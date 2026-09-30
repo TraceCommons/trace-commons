@@ -508,6 +508,33 @@ equal that variable times 1,000,000 (a points delta of `2.5` is
 and no ledger event. A different delta is a different package, with its own
 bundle id, and it applies only to runs bound to that package.
 
+## DB reconciliation of a pipeline tenant
+
+`main`'s DB reconciliation (`/v1/admin/db-reconciliation-drill`, and a
+maintenance run with `reconcile_db_mirror=true`) compares `main`'s file
+mirror with the database. The pipeline writes database rows only, never a
+file record, so the reconciliation leaves the tenant's pipeline rows out of
+each comparison they would fail:
+
+- the runs' submission rows and their derived records (the missing-in-files
+  checks);
+- the credit events whose `pipeline_run_id` is one of the tenant's runs;
+- the settlement batches the runs' Trace Credit legs carry, and the NEAR
+  outbox lines of those batches;
+- the contributor-credit, reviewer-metadata and analytics reader parity
+  checks, whose database side then reads without the pipeline rows;
+- the check that an accepted submission's envelope object reads back: a
+  pipeline submission's objects are the pipeline's own source and approved
+  revision, which the pipeline reads and checks itself.
+
+Each row is found through its pipeline run, not by its shape. `main`'s own
+rows keep every check: a legacy row with no file record is still a blocking
+gap. The database counts in the report (`db_submission_count` and the
+others) still include the pipeline rows, so they can be larger than the file
+counts on a clean report. The pipeline rows are found only while a pipeline
+runtime is injected; without one, a tenant's earlier pipeline rows are
+reported as gaps.
+
 ## Receipt staging and the orphan sweep
 
 A pipeline receipt records its envelope object as a `staged` row in

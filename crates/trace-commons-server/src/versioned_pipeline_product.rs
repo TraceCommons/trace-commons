@@ -1140,6 +1140,68 @@ impl PipelineProductStore {
         Ok(completed)
     }
 
+    /// The rows a tenant's pipeline runs wrote into `main`'s tables, each
+    /// found through its run, never by its shape (Ruling F-M10): the runs'
+    /// submissions; the credit events whose `pipeline_run_id` is one of the
+    /// runs; the settlement batches the runs' settlement legs carry; and the
+    /// NEAR outbox lines of those batches. The pipeline writes these rows to
+    /// the database only, so `main`'s DB/file reconciliation leaves them out
+    /// of its file-versus-database comparisons.
+    pub async fn reconciliation_rows(
+        &self,
+        tenant_id: &str,
+    ) -> Result<PipelineReconciliationRows, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let ids = |rows: Vec<Row>| {
+            rows.iter()
+                .map(|row| row.get::<_, Uuid>(0))
+                .collect::<BTreeSet<_>>()
+        };
+        let submission_ids = ids(tx
+            .query(
+                "SELECT DISTINCT submission_id FROM pipeline_runs WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?);
+        let credit_event_ids = ids(tx
+            .query(
+                "SELECT l.credit_event_id
+                   FROM trace_credit_ledger l
+                   JOIN pipeline_runs r
+                     ON r.tenant_id = l.tenant_id AND r.run_id = l.pipeline_run_id
+                  WHERE l.tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?);
+        let settlement_batch_ids = ids(tx
+            .query(
+                "SELECT DISTINCT settlement_batch_id FROM pipeline_run_settlements
+                  WHERE tenant_id = $1 AND settlement_batch_id IS NOT NULL",
+                &[&tenant_id],
+            )
+            .await?);
+        let near_outbox_ids = ids(tx
+            .query(
+                "SELECT o.near_outbox_id
+                   FROM trace_near_credit_outbox o
+                  WHERE o.tenant_id = $1
+                    AND o.settlement_batch_id IN (
+                        SELECT s.settlement_batch_id FROM pipeline_run_settlements s
+                         WHERE s.tenant_id = $1 AND s.settlement_batch_id IS NOT NULL
+                    )",
+                &[&tenant_id],
+            )
+            .await?);
+        tx.commit().await?;
+        Ok(PipelineReconciliationRows {
+            submission_ids,
+            credit_event_ids,
+            settlement_batch_ids,
+            near_outbox_ids,
+        })
+    }
+
     pub async fn lifecycle_summary(
         &self,
         tenant_id: &str,
@@ -1409,6 +1471,17 @@ fn sum_trace_credit_atomic_units(
                 )
             })
         })
+}
+
+/// What `PipelineProductStore::reconciliation_rows` found: the identifiers
+/// of the rows a tenant's pipeline runs wrote into `main`'s tables. Empty
+/// for a tenant with no pipeline run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PipelineReconciliationRows {
+    pub submission_ids: BTreeSet<Uuid>,
+    pub credit_event_ids: BTreeSet<Uuid>,
+    pub settlement_batch_ids: BTreeSet<Uuid>,
+    pub near_outbox_ids: BTreeSet<Uuid>,
 }
 
 /// The versioned-pipeline tables the operational summary's tenant-isolation

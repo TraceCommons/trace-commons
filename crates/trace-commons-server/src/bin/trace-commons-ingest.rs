@@ -267,7 +267,7 @@ use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_SNAPSHOT_INVALIDATED, PIPELINE_EXPORT_SOURCE_INVALIDATED,
     PipelineContributorStatus, PipelineCreditStatus, PipelineExportConsentScopes,
     PipelineExportSnapshot, PipelineForensicTrace, PipelineOperationalSummary,
-    PipelineProductStore, is_pipeline_export_manifest_purpose_code,
+    PipelineProductStore, PipelineReconciliationRows, is_pipeline_export_manifest_purpose_code,
     pipeline_export_manifest_purpose_code,
 };
 use uuid::Uuid;
@@ -72266,6 +72266,19 @@ async fn reconcile_db_mirror(
         .list_trace_retention_jobs(&tenant.tenant_id)
         .await
         .context("failed to list trace retention jobs for DB reconciliation")?;
+    // Ruling F-M10: the rows the tenant's pipeline runs wrote into `main`'s
+    // tables, found through their runs. The pipeline writes them to the
+    // database only, so each file-versus-database comparison below that
+    // they would fail leaves them out; `main`'s own rows keep every check,
+    // and the database counts still include them. With no pipeline runtime
+    // injected there is nothing to leave out.
+    let pipeline_rows = match state.pipeline_product.as_ref() {
+        Some(product) => product
+            .reconciliation_rows(&tenant.tenant_id)
+            .await
+            .context("failed to list pipeline rows for DB reconciliation")?,
+        None => PipelineReconciliationRows::default(),
+    };
     let mut db_retention_job_item_count = 0usize;
     let mut db_retention_job_item_counts = BTreeMap::new();
     for job in &db_retention_jobs {
@@ -72464,6 +72477,7 @@ async fn reconcile_db_mirror(
         .collect::<Vec<_>>();
     let missing_credit_event_ids_in_files = db_file_projected_credit_event_ids
         .difference(&file_credit_event_ids)
+        .filter(|event_id| !pipeline_rows.credit_event_ids.contains(event_id))
         .copied()
         .collect::<Vec<_>>();
     let file_utility_attestation_ids = file_utility_attestations
@@ -72496,6 +72510,7 @@ async fn reconcile_db_mirror(
         .collect::<Vec<_>>();
     let missing_credit_settlement_batch_ids_in_files = db_credit_settlement_batch_ids
         .difference(&file_credit_settlement_batch_ids)
+        .filter(|batch_id| !pipeline_rows.settlement_batch_ids.contains(batch_id))
         .copied()
         .collect::<Vec<_>>();
     let db_credit_settlement_batches_by_id = db_credit_settlement_batches
@@ -72554,6 +72569,7 @@ async fn reconcile_db_mirror(
         .collect::<Vec<_>>();
     let missing_near_credit_outbox_ids_in_files = db_near_credit_outbox_ids
         .difference(&file_near_credit_outbox_ids)
+        .filter(|outbox_id| !pipeline_rows.near_outbox_ids.contains(outbox_id))
         .copied()
         .collect::<Vec<_>>();
     let db_near_credit_outbox_items_by_id = db_near_credit_outbox_items
@@ -72837,9 +72853,13 @@ async fn reconcile_db_mirror(
                 )
             })?;
         db_object_ref_count += object_refs.len();
+        // A pipeline submission's objects are the pipeline's own wrapped
+        // source and approved revision, which the pipeline reads and checks
+        // itself; `main`'s envelope reader cannot read them (Ruling F-M10).
         if record.status == StorageTraceCorpusStatus::Accepted
             && record.revoked_at.is_none()
             && record.purged_at.is_none()
+            && !pipeline_rows.submission_ids.contains(&record.submission_id)
         {
             // Rescrubbed first, then submitted: an accepted trace the PII
             // backstop released has only an active `rescrubbed_envelope` ref,
@@ -72921,6 +72941,7 @@ async fn reconcile_db_mirror(
     let missing_submission_ids_in_files = db_by_submission
         .keys()
         .filter(|submission_id| !file_by_submission.contains_key(submission_id))
+        .filter(|submission_id| !pipeline_rows.submission_ids.contains(submission_id))
         .copied()
         .collect::<Vec<_>>();
     let missing_derived_submission_ids_in_db = file_derived_by_submission
@@ -72931,6 +72952,7 @@ async fn reconcile_db_mirror(
     let missing_derived_submission_ids_in_files = db_derived_by_submission
         .keys()
         .filter(|submission_id| !file_derived_by_submission.contains_key(submission_id))
+        .filter(|submission_id| !pipeline_rows.submission_ids.contains(submission_id))
         .copied()
         .collect::<Vec<_>>();
     let mut derived_status_mismatches = Vec::new();
@@ -73023,9 +73045,24 @@ async fn reconcile_db_mirror(
 
     let file_credit_view =
         contributor_credit_view_from_file_records(tenant, file_records, &file_credit_events);
-    let db_credit_view = read_contributor_credit_view_from_db(state, tenant, None).await?;
+    // The reader parity checks compare `main`'s database readers with its
+    // file readers, so the database side leaves out the pipeline's rows,
+    // which have no file side (Ruling F-M10).
+    let mut db_credit_view = read_contributor_credit_view_from_db(state, tenant, None).await?;
+    db_credit_view
+        .records
+        .retain(|record| !pipeline_rows.submission_ids.contains(&record.submission_id));
+    db_credit_view
+        .credit_events
+        .retain(|event| !pipeline_rows.credit_event_ids.contains(&event.event_id));
     let file_metadata_view = metadata_view_from_file_records(file_records, file_derived);
-    let db_metadata_view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+    let mut db_metadata_view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+    db_metadata_view
+        .records
+        .retain(|record| !pipeline_rows.submission_ids.contains(&record.submission_id));
+    db_metadata_view
+        .derived
+        .retain(|record| !pipeline_rows.submission_ids.contains(&record.submission_id));
     let file_analytics = TraceCommonsAnalyticsResponse::from_records(
         tenant.tenant_id.clone(),
         file_metadata_view.records.clone(),

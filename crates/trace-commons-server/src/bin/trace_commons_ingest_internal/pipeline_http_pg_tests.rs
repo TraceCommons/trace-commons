@@ -41,7 +41,7 @@ use trace_commons_server::admission_evidence::AdmissionProviderTrust;
 use trace_commons_server::admission_ledger::AdmissionLimits;
 use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::versioned_pipeline::{
-    PipelineCaps, PipelineCrashPoint, PipelineServiceBuilder,
+    PipelineCaps, PipelineCrashPoint, PipelinePayoutConfig, PipelineServiceBuilder,
 };
 use trace_commons_server::versioned_pipeline_authority::{
     PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
@@ -53,7 +53,7 @@ use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    RecordingSettlementAdapter, SettlementAdapterRegistry,
+    RecordingNearAdapter, RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::witness_service;
@@ -3339,6 +3339,273 @@ async fn pipeline_review_routes_answer_409_422_and_404_for_an_inoperable_run() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
     assert_eq!(refused["error"], "pipeline run is not waiting for review");
+}
+
+// ---------------------------------------------------------------------------
+// `main`'s DB/file reconciliation of a tenant with pipeline rows (Ruling F-M10).
+// ---------------------------------------------------------------------------
+
+/// A minimal-family service that awards Trace Credit on the `near` rail and
+/// pays it out through `near`, on `artifacts`: its runs write a pipeline
+/// credit event, its finalized batch, and, once paid, a NEAR outbox line.
+fn trace_credit_payout_service(
+    backend: Arc<PgBackend>,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    near: Arc<RecordingNearAdapter>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+                atomic_units: AtomicUnits::from_raw(1_000_000),
+                descriptor: InstrumentDescriptor {
+                    kind: InstrumentKind::Nep141,
+                    network: "testnet".to_string(),
+                    contract: "trace-credit.testnet".to_string(),
+                    decimals: trace_commons_gate_api::pipeline::TRACE_CREDIT_DECIMALS,
+                },
+            }],
+            include_index: true,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build the minimal package");
+    let index = IsolatedPipelineIndex::new();
+    let registry = SettlementAdapterRegistry::new(vec![RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_reconciliation_test_only",
+        "near",
+    ) as Arc<dyn SettlementAdapter>])
+    .expect("build the adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend,
+            artifacts,
+            package,
+            index.clone(),
+            index,
+            registry,
+            caps,
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_authority(allow_all_test_authority())
+        .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary))
+        .with_payout(
+            near,
+            PipelinePayoutConfig {
+                enabled: true,
+                require_confirmation_evidence: true,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                confirmation_interval: std::time::Duration::ZERO,
+            },
+        )
+        .build()
+        .expect("build the payout service"),
+    )
+}
+
+/// `POST /v1/admin/db-reconciliation-drill` for the tenant of `admin_token`:
+/// `(ready, blocking_gaps)`.
+async fn db_reconciliation_drill(state: &Arc<AppState>, admin_token: &str) -> (bool, Vec<String>) {
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/admin/db-reconciliation-drill",
+        auth_headers(admin_token),
+        Some(serde_json::json!({ "purpose": "pipeline reconciliation test" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gaps = body["blocking_gaps"]
+        .as_array()
+        .expect("blocking gaps")
+        .iter()
+        .map(|gap| gap.as_str().expect("a gap label").to_string())
+        .collect();
+    (body["ready"].as_bool().expect("ready"), gaps)
+}
+
+/// `main`'s DB/file reconciliation compares its file mirror with the
+/// database. The pipeline writes database rows only (Ruling T7-10, RB-14),
+/// so each of them is identified by its pipeline run and left out of every
+/// file-versus-database comparison it would fail; `main`'s own rows keep
+/// every check.
+///
+/// - Tenant A has a legacy submission (accepted and vector-indexed, as a
+///   deployment's worker leaves it), and two minimal-family pipeline runs
+///   that each settled Trace Credit into a finalized batch and were paid
+///   out through a NEAR outbox line; both were exported, and one was then
+///   withdrawn. The drill is ready, with no blocking gap.
+/// - Tenant B has a compatibility run, whose `NoveltyUtility` credit event
+///   has no batch. The drill is ready too.
+/// - A legacy submission row in tenant A's database with no file record is
+///   still a blocking gap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn db_reconciliation_leaves_pipeline_rows_out_of_the_file_comparison() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-reconcile-{suffix}");
+    let compat_tenant = format!("tenant-reconcile-compat-{suffix}");
+    let token = format!("token-reconcile-{suffix}");
+    let admin_token = format!("token-reconcile-admin-{suffix}");
+    let vector_token = format!("token-reconcile-vector-{suffix}");
+    let export_token = format!("token-reconcile-export-{suffix}");
+    let compat_admin_token = format!("token-reconcile-compat-admin-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    insert_token(&mut tokens, &tenant, &admin_token, TokenRole::Admin);
+    insert_token(&mut tokens, &tenant, &vector_token, TokenRole::VectorWorker);
+    insert_token(&mut tokens, &tenant, &export_token, TokenRole::ExportWorker);
+    insert_token(
+        &mut tokens,
+        &compat_tenant,
+        &compat_admin_token,
+        TokenRole::Admin,
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(owner.clone() as Arc<dyn Database>),
+        Some(artifacts.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.require_db_mirror_writes = true;
+    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+
+    // ---- A legacy submission, with its file record and its DB mirror ----
+    let mut legacy = sample_envelope().await;
+    make_metadata_only_low_risk(&mut legacy);
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&token),
+        submit_body(legacy),
+    )
+    .await
+    .expect("the legacy submission mirrors to the database");
+    let _ = vector_index_handler(
+        State(state.clone()),
+        auth_headers(&vector_token),
+        Json(TraceVectorIndexRequest {
+            purpose: Some("reconciliation test vector index".to_string()),
+            dry_run: false,
+            limit: None,
+        }),
+    )
+    .await
+    .expect("the vector worker indexes the legacy submission");
+    let (ready, gaps) = db_reconciliation_drill(&state, &admin_token).await;
+    assert!(ready && gaps.is_empty(), "legacy only: {gaps:?}");
+
+    // ---- Pipeline rows: two paid runs, exported, one withdrawn ----
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = trace_credit_payout_service(runtime.clone(), artifacts.clone(), near.clone());
+    let principal = "principal_sha256:reconcile";
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let mut envelope = sample_envelope().await;
+        envelope.submission_id = Uuid::new_v4();
+        make_metadata_only_low_risk(&mut envelope);
+        runs.push(completed_run_of(&service, &tenant, principal, &envelope).await);
+    }
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 2);
+    assert_eq!(near.requests().len(), 2, "both runs were paid out");
+    let (status, created) = create_pipeline_export(&state, &export_token, "reconcile", 10).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(
+        created["items"].as_array().map(Vec::len),
+        Some(2),
+        "{created}"
+    );
+    let (status, completed) =
+        complete_pipeline_export(&state, &export_token, &created["snapshot_id"]).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    service
+        .withdraw_submission(&tenant, runs[1].submission_id, principal, None)
+        .await
+        .expect("the owner withdraws the second run");
+    let (ready, gaps) = db_reconciliation_drill(&state, &admin_token).await;
+    assert!(
+        gaps.is_empty(),
+        "pipeline rows are not file-versus-database gaps: {gaps:?}"
+    );
+    assert!(ready);
+
+    // ---- A compatibility run: a NoveltyUtility event with no batch ----
+    let compat = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    completed_run_of(&compat, &compat_tenant, principal, &envelope).await;
+    let (ready, gaps) = db_reconciliation_drill(&state, &compat_admin_token).await;
+    assert!(
+        gaps.is_empty(),
+        "a compatibility run's rows are not gaps: {gaps:?}"
+    );
+    assert!(ready);
+
+    // ---- A legacy row with no file record is still a gap ----
+    let db_only = Uuid::new_v4();
+    owner
+        .upsert_trace_submission(StorageTraceSubmissionWrite {
+            tenant_id: tenant.clone(),
+            submission_id: db_only,
+            trace_id: Uuid::new_v4(),
+            auth_principal_ref: principal_storage_ref(&token),
+            contributor_pseudonym: None,
+            submitted_tenant_scope_ref: Some(tenant_storage_ref(&tenant)),
+            schema_version: "trace_contribution.v1".to_string(),
+            consent_policy_version: "trace-consent-v1".to_string(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
+            status: StorageTraceCorpusStatus::Quarantined,
+            privacy_risk: "medium".to_string(),
+            redaction_pipeline_version: "test-redactor-v1".to_string(),
+            redaction_counts: BTreeMap::new(),
+            redaction_hash: sha256_prefixed(&format!("{tenant}:{db_only}")),
+            canonical_summary_hash: None,
+            submission_score: None,
+            credit_points_pending: None,
+            credit_points_final: None,
+            expires_at: None,
+            residual_risk_basis: None,
+        })
+        .await
+        .expect("write a legacy submission row with no file record");
+    let (ready, gaps) = db_reconciliation_drill(&state, &admin_token).await;
+    assert!(!ready);
+    assert!(
+        gaps.iter()
+            .any(|gap| gap == "missing_submission_ids_in_files=1"),
+        "a legacy database row with no file record is a gap: {gaps:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
