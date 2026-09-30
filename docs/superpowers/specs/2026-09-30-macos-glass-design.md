@@ -68,16 +68,48 @@ the macOS app keeps `main`'s behaviour. In particular:
   sentence that promises privacy or security. The #1146 shield-and-check
   icon on the credential node is not carried over.
 
+## Alignment with near.ai
+
+Decided 2026-09-30: the app follows near.ai's brand language, but keeps
+#1146's purple as its accent. near.ai's own accent is a single blue; the app
+does not adopt it. Everything else below comes from the near.ai brand page
+(<https://near.ai/brand>), checked against the CSS its live site ships.
+
+- **Typefaces.** These replace SF Pro and SF Mono:
+
+  | Role | near.ai typeface | Weights and use |
+  |---|---|---|
+  | Display | Schibsted Grotesk | 600 for headings, 500 for short headings |
+  | Body | Mona Sans | 400 for running text, 600 for emphasis and buttons |
+  | Utility | JetBrains Mono | 400 for labels, data, captions and metadata |
+
+  - All three are SIL Open Font License 1.1: Schibsted Grotesk (© 2023 The
+    Schibsted-Grotesk Project Authors), Mona Sans (© 2023 GitHub) and
+    JetBrains Mono (© 2020 The JetBrains Mono Project Authors).
+  - They ship inside the app bundle and the Tauri frontend, each with its
+    `OFL.txt`. The live near.ai site loads these three families.
+  - A superseded near.ai PDF names PP Neue Montreal instead. It is not used.
+- **Appearance.** Light and dark, following the system, as near.ai does.
+  Where the light palette needs neutrals, it takes them from near.ai's
+  greyscale: `#EEEEEB`, `#E6E6E6`, `#D5D5D5`, `#A7A7A7`, `#858585`,
+  `#525252`, `#272727`.
+- **Voice.** Direct, and centred on proof rather than promises, as in
+  near.ai's "Trust that's verified, not assumed." The app takes the tone but
+  not near.ai's privacy claims. Our copy rules still exclude any sentence
+  that promises privacy, and consent copy still comes from the core.
+- **Logo.** near.ai publishes no rules for third-party use. The app shows no
+  near.ai logo or lockup, for example on the Private AI screen, without
+  near.ai's written permission. The name "NEAR AI" appears in text only
+  where the core's copy uses it.
+- **What stays from #1146.** The purple accent, the status colours, the
+  glass tiers, the radii and the layout.
+
 ## Decisions needed
 
-1. **Appearance.** #1146 is dark only. The options are:
-   - (a) dark only on macOS too, which removes light mode the app ships
-     today;
-   - (b) derive a light palette, as proposed in "Appearance" below;
-   - (c) follow the system appearance, with a light palette designed
-     separately.
-
-   Recommendation: (b), reviewed by the brand owner.
+1. **Appearance: decided 2026-09-30, light and dark, following the
+   system.** This matches near.ai, which ships both (see "Alignment with
+   near.ai"). #1146 is dark only, so the light palette is derived as set
+   out in "Appearance" below and reviewed by the brand owner.
 2. **Brand: decided 2026-09-30, the macOS app moves from green to purple.**
    #1146's purple (`#6D14F3`) replaces the current green (`#178F70`), which
    came from the community site. Whether the community site follows is
@@ -135,8 +167,9 @@ A token can carry a platform override, for example a Liquid Glass tint on
 macOS 26 in place of a gradient fill.
 
 **Seeding.** Copy #1146's `tokens/*.css` into the JSON verbatim as the
-`dark` values, so the first generated CSS diffs to zero against #1146. Light
-and high-contrast values are added in the Appearance step.
+`dark` values, so the first generated CSS diffs to zero against #1146. The
+typeface change, light values and high-contrast values then land as
+separate, reviewable token changes.
 
 ### Values taken from #1146
 
@@ -157,20 +190,29 @@ These are exact, from `tauri-desktop/frontend/src/design-system/tokens/` at
   control 8, pill 999.
 - **Motion** (`materials.css`): ease `cubic-bezier(0.2, 0.8, 0.2, 1)`;
   durations 150, 220 and 300 ms.
-- **Type** (`typography.css`), as weight size/line-height:
+- **Type.** Sizes and line heights come from #1146's `typography.css`. The
+  families and weights follow near.ai (see "Alignment with near.ai"): mono
+  for eyebrows, labels and captions; the display face at 600 for anything
+  heading-like.
 
-  | Style | Value | Note |
-  |---|---|---|
-  | eyebrow | 600 10/14 | uppercase, tracking 0.08em |
-  | caption | 400 11/16 | |
-  | label | 500 12/16 | |
-  | body | 400 13/18 | |
-  | body strong | 600 13/18 | |
-  | title | 600 15/20 | |
-  | heading | 600 17/22 | |
-  | display | 700 22/28 | tracking -0.01em |
-  | number | 700 28/34 | tabular figures |
-  | mono | 400 11/16 | SF Mono |
+  | Style | Size/line height (#1146) | #1146 face and weight | Face and weight here | Note |
+  |---|---|---|---|---|
+  | eyebrow | 10/14 | SF Pro 600 | JetBrains Mono 400 | uppercase, tracking 0.08em |
+  | caption | 11/16 | SF Pro 400 | JetBrains Mono 400 | |
+  | label | 12/16 | SF Pro 500 | JetBrains Mono 400 | |
+  | body | 13/18 | SF Pro 400 | Mona Sans 400 | |
+  | body strong | 13/18 | SF Pro 600 | Mona Sans 600 | |
+  | title | 15/20 | SF Pro 600 | Schibsted Grotesk 500 | |
+  | heading | 17/22 | SF Pro 600 | Schibsted Grotesk 600 | |
+  | display | 22/28 | SF Pro 700 | Schibsted Grotesk 600 | tracking -0.01em |
+  | number | 28/34 | SF Pro 700 | Schibsted Grotesk 600 | tabular figures; JetBrains Mono if the face lacks them |
+  | mono | 11/16 | SF Mono 400 | JetBrains Mono 400 | |
+
+  - **Dynamic Type.** On macOS each style is
+    `Font.custom(<face>, size:, relativeTo: <text style>)`, so the custom
+    faces still scale. Each style's text style is recorded as
+    `macosTextStyle` in the JSON.
+  - **Tauri.** Tauri gets the same families through the generated CSS.
 - **Spacing** (`spacing.css`):
   - scale 2, 4, 6, 8, 10, 12, 14, 16, 20, 24;
   - padding: window 10, pane 12, card 12×14;
@@ -194,13 +236,15 @@ These are exact, from `tauri-desktop/frontend/src/design-system/tokens/` at
 ## Appearance
 
 - **Dark.** Use #1146's values.
-- **Light** (subject to Decision 1). Derive it per tier rather than
-  inverting:
-  - The scene becomes a pale, warm gradient.
-  - Pane and card fills become white at the same relative opacities, with a
-    darker lowlight edge.
-  - Text tiers invert to `#1D1D1F`, `#3C3C43`, `#6E6E73`, the system label
-    ramp.
+- **Light** (Decision 1). Derive it per tier, using near.ai's light
+  neutrals, rather than inverting the dark values:
+  - **Scene:** a pale, warm gradient from near.ai's light background
+    (`#E9E8E5`) to its surface (`#F6F5F3`).
+  - **Fills:** pane and card fills become white at the same relative
+    opacities, with a darker lowlight edge.
+  - **Text:** the tiers take near.ai's light-mode text colours: primary
+    `#16171B`, secondary `#5D6166`, tertiary `#858585`. The tertiary tier
+    needs a contrast check before use at caption size.
   - The brand purple stays, and purple text becomes `#5A10CC` for contrast.
   - Status colours darken until they reach 4.5:1 against the light card.
 
@@ -389,18 +433,23 @@ Each step is a PR of its own.
 1. **Token source and generators.** The JSON, three generators and the CI
    drift job. The Tauri output must diff to zero against #1146's
    `tokens/*.css`.
-2. **Swift token layer.** `Tokens.generated.swift`. `TC` reads its colours,
+2. **Typefaces.**
+   - Bundle Schibsted Grotesk, Mona Sans and JetBrains Mono, each with its
+     `OFL.txt`, in the macOS app and the Tauri frontend.
+   - Switch the type tokens to them.
+   - Record the three fonts in the repo's third-party notices.
+3. **Swift token layer.** `Tokens.generated.swift`. `TC` reads its colours,
    radii and type from it; the old green palette is removed behind a single
    switch.
-3. **Materials and components.** The tier modifiers for both OS paths, and
+4. **Materials and components.** The tier modifiers for both OS paths, and
    the component catalogue, with a SwiftUI preview gallery equivalent to
    #1146's Storybook page.
-4. **Window shell.** Three panes, the toolbar, tabs, restoration, and the
+5. **Window shell.** Three panes, the toolbar, tabs, restoration, and the
    Settings scene.
-5. **Screens.** Move screens one at a time, keeping `main`'s behaviour and
+6. **Screens.** Move screens one at a time, keeping `main`'s behaviour and
    the core's copy.
-6. **Menu-bar popover.**
-7. **Light and high-contrast values.** Reviewed by the brand owner.
+7. **Menu-bar popover.**
+8. **Light and high-contrast values.** Reviewed by the brand owner.
 
 ## Acceptance
 
