@@ -559,10 +559,30 @@ keyring-core = "=1.0.0"
 # enough, and the changed lines of both lock diffs were grepped for
 # non-ironwire movement, of which there were zero (22 changed lines each, all
 # of them the rev).
-# Token capture integration: nearai/ironwire#57 (draft), exact reviewed candidate.
-# Adds bounded private capture leases and opt-in Chat probability fields.
-# No new packages; re-run downstream platform and license gates before landing.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
+# Token capture integration: nearai/ironwire#57 (merged), which adds bounded
+# private capture leases and opt-in Chat probability fields.
+#
+# Z4b (#1118): pins IronWire `main` at b1bd2417, with #57 and nearai/ironwire#58
+# (receipt proof status, the `/summary` rollup,
+# `EmbedOptions::with_signer_attestor`) both merged. Its tree is byte-identical
+# to 1d05001a, the `z4a-on-token-capture` integration commit this crate pinned
+# while the two were open (`git rev-parse <rev>^{tree}` is 8cb70910 for both),
+# so moving from that commit to `main` changed no source this crate compiles.
+#
+# COST. No package enters any graph. The three lockfiles (root, GTK, Tauri)
+# each move only the ironwire source strings plus three new edges from
+# `ironwire_proxy` -- `async-trait`, `ed25519-dalek`, `hex` -- to packages
+# already in each lock. `cargo-sources.json` moves the same 14 lines as prior
+# advances (2 full revs, 12 short-hash vendor lines), edited rather than
+# regenerated because flatpak-cargo-generator was not available; the lock's
+# package set is unchanged, which is what makes that equivalent.
+#
+# SURFACE. `EmbedOptions` gains `signer_attestor` and `proof_settings`
+# (additive; this crate writes no `EmbedOptions` literal). Other breaking
+# IronWire changes (`Exchange.proof`, `Capture::request` becoming a method,
+# `CaptureConfig.receipts`, `LedgerContext` non-exhaustive) touch nothing this
+# crate names.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -576,8 +596,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "d622d11417
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
