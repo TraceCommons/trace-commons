@@ -32,14 +32,7 @@ pub(crate) struct OsSecretBackend {
 
 impl OsSecretBackend {
     pub(crate) fn new() -> Result<Self, CredentialError> {
-        // A test build never touches the user's real credential store. The
-        // two production call sites already route to the test file store
-        // under this feature; this refuses any path added later that does not.
-        // (`cfg(test)` is exempt: only the manual, `#[ignore]`d round trips
-        // below construct this there, and they exist to reach the real store.)
-        if cfg!(all(feature = "test-credential-store", not(test))) {
-            return Err(CredentialError::Unavailable);
-        }
+        refuse_under_test_credential_store()?;
         #[cfg(target_os = "macos")]
         let store: Arc<NativeStore> = {
             // `cloud-sync` is left at its default of false, selecting the
@@ -80,6 +73,7 @@ impl OsSecretBackend {
     /// identity. The upgrade prompt is worth removing; `submit` is not worth
     /// breaking to remove it.
     pub(crate) fn commons() -> Result<Self, CredentialError> {
+        refuse_under_test_credential_store()?;
         #[cfg(target_os = "macos")]
         let store: Arc<NativeStore> =
             apple_native_keyring_store::keychain::Store::new().map_err(storage_error)?;
@@ -103,14 +97,17 @@ impl OsSecretBackend {
         }
     }
 
-    /// The legacy, pre-data-protection Cloud store. It exists solely so the
-    /// startup sweep can reach an orphaned entry left behind by a build
-    /// before the move; nothing reads or writes through it otherwise.
+    /// The legacy, pre-data-protection Cloud store, where builds before the
+    /// move kept the Cloud credential. Reached only from moments the
+    /// contributor initiated: the one-time migration that copies the active
+    /// entry into the data-protection store, and the sweep of superseded
+    /// entries at the ceremony tail and on forget. Nothing writes through it.
+    ///
+    /// In `cfg(test)` those paths use the injected legacy registry instead;
+    /// the only test that opens this is the `#[ignore]`d manual round trip.
     #[cfg(target_os = "macos")]
-    // Only reached outside `cfg(test)`, where the sweep uses the injected
-    // legacy registry instead; never opened against the real keychain here.
-    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn legacy_cloud() -> Result<Self, CredentialError> {
+        refuse_under_test_credential_store()?;
         let store: Arc<NativeStore> =
             apple_native_keyring_store::keychain::Store::new().map_err(storage_error)?;
         Ok(Self {
@@ -176,6 +173,22 @@ fn validate_bytes(bytes: &[u8]) -> Result<(), CredentialError> {
         return Err(CredentialError::InvalidBundle);
     }
     Ok(())
+}
+
+/// A test build never touches the user's real credential store. The
+/// production call sites already route to the test file store under this
+/// feature; this refuses any path added later that does not. Every
+/// constructor calls it: `commons` and `legacy_cloud` open their own stores
+/// rather than going through `new`, so a check in `new` alone left both of
+/// them reaching the real keychain from an integration test.
+/// (`cfg(test)` is exempt: only the manual, `#[ignore]`d round trips below
+/// construct a real store there, and they exist to reach it.)
+fn refuse_under_test_credential_store() -> Result<(), CredentialError> {
+    if cfg!(all(feature = "test-credential-store", not(test))) {
+        Err(CredentialError::Unavailable)
+    } else {
+        Ok(())
+    }
 }
 
 fn storage_error(error: KeyringError) -> CredentialError {
@@ -319,9 +332,20 @@ mod tests {
 
     /// Run explicitly on each supported OS with its user's credential store
     /// available. This uses real OS storage and only its fresh synthetic UUID.
+    ///
+    /// On macOS it exercises the legacy file keychain, not the Cloud store
+    /// `new()` opens. That store is the data-protection keychain behind a
+    /// team access group, and a `cargo test` process is never entitled to
+    /// it, so a round trip through `new()` can only fail with `Unentitled`
+    /// (`an_unentitled_process_is_reported_as_unentitled` asserts exactly
+    /// that). The data-protection round trip is covered by the signed app's
+    /// release self-check instead.
     #[test]
     #[ignore = "manual real OS credential-store round trip; may prompt for access"]
     fn real_os_round_trip_removes_only_its_synthetic_entry() {
+        #[cfg(target_os = "macos")]
+        let backend = OsSecretBackend::legacy_cloud().expect("OS store unavailable");
+        #[cfg(not(target_os = "macos"))]
         let backend = OsSecretBackend::new().expect("OS store unavailable");
         let reference: CredentialReference = serde_json::from_value(serde_json::json!({
             "version": 1,
