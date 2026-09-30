@@ -1,3 +1,6 @@
+import { RouteDisclosureUnreadableLine } from "../../../components/route-disclosure";
+import { Spinner } from "../../../components/ui/spinner";
+import { routeDisclosureView } from "../../../lib/tauri/route-disclosure";
 import {
   useCertificateDetail,
   useRouteDisclosure,
@@ -24,12 +27,16 @@ export function SessionSendDisclosure({
   );
   const unreadable = useRouteDisclosureUnreadableCopy();
   if (!disclosure.data) {
-    // The core's line when unreadable; nothing while still being read.
-    if (!disclosure.isError || !unreadable.data) return null;
+    // As macOS: a spinner while still being read, and the core's line --
+    // or, if even that failed to load, the glyph alone -- once unreadable.
+    if (routeDisclosureView(disclosure, core) === "loading") {
+      return <Spinner className="size-3" />;
+    }
     return (
-      <p className="m-0 text-[11px] text-destructive" role="alert">
-        {unreadable.data.session}
-      </p>
+      <RouteDisclosureUnreadableLine
+        line={unreadable.data?.session}
+        className="text-[11px]"
+      />
     );
   }
   const { facts, copy } = disclosure.data;

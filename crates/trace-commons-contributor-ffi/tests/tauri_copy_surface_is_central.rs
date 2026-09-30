@@ -780,8 +780,8 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     let unreadable_copy = rust_function(&witness_commands, "fn route_disclosure_unreadable_copy");
     assert!(unreadable_copy.contains("consent_copy::disclosure_unreadable_copy"));
     assert!(route_body.contains("unreadable.data?.title"));
-    assert!(route_body.contains("unreadable.data.panel"));
-    assert!(session_block.contains("unreadable.data.session"));
+    assert!(route_body.contains("unreadable.data?.panel"));
+    assert!(session_block.contains("unreadable.data?.session"));
     {
         use trace_commons_contributor::consent_copy as copy;
         for sentence in [

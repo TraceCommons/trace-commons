@@ -262,6 +262,22 @@ export type RouteDisclosureUnreadable = {
   session: string;
 };
 
+/**
+ * Which state a disclosure surface draws, as macOS's `routeDisclosureState`:
+ * the disclosure itself, a spinner while it is still being read, or the
+ * unreadable line once the read has failed. The disclosure is read only
+ * after the core's status, so a failed status read makes it unreadable too.
+ */
+export type RouteDisclosureView = "shown" | "loading" | "unreadable";
+
+export function routeDisclosureView(
+  query: { data?: unknown; isError: boolean },
+  core: { isError: boolean } = { isError: false },
+): RouteDisclosureView {
+  if (query.data) return "shown";
+  return query.isError || core.isError ? "unreadable" : "loading";
+}
+
 export function parseRouteDisclosureUnreadable(
   value: unknown,
 ): RouteDisclosureUnreadable {

@@ -1,9 +1,14 @@
-import type { RouteDisclosure } from "../lib/tauri/route-disclosure";
+import { WarningIcon } from "@phosphor-icons/react";
+import {
+  type RouteDisclosure,
+  routeDisclosureView,
+} from "../lib/tauri/route-disclosure";
 import {
   useRouteDisclosure,
   useRouteDisclosureUnreadableCopy,
 } from "../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
+import { Spinner } from "./ui/spinner";
 
 // K11: the raw send, both enclaves, and where the witness came from. Every
 // fact is the daemon's (`route_disclosure`) and every sentence is the
@@ -57,15 +62,42 @@ export function RouteDisclosureBody({
 }
 
 /**
+ * The unreadable state. Marked by a glyph as well as colour, and drawn even
+ * when the core's sentence for it failed to load, so the section is never
+ * simply empty -- as macOS's `RouteDisclosureUnreadableLine`.
+ */
+export function RouteDisclosureUnreadableLine({
+  line,
+  className,
+}: {
+  line: string | undefined;
+  className: string;
+}) {
+  return (
+    <p
+      className={`m-0 flex items-baseline gap-2 text-destructive ${className}`}
+      role="alert"
+    >
+      <WarningIcon
+        className="shrink-0 self-center"
+        aria-hidden={line !== undefined}
+      />
+      {line}
+    </p>
+  );
+}
+
+/**
  * A settings section that reads the disclosure itself. Unreadable is said as
  * such and never drawn as some other route. The title and the unreadable
- * line are the core's (`route_disclosure_unreadable_copy`); nothing is said
- * while the disclosure is still being read.
+ * line are the core's (`route_disclosure_unreadable_copy`); a spinner shows
+ * while the disclosure is still being read, as on macOS.
  */
 export function RouteDisclosurePanel() {
   const core = useCoreStatus();
   const disclosure = useRouteDisclosure(core.scope, core.isSuccess);
   const unreadable = useRouteDisclosureUnreadableCopy();
+  const view = routeDisclosureView(disclosure, core);
   const title = disclosure.data?.copy.title ?? unreadable.data?.title;
   return (
     <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
@@ -74,15 +106,15 @@ export function RouteDisclosurePanel() {
           {title}
         </h2>
       )}
-      {disclosure.data ? (
+      {view === "shown" && disclosure.data && (
         <RouteDisclosureBody disclosure={disclosure.data} />
-      ) : (
-        disclosure.isError &&
-        unreadable.data && (
-          <p className="m-0 text-[12px] text-destructive" role="alert">
-            {unreadable.data.panel}
-          </p>
-        )
+      )}
+      {view === "loading" && <Spinner className="size-3" />}
+      {view === "unreadable" && (
+        <RouteDisclosureUnreadableLine
+          line={unreadable.data?.panel}
+          className="text-[12px]"
+        />
       )}
     </section>
   );
