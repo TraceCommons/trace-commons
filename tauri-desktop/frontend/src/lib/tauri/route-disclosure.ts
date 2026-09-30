@@ -252,6 +252,44 @@ export function parseRouteDisclosure(value: unknown): RouteDisclosure {
 }
 
 /**
+ * What a disclosure surface says when the disclosure cannot be read: the
+ * section's title and the unreadable lines, all the core's
+ * (`consent_copy::disclosure_unreadable_copy`). Every line is required.
+ */
+export type RouteDisclosureUnreadable = {
+  title: string;
+  panel: string;
+  session: string;
+};
+
+/**
+ * Which state a disclosure surface draws, as macOS's `routeDisclosureState`:
+ * the disclosure itself, a spinner while it is still being read, or the
+ * unreadable line once the read has failed. The disclosure is read only
+ * after the core's status, so a failed status read makes it unreadable too.
+ */
+export type RouteDisclosureView = "shown" | "loading" | "unreadable";
+
+export function routeDisclosureView(
+  query: { data?: unknown; isError: boolean },
+  core: { isError: boolean } = { isError: false },
+): RouteDisclosureView {
+  if (query.data) return "shown";
+  return query.isError || core.isError ? "unreadable" : "loading";
+}
+
+export function parseRouteDisclosureUnreadable(
+  value: unknown,
+): RouteDisclosureUnreadable {
+  const item = record(value, "route disclosure unreadable copy");
+  return {
+    title: text(item, "title"),
+    panel: text(item, "panel"),
+    session: text(item, "session"),
+  };
+}
+
+/**
  * The daemon's `certificate_detail` for one entry, with the core's labels.
  * Only `verified_at_review` is worded: the claim is about the review, and a
  * verification this build has no sentence for is not rendered as that one.
