@@ -59,9 +59,9 @@ use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    NearConfirmationEvidence, NearPayoutAdapter, PIPELINE_SETTLEMENT_POLICY_VERSION,
-    RecordingNearAdapter, RecordingSettlementAdapter, SettlementAdapterRegistry,
-    credit_account_hash, pipeline_near_outbox_line_id,
+    DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter,
+    PIPELINE_SETTLEMENT_POLICY_VERSION, RecordingNearAdapter, RecordingSettlementAdapter,
+    SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 use trace_commons_server::versioned_pipeline_product::{
@@ -14327,6 +14327,7 @@ async fn compatibility_test_service_with(
                 require_confirmation_evidence: true,
                 near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
                 confirmation_interval: std::time::Duration::ZERO,
+                controls: HTTP_NEAR_PAYOUT_CONTROLS,
             },
         ),
         None => service,
@@ -18923,6 +18924,7 @@ async fn payout_test_service_on_contract(
             require_confirmation_evidence: true,
             near_contract_id: Some(near_contract_id.to_string()),
             confirmation_interval: std::time::Duration::ZERO,
+            controls: HTTP_NEAR_PAYOUT_CONTROLS,
         },
     )
     .await
@@ -18990,6 +18992,13 @@ fn payout_test_builder(
     builder
 }
 
+/// `main`'s NEAR payout controls the payout tests run under: the injected
+/// adapter pays (`http`), and no adapter credential is required.
+const HTTP_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayoutControls {
+    settlement_mode: PipelineNearSettlementMode::Http,
+    require_adapter_auth: false,
+};
+
 /// The enabled payout the payout tests configure, on
 /// `PAYOUT_TEST_NEAR_CONTRACT`, polling a `submitted` payout on every pass.
 fn enabled_test_payout() -> PipelinePayoutConfig {
@@ -18998,6 +19007,7 @@ fn enabled_test_payout() -> PipelinePayoutConfig {
         require_confirmation_evidence: true,
         near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
         confirmation_interval: std::time::Duration::ZERO,
+        controls: HTTP_NEAR_PAYOUT_CONTROLS,
     }
 }
 
@@ -20189,6 +20199,7 @@ async fn payout_calls_name_the_configured_near_contract() {
             require_confirmation_evidence: true,
             near_contract_id: None,
             confirmation_interval: std::time::Duration::ZERO,
+            controls: HTTP_NEAR_PAYOUT_CONTROLS,
         },
     )
     .build()
@@ -21089,6 +21100,7 @@ async fn a_submitted_payout_is_polled_once_per_confirmation_interval() {
             require_confirmation_evidence: true,
             near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
             confirmation_interval: std::time::Duration::from_secs(60),
+            controls: HTTP_NEAR_PAYOUT_CONTROLS,
         },
     )
     .await;
@@ -21315,4 +21327,170 @@ async fn mains_gate_enumeration_leaves_out_pipeline_submissions() {
         "the pipeline submission is not counted"
     );
     assert_ne!(run.submission_id, legacy);
+}
+
+/// The payout test service under `main`'s NEAR payout `controls`.
+async fn payout_service_under(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    near: Arc<dyn NearPayoutAdapter>,
+    controls: PipelineNearPayoutControls,
+) -> Arc<PipelineService> {
+    payout_test_service_with_config(
+        backend.clone(),
+        artifact_store(dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near,
+        None,
+        PipelinePayoutConfig {
+            controls,
+            ..enabled_test_payout()
+        },
+    )
+    .await
+}
+
+/// Finding 2: with `main`'s NEAR settlement mode `disabled` (its default),
+/// `main`'s outbox worker advances nothing, and neither does the pipeline
+/// payout: a complete Trace Credit leg writes no outbox row, the adapter is
+/// never called, and the leg stays `pending`, by the pass and by a direct
+/// `process_payout` alike.
+#[tokio::test]
+async fn a_payout_under_mains_disabled_settlement_mode_advances_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_service_under(
+        &backend,
+        &dir,
+        near.clone(),
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::Disabled,
+            require_adapter_auth: false,
+        },
+    )
+    .await;
+    let tenant = format!("payout-mode-disabled-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    service
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("a direct payout under the disabled mode changes nothing");
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty());
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "pending"
+    );
+}
+
+/// Finding 2: with `main`'s NEAR settlement mode `dry_run`, the payout runs
+/// the full outbox state machine as `main`'s worker does in that mode: one
+/// pass submits through the in-process dry-run adapter, with the synthetic
+/// transaction hash derived from the call's idempotency key, and confirms
+/// with hash-only evidence. The injected adapter is never called.
+#[tokio::test]
+async fn a_payout_under_mains_dry_run_settlement_mode_confirms_without_the_adapter() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_service_under(
+        &backend,
+        &dir,
+        near.clone(),
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::DryRun,
+            require_adapter_auth: false,
+        },
+    )
+    .await;
+    let tenant = format!("payout-mode-dry-run-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert!(
+        near.requests().is_empty(),
+        "the injected adapter is not called"
+    );
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1, "one outbox line");
+    assert_eq!(outbox[0].status, "confirmed");
+    let idempotency_key = outbox[0].near_call_json["idempotency_key"]
+        .as_str()
+        .expect("the stored call's idempotency key")
+        .to_string();
+    let expected_hash = format!(
+        "sha256:{:x}",
+        Sha256::digest(DryRunNearPayoutAdapter::transaction_hash(&idempotency_key).as_bytes())
+    );
+    assert_eq!(
+        outbox[0].near_call_json["confirmation_evidence"]["transaction_hash_hash"],
+        serde_json::json!(expected_hash)
+    );
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+}
+
+/// Finding 2: under `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, as
+/// `main` refuses to start its NEAR adapters without their credentials, an
+/// enabled payout on an adapter that presents none is refused at build,
+/// whatever the settlement mode; one that presents one builds, and so does
+/// an unauthenticated adapter when the flag is off.
+#[tokio::test]
+async fn an_enabled_payout_needs_an_authenticated_adapter_when_main_requires_one() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let build = |near: RecordingNearAdapter, mode, require_adapter_auth| {
+        payout_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            Arc::new(near),
+            None,
+            PipelinePayoutConfig {
+                controls: PipelineNearPayoutControls {
+                    settlement_mode: mode,
+                    require_adapter_auth,
+                },
+                ..enabled_test_payout()
+            },
+        )
+        .build()
+    };
+    for mode in [
+        PipelineNearSettlementMode::Disabled,
+        PipelineNearSettlementMode::DryRun,
+        PipelineNearSettlementMode::Http,
+    ] {
+        let error = build(RecordingNearAdapter::new(), mode, true)
+            .err()
+            .expect("an unauthenticated adapter is refused");
+        assert_eq!(
+            error.to_string(),
+            PIPELINE_PAYOUT_ADAPTER_AUTH_MISSING_LABEL,
+            "{}",
+            mode.as_label()
+        );
+        build(RecordingNearAdapter::authenticated(), mode, true)
+            .expect("an authenticated adapter builds");
+        build(RecordingNearAdapter::new(), mode, false)
+            .expect("no credential is needed without the flag");
+    }
 }

@@ -10405,6 +10405,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
@@ -10856,6 +10857,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
@@ -10877,6 +10879,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .unwrap()
@@ -11324,6 +11327,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
@@ -11351,6 +11355,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("the opt-in lets an unqualified dependency start")
@@ -11376,6 +11381,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
@@ -11404,6 +11410,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("assemble a qualified runtime")
@@ -11432,6 +11439,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_auth
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
@@ -11459,6 +11467,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
@@ -11487,6 +11496,10 @@ impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
         true
     }
 
+    fn authenticated(&self) -> bool {
+        trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter::authenticated(&self.0)
+    }
+
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,
@@ -11510,6 +11523,13 @@ const TEST_PAYOUT_NEAR_CONTRACT: &str = "trace-credits.testnet";
 /// (its default).
 const TEST_NEAR_CONFIRMATION_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
+/// `main`'s NEAR payout controls the pipeline tests assemble with: the
+/// injected adapter pays (`http`), and no adapter credential is required.
+const TEST_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayoutControls {
+    settlement_mode: PipelineNearSettlementMode::Http,
+    require_adapter_auth: false,
+};
+
 /// A payout configuration with confirmation evidence required.
 fn payout_test_config(
     enabled: bool,
@@ -11520,6 +11540,7 @@ fn payout_test_config(
         require_confirmation_evidence: true,
         near_contract_id: near_contract_id.map(str::to_string),
         confirmation_interval: TEST_NEAR_CONFIRMATION_INTERVAL,
+        controls: TEST_NEAR_PAYOUT_CONTROLS,
     }
 }
 
@@ -11530,6 +11551,7 @@ fn payout_test_config(
 struct PayoutAssembler {
     near_contract_id: Option<&'static str>,
     confirmation_interval: Option<StdDuration>,
+    controls: Option<PipelineNearPayoutControls>,
 }
 
 impl IngestPipelineRuntimeAssembler for PayoutAssembler {
@@ -11545,6 +11567,7 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
         config.confirmation_interval = self
             .confirmation_interval
             .unwrap_or(context.near_confirmation_interval);
+        config.controls = self.controls.unwrap_or(context.near_payout_controls);
         qualified_pipeline_service(
             context.backend,
             context.artifact_store,
@@ -11553,7 +11576,7 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
             true,
             Some((
                 Arc::new(QualifiedTestNearAdapter(
-                    trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter::new(),
+                    trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter::authenticated(),
                 )),
                 config,
             )),
@@ -11579,6 +11602,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             false,
             configured,
             TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
         )
     };
@@ -11587,6 +11611,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
         &PayoutAssembler {
             near_contract_id: None,
             confirmation_interval: None,
+            controls: None,
         },
         Some(TEST_PAYOUT_NEAR_CONTRACT),
     )
@@ -11603,6 +11628,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             &PayoutAssembler {
                 near_contract_id: Some("other-credits.testnet"),
                 confirmation_interval: None,
+                controls: None,
             },
             configured,
         )
@@ -11672,6 +11698,7 @@ async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_che
             false,
             None,
             TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
             &checks,
         )
     };
@@ -11707,6 +11734,7 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
             false,
             Some(TEST_PAYOUT_NEAR_CONTRACT),
             TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
         )
     };
@@ -11714,6 +11742,7 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
     let service = assemble(&PayoutAssembler {
         near_contract_id: None,
         confirmation_interval: None,
+        controls: None,
     })
     .expect("a payout at main's cadence starts")
     .expect("an assembler was given, so a service is returned");
@@ -11725,6 +11754,7 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
     let error = assemble(&PayoutAssembler {
         near_contract_id: None,
         confirmation_interval: Some(StdDuration::from_secs(5)),
+        controls: None,
     })
     .err()
     .expect("a payout polling at another cadence is refused");
@@ -11732,6 +11762,71 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
         error.to_string(),
         "pipeline_runtime_near_confirmation_interval_mismatch"
     );
+}
+
+/// Zaki review 1, round 2, finding 2: an enabled payout follows `main`'s NEAR
+/// settlement mode and adapter-auth requirement. Ingest hands both to the
+/// assembly and refuses a runtime whose payout holds others.
+#[tokio::test]
+async fn pipeline_runtime_payout_follows_mains_near_payout_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let mains = PipelineNearPayoutControls {
+        settlement_mode: PipelineNearSettlementMode::Disabled,
+        require_adapter_auth: false,
+    };
+    let assemble = |assembler: &PayoutAssembler| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            true,
+            false,
+            Some(TEST_PAYOUT_NEAR_CONTRACT),
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            mains,
+            &PipelineNoveltyUtilityChecks::default(),
+        )
+    };
+
+    let service = assemble(&PayoutAssembler {
+        near_contract_id: None,
+        confirmation_interval: None,
+        controls: None,
+    })
+    .expect("a payout under main's controls starts")
+    .expect("an assembler was given, so a service is returned");
+    assert_eq!(service.payout_controls(), Some(mains));
+
+    for other in [
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::Http,
+            require_adapter_auth: false,
+        },
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::DryRun,
+            require_adapter_auth: false,
+        },
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::Disabled,
+            require_adapter_auth: true,
+        },
+    ] {
+        let error = assemble(&PayoutAssembler {
+            near_contract_id: None,
+            confirmation_interval: None,
+            controls: Some(other),
+        })
+        .err()
+        .expect("a payout under other controls is refused");
+        assert_eq!(
+            error.to_string(),
+            "pipeline_runtime_near_payout_controls_mismatch",
+            "{other:?}"
+        );
+    }
 }
 
 /// Task 10: the NEAR payout adapter counts toward production qualification
@@ -11798,6 +11893,7 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("no routed tenants and no required flag: an unqualified dependency starts")

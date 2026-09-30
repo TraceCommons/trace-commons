@@ -38,6 +38,13 @@ use super::*;
 /// `assemble_ingest_pipeline_runtime` refuses one that does not. The tenant
 /// policy those checks read comes from the assembly's own authority
 /// provider, the source the receipt uses.
+///
+/// `near_payout_controls` are `main`'s NEAR payout controls: its settlement
+/// mode (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE`) and
+/// `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, resolved before
+/// assembly. An assembly that enables payout passes them as
+/// `PipelinePayoutConfig::controls`, and `assemble_ingest_pipeline_runtime`
+/// refuses one that does not (Zaki review 1, round 2, finding 2).
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
@@ -45,6 +52,7 @@ pub struct IngestPipelineRuntimeContext {
     pub lease_config: PipelineLeaseConfig,
     pub near_contract_id: Option<String>,
     pub near_confirmation_interval: StdDuration,
+    pub near_payout_controls: PipelineNearPayoutControls,
     pub novelty_utility_checks: PipelineNoveltyUtilityChecks,
 }
 
@@ -81,10 +89,11 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// `pipeline_test_dependencies_not_allowed_when_required`, regardless of
 /// qualification. The caller resolves both booleans from the environment (or
 /// from the tenant rollout gates); this function reads neither directly.
-/// `near_contract_id` is `main`'s configured NEAR credit contract and
-/// `near_confirmation_interval` its NEAR outbox scheduler cadence, and
-/// `novelty_utility_checks` the configuration of `main`'s `NoveltyUtility`
-/// credit checks, all handed to the assembly in its context.
+/// `near_contract_id` is `main`'s configured NEAR credit contract,
+/// `near_confirmation_interval` its NEAR outbox scheduler cadence,
+/// `near_payout_controls` its NEAR settlement mode and adapter-auth
+/// requirement, and `novelty_utility_checks` the configuration of `main`'s
+/// `NoveltyUtility` credit checks, all handed to the assembly in its context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
@@ -96,6 +105,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     allow_test_dependencies: bool,
     near_contract_id: Option<&str>,
     near_confirmation_interval: StdDuration,
+    near_payout_controls: PipelineNearPayoutControls,
     novelty_utility_checks: &PipelineNoveltyUtilityChecks,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
@@ -122,6 +132,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         lease_config,
         near_contract_id: near_contract_id.map(str::to_string),
         near_confirmation_interval,
+        near_payout_controls,
         novelty_utility_checks: novelty_utility_checks.clone(),
     })?;
     // M11: every object ref the pipeline commits names the store it was
@@ -150,6 +161,13 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         !service.payout_enabled()
             || service.payout_confirmation_interval() == Some(near_confirmation_interval),
         "pipeline_runtime_near_confirmation_interval_mismatch"
+    );
+    // Zaki review 1, round 2, finding 2: an enabled payout follows `main`'s
+    // NEAR settlement mode and adapter-auth requirement, never ones the
+    // assembly picked itself.
+    anyhow::ensure!(
+        !service.payout_enabled() || service.payout_controls() == Some(near_payout_controls),
+        "pipeline_runtime_near_payout_controls_mismatch"
     );
     // Ruling T15-12: a compatibility award applies `main`'s NoveltyUtility
     // credit checks with the configuration ingest was started with, never a

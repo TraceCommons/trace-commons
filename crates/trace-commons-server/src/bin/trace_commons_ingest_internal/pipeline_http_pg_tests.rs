@@ -350,6 +350,7 @@ fn assemble_test_pipeline_service(
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("assemble the injected pipeline runtime")
@@ -4366,6 +4367,7 @@ fn trace_credit_payout_service(
                 require_confirmation_evidence: true,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 confirmation_interval: std::time::Duration::ZERO,
+                controls: TEST_NEAR_PAYOUT_CONTROLS,
             },
         )
         .build()
@@ -4656,6 +4658,7 @@ fn assemble_compatibility_pipeline_service(
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("assemble the injected compatibility pipeline runtime")

@@ -261,10 +261,11 @@ use trace_commons_server::trace_score_attestation::{
 };
 use trace_commons_server::versioned_pipeline::{
     PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
-    PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNoveltyUtilityChecks,
-    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
-    PipelineReviewClaim, PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState,
-    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
+    PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNearPayoutControls,
+    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
+    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineReviewClaim,
+    PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome,
+    is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
@@ -3907,6 +3908,12 @@ impl AppState {
             settlement_require_rollout_smoke_ready: credit_settlement_require_rollout_smoke_ready,
             settlement_max_micros_per_account: credit_settlement_max_micros_per_account,
         };
+        // Zaki review 1, round 2, finding 2: `main`'s NEAR settlement mode and
+        // adapter-auth requirement, resolved before the pipeline runtime is
+        // assembled, so an enabled payout follows both.
+        let near_settlement_mode = NearSettlementMode::from_env();
+        let near_credit_require_adapter_auth =
+            env_truthy(TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH);
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
@@ -3917,6 +3924,10 @@ impl AppState {
             pipeline_allow_test_dependencies,
             credit_settlement_near_contract_id.as_deref(),
             pipeline_near_confirmation_interval_from_env(pipeline_runtime_assembler.is_some())?,
+            PipelineNearPayoutControls {
+                settlement_mode: near_settlement_mode.for_pipeline(),
+                require_adapter_auth: near_credit_require_adapter_auth,
+            },
             &pipeline_novelty_utility_checks,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
@@ -3944,8 +3955,6 @@ impl AppState {
         let near_credit_confirmer_auth_configured = near_credit_confirmer_config
             .as_ref()
             .is_some_and(|config| config.auth_configured);
-        let near_credit_require_adapter_auth =
-            env_truthy(TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH);
         if near_credit_require_adapter_auth
             && near_credit_submitter_timeout_ms.is_some()
             && !near_credit_submitter_auth_configured
@@ -3997,7 +4006,8 @@ impl AppState {
         // its auth requirements, while `DryRun` substitutes in-process impls and
         // `Disabled` withholds any submitter (worker no-ops, rows stay pending).
         // Default is `Disabled` (fail-safe): an unset mode never advances credit.
-        let near_settlement_mode = NearSettlementMode::from_env();
+        // The mode itself was resolved before the pipeline runtime was
+        // assembled.
         let (near_credit_submitter, near_credit_confirmer) = match near_settlement_mode {
             NearSettlementMode::Disabled => (None, None),
             NearSettlementMode::DryRun => {
@@ -24825,6 +24835,16 @@ impl NearSettlementMode {
             NearSettlementMode::Disabled => "disabled",
             NearSettlementMode::DryRun => "dry_run",
             NearSettlementMode::Http => "http",
+        }
+    }
+
+    /// The same mode, as the pipeline payout follows it (Zaki review 1,
+    /// round 2, finding 2).
+    fn for_pipeline(self) -> PipelineNearSettlementMode {
+        match self {
+            NearSettlementMode::Disabled => PipelineNearSettlementMode::Disabled,
+            NearSettlementMode::DryRun => PipelineNearSettlementMode::DryRun,
+            NearSettlementMode::Http => PipelineNearSettlementMode::Http,
         }
     }
 }

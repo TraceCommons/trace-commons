@@ -58,7 +58,7 @@ use crate::versioned_pipeline_bundle::{
     pipeline_operation_ref, pipeline_result_ref,
 };
 use crate::versioned_pipeline_credit::{
-    NearPayoutAdapter, PIPELINE_CREDIT_ACTOR_ROLE, PIPELINE_CREDIT_REASON,
+    DryRunNearPayoutAdapter, NearPayoutAdapter, PIPELINE_CREDIT_ACTOR_ROLE, PIPELINE_CREDIT_REASON,
     PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE, PIPELINE_SETTLEMENT_POLICY_VERSION,
     SettlementAdapterRegistry, credit_account_hash, disabled_near_call,
     microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
@@ -125,6 +125,11 @@ pub const PIPELINE_PAYOUT_ROLLOUT_SMOKE_NOT_READY_LABEL: &str =
     "credit_settlement_rollout_smoke_not_ready";
 pub const PIPELINE_PAYOUT_ACCOUNT_CAP_UNSUPPORTED_LABEL: &str =
     "credit_settlement_account_cap_unsupported";
+/// `PipelineServiceBuilder::build`'s refusal of an enabled payout on an
+/// adapter that presents no credential while `main` requires one
+/// (`TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`; Zaki review 1, round 2,
+/// finding 2).
+pub const PIPELINE_PAYOUT_ADAPTER_AUTH_MISSING_LABEL: &str = "near_payout_adapter_auth_missing";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 /// The reason code of an index invalidation a withdrawal queues.
 const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
@@ -4750,12 +4755,54 @@ pub struct PipelineCaps {
 /// its NEAR confirmation: `main`'s NEAR outbox scheduler cadence
 /// (`TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS`, 60
 /// seconds by default), which ingest hands to the assembly (Ruling T10-10).
+///
+/// `controls` are `main`'s NEAR payout controls, which ingest hands to the
+/// assembly and refuses a runtime that does not hold.
 #[derive(Debug, Clone)]
 pub struct PipelinePayoutConfig {
     pub enabled: bool,
     pub require_confirmation_evidence: bool,
     pub near_contract_id: Option<String>,
     pub confirmation_interval: std::time::Duration,
+    pub controls: PipelineNearPayoutControls,
+}
+
+/// `main`'s NEAR settlement mode, `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`, as
+/// ingest resolves it (unset or unknown is `Disabled`). An enabled payout
+/// follows it as `main`'s outbox worker does (Zaki review 1, round 2,
+/// finding 2):
+///
+/// - `Disabled`: nothing advances. The payout writes no outbox row and
+///   submits and confirms nothing; each leg stays `pending`.
+/// - `DryRun`: the full outbox state machine runs through the in-process
+///   `DryRunNearPayoutAdapter`, with no network and no funds, in place of
+///   the injected adapter.
+/// - `Http`: the injected adapter pays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineNearSettlementMode {
+    Disabled,
+    DryRun,
+    Http,
+}
+
+impl PipelineNearSettlementMode {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            PipelineNearSettlementMode::Disabled => "disabled",
+            PipelineNearSettlementMode::DryRun => "dry_run",
+            PipelineNearSettlementMode::Http => "http",
+        }
+    }
+}
+
+/// `main`'s NEAR payout controls an enabled payout applies (Zaki review 1,
+/// round 2, finding 2): its settlement mode, and
+/// `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, under which the payout
+/// adapter must present a credential (`NearPayoutAdapter::authenticated`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineNearPayoutControls {
+    pub settlement_mode: PipelineNearSettlementMode,
+    pub require_adapter_auth: bool,
 }
 
 /// Ruling T15-6: the configuration `main`'s `NoveltyUtility` credit checks
@@ -5036,10 +5083,18 @@ impl PipelineServiceBuilder {
     /// own default bundle fails at construction rather than on the first
     /// receipt.
     pub fn build(self) -> anyhow::Result<PipelineService> {
-        if let Some((_, config)) = self.payout.as_ref().filter(|(_, config)| config.enabled) {
+        if let Some((adapter, config)) = self.payout.as_ref().filter(|(_, config)| config.enabled) {
             anyhow::ensure!(
                 config.require_confirmation_evidence,
                 "payout confirmation evidence cannot be disabled"
+            );
+            // Zaki review 1, round 2, finding 2: `main` refuses to start its
+            // NEAR adapters without their credentials under
+            // `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, whatever the
+            // settlement mode; so is a payout adapter that presents none.
+            anyhow::ensure!(
+                !config.controls.require_adapter_auth || adapter.authenticated(),
+                PIPELINE_PAYOUT_ADAPTER_AUTH_MISSING_LABEL
             );
             // Ruling T10-4: an enabled payout names a NEAR contract, and one
             // a call can be built for.
@@ -5266,6 +5321,15 @@ impl PipelineService {
     /// service applies (`PipelineServiceBuilder::with_novelty_utility_checks`).
     pub fn novelty_utility_checks(&self) -> &PipelineNoveltyUtilityChecks {
         &self.novelty_utility_checks
+    }
+
+    /// `main`'s NEAR payout controls an enabled payout applies
+    /// (`PipelinePayoutConfig::controls`); `None` while payout is disabled.
+    pub fn payout_controls(&self) -> Option<PipelineNearPayoutControls> {
+        self.payout
+            .as_ref()
+            .filter(|(_, config)| config.enabled)
+            .map(|(_, config)| config.controls)
     }
 
     /// The NEAR credit contract an enabled payout names
@@ -8713,6 +8777,11 @@ impl PipelineService {
         let Some((_, config)) = self.payout.as_ref().filter(|(_, config)| config.enabled) else {
             return Ok(0);
         };
+        // `main`'s disabled NEAR settlement mode advances nothing (Zaki
+        // review 1, round 2, finding 2).
+        if config.controls.settlement_mode == PipelineNearSettlementMode::Disabled {
+            return Ok(0);
+        }
         let mut client = self.backend.trace_pool().get().await?;
         let work = PgPipelineStore::list_payout_work_on(
             &mut client,
@@ -8767,7 +8836,12 @@ impl PipelineService {
         tenant_id: &str,
         run_id: Uuid,
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
-        if !self.payout_enabled() {
+        if !self.payout_enabled()
+            || self
+                .payout_controls()
+                .map(|controls| controls.settlement_mode)
+                == Some(PipelineNearSettlementMode::Disabled)
+        {
             return Ok(self.store.get_run(tenant_id, run_id).await?);
         }
         let Some(mut lock) = self.try_lock_payouts(tenant_id).await? else {
@@ -8921,12 +8995,22 @@ impl PipelineService {
         may_submit: bool,
         retry_failed: bool,
     ) -> anyhow::Result<()> {
-        let Some((adapter, config)) = self.payout.as_ref() else {
+        let Some((injected, config)) = self.payout.as_ref() else {
             return Ok(());
         };
         if !config.enabled {
             return Ok(());
         }
+        // `main`'s NEAR settlement mode picks who pays, as it picks the
+        // submitter and confirmer `main`'s outbox worker drives (Zaki review
+        // 1, round 2, finding 2): nobody while it is disabled, the in-process
+        // dry-run adapter under `dry_run`, and the injected one under `http`.
+        let dry_run = DryRunNearPayoutAdapter;
+        let adapter: &dyn NearPayoutAdapter = match config.controls.settlement_mode {
+            PipelineNearSettlementMode::Disabled => return Ok(()),
+            PipelineNearSettlementMode::DryRun => &dry_run,
+            PipelineNearSettlementMode::Http => injected.as_ref(),
+        };
         // `PipelineServiceBuilder::build` refuses an enabled payout without one.
         let near_contract_id = config
             .near_contract_id

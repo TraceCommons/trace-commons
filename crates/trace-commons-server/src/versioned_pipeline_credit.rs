@@ -195,12 +195,13 @@ pub struct NearLogicalRequest {
 /// key once, answers a repeated key with the same result, and refuses a
 /// repeated key with a different method. A confirmation exists only once a
 /// test records one (`record_confirmation`). `fail_next` makes the next
-/// submit fail.
+/// submit fail. It presents no credential unless built `authenticated`.
 #[derive(Debug, Default)]
 pub struct RecordingNearAdapter {
     requests: Mutex<Vec<NearLogicalRequest>>,
     confirmations: Mutex<BTreeMap<String, NearConfirmationEvidence>>,
     fail_next: AtomicBool,
+    authenticated: bool,
 }
 
 /// Hash-only evidence that a submitted NEAR call was confirmed.
@@ -219,19 +220,83 @@ pub struct NearConfirmationEvidence {
 /// with the same key is the same logical request, never a second
 /// transaction. The payout records a submit in the outbox after `submit`
 /// returns, so a crash between the two repeats the call on the next pass.
+///
+/// `authenticated` says whether its calls present a credential to the NEAR
+/// submitter and confirmer, as `main`'s HTTP adapters do with a bearer
+/// token. Under `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, an enabled
+/// payout on an adapter that does not is refused at build, as `main` refuses
+/// to start its own adapters without their tokens (Zaki review 1, round 2,
+/// finding 2).
 #[async_trait]
 pub trait NearPayoutAdapter: Send + Sync {
     fn dependency_identity(&self) -> &str;
     fn production_qualified(&self) -> bool {
         false
     }
+    fn authenticated(&self) -> bool {
+        false
+    }
     async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String>;
     async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence>;
+}
+
+/// The payout adapter `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=dry_run` pays
+/// through in place of the injected one, as `main`'s outbox worker does in
+/// that mode with its in-process submitter and confirmer: the full outbox
+/// state machine runs with no network and no funds. `submit` validates the
+/// call and answers a synthetic transaction hash derived from its
+/// idempotency key alone, so a repeated key gets the same hash; every
+/// submitted call is confirmed, with hash-only evidence derived from the
+/// same key (Zaki review 1, round 2, finding 2).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DryRunNearPayoutAdapter;
+
+impl DryRunNearPayoutAdapter {
+    /// The synthetic NEAR transaction hash for `idempotency_key`: base58 of
+    /// its SHA-256, the shape `main`'s dry-run submitter answers.
+    pub fn transaction_hash(idempotency_key: &str) -> String {
+        bs58::encode(Sha256::digest(idempotency_key.as_bytes())).into_string()
+    }
+}
+
+#[async_trait]
+impl NearPayoutAdapter for DryRunNearPayoutAdapter {
+    fn dependency_identity(&self) -> &str {
+        "near_dry_run_payout"
+    }
+
+    async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String> {
+        call.validate()?;
+        Ok(Self::transaction_hash(&call.idempotency_key))
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        let transaction_hash = Self::transaction_hash(idempotency_key);
+        Some(NearConfirmationEvidence {
+            transaction_hash_hash: format!(
+                "sha256:{:x}",
+                Sha256::digest(transaction_hash.as_bytes())
+            ),
+            receipt_hash: format!(
+                "sha256:{:x}",
+                Sha256::digest(format!("near_dry_run_receipt:v1:{idempotency_key}").as_bytes())
+            ),
+        })
+    }
 }
 
 impl RecordingNearAdapter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A recording adapter whose calls present a credential
+    /// (`NearPayoutAdapter::authenticated`).
+    pub fn authenticated() -> Self {
+        Self {
+            authenticated: true,
+            ..Self::default()
+        }
     }
 
     pub fn fail_next(&self) {
@@ -285,6 +350,10 @@ impl RecordingNearAdapter {
 impl NearPayoutAdapter for RecordingNearAdapter {
     fn dependency_identity(&self) -> &str {
         "recording_near_test_only"
+    }
+
+    fn authenticated(&self) -> bool {
+        self.authenticated
     }
 
     async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String> {
