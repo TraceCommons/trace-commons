@@ -227,6 +227,10 @@ pub struct ArmingRewordNotice {
     pub was: super::arming_wording::ArmingClaim,
     /// What the words in force for it claim now.
     pub now: super::arming_wording::ArmingClaim,
+    /// This notice announces the Automatic-default upgrade, not a claim
+    /// narrowing. Existing shells pass the whole object to shared copy.
+    #[serde(default)]
+    pub scrub_check_defaulted: bool,
 }
 
 /// A project the app should offer to arm, and the evidence for offering.
@@ -295,6 +299,9 @@ pub struct ProjectPolicy {
     /// The id the next [`ArmingRewordNotice`] gets. Never reused.
     #[serde(default)]
     pub next_arming_reword_id: u64,
+    /// Recorded atomically with upgrade notices, never cleared by their ack.
+    #[serde(default)]
+    pub scrub_check_upgrade_recorded: bool,
     /// Projects the contributor armed **from now** (`set_project_mode`
     /// `auto_upload` with `from_now: true`), by project key. See
     /// [`ArmedFromNow`]. An entry leaves when the project's mode is set
@@ -406,6 +413,9 @@ impl ProjectPolicy {
             arming_claims: BTreeMap::new(),
             arming_rewordings: Vec::new(),
             next_arming_reword_id: 0,
+            // Fresh installs start with Automatic; only old files (whose
+            // serde default is false) need an upgrade announcement.
+            scrub_check_upgrade_recorded: true,
             armed_from_now: BTreeMap::new(),
             sessions_on_disk_at_arming: BTreeMap::new(),
             next_arming_record: 0,
@@ -1069,7 +1079,8 @@ impl ProjectPolicy {
         let mut labels = Vec::with_capacity(reworded.len());
         for (key, label, was, in_force) in reworded {
             self.arming_claims.insert(key.clone(), in_force);
-            self.arming_rewordings.retain(|n| n.project_key != key);
+            self.arming_rewordings
+                .retain(|n| n.project_key != key || n.scrub_check_defaulted);
             let id = self.next_arming_reword_id;
             self.next_arming_reword_id = id.saturating_add(1);
             self.arming_rewordings.push(ArmingRewordNotice {
@@ -1078,6 +1089,7 @@ impl ProjectPolicy {
                 project_key: key,
                 was,
                 now: in_force,
+                scrub_check_defaulted: false,
             });
             labels.push(label);
         }
@@ -1090,6 +1102,34 @@ impl ProjectPolicy {
         let before = self.arming_rewordings.len();
         self.arming_rewordings.retain(|n| !ids.contains(&n.id));
         before - self.arming_rewordings.len()
+    }
+
+    /// Announce changed hold behavior only for folders armed at upgrade.
+    /// The marker and notices are saved together by startup, before work.
+    pub fn record_scrub_check_upgrade(&mut self, automatic: bool, now: DateTime<Utc>) -> bool {
+        if self.scrub_check_upgrade_recorded {
+            return false;
+        }
+        if automatic {
+            for (key, entry) in &self.projects {
+                if entry.mode != ProjectMode::AutoUpload || key == UNKNOWN_PROJECT_KEY {
+                    continue;
+                }
+                let claim = self.arming_claim(key);
+                let id = self.next_arming_reword_id;
+                self.next_arming_reword_id = id.saturating_add(1);
+                self.arming_rewordings.push(ArmingRewordNotice {
+                    id,
+                    reworded_at: now,
+                    project_key: key.clone(),
+                    was: claim,
+                    now: claim,
+                    scrub_check_defaulted: true,
+                });
+            }
+        }
+        self.scrub_check_upgrade_recorded = true;
+        true
     }
 
     /// Record a notice, replacing any still outstanding for the same grant:
@@ -2255,9 +2295,11 @@ mod tests {
         let object = value.as_object_mut().unwrap();
         object.remove("grant_voids");
         object.remove("next_grant_void_id");
+        object.remove("scrub_check_upgrade_recorded");
         let p: ProjectPolicy = serde_json::from_value(value).unwrap();
         assert!(p.grant_voids.is_empty());
         assert_eq!(p.next_grant_void_id, 0);
+        assert!(!p.scrub_check_upgrade_recorded);
     }
 
     use super::super::arming_wording::ArmingClaim;
@@ -2269,6 +2311,45 @@ mod tests {
                 .unwrap();
         }
         p
+    }
+
+    #[test]
+    fn scrub_check_upgrade_is_once_only_and_keeps_other_notices() {
+        let now = t("2026-09-30T00:00:00Z");
+        let mut p = armed_by_hand(&["/w/api"]);
+        p.scrub_check_upgrade_recorded = false;
+        assert!(p.record_scrub_check_upgrade(true, now));
+        assert_eq!(p.arming_rewordings.len(), 1);
+        let upgrade_id = p.arming_rewordings[0].id;
+        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
+        assert_eq!(p.arming_rewordings.len(), 2);
+        assert!(
+            p.arming_rewordings
+                .iter()
+                .any(|n| n.id == upgrade_id && n.scrub_check_defaulted)
+        );
+        p.acknowledge_arming_rewordings(&[upgrade_id]);
+        assert_eq!(p.arming_rewordings.len(), 1);
+        assert!(!p.record_scrub_check_upgrade(true, now));
+        p.set_mode("/w/api", ProjectMode::NotifyOnly, now).unwrap();
+        assert!(p.arming_rewordings.is_empty());
+    }
+
+    #[test]
+    fn scrub_check_upgrade_does_not_notify_manual_or_later_armed_folders() {
+        let now = t("2026-09-30T00:00:00Z");
+        let mut manual = armed_by_hand(&["/w/api"]);
+        manual.scrub_check_upgrade_recorded = false;
+        assert!(manual.record_scrub_check_upgrade(false, now));
+        assert!(manual.arming_rewordings.is_empty());
+        let mut no_folders = ProjectPolicy::new();
+        no_folders.scrub_check_upgrade_recorded = false;
+        assert!(no_folders.record_scrub_check_upgrade(true, now));
+        no_folders
+            .set_mode("/w/api", ProjectMode::AutoUpload, now)
+            .unwrap();
+        assert!(!no_folders.record_scrub_check_upgrade(true, now));
+        assert!(no_folders.arming_rewordings.is_empty());
     }
 
     /// K5: a folder armed under the old "will be scrubbed" wording, whose

@@ -736,7 +736,7 @@ impl DaemonShared {
         // finished or undone before the policy is read and before any pass,
         // so nothing ever sees a half-switched identity.
         super::legacy_migration::recover(&store)?;
-        let policy = ProjectPolicy::load(&store)?;
+        let mut policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|error| {
             let mut settings = DaemonSettings::load(&store)?;
@@ -753,6 +753,24 @@ impl DaemonShared {
             settings.cloud_storage_unavailable = true;
             Ok::<_, anyhow::Error>(settings)
         })?;
+        if settings.scrub_check_defaulted_on_upgrade
+            && store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)?
+                .is_none()
+        {
+            // Save provenance before marking the policy migration done; a
+            // restart must not mistake a legacy settings-less install for fresh.
+            settings.save(&store)?;
+        }
+        if policy.record_scrub_check_upgrade(
+            settings.scrub_check_defaulted_on_upgrade
+                && settings.scrub_check == super::settings::ScrubCheck::Automatic,
+            Utc::now(),
+        ) {
+            // Fail startup if the notice cannot be persisted: changed
+            // unattended behavior must not silently precede its notice.
+            policy.save(&store)?;
+        }
         // Built here from the declaration this settings file carries at
         // startup. A later edit does not wait for a restart:
         // `set_settings` rebuilds the instance in place.
@@ -1708,6 +1726,7 @@ impl DaemonShared {
                     ),
                     "was": notice.was,
                     "now": notice.now,
+                    "scrub_check_defaulted": notice.scrub_check_defaulted,
                 })
             })
             .collect();
@@ -2574,12 +2593,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "cancel" => handle_cancel(shared, req),
         "list_audit" => handle_list_audit(shared, req),
-        // A count of `reason_label` across every entry currently on the
-        // queue, whatever its state -- no state filter is applied, it is
-        // simply whichever entries currently carry a label (in practice
-        // that's dismissed, refused, expired, and superseded entries, since
-        // nothing else sets one). These labels are already computed by the
-        // queue and uploader; this is the first surface that rolls them up.
+        // Resolved outcomes only. Pending review holds and approved/uploading
+        // entries are still waiting, and must not appear in the shells'
+        // "Sessions no longer waiting" group.
         //
         // Deliberately NOT named `eligibility_reasons`: every source of a
         // `reason_label` applies to an entry that already exists in the
@@ -2595,6 +2611,12 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             let mut counts: std::collections::BTreeMap<&str, u64> =
                 std::collections::BTreeMap::new();
             for e in queue.all() {
+                if matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                ) {
+                    continue;
+                }
                 if let Some(label) = e.reason_label.as_deref() {
                     *counts.entry(label).or_insert(0) += 1;
                 }
@@ -3933,7 +3955,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // the save so a declaration that takes effect is always
             // one that survives a restart too.
             shared.rebuild_effective_routing(&settings);
-            let manual = Some(super::settings::ScrubCheck::Manual);
+            let manual = super::settings::ScrubCheck::Manual;
             let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             drop(settings);
@@ -7718,26 +7740,14 @@ mod tests {
                 serde_json::json!({"project_key": work_api, "mode": "notify_only"}),
             ),
         );
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: work_api.clone(),
-                        project_label: "api".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                project_key: work_api.clone(),
+                project_label: "api".to_string(),
+                ..queue_entry_fixture()
+            },
+        );
 
         // A colliding project shows up via a policy edit -- no tick runs.
         let r = handle_request(
@@ -7808,26 +7818,7 @@ mod tests {
         // audit; approving one entry at a time is the default, always-was
         // path and does not need a new log entry per click.
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
         let r = handle_request_async(
             &s,
             &req(
@@ -7843,31 +7834,17 @@ mod tests {
     #[tokio::test]
     async fn an_approval_carries_its_verdict_to_the_entry() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        // Already pinned, so `handle_approve` does not try to
-                        // build a real preview for a path that does not
-                        // exist -- this test is about the verdict, not the
-                        // envelope pipeline.
-                        previewed_envelope_digest: Some("sha256:preview".to_string()),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                // Already pinned, so `handle_approve` does not try to
+                // build a real preview for a path that does not
+                // exist -- this test is about the verdict, not the
+                // envelope pipeline.
+                previewed_envelope_digest: Some("sha256:preview".to_string()),
+                ..queue_entry_fixture()
+            },
+        );
 
         let r = handle_request_async(
             &s,
@@ -7937,26 +7914,7 @@ mod tests {
     #[tokio::test]
     async fn an_unrecognised_verdict_is_refused_and_approves_nothing() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
 
         let r = handle_request_async(
             &s,
@@ -8686,6 +8644,89 @@ mod tests {
         assert_eq!(
             status["automatic_contribution_held"],
             serde_json::json!({ "held_sessions": 0, "reasons": [], "projects": [] })
+        );
+    }
+
+    #[test]
+    fn automatic_default_upgrade_notice_survives_save_restart_and_acknowledgement() {
+        let s = enrolled_shared();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/upgrade", ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&s.store).unwrap();
+        }
+        let mut old = serde_json::to_value(DaemonSettings::default()).unwrap();
+        old.as_object_mut().unwrap().remove("scrub_check");
+        s.store
+            .write_daemon_file(
+                crate::config::DAEMON_SETTINGS_FILE,
+                old.to_string().as_bytes(),
+            )
+            .unwrap();
+        // A preference write before the daemon starts must not erase provenance.
+        DaemonSettings::load(&s.store)
+            .unwrap()
+            .save(&s.store)
+            .unwrap();
+        let upgraded = DaemonShared::load(s.store.clone()).unwrap();
+        let notices = upgraded.status_value()["arming_rewordings"].clone();
+        assert_eq!(notices.as_array().unwrap().len(), 1);
+        assert_eq!(notices[0]["scrub_check_defaulted"], true);
+        assert!(!notices.to_string().contains("/tmp/upgrade"));
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(restarted.status_value()["arming_rewordings"], notices);
+        let response = handle_request(
+            &restarted,
+            &req(
+                "acknowledge_arming_rewordings",
+                serde_json::json!({"ids": [notices[0]["id"]]}),
+            ),
+        );
+        assert!(response.error.is_none());
+        let acknowledged = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            acknowledged.status_value()["arming_rewordings"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn startup_announces_an_old_armed_install_without_a_settings_file() {
+        let s = shared();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_none()
+        );
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/legacy", ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&s.store).unwrap();
+        }
+        let upgraded = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            upgraded.status_value()["arming_rewordings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            DaemonSettings::load(&s.store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            restarted.status_value()["arming_rewordings"],
+            upgraded.status_value()["arming_rewordings"]
         );
     }
 
@@ -9806,26 +9847,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_approval_is_rolled_back_when_its_audit_entry_cannot_be_written() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
         break_the_audit_log(&s.store);
 
         let r = handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
@@ -10057,13 +10079,18 @@ mod tests {
         // against today's cap reports pressure, or blocked entries, that no
         // upload is actually facing yet. Once it is due it counts again.
         let s = shared();
-        let now = Utc::now();
+        // Stay within one UTC day: near midnight, +31 minutes correctly
+        // resets the real daily cap and used to make this test fail.
+        let now = "2026-09-30T12:00:00Z"
+            .parse::<chrono::DateTime<Utc>>()
+            .unwrap();
         {
             let mut state = s.state.lock().unwrap();
             state.day_bucket = Some(now.format("%Y-%m-%d").to_string());
             state.uploads_today = 50;
         }
         let mut waiting = approved_entry(1_024);
+        waiting.discovered_at = now;
         waiting.reason_label = Some(crate::submit::REASON_TRANSIENT_REDACTION.into());
         waiting.retry_after = Some(now + chrono::Duration::minutes(30));
         {
@@ -12272,9 +12299,8 @@ mod tests {
             .result
             .expect("get_settings answers");
         assert_eq!(
-            before["scrub_check"],
-            serde_json::Value::Null,
-            "never chosen, the default"
+            before["scrub_check"], "automatic",
+            "the default, reported as the string"
         );
 
         let r = handle_request(
@@ -12289,7 +12315,7 @@ mod tests {
         let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
         assert_eq!(
             reloaded.scrub_check,
-            Some(super::super::settings::ScrubCheck::Manual),
+            super::super::settings::ScrubCheck::Manual,
             "a restart keeps it"
         );
 
@@ -12519,6 +12545,26 @@ mod tests {
             s.settings.lock().unwrap().max_uploads_per_day,
             super::super::settings::DaemonSettings::default().max_uploads_per_day
         );
+    }
+
+    fn queue_entry_fixture() -> super::super::queue::QueueEntry {
+        super::super::queue::QueueEntry {
+            entry_id: Uuid::new_v4(),
+            session_hash: "sha256:seed".to_string(),
+            source: "claude-code".to_string(),
+            project_key: "/tmp/p".to_string(),
+            project_label: "p".to_string(),
+            path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+            size_bytes: 1,
+            discovered_at: Utc::now(),
+            ..Default::default()
+        }
+    }
+
+    fn seed_queue_entry(s: &DaemonShared, entry: super::super::queue::QueueEntry) -> Uuid {
+        let id = entry.entry_id;
+        s.queue.lock().unwrap().upsert(entry, 500).unwrap();
+        id
     }
 
     fn seed_entry_in_state(s: &DaemonShared, state: QueueState) -> Uuid {
@@ -12816,6 +12862,27 @@ mod tests {
     }
 
     #[test]
+    fn queue_outcome_counts_excludes_sessions_still_waiting_for_review() {
+        for label in [
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            super::super::second_look::REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let s = shared();
+            let id = seed_entry_in_state(&s, QueueState::Pending);
+            s.queue
+                .lock()
+                .unwrap()
+                .set_state(id, QueueState::Pending, Some(label.into()));
+            let r = handle_request(&s, &req("queue_outcome_counts", serde_json::json!({})));
+            assert_eq!(
+                r.result.unwrap()["reasons"],
+                serde_json::json!({}),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn consent_options_is_reachable_over_the_dispatcher() {
         let s = shared();
         let r = handle_request(&s, &req("consent_options", serde_json::json!({})));
@@ -12859,27 +12926,13 @@ mod tests {
     #[tokio::test]
     async fn quiesce_times_out_rather_than_forcing_its_way_past_an_upload() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        state: QueueState::Uploading,
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                state: QueueState::Uploading,
+                ..queue_entry_fixture()
+            },
+        );
         let r =
             handle_request_async(&s, &req("quiesce", serde_json::json!({"timeout_secs": 1}))).await;
         let err = r.error.expect("an in-flight upload must not be abandoned");
@@ -12893,27 +12946,13 @@ mod tests {
     #[tokio::test]
     async fn quiesce_completes_once_the_in_flight_upload_finishes() {
         let s = std::sync::Arc::new(shared());
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        state: QueueState::Uploading,
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                state: QueueState::Uploading,
+                ..queue_entry_fixture()
+            },
+        );
         let finisher = std::sync::Arc::clone(&s);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;

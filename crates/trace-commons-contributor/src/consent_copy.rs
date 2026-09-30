@@ -608,8 +608,8 @@ pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is 
 pub const SCRUB_CHECK_TITLE: &str = "Scrub check";
 
 /// **DRAFT, NEEDS APPROVAL.** The Automatic choice (`scrub_check:
-/// "automatic"`). Opt-in: a daemon where nothing was chosen reports `null`
-/// and holds nothing, so a shell must not render that state as this one.
+/// "automatic"`). The default: a daemon where nothing was chosen reports
+/// `"automatic"` and holds as this says, so a shell renders it selected.
 pub const SCRUB_CHECK_AUTOMATIC_LABEL: &str = "Automatic";
 
 /// **DRAFT, NEEDS APPROVAL.** What Automatic does. Names both second-look
@@ -998,10 +998,9 @@ pub struct ArmingRewordedNoticeCopy {
 /// The notice for one element of `status.arming_rewordings`, as it came off
 /// the wire. `None` only for a value that is not an object.
 ///
-/// Every element is a narrowing to patterns-only today, the only rewording
-/// the daemon records (`arming_wording::ArmingClaim::narrowed_to`), so the
-/// words do not branch on `was` / `now`; a shell passes the object through
-/// and never reads them.
+/// The daemon also uses this persisted/acknowledged channel for the
+/// Automatic-default upgrade. Shells pass the whole object through, so
+/// both notices reach every shell without shell-authored consent copy.
 #[must_use]
 pub fn arming_reworded_notice_for_wire(
     value: &serde_json::Value,
@@ -1015,6 +1014,26 @@ pub fn arming_reworded_notice_for_wire(
         .get("project_id")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|id| !id.is_empty());
+    if object
+        .get("scrub_check_defaulted")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Some(ArmingRewordedNoticeCopy {
+            title: label.map_or_else(
+                || "The Scrub check is now Automatic".to_string(),
+                |label| format!("The Scrub check is now Automatic for {label}"),
+            ),
+            body: "Your Scrub check was previously unset. This update makes it Automatic. This folder stays set to share automatically, but more sessions may now wait for your review.",
+            now_heading: "What happens now",
+            scope: SCRUB_CHECK_AUTOMATIC_HELP,
+            limit: "Choose Ask me first for this folder if you want to review every session from it.",
+            no_review: "Held sessions are not sent until you decide.",
+            acknowledge: VOID_ACKNOWLEDGE,
+            ask_first_action: has_id.then_some(ASK_ME_FIRST_ACTION),
+            ask_first_failed: has_id.then_some(ASK_ME_FIRST_FAILED),
+        });
+    }
     Some(ArmingRewordedNoticeCopy {
         title: arming_reworded_title(label),
         body: REWORDED_BODY,
@@ -2231,6 +2250,23 @@ mod tests {
         assert_eq!(n.title, REWORDED_UNPLACED_TITLE);
         assert!(n.ask_first_action.is_none() && n.ask_first_failed.is_none());
         assert!(arming_reworded_notice_for_wire(&serde_json::json!("x")).is_none());
+    }
+
+    #[test]
+    fn an_automatic_default_upgrade_explains_the_new_hold() {
+        let copy = arming_reworded_notice_for_wire(&serde_json::json!({
+            "id": 1, "project_id": "p-1", "project_label": "api",
+            "scrub_check_defaulted": true
+        }))
+        .unwrap();
+        assert_eq!(copy.title, "The Scrub check is now Automatic for api");
+        assert!(copy.body.contains("previously unset"));
+        assert_eq!(copy.scope, SCRUB_CHECK_AUTOMATIC_HELP);
+        assert_eq!(
+            copy.no_review,
+            "Held sessions are not sent until you decide."
+        );
+        assert!(copy.ask_first_action.is_some());
     }
 
     /// The held notice: counted, a sentence per reason, the release line,

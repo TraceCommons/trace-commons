@@ -6158,7 +6158,7 @@ mod tests {
             ..r5_unattended_entry(&cfg, &reference)
         };
         let settings = crate::daemon::settings::DaemonSettings {
-            scrub_check: Some(crate::daemon::settings::ScrubCheck::Automatic),
+            scrub_check: crate::daemon::settings::ScrubCheck::Automatic,
             ..Default::default()
         };
         let opts = review_options();

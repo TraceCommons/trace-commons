@@ -506,7 +506,7 @@ impl Uploader<'_, '_> {
         // is set; this catches an approval made before the switch, and
         // holds it before anything is read, built or sent.
         if entry.approved_unattended
-            && self.settings.scrub_check == Some(super::settings::ScrubCheck::Manual)
+            && self.settings.scrub_check == super::settings::ScrubCheck::Manual
         {
             return Ok(UploadDecision::HeldForSecondLook {
                 reason_label: super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string(),
@@ -690,10 +690,11 @@ impl Uploader<'_, '_> {
         // the envelope it builds, before the send. A person's approval is
         // never held here: they are the second look.
         //
-        // Only when Automatic was chosen. Never chosen (`None`, the default)
-        // is the behaviour from before the setting existed: no hold.
+        // Automatic is the default, and a settings file that never chose
+        // loads as it. Manual has already held above, before anything was
+        // read or built.
         if entry.approved_unattended
-            && self.settings.scrub_check == Some(super::settings::ScrubCheck::Automatic)
+            && self.settings.scrub_check == super::settings::ScrubCheck::Automatic
         {
             self.ctx.hold_unless_scrub_is_clear(entry.subagents_dropped);
         }
@@ -1215,54 +1216,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn upload_refuses_when_a_delegated_transcript_appeared_after_approval() {
-        // The same consent property as the test below, one level out: an
-        // approval covers a conversation, and a conversation that has since
-        // delegated work to a subagent is not the one that was approved. The
-        // group hash is what makes the re-hash guard see it -- with a
-        // parent-only hash this would ship silently.
-        let session = GrowingSession::new();
-        let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            // No public profile claimed. These are cache fields, excluded
-            // from the input fingerprint, so they cannot affect what this
-            // test measures -- the re-hash guard seeing a new subagent.
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
-        store.save_config(&cfg).unwrap();
-
-        let offered_hash = session.current_hash();
-        let entry = session.entry_for(&offered_hash, &cfg);
-        session.add_subagent("agent-a");
-
-        let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+    async fn upload_fixture(
+        ctx: &mut SubmitContext<'_>,
+        store: &ConfigStore,
+        session: &GrowingSession,
+        entry: &QueueEntry,
+    ) -> (UploadDecision, DaemonState, HealthState) {
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
         let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
+            ctx,
+            store,
             settings: &settings,
             state: &mut state,
             health: &mut health,
@@ -1272,11 +1237,36 @@ mod tests {
             .upload_entry(
                 &session.source(),
                 &session.session_ref(),
-                &entry,
+                entry,
                 at("2026-08-08T16:00:00Z"),
             )
             .await
             .unwrap();
+        (decision, state, health)
+    }
+
+    #[tokio::test]
+    async fn upload_refuses_when_a_delegated_transcript_appeared_after_approval() {
+        // The same consent property as the test below, one level out: an
+        // approval covers a conversation, and a conversation that has since
+        // delegated work to a subagent is not the one that was approved. The
+        // group hash is what makes the re-hash guard see it -- with a
+        // parent-only hash this would ship silently.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        // No public profile claimed. These are cache fields, excluded
+        // from the input fingerprint, so they cannot affect what this
+        // test measures -- the re-hash guard seeing a new subagent.
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let offered_hash = session.current_hash();
+        let entry = session.entry_for(&offered_hash, &cfg);
+        session.add_subagent("agent-a");
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         match decision {
             UploadDecision::Superseded { new_hash } => {
@@ -1297,28 +1287,7 @@ mod tests {
         // ship one that has since gained an afternoon of work.
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
+        let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
 
         let offered_hash = session.current_hash();
@@ -1327,26 +1296,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         match decision {
             UploadDecision::Superseded { new_hash } => {
@@ -1365,53 +1315,13 @@ mod tests {
     async fn upload_proceeds_when_the_hash_still_matches() {
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
+        let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
 
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
             matches!(decision, UploadDecision::Uploaded { .. }),
@@ -1499,30 +1409,36 @@ mod tests {
 
     fn manual() -> DaemonSettings {
         DaemonSettings {
-            scrub_check: Some(crate::daemon::settings::ScrubCheck::Manual),
+            scrub_check: crate::daemon::settings::ScrubCheck::Manual,
             ..DaemonSettings::default()
         }
     }
 
-    /// Automatic, chosen explicitly: the hold is opt-in.
+    /// Automatic, stated explicitly. It is also the default
+    /// (`the_default_scrub_check_holds_a_path_only_armed_session`).
     fn automatic() -> DaemonSettings {
         DaemonSettings {
-            scrub_check: Some(crate::daemon::settings::ScrubCheck::Automatic),
+            scrub_check: crate::daemon::settings::ScrubCheck::Automatic,
             ..DaemonSettings::default()
         }
     }
 
-    /// Never chosen, the default: an armed session the scrubber removed
-    /// nothing from is sent, exactly as before the setting existed.
+    /// Zaki's decision on #1139: the Scrub check defaults to Automatic. A
+    /// fresh install that never chose, with the project armed, holds a
+    /// session whose only marks are paths for a second look instead of
+    /// sending it.
     #[tokio::test]
-    async fn an_unchosen_scrub_check_sends_as_before_with_no_hold() {
-        let session = session_saying(NOTHING_TO_MARK);
+    async fn the_default_scrub_check_holds_a_path_only_armed_session() {
+        let session =
+            session_saying("open /Users/alice/code/orchard-api/src/main.rs and fix the parser");
         let (decision, state) = upload_under(&session, armed, DaemonSettings::default()).await;
-        assert!(
-            matches!(decision, UploadDecision::Uploaded { .. }),
-            "{decision:?}"
+        let pin = assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
         );
-        assert_eq!(state.uploads_today, 1);
+        assert!(pin.is_some(), "the built envelope is pinned");
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
     }
 
     /// A hold under `reason`, decided on `expected` second-look labels.
@@ -1841,7 +1757,9 @@ mod tests {
     async fn upload_entry_records_the_entrys_own_provenance_on_the_receipt() {
         let issuer = spawn_stub(stub_claim_issuer()).await;
         let ingest = spawn_stub(stub_ingest_accepts()).await;
-        let session = GrowingSession::new();
+        // An address the scrubber removes, so the default (Automatic) Scrub
+        // check lets this armed session through to the receipt.
+        let session = session_saying(ONE_EMAIL);
         let (_d, store) = temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = crate::config::ContributorConfig {
@@ -1970,25 +1888,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -2124,25 +2024,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -2239,25 +2121,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -2305,25 +2169,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
             matches!(decision, UploadDecision::Uploaded { .. }),
@@ -2359,25 +2205,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
             matches!(decision, UploadDecision::Uploaded { .. }),
@@ -2400,25 +2228,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -2434,28 +2244,7 @@ mod tests {
         // A cached claim outlives a logout by minutes.
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
+        let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
@@ -2464,25 +2253,7 @@ mod tests {
         // Log out underneath the running context.
         store.wipe().unwrap();
 
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -2501,28 +2272,7 @@ mod tests {
     async fn upload_stops_at_the_daily_cap() {
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
+        let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
 
         let entry = session.entry_for(&session.current_hash(), &cfg);
