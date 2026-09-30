@@ -316,6 +316,8 @@ fn derived_write(hash: &str, policy_label: &str) -> InviteGrantWrite {
         issued_by_label: None,
         credential_binding_hash: None,
         note_label: None,
+        issuer_display_name: None,
+        credit_range: None,
     }
 }
 
@@ -350,6 +352,8 @@ fn round_trip_fixture(hash: &str, policy_label: &str, credential: &str) -> Invit
         issued_by_label: Some("issued-by-round-trip".to_string()),
         credential_binding_hash: Some(credential.to_string()),
         note_label: Some("note-label-round-trip".to_string()),
+        issuer_display_name: Some("display-name-round-trip".to_string()),
+        credit_range: Some((11, 29)),
     }
 }
 
@@ -396,6 +400,11 @@ async fn insert_then_list_round_trips_every_field() {
         Some(credential.as_str())
     );
     assert_eq!(found.note_label.as_deref(), Some("note-label-round-trip"));
+    assert_eq!(
+        found.issuer_display_name.as_deref(),
+        Some("display-name-round-trip")
+    );
+    assert_eq!(found.credit_range, Some((11, 29)));
     assert!(found.revoked_at.is_none());
 }
 
@@ -1088,4 +1097,592 @@ async fn an_expired_invite_cannot_be_redeemed() {
         .await
         .expect("an expired invite is not a database error");
     assert!(result.is_none(), "an expired invite must not redeem");
+}
+
+// ---- V103 public face and the non-redeeming lookup route (#1118 Z1) ----
+
+mod lookup_route {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, StatusCode};
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
+    use trace_commons_server::trace_invite_registry::DbInviteRegistry;
+    use trace_commons_server::trace_upload_claim_allowlist::hash_invite_code;
+    use trace_commons_server::trace_upload_claim_issuer::{
+        TraceUploadClaimIssuerConfig, generate_upload_claim_keypair,
+        trace_upload_claim_issuer_router,
+    };
+
+    const SECRET_POLICY_SUFFIX: &str = "policy-never-shown";
+    const SECRET_ISSUED_BY: &str = "issued-by-never-shown";
+    const SECRET_NOTE: &str = "note-never-shown";
+
+    std::thread_local! {
+        static CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Writes into this thread's capture buffer, if one is open.
+    struct ThreadCapture;
+
+    impl std::io::Write for ThreadCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            CAPTURE.with(|capture| {
+                if let Some(sink) = capture.borrow().as_ref() {
+                    sink.lock().unwrap().extend_from_slice(buf);
+                }
+            });
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Start capturing events emitted on this thread (a `#[tokio::test]`
+    /// runs on one). A process-global subscriber with a dynamic filter, not a
+    /// scoped one: a scoped subscriber loses events whenever a parallel test
+    /// is the first to register the handler's callsite, because tracing-core
+    /// then caches that thread's answer ("disabled") for every thread. See
+    /// `capture_logs` in the issuer's unit tests.
+    fn open_log_capture() -> Arc<Mutex<Vec<u8>>> {
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::SubscriberExt;
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(|| ThreadCapture)
+                .with_ansi(false)
+                .with_filter(tracing_subscriber::filter::dynamic_filter_fn(|_, _| {
+                    CAPTURE.with(|capture| capture.borrow().is_some())
+                }));
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                .expect("no other global subscriber in this test binary");
+        });
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        CAPTURE.with(|capture| *capture.borrow_mut() = Some(sink.clone()));
+        sink
+    }
+
+    fn close_log_capture(sink: Arc<Mutex<Vec<u8>>>) -> String {
+        CAPTURE.with(|capture| *capture.borrow_mut() = None);
+        let bytes = sink.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// A 16-character code in the invite alphabet, distinct per call.
+    fn unique_code() -> String {
+        let n = fixture_nonce();
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut code = String::new();
+        let mut rest = n;
+        for _ in 0..16 {
+            code.push(alphabet[(rest % 26) as usize] as char);
+            rest /= 26;
+            if rest == 0 {
+                rest = n.rotate_left(7) | 1;
+            }
+        }
+        code
+    }
+
+    fn write_for(code: &str, policy_label: &str) -> InviteGrantWrite {
+        let mut write = derived_write(&hash_invite_code(code), policy_label);
+        write.issued_by_label = Some(SECRET_ISSUED_BY.to_string());
+        write.note_label = Some(SECRET_NOTE.to_string());
+        write.issuer_display_name = Some("Trace Commons Pilot".to_string());
+        write.credit_range = Some((2, 6));
+        write
+    }
+
+    async fn router_for(backend: Arc<PgBackend>) -> axum::Router {
+        router_with(backend, true).await
+    }
+
+    async fn router_with(backend: Arc<PgBackend>, authoritative: bool) -> axum::Router {
+        let registry = Arc::new(
+            DbInviteRegistry::new(
+                backend.clone(),
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(600),
+            )
+            .await
+            .expect("registry warms"),
+        );
+        router_over(backend, registry, authoritative)
+    }
+
+    fn router_over(
+        backend: Arc<PgBackend>,
+        registry: Arc<DbInviteRegistry>,
+        authoritative: bool,
+    ) -> axum::Router {
+        let issuer_keys = generate_upload_claim_keypair().unwrap();
+        let workload_keys = generate_upload_claim_keypair().unwrap();
+        trace_upload_claim_issuer_router(TraceUploadClaimIssuerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            signing_private_key_pem: issuer_keys.private_key_pem.clone(),
+            signing_public_key_pem: issuer_keys.public_key_pem.clone(),
+            signing_kid: "issuer-test".into(),
+            issuer: "trace-commons-upload-issuer".into(),
+            audience: "trace-commons-upload".into(),
+            max_ttl_seconds: 300,
+            workload_public_key_pem: workload_keys.public_key_pem.clone(),
+            workload_issuer: None,
+            workload_audience: None,
+            tenant_access_grant_db: None,
+            require_tenant_access_grants: false,
+            shutdown_grace_seconds: 30,
+            request_timeout_seconds: 10,
+            max_request_bytes: 64 * 1024,
+            allowlist_source: None,
+            allowlist_refresh_interval_seconds: 60,
+            allowlist_max_stale_seconds: 3600,
+            onboarding_device_key_db: None,
+            onboarding_ingest_url: None,
+            onboarding_community_url: None,
+            onboarding_profile_url: None,
+            onboarding_leaderboard_url: None,
+            admin_bind: None,
+            invite_admin_backend: Some(backend),
+            invite_admin_registry: Some(registry),
+            invite_registry_authoritative: authoritative,
+        })
+        .expect("router")
+    }
+
+    async fn lookup(router: &axum::Router, code: &str) -> (StatusCode, serde_json::Value, String) {
+        let body = serde_json::json!({
+            "schema_version": trace_commons_protocol::invite_lookup::INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+            "invite_code": code,
+        })
+        .to_string();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/invite/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        (status, serde_json::from_str(&text).unwrap(), text)
+    }
+
+    async fn stored_uses(backend: &PgBackend, hash: &str) -> (i32, chrono::DateTime<chrono::Utc>) {
+        let client = backend.trace_pool_for_test().get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT consumed_uses, updated_at FROM onboarding_invite_grants
+                  WHERE invite_subject_hash = $1",
+                &[&hash],
+            )
+            .await
+            .unwrap();
+        (row.get(0), row.get(1))
+    }
+
+    #[tokio::test]
+    async fn lookup_names_the_issuer_and_spends_nothing() {
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let backend = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        backend.run_migrations().await.expect("migrations");
+        let policy_label = unique_label(SECRET_POLICY_SUFFIX);
+        let code = unique_code();
+        let hash = hash_invite_code(&code);
+        assert_eq!(
+            backend
+                .insert_invite_grant(write_for(&code, &policy_label))
+                .await
+                .unwrap(),
+            InviteGrantInsertOutcome::Inserted
+        );
+        let router = router_for(backend.clone()).await;
+        let before = stored_uses(&backend, &hash).await;
+
+        let sink = open_log_capture();
+        for _ in 0..7 {
+            let (status, body, text) = lookup(&router, &code).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "valid": true,
+                    "issuer_display_name": "Trace Commons Pilot",
+                    "credit_range": {"min": 2, "max": 6, "unit": "points_per_accepted_trace"},
+                })
+            );
+            for secret in [
+                SECRET_ISSUED_BY,
+                SECRET_NOTE,
+                SECRET_POLICY_SUFFIX,
+                "max_uses",
+            ] {
+                assert!(!text.contains(secret), "{secret} leaked: {text}");
+            }
+        }
+        let logged = close_log_capture(sink);
+
+        // max_uses is 3 and we looked up 7 times: the stored count, and the
+        // whole row's updated_at, are exactly as seeded.
+        assert_eq!(stored_uses(&backend, &hash).await, before);
+        assert_eq!(before.0, 0);
+
+        // The log names the invite by subject hash and never by code.
+        assert!(logged.contains(&hash), "hash missing from log: {logged}");
+        assert!(!logged.contains(&code), "code reached the log: {logged}");
+
+        cleanup_test_invites(&backend, &policy_label).await;
+    }
+
+    #[tokio::test]
+    async fn lookup_labels_each_way_an_invite_can_be_unusable() {
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let backend = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        backend.run_migrations().await.expect("migrations");
+        let policy_label = unique_label(SECRET_POLICY_SUFFIX);
+
+        let revoked = unique_code();
+        let expired = unique_code();
+        let exhausted = unique_code();
+        let unknown = unique_code();
+        for code in [&revoked, &expired, &exhausted] {
+            backend
+                .insert_invite_grant(write_for(code, &policy_label))
+                .await
+                .unwrap();
+        }
+        assert!(
+            backend
+                .revoke_invite_grant(&hash_invite_code(&revoked))
+                .await
+                .unwrap()
+        );
+        {
+            let client = backend.trace_pool_for_test().get().await.unwrap();
+            client
+                .execute(
+                    "UPDATE onboarding_invite_grants
+                        SET expires_at = NOW() - INTERVAL '1 hour'
+                      WHERE invite_subject_hash = $1",
+                    &[&hash_invite_code(&expired)],
+                )
+                .await
+                .unwrap();
+            client
+                .execute(
+                    "UPDATE onboarding_invite_grants SET consumed_uses = max_uses
+                      WHERE invite_subject_hash = $1",
+                    &[&hash_invite_code(&exhausted)],
+                )
+                .await
+                .unwrap();
+        }
+
+        let router = router_for(backend.clone()).await;
+        for (code, label) in [
+            (&revoked, "revoked"),
+            (&expired, "expired"),
+            (&exhausted, "exhausted"),
+            (&unknown, "not_found"),
+        ] {
+            let (status, body, text) = lookup(&router, code).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(
+                body,
+                serde_json::json!({"valid": false, "reason_label": label}),
+                "{text}"
+            );
+        }
+
+        cleanup_test_invites(&backend, &policy_label).await;
+    }
+
+    /// An invite written to the database by another process (the
+    /// `--mint-invites` CLI) is not in this process's cache. Onboarding
+    /// refuses a code the cache does not hold, so the lookup must not call it
+    /// valid; after the cache refreshes both accept it.
+    #[tokio::test]
+    async fn lookup_agrees_with_onboarding_about_a_code_the_cache_has_not_seen() {
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let backend = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        backend.run_migrations().await.expect("migrations");
+        let policy_label = unique_label(SECRET_POLICY_SUFFIX);
+        let registry = Arc::new(
+            DbInviteRegistry::new(
+                backend.clone(),
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(600),
+            )
+            .await
+            .expect("registry warms"),
+        );
+        let router = router_over(backend.clone(), registry.clone(), true);
+
+        // Minted after the cache warmed, straight into the database.
+        let code = unique_code();
+        backend
+            .insert_invite_grant(write_for(&code, &policy_label))
+            .await
+            .unwrap();
+        let (status, body, text) = lookup(&router, &code).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            body,
+            serde_json::json!({"valid": false, "reason_label": "not_found"}),
+            "{text}"
+        );
+
+        registry.refresh_once().await.expect("refresh");
+        let (status, body, text) = lookup(&router, &code).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(body["valid"], true, "{text}");
+
+        cleanup_test_invites(&backend, &policy_label).await;
+    }
+
+    #[tokio::test]
+    async fn the_database_refuses_a_backwards_or_half_set_range_and_a_bad_name() {
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let backend = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        backend.run_migrations().await.expect("migrations");
+        let policy_label = unique_label("range-check");
+
+        let mut backwards = write_for(&unique_code(), &policy_label);
+        backwards.credit_range = Some((6, 2));
+        assert!(backend.insert_invite_grant(backwards).await.is_err());
+
+        let mut negative = write_for(&unique_code(), &policy_label);
+        negative.credit_range = Some((-1, 2));
+        assert!(backend.insert_invite_grant(negative).await.is_err());
+
+        let mut padded = write_for(&unique_code(), &policy_label);
+        padded.issuer_display_name = Some(" padded ".to_string());
+        assert!(backend.insert_invite_grant(padded).await.is_err());
+
+        let mut newline = write_for(&unique_code(), &policy_label);
+        newline.issuer_display_name = Some("two\nlines".to_string());
+        assert!(backend.insert_invite_grant(newline).await.is_err());
+
+        // Half-set: the write type cannot express it, so go around it.
+        let client = backend.trace_pool_for_test().get().await.unwrap();
+        let hash = hash_invite_code(&unique_code());
+        let half = client
+            .execute(
+                "INSERT INTO onboarding_invite_grants
+                    (invite_subject_hash, policy_label, tenant_mode, tenant_template_id,
+                     policy_version, issuance_source, credit_range_min)
+                 VALUES ($1, $2, 'derived', 'tmpl', 'v1', 'operator', 1)",
+                &[&hash, &policy_label],
+            )
+            .await;
+        assert!(half.is_err(), "min without max must be refused");
+
+        // A valid write with neither field still lands, and so does an
+        // equal-bounds range.
+        let mut bare = write_for(&unique_code(), &policy_label);
+        bare.issuer_display_name = None;
+        bare.credit_range = None;
+        assert_eq!(
+            backend.insert_invite_grant(bare).await.unwrap(),
+            InviteGrantInsertOutcome::Inserted
+        );
+        let mut flat = write_for(&unique_code(), &policy_label);
+        flat.credit_range = Some((3, 3));
+        assert_eq!(
+            backend.insert_invite_grant(flat).await.unwrap(),
+            InviteGrantInsertOutcome::Inserted
+        );
+
+        cleanup_test_invites(&backend, &policy_label).await;
+    }
+
+    /// Onboarding redeems from the file allowlist unless the registry is
+    /// authoritative, so in that mode the database is not what decides. A
+    /// lookup answered from it could call an invite valid that onboarding
+    /// then refuses (or the reverse), so it must fail closed instead.
+    #[tokio::test]
+    async fn lookup_fails_closed_when_the_registry_is_not_the_redemption_authority() {
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let backend = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        backend.run_migrations().await.expect("migrations");
+        let policy_label = unique_label(SECRET_POLICY_SUFFIX);
+        let code = unique_code();
+        backend
+            .insert_invite_grant(write_for(&code, &policy_label))
+            .await
+            .unwrap();
+
+        let router = router_with(backend.clone(), false).await;
+        let (status, body, text) = lookup(&router, &code).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "invite_registry_not_configured"})
+        );
+
+        cleanup_test_invites(&backend, &policy_label).await;
+    }
+
+    fn with_login(url: &str, login: &str) -> String {
+        let mut parsed = reqwest::Url::parse(url).expect("parse test database URL");
+        parsed.set_username(login).expect("set test login");
+        parsed.set_password(None).expect("clear test password");
+        parsed.into()
+    }
+
+    /// A backend whose invite-registry pool logs in as `login`, the way the
+    /// issuer's pool logs in as an operator-provisioned member of
+    /// `trace_invite_registry` in production. The trace pool keeps the
+    /// fixture URL; the lookup never touches it.
+    async fn backend_with_registry_login(config: &DatabaseConfig, login: &str) -> Arc<PgBackend> {
+        use secrecy::ExposeSecret;
+        let mut config = config.clone();
+        config.invite_registry_url = Some(SecretString::from(with_login(
+            config.url.expose_secret(),
+            login,
+        )));
+        Arc::new(
+            PgBackend::new(&config)
+                .await
+                .expect("registry-login backend"),
+        )
+    }
+
+    /// The other lookup tests run the registry pool as the fixture user,
+    /// which is a superuser locally and bypasses RLS: they would pass even if
+    /// the production role could not read the row. This one runs the route
+    /// through a NOSUPERUSER NOBYPASSRLS login that is a member of
+    /// `trace_invite_registry`, as production provisions it, and pairs it
+    /// with a control login that has the table grant but not the role, which
+    /// must see nothing. Were RLS bypassed on this path the control would
+    /// find the invite and the test would fail.
+    #[tokio::test]
+    async fn lookup_works_through_the_non_superuser_registry_login() {
+        use secrecy::ExposeSecret;
+        const REGISTRY_LOGIN: &str = "tc_z1_invite_registry_login";
+        const OUTSIDER_LOGIN: &str = "tc_z1_invite_outsider_login";
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let admin = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        admin.run_migrations().await.expect("migrations");
+        {
+            let client = admin.trace_pool_for_test().get().await.unwrap();
+            client
+                .batch_execute(&format!(
+                    "DO $$ BEGIN
+                         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{REGISTRY_LOGIN}')
+                         THEN CREATE ROLE {REGISTRY_LOGIN} LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+                         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{OUTSIDER_LOGIN}')
+                         THEN CREATE ROLE {OUTSIDER_LOGIN} LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+                     END $$;
+                     GRANT trace_invite_registry TO {REGISTRY_LOGIN};
+                     GRANT USAGE ON SCHEMA public TO {OUTSIDER_LOGIN};
+                     GRANT SELECT ON onboarding_invite_grants TO {OUTSIDER_LOGIN};"
+                ))
+                .await
+                .expect("provision the registry and control logins");
+        }
+
+        // Prove the logins are what they claim before trusting any answer.
+        for login in [REGISTRY_LOGIN, OUTSIDER_LOGIN] {
+            let (client, connection) = tokio_postgres::connect(
+                &with_login(config.url.expose_secret(), login),
+                tokio_postgres::NoTls,
+            )
+            .await
+            .expect("connect as test login");
+            tokio::spawn(connection);
+            let row = client
+                .query_one(
+                    "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+                    &[],
+                )
+                .await
+                .unwrap();
+            let (superuser, bypass): (bool, bool) = (row.get(0), row.get(1));
+            assert!(!superuser && !bypass, "{login} must be subject to RLS");
+        }
+
+        let registry = backend_with_registry_login(&config, REGISTRY_LOGIN).await;
+        let policy_label = unique_label(SECRET_POLICY_SUFFIX);
+        let live = unique_code();
+        let revoked = unique_code();
+        // Seed through the registry login too: its V42 policy is what
+        // authorizes the admin write as well as the lookup read.
+        for code in [&live, &revoked] {
+            assert_eq!(
+                registry
+                    .insert_invite_grant(write_for(code, &policy_label))
+                    .await
+                    .expect("the registry login can create invites"),
+                InviteGrantInsertOutcome::Inserted
+            );
+        }
+        assert!(
+            registry
+                .revoke_invite_grant(&hash_invite_code(&revoked))
+                .await
+                .unwrap()
+        );
+        let before = stored_uses(&admin, &hash_invite_code(&live)).await;
+
+        let router = router_for(registry.clone()).await;
+        let (status, body, text) = lookup(&router, &live).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "valid": true,
+                "issuer_display_name": "Trace Commons Pilot",
+                "credit_range": {"min": 2, "max": 6, "unit": "points_per_accepted_trace"},
+            })
+        );
+        for (code, label) in [(revoked.clone(), "revoked"), (unique_code(), "not_found")] {
+            let (status, body, text) = lookup(&router, &code).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(
+                body,
+                serde_json::json!({"valid": false, "reason_label": label})
+            );
+        }
+        assert_eq!(stored_uses(&admin, &hash_invite_code(&live)).await, before);
+
+        // Control: same table grant, no registry role, so RLS hides the row
+        // and the live invite reads as not_found.
+        let outsider = backend_with_registry_login(&config, OUTSIDER_LOGIN).await;
+        let (status, body, text) = lookup(&router_for(outsider).await, &live).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            body,
+            serde_json::json!({"valid": false, "reason_label": "not_found"}),
+            "a login outside trace_invite_registry must not see the invite"
+        );
+
+        cleanup_test_invites(&admin, &policy_label).await;
+    }
 }

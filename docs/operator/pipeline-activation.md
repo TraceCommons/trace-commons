@@ -71,7 +71,7 @@ described, and a document `main` holds carries no pipeline block.
 
 Activation replaces this list with qualified routing.
 
-The pipeline's own tables (V92 to V95, V103 and V104) grant the ingest runtime group,
+The pipeline's own tables (V92 to V95, V105 and V106) grant the ingest runtime group,
 `trace_ingest_runtime`, exactly what the pipeline reads and writes there. The
 pipeline also reads and writes tables from V62 and earlier -- submissions,
 object refs, derived records, tombstones, withdrawals, credit holds, the
@@ -84,7 +84,7 @@ pipeline fails closed with `permission denied`. To withdraw a submission
 that belongs to a source session, both withdrawal routes also need the
 ingest login to be a member of `trace_account_admission_runtime`, as
 `main`'s withdrawal already does ([deployment.md](deployment.md), "V92 to
-V95: the pipeline tables" and "V103 and V104: review, invalidation, and export
+V95: the pipeline tables" and "V105 and V106: review, invalidation, and export
 tables").
 
 ## Fail-closed dependency qualification

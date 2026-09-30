@@ -39,6 +39,27 @@ export function PrivateAiCredentialAction({
       </Button>
     );
   }
+  if (action === "migrate") {
+    // Both strings come from the core copy module through the status view;
+    // without them nothing is drawn, because the sentence warns about the
+    // macOS password prompt the button can cause.
+    const label = privateAi.credential?.view?.action_label;
+    const explains = privateAi.credential?.view?.action_explains;
+    if (!label || !explains) return null;
+    return (
+      <div className="flex flex-col gap-2">
+        <p className="text-[11px] text-muted-foreground">{explains}</p>
+        <Button
+          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          type="button"
+          onClick={() => void privateAi.migrate()}
+          disabled={privateAi.busy}
+        >
+          {label}
+        </Button>
+      </div>
+    );
+  }
   if (action !== "obtain") return null;
   return (
     <Button

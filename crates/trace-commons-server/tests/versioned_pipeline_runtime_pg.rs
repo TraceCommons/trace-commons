@@ -21338,7 +21338,7 @@ async fn gate_driver_backend() -> PgBackend {
 /// run, so `main` never scores a pipeline trace a second time. A legacy
 /// submission with a submitted envelope is still listed and counted. The
 /// enumeration runs as `trace_gate_driver`, which reads `pipeline_runs`
-/// across tenants only through the grant and policy V103 gives it.
+/// across tenants only through the grant and policy V105 gives it.
 #[tokio::test]
 async fn mains_gate_enumeration_leaves_out_pipeline_submissions() {
     use trace_commons_server::db::Database as _;

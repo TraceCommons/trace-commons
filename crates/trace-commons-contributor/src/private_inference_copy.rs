@@ -569,6 +569,8 @@ pub struct PrivateInferenceCopy {
     pub credential_cancel: &'static str,
     pub credential_forget: &'static str,
     pub credential_forget_explains: &'static str,
+    pub credential_migrate: &'static str,
+    pub credential_migrate_explains: &'static str,
     pub credential_absent: &'static str,
     pub credential_obtaining: &'static str,
     pub credential_failed: &'static str,
@@ -1152,6 +1154,47 @@ pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference k
      computer. It does not revoke them at Private AI. Remove the key in your \
      Private AI account to stop it working elsewhere.";
 
+/// The button behind `migration_available`: copy the sign-in an earlier
+/// build kept in the login keychain into the store this build uses.
+pub const CREDENTIAL_MIGRATE: &str = "Move my sign-in";
+
+/// What moving does, beside the button, and the one prompt it can cause.
+///
+/// **Names the password prompt before it happens.** The move is the one
+/// moment the app reads the login keychain, and macOS may ask for the login
+/// password to allow it. A dialog nobody warned about is the interruption
+/// this whole change exists to remove; one the contributor was told about
+/// and asked for is not.
+///
+/// Says the old copy stays, because it does: the move copies, and the
+/// login-keychain entry is only removed when a later sign-in or Forget
+/// supersedes it.
+pub const CREDENTIAL_MIGRATE_EXPLAINS: &str = "Moving copies your saved key and Private AI sign-in from the login \
+     keychain into the store this version of the app uses, so later updates \
+     stop asking for your password. macOS may ask for your login password \
+     once to allow it. The old copy stays in the login keychain until you \
+     next sign in or forget this key.";
+
+/// `migration_available`.
+///
+/// **Not "could not be read, unlock and restart".** That was the sentence an
+/// upgraded contributor saw before this state existed, and it was false:
+/// the store opened fine, the sign-in simply lives in the login keychain an
+/// earlier build used, and no number of restarts moves it.
+pub const CREDENTIAL_MIGRATION_AVAILABLE: &str = "Your Private AI sign-in from an earlier version of the app is still in \
+     your login keychain. Move it to keep using it without signing in again.";
+
+/// `storage_unentitled`.
+///
+/// **Permanent for this build, and says so.** The binary is not signed with
+/// the keychain access group, so no unlock, retry or restart reaches the
+/// store; telling a contributor to try again would be a lie they could act
+/// on. A locally built app lands here, and so does any build signed without
+/// the entitlement.
+pub const CREDENTIAL_STORAGE_UNENTITLED: &str = "This copy of the app is not signed to use the system credential store \
+     where your Private AI sign-in is kept, so it cannot read or save one. \
+     Restarting will not change that. Use a released build of the app.";
+
 /// `absent`.
 pub const CREDENTIAL_ABSENT: &str = "NEAR AI isn’t connected to this app.";
 
@@ -1231,6 +1274,11 @@ pub enum CredentialAction {
     /// Remove the stored key from this machine, with
     /// [`CREDENTIAL_FORGET_EXPLAINS`] beside it.
     Forget,
+    /// Copy the sign-in an earlier build kept in the login keychain into the
+    /// store this build uses (`near_ai_credential_migrate`), with
+    /// [`CREDENTIAL_MIGRATE_EXPLAINS`] beside it. macOS only in practice:
+    /// no other platform produces `migration_available`.
+    Migrate,
 }
 
 /// The sentence for one `near_ai_credential_status` state label.
@@ -1247,6 +1295,8 @@ pub fn credential_state_line(label: &str) -> &'static str {
         LABEL_CREDENTIAL_CLEANUP_REQUIRED => {
             "Private AI sign-in is disabled here, but its saved credentials could not be deleted. Unlock your system credential store, then choose Forget again."
         }
+        LABEL_CREDENTIAL_STORAGE_UNENTITLED => CREDENTIAL_STORAGE_UNENTITLED,
+        LABEL_CREDENTIAL_MIGRATION_AVAILABLE => CREDENTIAL_MIGRATION_AVAILABLE,
         "" => CREDENTIAL_UNREPORTED,
         LABEL_CREDENTIAL_ABSENT => CREDENTIAL_ABSENT,
         LABEL_CREDENTIAL_OBTAINING => CREDENTIAL_OBTAINING,
@@ -1297,6 +1347,10 @@ pub fn credential_action(label: &str) -> CredentialAction {
         LABEL_CREDENTIAL_PRESENT
         | LABEL_CREDENTIAL_STORAGE_UNAVAILABLE
         | LABEL_CREDENTIAL_CLEANUP_REQUIRED => CredentialAction::Forget,
+        LABEL_CREDENTIAL_MIGRATION_AVAILABLE => CredentialAction::Migrate,
+        // `storage_unentitled` offers nothing, deliberately. This build can
+        // neither read the key nor delete it, and Forget from here would drop
+        // the signed app's pointer to a sign-in this build cannot even see.
         _ => CredentialAction::None,
     }
 }
@@ -2003,6 +2057,8 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         credential_cancel: CREDENTIAL_CANCEL,
         credential_forget: CREDENTIAL_FORGET,
         credential_forget_explains: CREDENTIAL_FORGET_EXPLAINS,
+        credential_migrate: CREDENTIAL_MIGRATE,
+        credential_migrate_explains: CREDENTIAL_MIGRATE_EXPLAINS,
         credential_absent: CREDENTIAL_ABSENT,
         credential_obtaining: CREDENTIAL_OBTAINING,
         credential_failed: CREDENTIAL_FAILED,
@@ -2656,8 +2712,9 @@ pub use crate::daemon::nearai_credential::balance::{
 /// the same reason.
 pub use crate::daemon::nearai_credential::{
     LABEL_CREDENTIAL_ABSENT, LABEL_CREDENTIAL_CANCELLED, LABEL_CREDENTIAL_CLEANUP_REQUIRED,
-    LABEL_CREDENTIAL_FAILED, LABEL_CREDENTIAL_OBTAINING, LABEL_CREDENTIAL_PRESENT,
-    LABEL_CREDENTIAL_STORAGE_UNAVAILABLE,
+    LABEL_CREDENTIAL_FAILED, LABEL_CREDENTIAL_MIGRATION_AVAILABLE, LABEL_CREDENTIAL_OBTAINING,
+    LABEL_CREDENTIAL_PRESENT, LABEL_CREDENTIAL_STORAGE_UNAVAILABLE,
+    LABEL_CREDENTIAL_STORAGE_UNENTITLED,
 };
 pub use crate::daemon::private_inference::{
     LABEL_CRASHED, LABEL_OFF, LABEL_PORT_IN_USE, LABEL_RUNNING, LABEL_RUNNING_ANSWERED_ELSEWHERE,
@@ -4259,7 +4316,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            139,
+            141,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

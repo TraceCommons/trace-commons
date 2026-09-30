@@ -524,6 +524,14 @@ final class DaemonClient {
         _ = try rawResultJSON(CredentialSurface.forgetMethod)
     }
 
+    /// Copies the sign-in an earlier build kept in the login keychain into
+    /// the store this build uses. The daemon's one read of the login
+    /// keychain, so macOS may ask for the login password here -- which is why
+    /// only a contributor's press of the button ever sends it.
+    func nearAiCredentialMigrate() throws {
+        _ = try rawResultJSON(CredentialSurface.migrateMethod)
+    }
+
     /// Shape-checks a settings object, refusing rather than returning one
     /// that cannot honestly be sent.
     ///

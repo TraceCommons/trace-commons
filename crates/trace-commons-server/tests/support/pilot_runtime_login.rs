@@ -258,7 +258,7 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
 /// (V77), on top of whatever `provision_member_only_login` already gave it.
 ///
 /// `main`'s own legacy session withdrawal reads `trace_account_admission_submissions`
-/// under that role, not under `trace_ingest_runtime` (V103 does not grant the
+/// under that role, not under `trace_ingest_runtime` (V105 does not grant the
 /// table: owner ruling RB-11), and the pipeline withdrawal reaches the same
 /// table through `main`'s helper. A test harness whose runtime login
 /// exercises the pipeline withdrawal with a mapped source session needs this

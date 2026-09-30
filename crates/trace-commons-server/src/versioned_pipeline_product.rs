@@ -39,7 +39,7 @@ use crate::versioned_pipeline::{
 use crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_IMPLEMENTATION;
 
 pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
-/// The most items one export snapshot holds. V104 bounds a snapshot's
+/// The most items one export snapshot holds. V106 bounds a snapshot's
 /// `item_count` and its items' `ordinal` to the same number.
 pub const PIPELINE_EXPORT_ITEM_MAX: usize = 500;
 pub const PIPELINE_EXPORT_SELECTION_POLICY_ID: &str = "trace_commons.pipeline_export_selection.v1";

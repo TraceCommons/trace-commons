@@ -101,7 +101,7 @@ const PIPELINE_TABLES: [&str; 13] = [
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95, V103 and V104 have run, as
+/// the pipeline tables once V92 to V95, V105 and V106 have run, as
 /// `(table, privilege, columns)`; no columns means the whole table. It holds
 /// what the pipeline code reads and writes and nothing broader. The only
 /// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
@@ -138,7 +138,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             // V95
             "approved_object_ref_id",
             "approved_content_hash",
-            // V103
+            // V105
             "index_invalidation_state",
         ],
     ),
@@ -180,7 +180,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ),
     ("pipeline_admission_usage", "SELECT", &[]),
     ("pipeline_admission_usage", "INSERT", &[]),
-    // V103
+    // V105
     ("pipeline_index_invalidations", "SELECT", &[]),
     ("pipeline_index_invalidations", "INSERT", &[]),
     (
@@ -209,7 +209,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ),
     ("pipeline_review_assessments", "SELECT", &[]),
     ("pipeline_review_assessments", "INSERT", &[]),
-    // V104
+    // V106
     ("pipeline_export_snapshots", "SELECT", &[]),
     ("pipeline_export_snapshots", "INSERT", &[]),
     (
@@ -232,7 +232,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
 ];
 
 /// What `main`'s gate driver role, `trace_gate_driver`, holds on the pipeline
-/// tables (V103): the two `pipeline_runs` columns its enumeration joins on to
+/// tables (V105): the two `pipeline_runs` columns its enumeration joins on to
 /// leave pipeline submissions out (Zaki review 1, round 2, finding 1).
 const GATE_DRIVER_PIPELINE_GRANTS: &[(&str, &str, &[&str])] =
     &[("pipeline_runs", "SELECT", &["tenant_id", "submission_id"])];
@@ -302,7 +302,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 103, 104] {
+    for pipeline_version in [92, 93, 94, 95, 105, 106] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",

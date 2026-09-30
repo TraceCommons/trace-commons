@@ -179,6 +179,7 @@ pub(super) fn action_label(action: CredentialAction) -> Option<&'static str> {
         CredentialAction::Obtain => Some(copy::CREDENTIAL_OBTAIN),
         CredentialAction::Cancel => Some(copy::CREDENTIAL_CANCEL),
         CredentialAction::Forget => Some(copy::CREDENTIAL_FORGET),
+        CredentialAction::Migrate => Some(copy::CREDENTIAL_MIGRATE),
     }
 }
 
@@ -205,6 +206,9 @@ pub(super) fn action_explains(action: CredentialAction) -> &'static str {
         // removes it in their own account, and a shell that implied otherwise
         // would leave a live key nobody is watching.
         CredentialAction::Forget => copy::CREDENTIAL_FORGET_EXPLAINS,
+        // The one read of the login keychain, and the prompt it may cause,
+        // named before the contributor presses it. macOS-only in practice.
+        CredentialAction::Migrate => copy::CREDENTIAL_MIGRATE_EXPLAINS,
     }
 }
 
@@ -367,6 +371,10 @@ pub(super) fn act_with_provider(app: &Rc<App>, action: CredentialAction, provide
             crate::ui::funding::credential_pending(app);
             forget(app);
         }
+        CredentialAction::Migrate => {
+            crate::ui::funding::credential_pending(app);
+            migrate(app);
+        }
     }
     view.action.set_sensitive(!view.pending.get());
 }
@@ -475,6 +483,22 @@ fn cancel(app: &Rc<App>) {
 fn forget(app: &Rc<App>) {
     app.call(
         "near_ai_credential_forget",
+        serde_json::json!({}),
+        |app, _result| {
+            app.private_inference.credential.pending.set(false);
+            refresh(app);
+            private_inference::render_harnesses(app);
+        },
+    );
+}
+
+/// Move a sign-in an earlier build kept in the legacy keychain. Only macOS
+/// produces the state that offers this; it is wired here so the action table
+/// stays exhaustive rather than falling through to a control that does
+/// nothing.
+fn migrate(app: &Rc<App>) {
+    app.call(
+        "near_ai_credential_migrate",
         serde_json::json!({}),
         |app, _result| {
             app.private_inference.credential.pending.set(false);

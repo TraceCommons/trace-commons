@@ -160,7 +160,7 @@ CREATE POLICY trace_corpus_tenant_isolation ON pipeline_index_invalidations
 -- column the code does not use gets no grant.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
-        RAISE EXCEPTION 'V103: trace_ingest_runtime is missing; V90 creates it';
+        RAISE EXCEPTION 'V105: trace_ingest_runtime is missing; V90 creates it';
     END IF;
 END $$;
 
@@ -207,7 +207,7 @@ GRANT SELECT, INSERT ON pipeline_review_assessments TO trace_ingest_runtime;
 -- cross-tenant SELECT policy for its role only.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_gate_driver') THEN
-        RAISE EXCEPTION 'V103: trace_gate_driver is missing; V36 creates it';
+        RAISE EXCEPTION 'V105: trace_gate_driver is missing; V36 creates it';
     END IF;
 END $$;
 GRANT SELECT (tenant_id, submission_id) ON pipeline_runs TO trace_gate_driver;
