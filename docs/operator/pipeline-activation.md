@@ -434,6 +434,12 @@ to NEAR.
   submits until the next pass, and a direct `process_payout` is refused
   with `payout_lock_held`. `main`'s NEAR worker never submits or confirms a
   pipeline outbox row.
+- `main`'s admin outbox routes do not reach a pipeline outbox row (one with
+  an `instrument_id`): `GET /v1/admin/near-credit-outbox` leaves it out, and
+  `POST /v1/workers/near-credit-outbox/mark-status` answers `404` (`NEAR
+  credit outbox item not found`) and leaves it unchanged. The pipeline
+  confirms its rows only with its adapter's evidence. The operational
+  summary's NEAR outbox counts still include them.
 - Confirmation of a submitted payout is polled without the lock, at most
   once per `main`'s NEAR scheduler interval,
   `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS` (60 seconds

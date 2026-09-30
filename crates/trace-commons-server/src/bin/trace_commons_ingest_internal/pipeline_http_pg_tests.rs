@@ -2406,6 +2406,164 @@ async fn a_withdrawal_after_settle_keeps_and_pays_the_settled_trace_credit() {
     assert_eq!(settlements[0].last_error_label, None);
 }
 
+/// Zaki review 1, item 3: `main`'s admin NEAR outbox routes do not reach a
+/// pipeline payout line (a non-NULL `instrument_id`). The pipeline submits
+/// and confirms those through its own adapter, so the manual status route
+/// answers a pipeline line as it answers a line it does not have (`404`),
+/// and leaves it unchanged, and the admin listing leaves it out. A legacy
+/// line (`instrument_id` NULL) is listed and moved as before. `main`'s
+/// reads run on the database here, the only store that holds pipeline
+/// lines.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_admin_outbox_routes_leave_pipeline_payout_lines_alone() {
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let admin_token = format!("{}-admin", fixture.token);
+    let utility_token = format!("{}-utility", fixture.token);
+    let mut state = fixture.state.clone();
+    let mut tokens = (*state.tokens).clone();
+    insert_token(&mut tokens, tenant, &admin_token, TokenRole::Admin);
+    insert_token(
+        &mut tokens,
+        tenant,
+        &utility_token,
+        TokenRole::UtilityWorker,
+    );
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    assert_eq!(
+        fixture.service.process_payouts(tenant, 32).await.unwrap(),
+        1
+    );
+    let pipeline_line = fixture
+        .owner
+        .list_trace_near_credit_outbox_items(tenant)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|line| line.instrument_id.is_some())
+        .expect("the pipeline wrote its payout line");
+    assert!(
+        fixture
+            .service
+            .store()
+            .list_settlements(tenant, run.run_id)
+            .await
+            .unwrap()[0]
+            .settlement_batch_id
+            .is_some(),
+        "the leg has a batch"
+    );
+
+    // A legacy line of `main`'s own, on a legacy batch (no instrument).
+    let legacy_id = Uuid::new_v4();
+    let mut legacy = submitted_near_credit_outbox_item(legacy_id, TEST_NEAR_TX_HASH_1, 1_000_000);
+    legacy.tenant_id = tenant.to_string();
+    legacy.tenant_storage_ref = tenant_storage_ref(tenant);
+    let legacy_list_hash = sha256_prefixed(&format!("legacy-sources:{legacy_id}"));
+    fixture
+        .owner
+        .upsert_trace_credit_settlement_batch(StorageTraceCreditSettlementBatchWrite {
+            tenant_id: tenant.to_string(),
+            settlement_batch_id: legacy.settlement_batch_id,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            status: StorageTraceCreditSettlementBatchStatus::Finalized,
+            reason_hash: legacy_list_hash.clone(),
+            issuer_approval_evidence_hash: None,
+            source_credit_event_ids: Vec::new(),
+            source_submission_ids: Vec::new(),
+            source_list_hash: legacy_list_hash,
+            settled_credit_points: "1".to_string(),
+            settled_credit_micros: 1_000_000,
+            line_items: Vec::new(),
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+            ranking_calibration_run_id: None,
+            ranking_calibration_report_hash: None,
+            ranking_calibration_joined_evidence_hash: None,
+            ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+            actor_principal_ref: principal.clone(),
+        })
+        .await
+        .expect("write the legacy batch");
+    append_near_credit_outbox_item_with_db_mirror(
+        state.as_ref(),
+        &revocation_worker_tenant_auth(tenant),
+        &legacy,
+    )
+    .await
+    .expect("write the legacy line");
+    mirror_near_credit_outbox_item_to_db(state.as_ref(), &legacy)
+        .await
+        .expect("the legacy line is in the database");
+
+    let Json(listed) = near_credit_outbox_handler(State(state.clone()), auth_headers(&admin_token))
+        .await
+        .expect("the admin lists the outbox");
+    let listed_ids = listed
+        .iter()
+        .map(|line| line.near_outbox_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed_ids,
+        vec![legacy_id],
+        "only the legacy line is listed"
+    );
+
+    let refused = mark_near_credit_outbox_status_handler(
+        State(state.clone()),
+        auth_headers(&utility_token),
+        Json(TraceNearCreditOutboxStatusRequest {
+            near_outbox_id: pipeline_line.near_outbox_id,
+            status: StorageTraceCreditSettlementNearStatus::Failed,
+            near_transaction_hash: None,
+            error_detail: Some("manual".to_string()),
+        }),
+    )
+    .await
+    .expect_err("a pipeline line cannot be moved by hand");
+    assert_eq!(refused.0, StatusCode::NOT_FOUND);
+    assert_eq!(refused.1.0.error, "NEAR credit outbox item not found");
+    let unchanged = fixture
+        .owner
+        .list_trace_near_credit_outbox_items(tenant)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|line| line.near_outbox_id == pipeline_line.near_outbox_id)
+        .unwrap();
+    assert_eq!(
+        unchanged.status, pipeline_line.status,
+        "the line is unchanged"
+    );
+
+    let Json(moved) = mark_near_credit_outbox_status_handler(
+        State(state.clone()),
+        auth_headers(&utility_token),
+        Json(TraceNearCreditOutboxStatusRequest {
+            near_outbox_id: legacy_id,
+            status: StorageTraceCreditSettlementNearStatus::Failed,
+            near_transaction_hash: None,
+            error_detail: Some("manual".to_string()),
+        }),
+    )
+    .await
+    .expect("a legacy line moves as before");
+    assert_eq!(moved.status, StorageTraceCreditSettlementNearStatus::Failed);
+}
+
 /// Review Focus 1 through the worker: the worker's tenant drain
 /// (`drain_pipeline_tenant`, one tenant's share of a worker pass) processes
 /// the index invalidation a withdrawal queued, with no direct call into the

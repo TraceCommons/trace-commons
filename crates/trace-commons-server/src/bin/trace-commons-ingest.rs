@@ -29330,7 +29330,7 @@ async fn near_credit_outbox_handler(
 ) -> ApiResult<Json<Vec<TraceNearCreditOutboxItem>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let items = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
+    let items = read_mains_near_credit_outbox_items(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
     append_control_plane_read_audit(state.as_ref(), &tenant, "near_credit_outbox", items.len())
@@ -29564,7 +29564,7 @@ async fn mark_near_credit_outbox_status_handler(
     };
     require_near_credit_outbox_status_principal_if_configured(state.as_ref(), &tenant)?;
     require_near_credit_manual_status_adapter_auth(state.as_ref(), status)?;
-    let existing = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
+    let existing = read_mains_near_credit_outbox_items(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?
         .into_iter()
@@ -30410,7 +30410,7 @@ async fn run_near_credit_outbox_submit_worker(
     // Preview snapshot, used ONLY for the dry_run report. The live submit path
     // re-reads candidates UNDER the advisory lock below so a run that waited on the
     // lock observes the prior run's committed writes (never a stale pre-lock read).
-    let preview_items = read_near_credit_outbox_items_for_worker(state, tenant).await?;
+    let preview_items = read_mains_near_credit_outbox_items(state, tenant).await?;
     let preview_pending_total = preview_items
         .iter()
         .filter(|item| near_credit_outbox_item_is_submit_candidate(item))
@@ -30614,7 +30614,7 @@ async fn run_near_credit_outbox_confirm_worker(
     let limit = request
         .limit
         .clamp(1, TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT) as usize;
-    let items = read_near_credit_outbox_items_for_worker(state, tenant).await?;
+    let items = read_mains_near_credit_outbox_items(state, tenant).await?;
     let pending_total = items
         .iter()
         .filter(|item| near_credit_outbox_item_is_confirm_candidate(item))
@@ -32186,10 +32186,11 @@ async fn read_near_credit_outbox_items_for_admin(
     read_near_credit_outbox_items(state, tenant, true).await
 }
 
-/// `read_near_credit_outbox_items_for_admin` for the NEAR outbox workers: the
-/// same read, without the versioned pipeline's payout rows
-/// (`near_credit_outbox_record_is_pipeline_payout`).
-async fn read_near_credit_outbox_items_for_worker(
+/// `read_near_credit_outbox_items_for_admin` without the versioned
+/// pipeline's payout rows (`near_credit_outbox_record_is_pipeline_payout`):
+/// the NEAR outbox workers' read, and the read of `main`'s admin outbox
+/// listing and manual status route (Zaki review 1, item 3).
+async fn read_mains_near_credit_outbox_items(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
@@ -32224,8 +32225,12 @@ async fn read_near_credit_outbox_items(
 /// A versioned-pipeline payout row (a non-NULL `instrument_id`, V94). The
 /// pipeline submits and confirms those through its own NEAR payout adapter,
 /// so `main`'s NEAR outbox workers never select one (Ruling T10-3): one
-/// payout is never submitted twice, through two adapters. Admin listings
-/// still show it. The file store never holds one.
+/// payout is never submitted twice, through two adapters. `main`'s admin
+/// outbox listing leaves it out, and its manual status route answers it
+/// `404`, as a row it does not have: an operator could otherwise mark a
+/// pipeline line confirmed with no adapter evidence, or submit one the
+/// pipeline also submits (Zaki review 1, item 3). The pipeline's
+/// operational summary still counts it. The file store never holds one.
 fn near_credit_outbox_record_is_pipeline_payout(
     record: &StorageTraceNearCreditOutboxItemRecord,
 ) -> bool {
