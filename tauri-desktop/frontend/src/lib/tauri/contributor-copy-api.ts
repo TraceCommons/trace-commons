@@ -27,14 +27,20 @@ import {
   type CertificateDetail,
   parseCertificateDetail,
   parseRouteDisclosure,
+  parseRouteDisclosureUnreadable,
   type RouteDisclosure,
+  type RouteDisclosureUnreadable,
 } from "./route-disclosure";
 import {
   parseWitnessCapacityNotice,
   type WitnessCapacityNotice,
 } from "./witness-capacity";
 
-export type { CertificateDetail, RouteDisclosure } from "./route-disclosure";
+export type {
+  CertificateDetail,
+  RouteDisclosure,
+  RouteDisclosureUnreadable,
+} from "./route-disclosure";
 
 export type { QuitConfirmationCopy } from "./quit-confirmation-copy";
 
@@ -668,6 +674,16 @@ export async function getGateHeldNotice(
  */
 export async function getRouteDisclosure(): Promise<RouteDisclosure> {
   return parseRouteDisclosure(await invokeTauri("route_disclosure"));
+}
+
+/**
+ * The disclosure section's title and what it says when the disclosure
+ * cannot be read, from the core, so the shell writes neither.
+ */
+export async function getRouteDisclosureUnreadableCopy(): Promise<RouteDisclosureUnreadable> {
+  return parseRouteDisclosureUnreadable(
+    await invokeTauri("route_disclosure_unreadable_copy"),
+  );
 }
 
 /** The certificate a pending entry holds, as checked at review. */

@@ -3,16 +3,24 @@
 
 use super::*;
 
+#[path = "tests/account_binding_gate_tests.rs"]
+mod account_binding_gate_tests;
 #[path = "tests/legacy_invite_link_tests.rs"]
 mod legacy_invite_link_tests;
 #[path = "tests/mission_catalog_tests.rs"]
 mod mission_catalog_tests;
+#[path = "tests/native_passkey_tests.rs"]
+mod native_passkey_tests;
+#[path = "tests/near_ai_bind_tests.rs"]
+mod near_ai_bind_tests;
 #[path = "tests/public_run_lifecycle_tests.rs"]
 mod public_run_lifecycle_tests;
 #[path = "tests/public_run_tests.rs"]
 mod public_run_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
+#[path = "tests/step_up_page_tests.rs"]
+mod step_up_page_tests;
 
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
@@ -1737,9 +1745,12 @@ async fn confirm_login_issues_single_use_session_cookie() {
         .to_str()
         .expect("ascii cookie");
     assert!(
-        set_cookie.starts_with("tc_account_session="),
-        "cookie name must be tc_account_session: {set_cookie}"
+        set_cookie.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")),
+        "cookie name must be {ACCOUNT_SESSION_COOKIE}: {set_cookie}"
     );
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
+    assert_clears_login_ceremony_cookie(response.headers());
     assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
     assert!(set_cookie.contains("Secure"), "cookie must be Secure");
     assert!(
@@ -1835,7 +1846,7 @@ async fn confirm_login_issues_single_use_session_cookie() {
 // both-credentials test short-circuits before any DB access and runs without a
 // database.
 
-/// Mint + redeem via the public handlers and return the raw `tc_account_session`
+/// Mint + redeem via the public handlers and return the raw `ACCOUNT_SESSION_COOKIE`
 /// cookie value the browser would replay (the `{b64url(tenant)}.{secret}` form).
 async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) -> String {
     use axum::response::IntoResponse;
@@ -1871,7 +1882,7 @@ async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) ->
     // `name=value; Attr; Attr` -> take the value of the first pair.
     let first = set_cookie.split(';').next().expect("cookie pair");
     let (name, value) = first.split_once('=').expect("cookie name=value");
-    assert_eq!(name, "tc_account_session");
+    assert_eq!(name, ACCOUNT_SESSION_COOKIE);
     value.to_string()
 }
 
@@ -1895,7 +1906,7 @@ async fn account_ctx_ext(state: &Arc<AppState>, headers: &HeaderMap) -> Extensio
 /// which is what those tests previously relied on `mint_login_link_handler` for.
 async fn account_session_headers(state: &Arc<AppState>, token: &str) -> HeaderMap {
     let cookie = mint_redeem_session_cookie_value(state, token).await;
-    cookie_request_headers("tc_account_session", &cookie)
+    cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie)
 }
 
 fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
@@ -1905,6 +1916,99 @@ fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
         HeaderValue::from_str(&format!("{name}={value}")).expect("valid cookie header"),
     );
     headers
+}
+
+/// Every cookie ingest sets is bound to the exact host: the name carries the
+/// `__Host-` prefix, and the attributes are the ones a browser demands before
+/// it will accept that prefix (`Secure`, `Path=/`, no `Domain`), plus
+/// `HttpOnly` and `SameSite=Strict`. The one permitted exception is the
+/// `Max-Age=0` write that expires the pre-prefix session cookie, which
+/// [`assert_clears_legacy_session_cookie`] checks on its own. Panics on the
+/// first `Set-Cookie` that breaks the rule, and when there is none at all.
+fn assert_set_cookies_are_host_bound(headers: &HeaderMap) {
+    let values: Vec<&str> = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().expect("ascii Set-Cookie"))
+        .collect();
+    assert!(!values.is_empty(), "expected at least one Set-Cookie");
+    for raw in values {
+        let parsed = cookie::Cookie::parse(raw.to_string()).expect("Set-Cookie parses");
+        if parsed.name() == LEGACY_ACCOUNT_SESSION_COOKIE {
+            continue;
+        }
+        assert!(
+            parsed.name().starts_with("__Host-"),
+            "cookie name must carry the __Host- prefix: {raw}"
+        );
+        assert_eq!(parsed.secure(), Some(true), "must be Secure: {raw}");
+        assert_eq!(parsed.path(), Some("/"), "must be Path=/: {raw}");
+        assert_eq!(parsed.domain(), None, "must not carry a Domain: {raw}");
+        assert!(
+            !raw.to_ascii_lowercase().contains("domain="),
+            "must not carry a Domain: {raw}"
+        );
+        assert_eq!(parsed.http_only(), Some(true), "must be HttpOnly: {raw}");
+        assert_eq!(
+            parsed.same_site(),
+            Some(cookie::SameSite::Strict),
+            "must be SameSite=Strict: {raw}"
+        );
+    }
+}
+
+/// The response expires the pre-`__Host-` session cookie exactly once, with the
+/// attributes it was set with, so a browser still holding it drops it.
+fn assert_clears_legacy_session_cookie(headers: &HeaderMap) {
+    let clears: Vec<cookie::Cookie<'static>> = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| cookie::Cookie::parse(v.to_string()).ok())
+        .filter(|c| c.name() == LEGACY_ACCOUNT_SESSION_COOKIE)
+        .collect();
+    assert_eq!(
+        clears.len(),
+        1,
+        "exactly one Set-Cookie must expire the legacy session cookie"
+    );
+    let clear = &clears[0];
+    assert_eq!(clear.value(), "", "the legacy clear carries no value");
+    assert_eq!(
+        clear.max_age(),
+        Some(cookie::time::Duration::ZERO),
+        "the legacy clear must be Max-Age=0"
+    );
+    assert_eq!(clear.path(), Some("/"));
+    assert_eq!(clear.domain(), None);
+    assert_eq!(clear.secure(), Some(true));
+    assert_eq!(clear.http_only(), Some(true));
+    assert_eq!(clear.same_site(), Some(cookie::SameSite::Strict));
+}
+
+/// A successful confirm spends the sign-in link ceremony, so the response
+/// expires its cookie exactly once rather than leaving a spent nonce on every
+/// path until its ten-minute lifetime runs out.
+fn assert_clears_login_ceremony_cookie(headers: &HeaderMap) {
+    let clears: Vec<cookie::Cookie<'static>> = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| cookie::Cookie::parse(v.to_string()).ok())
+        .filter(|c| c.name() == LOGIN_CEREMONY_COOKIE)
+        .collect();
+    assert_eq!(
+        clears.len(),
+        1,
+        "exactly one Set-Cookie must expire the login ceremony cookie"
+    );
+    let clear = &clears[0];
+    assert_eq!(clear.value(), "", "the ceremony clear carries no value");
+    assert_eq!(
+        clear.max_age(),
+        Some(cookie::time::Duration::ZERO),
+        "the ceremony clear must be Max-Age=0"
+    );
 }
 
 /// `export_job_request_metadata` records the request filters only. The
@@ -2063,7 +2167,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
     let cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
     let mut ctx = resolve_account_ctx(
         state.as_ref(),
-        &cookie_request_headers("tc_account_session", &cookie),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie),
     )
     .await
     .unwrap();
@@ -2101,7 +2205,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
                 .uri("/v1/account/invites/redeem")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "cross-site")
                 .header(CONTENT_TYPE, "application/json")
@@ -2124,7 +2228,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
                 .uri("/v1/account/invites/redeem")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2149,7 +2253,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
                 .uri("/v1/account/invites/redeem")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2174,7 +2278,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
     ] {
         let rejected = app(state.clone()).oneshot(
             axum::http::Request::builder().method("POST").uri("/v1/account/invites/redeem")
-                .header(axum::http::header::COOKIE, format!("tc_account_session={cookie}"))
+                .header(axum::http::header::COOKIE, format!("{ACCOUNT_SESSION_COOKIE}={cookie}"))
                 .header("sec-fetch-site", "same-origin").header(CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::json!({"invite_code": malformed_code, "idempotency_key": Uuid::new_v4()}).to_string())).unwrap()
         ).await.unwrap();
@@ -2196,7 +2300,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
                 .uri("/v1/account/invites/redeem")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2408,7 +2512,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
     let cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
     let ctx = resolve_account_ctx(
         state.as_ref(),
-        &cookie_request_headers("tc_account_session", &cookie),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie),
     )
     .await
     .unwrap();
@@ -2425,7 +2529,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection/offers")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -2450,7 +2554,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -2483,7 +2587,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2534,7 +2638,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "cross-site")
                 .header(CONTENT_TYPE, "application/json")
@@ -2560,7 +2664,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2577,7 +2681,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2619,7 +2723,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2640,7 +2744,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2666,7 +2770,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2689,7 +2793,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -2714,7 +2818,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri(&path)
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
@@ -2731,7 +2835,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                     .uri(&path)
                     .header(
                         axum::http::header::COOKIE,
-                        format!("tc_account_session={cookie}"),
+                        format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                     )
                     .header("sec-fetch-site", "same-origin")
                     .body(Body::empty())
@@ -2755,7 +2859,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -2808,7 +2912,7 @@ async fn account_ctx_cookie_resolves_account_with_actor_prefix() {
     // The cookie carries `{b64url(tenant)}.{secret}`.
     assert!(cookie_value.contains('.'), "cookie must be tenant.secret");
 
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("cookie resolves to an account ctx");
@@ -2854,7 +2958,7 @@ async fn account_ctx_cookie_with_forged_tenant_fails_closed() {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("tenant-evil".as_bytes()),
         secret,
     );
-    let headers = cookie_request_headers("tc_account_session", &forged);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &forged);
     let result = resolve_account_ctx(state.as_ref(), &headers).await;
     let err = result.expect_err("forged tenant must fail closed");
     assert_eq!(err.0, StatusCode::UNAUTHORIZED, "forged tenant -> 401");
@@ -2918,7 +3022,7 @@ async fn account_ctx_session_past_idle_cap_is_denied() {
     assert!(validated.is_none(), "idle-capped session must not validate");
 
     // And the resolver surfaces it as 401.
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let err = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect_err("idle-capped cookie must be denied");
@@ -3007,7 +3111,7 @@ async fn validate_session_rejects_closed_account() {
     );
 
     // And the resolver surfaces it as 401.
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let err = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect_err("closed-account cookie must be denied");
@@ -3092,7 +3196,8 @@ async fn account_ctx_both_credentials_is_ambiguous_400() {
     let mut headers = auth_headers("token-a");
     headers.insert(
         axum::http::header::COOKIE,
-        HeaderValue::from_static("tc_account_session=dGVuYW50LWE.somesecret"),
+        HeaderValue::from_str(&format!("{ACCOUNT_SESSION_COOKIE}=dGVuYW50LWE.somesecret"))
+            .expect("cookie header"),
     );
     let err = resolve_account_ctx(state.as_ref(), &headers)
         .await
@@ -3207,21 +3312,20 @@ async fn rotation_test_read_session(
     )
 }
 
-/// Extract the `tc_account_session` cookie VALUE from a response's `Set-Cookie`
-/// header, if present.
+/// Extract the `ACCOUNT_SESSION_COOKIE` cookie VALUE from a response's `Set-Cookie`
+/// header, if present. Searches every `Set-Cookie`, not just the first: a
+/// response can also carry a ceremony cookie or the legacy-name clear, in any
+/// order.
 fn rotation_test_set_cookie_value(response: &axum::response::Response) -> Option<String> {
-    let raw = response
+    response
         .headers()
-        .get(axum::http::header::SET_COOKIE)?
-        .to_str()
-        .ok()?;
-    let first = raw.split(';').next()?;
-    let (name, value) = first.split_once('=')?;
-    if name.trim() == "tc_account_session" {
-        Some(value.to_string())
-    } else {
-        None
-    }
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|raw| raw.split(';').next())
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| name.trim() == ACCOUNT_SESSION_COOKIE)
+        .map(|(_, value)| value.to_string())
 }
 
 /// Drive `GET /v1/account/passkeys` through the FULL app (and thus the auth
@@ -3239,7 +3343,7 @@ async fn rotation_test_get_passkeys(
                 .uri("/v1/account/passkeys")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie_value}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
                 )
                 .body(Body::empty())
                 .expect("request builds"),
@@ -3291,6 +3395,8 @@ async fn session_rotation_fires_and_attaches_set_cookie() {
     // A NEW session cookie is attached.
     let new_cookie =
         rotation_test_set_cookie_value(&response).expect("rotation attaches a Set-Cookie");
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     assert_ne!(
         new_cookie, cookie_value,
         "rotated cookie carries a NEW value"
@@ -3512,7 +3618,7 @@ async fn account_middleware_accepts_cookie_and_rejects_device_bearer_or_ambiguou
                 .header(AUTHORIZATION, "Bearer token-a")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie_value}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
                 )
                 .body(Body::empty())
                 .expect("request builds"),
@@ -3612,7 +3718,7 @@ async fn rotation_test_post_logout(
                 .uri("/v1/account/logout")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie_value}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
                 )
                 .body(Body::empty())
                 .expect("request builds"),
@@ -3670,6 +3776,10 @@ async fn logout_while_rotation_revokes_the_rotated_session() {
     let rotated_cookie =
         rotation_test_set_cookie_value(&response).expect("logout request rotated -> new cookie");
     assert_ne!(rotated_cookie, old_cookie, "rotated to a new secret");
+    // Handler and middleware both expire the legacy cookie; the header is
+    // emitted once, and every other cookie is host-bound.
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     let new_hash = trace_commons_server::account_session::hash_secret(
         rotated_cookie.split_once('.').expect("tenant.secret").1,
     );
@@ -3703,7 +3813,7 @@ async fn logout_while_rotation_revokes_the_rotated_session() {
 /// Regression (Set-Cookie clobber): if rotation fires during register/start, the
 /// middleware must APPEND the rotated session cookie alongside the handler's
 /// ceremony cookie, not replace it. Assert the response carries BOTH a
-/// `tc_passkey_ceremony` and a `tc_account_session` Set-Cookie.
+/// `ACCOUNT_PASSKEY_CEREMONY_COOKIE` and a `ACCOUNT_SESSION_COOKIE` Set-Cookie.
 #[tokio::test]
 async fn register_start_while_rotation_keeps_both_set_cookies() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -3738,7 +3848,7 @@ async fn register_start_while_rotation_keeps_both_set_cookies() {
                     .uri("/v1/account/passkeys/register/start")
                     .header(
                         axum::http::header::COOKIE,
-                        format!("tc_account_session={cookie_value}"),
+                        format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
                     )
                     .body(Body::empty())
                     .expect("request builds"),
@@ -3753,11 +3863,11 @@ async fn register_start_while_rotation_keeps_both_set_cookies() {
     // cookie and register/finish would then fail with no ceremony in progress.
     let names = rotation_test_all_set_cookie_names(&response);
     assert!(
-        names.contains("tc_passkey_ceremony"),
+        names.contains(ACCOUNT_PASSKEY_CEREMONY_COOKIE),
         "ceremony cookie must survive rotation; got {names:?}"
     );
     assert!(
-        names.contains("tc_account_session"),
+        names.contains(ACCOUNT_SESSION_COOKIE),
         "rotated session cookie must be present; got {names:?}"
     );
 
@@ -3932,7 +4042,7 @@ async fn credit_summary_scopes_to_the_calling_accounts_principal_set() {
 
     let ext = account_ctx_ext(
         &state,
-        &cookie_request_headers("tc_account_session", &cookie_value),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value),
     )
     .await;
     let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
@@ -3987,7 +4097,7 @@ async fn credit_summary_omits_currency_when_no_rate_is_configured() {
 
     let ext = account_ctx_ext(
         &state,
-        &cookie_request_headers("tc_account_session", &cookie_value),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value),
     )
     .await;
     let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
@@ -4042,7 +4152,7 @@ async fn credit_summary_never_reports_a_spend_figure() {
 
     let ext = account_ctx_ext(
         &state,
-        &cookie_request_headers("tc_account_session", &cookie_value),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value),
     )
     .await;
     let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
@@ -5648,13 +5758,14 @@ async fn the_interstitial_sets_a_ceremony_cookie_and_embeds_it() {
         }),
     )
     .await;
+    assert_set_cookies_are_host_bound(response.headers());
 
     let set_cookie = response
         .headers()
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|v| v.starts_with("tc_login_ceremony="))
+        .find(|v| v.starts_with(&format!("{LOGIN_CEREMONY_COOKIE}=")))
         .expect("interstitial sets the ceremony cookie")
         .to_string();
 
@@ -5666,7 +5777,7 @@ async fn the_interstitial_sets_a_ceremony_cookie_and_embeds_it() {
     );
 
     let nonce = set_cookie
-        .trim_start_matches("tc_login_ceremony=")
+        .trim_start_matches(&format!("{LOGIN_CEREMONY_COOKIE}="))
         .split(';')
         .next()
         .expect("cookie value")
@@ -5690,7 +5801,7 @@ fn with_login_ceremony(base: HeaderMap) -> HeaderMap {
     let mut headers = base;
     headers.insert(
         axum::http::header::COOKIE,
-        HeaderValue::from_str(&format!("tc_login_ceremony={TEST_LOGIN_CEREMONY}"))
+        HeaderValue::from_str(&format!("{LOGIN_CEREMONY_COOKIE}={TEST_LOGIN_CEREMONY}"))
             .expect("cookie header"),
     );
     headers
@@ -6075,6 +6186,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         tenant_policies: Arc::new(tenant_policies),
         require_tenant_submission_policy,
         db_mirror,
+        pipeline_service: None,
+        pipeline_runtime_required: false,
+        pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -6154,6 +6268,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
@@ -6188,6 +6303,14 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_unbound_ceiling: Arc::new(
+            trace_commons_server::account_native_passkey::UnboundAccountCeiling::disabled(),
+        ),
+        account_native_creation_cap: Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::with_limit(
+                trace_commons_server::account_native_passkey::DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
+            ),
+        ),
         account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
@@ -10266,6 +10389,909 @@ fn tenant_rollout_gate_dependency_requires_matching_tenant_scope() {
     )
     .expect_err("missing tenant-scoped dependency is rejected");
     assert!(missing.to_string().contains("missing dependency"));
+}
+
+#[test]
+fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
+    let error = assemble_ingest_pipeline_runtime(
+        None,
+        None,
+        None,
+        true,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_required_but_not_injected"
+    );
+}
+
+/// An out-of-range or unparsable
+/// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_*` refuses startup with the safe
+/// label `pipeline_lease_config_invalid`, never a raw parse error or a
+/// silently accepted value. Uses the real variable names -- no other test in
+/// this suite reads them, so setting and clearing them here does not race
+/// another test's env state.
+#[test]
+fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
+    // SAFETY: env mutation in tests is OK here -- these three variables are
+    // read only by `parse_pipeline_lease_config_from_env`, which nothing
+    // else in this suite calls concurrently.
+    unsafe {
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE);
+    }
+
+    // Unset every variable: the defaults, unchanged.
+    let defaults = parse_pipeline_lease_config_from_env().expect("defaults parse");
+    assert_eq!(defaults, PipelineLeaseConfig::default());
+
+    // Out of range (two hours plus one second): refused with the safe label.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "7201") };
+    let error =
+        parse_pipeline_lease_config_from_env().expect_err("an out-of-range Score lease is refused");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // Unparsable: refused with the same safe label, not a raw parse error.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "not-a-number") };
+    let error =
+        parse_pipeline_lease_config_from_env().expect_err("an unparsable Score lease is refused");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // A value that parses as `i64` but overflows
+    // `chrono::Duration::seconds` (above `i64::MAX / 1_000`) must refuse
+    // with the safe label, not panic.
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE,
+            "10000000000000000",
+        )
+    };
+    let error = parse_pipeline_lease_config_from_env()
+        .expect_err("a Score lease that overflows Duration::seconds is refused, not a panic");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // In range: accepted, and the configured seconds land on the right phase.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "120") };
+    let configured = parse_pipeline_lease_config_from_env().expect("120 seconds is in range");
+    assert_eq!(configured.score(), chrono::Duration::seconds(120));
+    assert_eq!(configured.review(), PipelineLeaseConfig::default().review());
+    assert_eq!(configured.settle(), PipelineLeaseConfig::default().settle());
+
+    unsafe {
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE);
+    }
+}
+
+#[test]
+fn pipeline_receipt_tenants_require_an_injected_runtime() {
+    let gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &["tenant-a"],
+    );
+    let error = validate_pipeline_receipt_rollout(&gates, false)
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "pipeline_receipts_configured_without_runtime"
+    );
+    assert!(validate_pipeline_receipt_rollout(&gates, true).is_ok());
+    assert!(validate_pipeline_receipt_rollout(&TraceTenantRolloutGates::default(), false).is_ok());
+}
+
+#[test]
+fn ingest_and_pipeline_derive_the_same_tenant_storage_ref() {
+    for tenant in ["tenant-a", "tenant-b", "a much longer tenant identifier"] {
+        assert_eq!(
+            tenant_storage_ref(tenant),
+            trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(tenant).as_str()
+        );
+    }
+}
+
+#[tokio::test]
+async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
+    use super::pipeline_runtime::build_pipeline_app;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"status": "not_ready", "reason": "pipeline_runtime_absent"})
+    );
+}
+
+/// A PostgreSQL backend that points at a loopback port nothing listens on.
+/// `PgBackend::new` builds the pool lazily, so constructing it needs no
+/// database; any query through it fails at once.
+async fn pg_backend_without_a_database() -> Arc<PgBackend> {
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    )
+}
+
+/// A minimal pipeline service over `backend` and `artifact_store`, recording
+/// `object_store_name` when one is given (else the builder's default).
+fn minimal_pipeline_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+    use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![],
+            include_index: false,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )?;
+    let index = IsolatedPipelineIndex::new();
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        SettlementAdapterRegistry::new(Vec::new())?,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// M11: ingest's assembly hands the configured store's name to the
+/// assembler and refuses a service that records any other label on its
+/// object refs.
+#[tokio::test]
+async fn pipeline_assembly_requires_the_configured_object_store_name() {
+    struct NameAssembler {
+        pass_the_name: bool,
+    }
+    impl IngestPipelineRuntimeAssembler for NameAssembler {
+        fn assemble(
+            &self,
+            context: pipeline_runtime::IngestPipelineRuntimeContext,
+        ) -> anyhow::Result<Arc<PipelineService>> {
+            minimal_pipeline_service(
+                context.backend,
+                context.artifact_store,
+                self.pass_the_name.then_some(context.object_store_name),
+            )
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let configured_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(dir.path()));
+
+    let refused = assemble_ingest_pipeline_runtime(
+        Some(&NameAssembler {
+            pass_the_name: false,
+        }),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .err()
+    .expect("a service that ignores the configured store name is refused");
+    assert_eq!(
+        refused.to_string(),
+        "pipeline_runtime_object_store_mismatch"
+    );
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&NameAssembler {
+            pass_the_name: true,
+        }),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        service.object_store_name(),
+        TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+    );
+}
+
+/// Wraps `ReferencePerplexityScorer` and overrides `production_qualified` to
+/// `true`. Real production scorers are injected by a proprietary assembler
+/// and never live in this tree; this exists only so the fail-closed tests
+/// below can prove the check does not block a genuinely qualified runtime.
+struct QualifiedTestScorer(trace_commons_gate_api::ReferencePerplexityScorer);
+
+impl trace_commons_gate_api::PerplexityScorer for QualifiedTestScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.0.score(plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for QualifiedTestScorer {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_perplexity_scorer"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-qualified-test-perplexity-scorer.v1".to_vec()
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// Wraps `ReferenceEmbedder` the same way `QualifiedTestScorer` wraps the
+/// reference scorer.
+struct QualifiedTestEmbedder(trace_commons_gate_api::ReferenceEmbedder);
+
+impl trace_commons_gate_api::Embedder for QualifiedTestEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.0.embed(plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedEmbedder for QualifiedTestEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_embedder"
+    }
+
+    fn model_id(&self) -> &str {
+        "qualified-test-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-qualified-test-embedder.v1".to_vec()
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// Wraps `IsolatedPipelineIndex` the same way `QualifiedTestScorer` wraps the
+/// reference scorer, for both the reader and the writer half.
+struct QualifiedTestIndex(
+    Arc<trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex>,
+);
+
+impl trace_commons_gate_api::VectorIndexReader for QualifiedTestIndex {
+    fn snapshot(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+    ) -> anyhow::Result<trace_commons_gate_api::IndexSnapshot> {
+        trace_commons_gate_api::VectorIndexReader::snapshot(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+        )
+    }
+
+    fn nearest(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        embedding: &[f32],
+        k: usize,
+        exclude_revision: Option<Uuid>,
+    ) -> anyhow::Result<Vec<trace_commons_gate_api::NearestNeighbor>> {
+        trace_commons_gate_api::VectorIndexReader::nearest(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+            embedding,
+            k,
+            exclude_revision,
+        )
+    }
+}
+
+impl trace_commons_gate_api::VectorIndexWriter for QualifiedTestIndex {
+    fn upsert(
+        &self,
+        key: &trace_commons_gate_api::IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<trace_commons_gate_api::IndexUpsertResult, trace_commons_gate_api::IndexWriteError>
+    {
+        trace_commons_gate_api::VectorIndexWriter::upsert(
+            self.0.as_ref(),
+            key,
+            embedding,
+            content_hash,
+        )
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, trace_commons_gate_api::IndexWriteError> {
+        trace_commons_gate_api::VectorIndexWriter::invalidate_revision(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+            revision_id,
+        )
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexReader for QualifiedTestIndex {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_index_reader"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexWriter for QualifiedTestIndex {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_index_writer"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A settlement adapter whose `production_qualified` override reports
+/// `true`. `settle` answers with an internal receipt for the expected result
+/// reference -- this double is never exercised past assembly in the tests
+/// that use it.
+struct QualifiedTestSettlementAdapter {
+    instrument_id: trace_commons_gate_api::pipeline::InstrumentId,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::SettlementAdapter for QualifiedTestSettlementAdapter {
+    fn instrument_id(&self) -> &trace_commons_gate_api::pipeline::InstrumentId {
+        &self.instrument_id
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "qualified_test_settlement_adapter"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    async fn settle(
+        &self,
+        request: &trace_commons_gate_api::SettlementRequest,
+    ) -> Result<trace_commons_gate_api::SettlementReceipt, trace_commons_gate_api::SettlementError>
+    {
+        trace_commons_gate_api::SettlementReceipt::internal(request.expected_result_ref_hash())
+            .map_err(|_| trace_commons_gate_api::SettlementError::Rejected)
+    }
+}
+
+/// A pipeline service whose scorer, embedder, index, and settlement adapter
+/// are all the `Qualified*` test doubles above, so
+/// `pipeline_runtime_is_production_qualified` reports `true` for it. Same
+/// shape as `minimal_pipeline_service`, which stays unqualified (its
+/// settlement adapter registry is empty).
+fn qualified_pipeline_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+
+    let scorer = Arc::new(QualifiedTestScorer(
+        trace_commons_gate_api::ReferencePerplexityScorer::new(),
+    ));
+    let embedder = Arc::new(QualifiedTestEmbedder(
+        trace_commons_gate_api::ReferenceEmbedder::new(),
+    ));
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![],
+            include_index: false,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )?;
+    let index = Arc::new(QualifiedTestIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
+        instrument_id: InstrumentId::new("qualified_test_instrument")?,
+    });
+    let registry = SettlementAdapterRegistry::new(vec![adapter])?;
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// Builds an unqualified pipeline service (`minimal_pipeline_service`)
+/// through the `IngestPipelineRuntimeAssembler` seam, passing the configured
+/// object store name through so the M11 store-name check in
+/// `assemble_ingest_pipeline_runtime` passes.
+struct UnqualifiedAssembler;
+
+impl IngestPipelineRuntimeAssembler for UnqualifiedAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        minimal_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// Builds a production-qualified pipeline service (`qualified_pipeline_service`)
+/// through the same seam.
+struct QualifiedAssembler;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// A `TraceCorpusDbConnections` and `ConfiguredTraceArtifactStore` pair over
+/// a database-less backend, for the fail-closed dependency-qualification
+/// tests below -- none of them reaches the database, since the refusal (or
+/// its absence) is decided during assembly, before any query runs.
+async fn pipeline_runtime_fail_closed_fixture(
+    dir: &tempfile::TempDir,
+) -> (TraceCorpusDbConnections, ConfiguredTraceArtifactStore) {
+    let backend = pg_backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let configured_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(dir.path()));
+    (connections, configured_store)
+}
+
+/// Routed tenants, an unqualified runtime, no
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`, no opt-in -- refused.
+/// A build that injects an assembler and lists
+/// tenants in `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` must not run real
+/// receipts through test doubles just because
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` was left unset.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_routed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+    )
+    .err()
+    .expect("an unqualified dependency with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+}
+
+/// The same as above, with the test opt-in set --
+/// starts.
+#[tokio::test]
+async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        true,
+    )
+    .expect("the opt-in lets an unqualified dependency start")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+}
+
+/// The opt-in together with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` -- refused, regardless of
+/// tenant routing or dependency qualification.
+#[tokio::test]
+async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        true,
+        PipelineLeaseConfig::default(),
+        false,
+        true,
+    )
+    .err()
+    .expect("the test opt-in never combines with the required flag");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_test_dependencies_not_allowed_when_required"
+    );
+}
+
+/// A qualified runtime with routed tenants and no
+/// opt-in -- starts. The fail-closed check must not block a genuinely
+/// production-qualified dependency.
+#[tokio::test]
+async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+    )
+    .expect("assemble a qualified runtime")
+    .expect("an assembler was given, so a service is returned");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// No routed tenants, no required flag, an unqualified
+/// runtime -- starts, because no receipt can reach it.
+#[tokio::test]
+async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_routed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .expect("no routed tenants and no required flag: an unqualified dependency starts")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+}
+
+/// A pipeline service whose PostgreSQL backend points at a loopback port
+/// nothing listens on: its readiness probe fails at once.
+async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
+    let dir = tempfile::tempdir().unwrap();
+    minimal_pipeline_service(
+        pg_backend_without_a_database().await,
+        test_artifact_store(dir.path()),
+        None,
+    )
+    .unwrap()
+}
+
+/// M12: a worker whose readiness probe fails reports
+/// `pipeline_worker_not_ready`, even when an earlier pass had reported
+/// ready.
+#[tokio::test]
+async fn pipeline_readiness_reports_not_ready_when_the_worker_probe_fails() {
+    use super::pipeline_runtime::{build_pipeline_app, run_pipeline_worker_pass};
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let service = pipeline_service_without_a_database().await;
+    Arc::make_mut(&mut state).pipeline_service = Some(service.clone());
+    state
+        .pipeline_worker_ready
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    run_pipeline_worker_pass(
+        async move { service.readiness().await },
+        Vec::<String>::new(),
+        |_tenant_id| async {},
+        &state.pipeline_worker_ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        !state
+            .pipeline_worker_ready
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"status": "not_ready", "reason": "pipeline_worker_not_ready"})
+    );
+}
+
+/// I5: a panic while one tenant's batch runs ends only that batch. The pass
+/// goes on to the next tenant, the worker reports not ready for that pass,
+/// and a later pass without a panic reports ready again.
+#[tokio::test]
+async fn a_panicking_tenant_batch_marks_the_worker_not_ready_and_the_pass_continues() {
+    use super::pipeline_runtime::run_pipeline_worker_pass;
+
+    let ready = std::sync::atomic::AtomicBool::new(true);
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let drained = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let drain = |panicking: Option<&'static str>| {
+        let drained = drained.clone();
+        move |tenant_id: String| {
+            let drained = drained.clone();
+            async move {
+                if panicking == Some(tenant_id.as_str()) {
+                    panic!("test-only panic in a tenant batch");
+                }
+                drained.lock().unwrap().push(tenant_id);
+            }
+        }
+    };
+
+    run_pipeline_worker_pass(
+        async { Ok(()) },
+        vec!["tenant-a".to_string(), "tenant-b".to_string()],
+        drain(Some("tenant-a")),
+        &ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        !ready.load(std::sync::atomic::Ordering::Relaxed),
+        "a pass with a panicking batch reports not ready"
+    );
+    assert_eq!(
+        *drained.lock().unwrap(),
+        vec!["tenant-b".to_string()],
+        "the pass continued past the panicking tenant"
+    );
+
+    run_pipeline_worker_pass(
+        async { Ok(()) },
+        vec!["tenant-a".to_string(), "tenant-b".to_string()],
+        drain(None),
+        &ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        ready.load(std::sync::atomic::Ordering::Relaxed),
+        "a later clean pass reports ready again"
+    );
+}
+
+#[tokio::test]
+async fn source_stays_public_on_the_pipeline_app() {
+    use super::pipeline_runtime::build_pipeline_app;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/source")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn run_pipeline_app_stops_within_the_grace_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(run_pipeline_app(state, listener, async {
+        let _ = rx.await;
+    }));
+    tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), server)
+        .await
+        .expect("bounded shutdown")
+        .unwrap()
+        .unwrap();
+}
+
+/// A worker that never notices its own stop signal must be aborted once the
+/// shutdown grace period elapses, not left running. Merely dropping a
+/// `JoinHandle` detaches its task rather than cancelling it, so a shutdown
+/// path that only waits and logs on timeout -- without calling `abort()` --
+/// leaves that task running: exactly the kind of leftover background
+/// activity that can go on touching a shared database a later caller assumes
+/// is now quiescent. This exercises `join_or_abort`, the piece of
+/// `run_pipeline_app`'s shutdown path that must prevent that, directly: a
+/// spawned task that only ever awaits `std::future::pending()` (so it can
+/// never finish on its own, standing in for a worker pass that never checks
+/// `stop` mid-drain) must be aborted, and aborting a task drops its future
+/// even without the future ever being polled to completion -- observed here
+/// through a drop guard the stuck task holds.
+#[tokio::test]
+async fn join_or_abort_aborts_a_task_that_outlives_its_grace_period() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SetOnDrop(Arc<AtomicBool>);
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let guard = SetOnDrop(dropped.clone());
+    let handle = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+
+    pipeline_runtime::join_or_abort(handle, std::time::Duration::from_millis(50)).await;
+
+    // `abort()` schedules cancellation; give the aborted task a moment to
+    // actually unwind and drop its guard before checking it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !dropped.load(Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a task that outlives its grace period must be aborted, not left running"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[test]
@@ -27467,6 +28493,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         tenant_policies: Arc::new(BTreeMap::new()),
         require_tenant_submission_policy: false,
         db_mirror: None,
+        pipeline_service: None,
+        pipeline_runtime_required: false,
+        pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
@@ -27548,6 +28577,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
@@ -27582,6 +28612,14 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_unbound_ceiling: Arc::new(
+            trace_commons_server::account_native_passkey::UnboundAccountCeiling::disabled(),
+        ),
+        account_native_creation_cap: Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::with_limit(
+                trace_commons_server::account_native_passkey::DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
+            ),
+        ),
         account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
@@ -29043,7 +30081,9 @@ fn audit_chain_repair_plan_refuses_anything_but_a_verifiable_db_ahead_tail() {
 
     // The file's head is not in the DB: a fork, not a lost append.
     assert_eq!(
-        plan_audit_chain_repair(&events, &rows[..1]).expect_err("fork refused"),
+        plan_audit_chain_repair(&events, &rows[..1])
+            .expect_err("fork refused")
+            .label(),
         "file_head_not_in_db"
     );
     // A tampered payload no longer reproduces its row's hash.
@@ -29053,14 +30093,18 @@ fn audit_chain_repair_plan_refuses_anything_but_a_verifiable_db_ahead_tail() {
         .as_ref()
         .map(|json| json.replace("idempotent_submit", "idempotent_submiT"));
     assert_eq!(
-        plan_audit_chain_repair(&events[..1], &tampered).expect_err("tamper refused"),
+        plan_audit_chain_repair(&events[..1], &tampered)
+            .expect_err("tamper refused")
+            .label(),
         "db_row_hash_mismatch"
     );
     // A hashed row without its payload cannot be restored.
     let mut bare = rows.clone();
     bare[1].canonical_event_json = None;
     assert_eq!(
-        plan_audit_chain_repair(&events[..1], &bare).expect_err("bare row refused"),
+        plan_audit_chain_repair(&events[..1], &bare)
+            .expect_err("bare row refused")
+            .label(),
         "db_row_missing_canonical_payload"
     );
 }
@@ -29072,40 +30116,40 @@ fn audit_chain_repair_plan_refuses_anything_but_a_verifiable_db_ahead_tail() {
 #[test]
 fn legacy_segment_resume_plan_accepts_only_a_file_ahead_through_legacy_rows() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let events = chained_file_read_events(temp.path(), 5);
-    // e0, e1: mirrored by the new build. Then the rollback: e2 and e4 were
-    // mirrored by the old build with no chain fields, e3 was written to the
-    // file only.
-    let rows = vec![
-        audit_chain_repair_test_row(&events[0], 1),
-        audit_chain_repair_test_row(&events[1], 2),
-        db_audit_row_for_file_event(&events[2], 3, false),
-        db_audit_row_for_file_event(&events[4], 4, false),
-    ];
+    // e0: mirrored by the new build. Then the rollback: two `submitted`
+    // events and a re-POST written to the file only (with a derived-id row
+    // for each submission), and a read mirrored with no chain fields.
+    let LegacySegmentFixture { events, rows } = legacy_segment_fixture(temp.path());
     assert_eq!(
-        plan_audit_chain_repair(&events, &rows).expect_err("not a DB-ahead tail"),
+        plan_audit_chain_repair(&events, &rows)
+            .expect_err("not a DB-ahead tail")
+            .label(),
         "file_head_not_in_db"
     );
+    assert!(matches!(
+        plan_audit_chain_repair(&events, &rows),
+        Err(AuditChainRepairPlanRefusal::FileAheadOfDb)
+    ));
     let resume = plan_legacy_segment_resume(&events, &rows)
         .expect("a file ahead through legacy rows plans")
         .expect("there is a segment to resume across");
     assert_eq!(
         Some(resume.db_head_event_hash.as_str()),
-        events[1].event_hash.as_deref()
+        events[0].event_hash.as_deref()
     );
-    assert_eq!(resume.file_events, 3);
-    assert_eq!(resume.unhashed_db_rows, 2);
-    assert_eq!(resume.file_only_events, 1);
+    assert_eq!(resume.file_events, 4);
+    assert_eq!(resume.unhashed_db_rows, 3);
+    assert_eq!(resume.file_only_events, 3);
 
     // Nothing after the DB head is unhashed: no old build wrote there, so a
     // file ahead of the DB is unexplained and stays refused.
     assert_eq!(
-        plan_legacy_segment_resume(&events, &rows[..2]).expect_err("unexplained file-ahead"),
+        plan_legacy_segment_resume(&events, &rows[..1]).expect_err("unexplained file-ahead"),
         "file_head_not_in_db"
     );
     // The DB head is not a file event: a fork.
     let mut forked = rows.clone();
-    forked[1].event_hash = Some(sha256_prefixed("forked-head"));
+    forked[0].event_hash = Some(sha256_prefixed("forked-head"));
     assert_eq!(
         plan_legacy_segment_resume(&events, &forked).expect_err("fork refused"),
         "db_head_not_in_file"
@@ -29119,14 +30163,14 @@ fn legacy_segment_resume_plan_accepts_only_a_file_ahead_through_legacy_rows() {
         "file_chain_break_after_db_head"
     );
     let mut tampered = events.clone();
-    tampered[2].reason = Some("surface=tampered".to_string());
+    tampered[4].reason = Some("surface=tampered".to_string());
     assert_eq!(
         plan_legacy_segment_resume(&tampered, &rows).expect_err("tampered file event refused"),
         "file_chain_break_after_db_head"
     );
     // A legacy row that disagrees with the file event of its id.
     let mut misattributed = rows.clone();
-    misattributed[2].submission_id = Some(Uuid::new_v4());
+    misattributed[3].submission_id = Some(Uuid::new_v4());
     assert_eq!(
         plan_legacy_segment_resume(&events, &misattributed).expect_err("mismatch refused"),
         "legacy_row_mismatch"
@@ -29134,14 +30178,512 @@ fn legacy_segment_resume_plan_accepts_only_a_file_ahead_through_legacy_rows() {
     // No hashed row at all: the DB accepts any first hashed row, so nothing
     // is locked; and a caught-up file has no segment.
     assert!(
-        plan_legacy_segment_resume(&events, &rows[2..])
+        plan_legacy_segment_resume(&events, &rows[1..])
             .expect("plans")
             .is_none()
     );
     assert!(
-        plan_legacy_segment_resume(&events[..2], &rows[..2])
+        plan_legacy_segment_resume(&events[..1], &rows[..1])
             .expect("plans")
             .is_none()
+    );
+}
+
+fn legacy_contributor_auth(principal: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: principal.to_string(),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+/// A `submitted` event as the build rolled back to (5f239be4) wrote it: the
+/// file line only. The DB got the store's derived-id row instead.
+fn legacy_submitted_event(auth: &TenantAuth, submission_id: Uuid) -> TraceCommonsAuditEvent {
+    TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: auth.tenant_id.clone(),
+        submission_id,
+        kind: "submitted".to_string(),
+        created_at: Utc::now(),
+        status: Some(TraceCorpusStatus::Accepted),
+        actor_role: Some(auth.role),
+        actor_principal_ref: Some(auth.principal_ref.clone()),
+        reason: Some("auth_method=static_token".to_string()),
+        export_count: None,
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    }
+}
+
+/// The derived-id `submit-audit` row the old build's store wrote beside a
+/// file-only `submitted` event.
+fn legacy_submit_audit_row(
+    event: &TraceCommonsAuditEvent,
+    audit_sequence: i64,
+) -> StorageTraceAuditEventRecord {
+    StorageTraceAuditEventRecord {
+        audit_event_id: deterministic_trace_uuid_for(
+            "submit-audit",
+            &event.tenant_id,
+            event.submission_id,
+        ),
+        tenant_id: event.tenant_id.clone(),
+        audit_sequence,
+        actor_principal_ref: event.actor_principal_ref.clone().expect("principal"),
+        actor_role: "contributor".to_string(),
+        action: StorageTraceAuditAction::Submit,
+        reason: Some("auth_method=static_token".to_string()),
+        request_id: None,
+        submission_id: Some(event.submission_id),
+        object_ref_id: Some(Uuid::new_v4()),
+        export_manifest_id: None,
+        decision_inputs_hash: Some(sha256_prefixed("canonical summary")),
+        previous_event_hash: None,
+        event_hash: None,
+        canonical_event_json: None,
+        metadata: StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Accepted,
+            privacy_risk: "low".to_string(),
+        },
+        occurred_at: event.created_at,
+    }
+}
+
+/// The row the old build mirrored an event as: written before the file
+/// append chained the event, so with no chain fields and no payload, and
+/// otherwise exactly the row the current build writes for it.
+fn legacy_mirror_row(
+    auth: &TenantAuth,
+    event: &TraceCommonsAuditEvent,
+    audit_sequence: i64,
+    action: StorageTraceAuditAction,
+    metadata: StorageTraceAuditSafeMetadata,
+) -> StorageTraceAuditEventRecord {
+    let mut unchained = event.clone();
+    unchained.previous_event_hash = None;
+    unchained.event_hash = None;
+    let write = audit_event_storage_write(
+        auth,
+        &unchained,
+        AuditRowMirror {
+            action,
+            metadata,
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+    )
+    .expect("legacy mirror row builds");
+    StorageTraceAuditEventRecord {
+        audit_event_id: write.audit_event_id,
+        tenant_id: write.tenant_id,
+        audit_sequence,
+        actor_principal_ref: write.actor_principal_ref,
+        actor_role: write.actor_role,
+        action: write.action,
+        reason: write.reason,
+        request_id: write.request_id,
+        submission_id: write.submission_id,
+        object_ref_id: write.object_ref_id,
+        export_manifest_id: write.export_manifest_id,
+        decision_inputs_hash: write.decision_inputs_hash,
+        previous_event_hash: write.previous_event_hash,
+        event_hash: write.event_hash,
+        canonical_event_json: write.canonical_event_json,
+        metadata: write.metadata,
+        occurred_at: event.created_at,
+    }
+}
+
+/// The rollback rehearsal's segment (#1100 follow-up), as the build rolled
+/// back to left it: two submissions, one idempotent re-POST and one status
+/// read. The file holds four events past the DB head; the DB holds two
+/// derived-id submit rows and one unhashed mirror of the read.
+struct LegacySegmentFixture {
+    events: Vec<TraceCommonsAuditEvent>,
+    rows: Vec<StorageTraceAuditEventRecord>,
+}
+
+fn legacy_segment_fixture(root: &Path) -> LegacySegmentFixture {
+    let reviewer = test_reviewer_auth("tenant-a");
+    let alice = legacy_contributor_auth("principal-alice");
+    let bob = legacy_contributor_auth("principal-bob");
+    let head = append_audit_event(
+        root,
+        "tenant-a",
+        TraceCommonsAuditEvent::read(&reviewer, "review_queue", 2),
+    )
+    .expect("head appends");
+    let submitted_alice = append_audit_event(
+        root,
+        "tenant-a",
+        legacy_submitted_event(&alice, Uuid::new_v4()),
+    )
+    .expect("appends");
+    let submitted_bob = append_audit_event(
+        root,
+        "tenant-a",
+        legacy_submitted_event(&bob, Uuid::new_v4()),
+    )
+    .expect("appends");
+    let re_post = append_audit_event(
+        root,
+        "tenant-a",
+        TraceCommonsAuditEvent::idempotent_submit(&alice, Uuid::new_v4()),
+    )
+    .expect("appends");
+    let status_read = append_audit_event(
+        root,
+        "tenant-a",
+        TraceCommonsAuditEvent::read(&alice, "contributor_status", 3),
+    )
+    .expect("appends");
+    let head_row = StorageTraceAuditEventRecord {
+        previous_event_hash: head.previous_event_hash.clone(),
+        event_hash: head.event_hash.clone(),
+        canonical_event_json: Some(
+            canonical_audit_event_json(
+                head.previous_event_hash.as_deref().expect("chained"),
+                &head,
+            )
+            .expect("canonical"),
+        ),
+        ..legacy_mirror_row(
+            &reviewer,
+            &head,
+            1,
+            StorageTraceAuditAction::Read,
+            trace_read_audit_metadata("review_queue", 2),
+        )
+    };
+    let rows = vec![
+        head_row,
+        legacy_submit_audit_row(&submitted_alice, 2),
+        legacy_submit_audit_row(&submitted_bob, 3),
+        legacy_mirror_row(
+            &alice,
+            &status_read,
+            4,
+            StorageTraceAuditAction::Read,
+            trace_read_audit_metadata("contributor_status", 3),
+        ),
+    ];
+    LegacySegmentFixture {
+        events: vec![head, submitted_alice, submitted_bob, re_post, status_read],
+        rows,
+    }
+}
+
+fn legacy_plan_label(
+    events: &[TraceCommonsAuditEvent],
+    rows: &[StorageTraceAuditEventRecord],
+) -> &'static str {
+    match plan_legacy_segment_resume(events, rows) {
+        Ok(Some(_)) => "accepted",
+        Ok(None) => "nothing_to_resume",
+        Err(label) => label,
+    }
+}
+
+/// The shape a real rollback leaves is accepted, with the counts the
+/// rehearsal saw and the time range the operator checks against the
+/// rollback window.
+#[test]
+fn legacy_segment_resume_accepts_the_rollback_rehearsal_shape() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let fixture = legacy_segment_fixture(temp.path());
+    let resume = plan_legacy_segment_resume(&fixture.events, &fixture.rows)
+        .expect("a real rollback plans")
+        .expect("there is a segment");
+    assert_eq!(resume.file_events, 4);
+    assert_eq!(resume.unhashed_db_rows, 3);
+    assert_eq!(resume.file_only_events, 3);
+    let segment_times = fixture.events[1..]
+        .iter()
+        .map(|event| event.created_at)
+        .chain(fixture.rows[1..].iter().map(|row| row.occurred_at))
+        .collect::<Vec<_>>();
+    assert_eq!(resume.earliest_at, segment_times.iter().min().copied());
+    assert_eq!(resume.latest_at, segment_times.iter().max().copied());
+    assert!(resume.interrupted_resume.is_none());
+}
+
+/// #1100 review M1(a): someone with DB access strips the hashes from the
+/// chain's tail and rewrites what the rows say. The file still says what
+/// happened, and the rows no longer agree with it, so this is not a legacy
+/// segment and the repair refuses.
+#[test]
+fn legacy_segment_resume_refuses_a_db_side_tail_rewrite() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let reviewer = test_reviewer_auth("tenant-a");
+    // Five events the new build mirrored with their chain fields.
+    let events = (0..5)
+        .map(|index| {
+            append_audit_event(
+                temp.path(),
+                "tenant-a",
+                TraceCommonsAuditEvent::read(&reviewer, "review_queue", index),
+            )
+            .expect("appends")
+        })
+        .collect::<Vec<_>>();
+    let hashed_rows = events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| StorageTraceAuditEventRecord {
+            previous_event_hash: event.previous_event_hash.clone(),
+            event_hash: event.event_hash.clone(),
+            canonical_event_json: Some(
+                canonical_audit_event_json(
+                    event.previous_event_hash.as_deref().expect("chained"),
+                    event,
+                )
+                .expect("canonical"),
+            ),
+            ..legacy_mirror_row(
+                &reviewer,
+                event,
+                index as i64 + 1,
+                StorageTraceAuditAction::Read,
+                trace_read_audit_metadata("review_queue", index),
+            )
+        })
+        .collect::<Vec<_>>();
+    // The tail after row 2, stripped of its chain fields.
+    let strip = |rows: &mut Vec<StorageTraceAuditEventRecord>| {
+        for row in rows.iter_mut().skip(2) {
+            row.previous_event_hash = None;
+            row.event_hash = None;
+            row.canonical_event_json = None;
+        }
+    };
+    // Stripping alone leaves rows that still say what the file says.
+    let mut stripped = hashed_rows.clone();
+    strip(&mut stripped);
+    assert_eq!(legacy_plan_label(&events, &stripped), "accepted");
+
+    // Rewriting the action of one stripped row.
+    let mut rewritten_action = stripped.clone();
+    rewritten_action[3].action = StorageTraceAuditAction::Export;
+    assert_eq!(
+        legacy_plan_label(&events, &rewritten_action),
+        "legacy_row_mismatch"
+    );
+    // Rewriting its metadata.
+    let mut rewritten_metadata = stripped.clone();
+    rewritten_metadata[3].metadata = trace_read_audit_metadata("review_queue", 99);
+    assert_eq!(
+        legacy_plan_label(&events, &rewritten_metadata),
+        "legacy_row_mismatch"
+    );
+}
+
+/// #1100 review M1(b): someone with DB access deletes the hashed tail and
+/// inserts one unhashed row, the old build's mark. The deleted events are
+/// now file-only, and events of their kind were never file-only on the old
+/// build; a deleted `submitted` event has no derived-id row beside it; and
+/// the inserted row matches nothing the old build wrote.
+#[test]
+fn legacy_segment_resume_refuses_a_db_side_tail_deletion() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let reviewer = test_reviewer_auth("tenant-a");
+    let alice = legacy_contributor_auth("principal-alice");
+    let events = vec![
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&reviewer, "review_queue", 1),
+        )
+        .expect("appends"),
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&reviewer, "review_queue", 2),
+        )
+        .expect("appends"),
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            legacy_submitted_event(&alice, Uuid::new_v4()),
+        )
+        .expect("appends"),
+    ];
+    let head_row = StorageTraceAuditEventRecord {
+        previous_event_hash: events[0].previous_event_hash.clone(),
+        event_hash: events[0].event_hash.clone(),
+        canonical_event_json: Some(
+            canonical_audit_event_json(
+                events[0].previous_event_hash.as_deref().expect("chained"),
+                &events[0],
+            )
+            .expect("canonical"),
+        ),
+        ..legacy_mirror_row(
+            &reviewer,
+            &events[0],
+            1,
+            StorageTraceAuditAction::Read,
+            trace_read_audit_metadata("review_queue", 1),
+        )
+    };
+    // The inserted row: shaped like an old-build mirror, of an event the
+    // file does not hold.
+    let planted_event = TraceCommonsAuditEvent::read(&reviewer, "review_queue", 7);
+    let planted = legacy_mirror_row(
+        &reviewer,
+        &planted_event,
+        2,
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("review_queue", 7),
+    );
+
+    // The deleted `read` row: a `read` event was never file-only.
+    assert_eq!(
+        legacy_plan_label(&events[..2], &[head_row.clone(), planted.clone()]),
+        "legacy_file_only_event_unexpected"
+    );
+    // The deleted `submitted` row, with the read's row kept: no derived-id
+    // row stands beside the `submitted` event.
+    let read_row = legacy_mirror_row(
+        &reviewer,
+        &events[1],
+        2,
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("review_queue", 2),
+    );
+    assert_eq!(
+        legacy_plan_label(&events, &[head_row.clone(), read_row.clone()]),
+        "legacy_submit_row_missing"
+    );
+    // Every event explained, plus the planted row: it is not the old
+    // build's.
+    let mut explained = vec![head_row, read_row, legacy_submit_audit_row(&events[2], 3)];
+    let mut planted_late = planted;
+    planted_late.audit_sequence = 4;
+    explained.push(planted_late);
+    assert_eq!(
+        legacy_plan_label(&events, &explained),
+        "legacy_row_unexplained"
+    );
+    explained.pop();
+    assert_eq!(legacy_plan_label(&events, &explained), "accepted");
+}
+
+/// Every field the old build copied from the event into its mirror row is
+/// compared: changing any one of them refuses the segment. (Removing a
+/// comparison from `legacy_audit_row_matches_file_event` turns this red.)
+#[test]
+fn legacy_segment_resume_compares_every_field_the_old_build_copied() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let fixture = legacy_segment_fixture(temp.path());
+    assert_eq!(
+        legacy_plan_label(&fixture.events, &fixture.rows),
+        "accepted"
+    );
+    // Row 3 is the unhashed mirror of the status read.
+    let mutations: Vec<(&str, Box<dyn Fn(&mut StorageTraceAuditEventRecord)>)> = vec![
+        (
+            "tenant",
+            Box::new(|row| row.tenant_id = "tenant-b".to_string()),
+        ),
+        (
+            "submission",
+            Box::new(|row| row.submission_id = Some(Uuid::new_v4())),
+        ),
+        (
+            "action",
+            Box::new(|row| row.action = StorageTraceAuditAction::Export),
+        ),
+        (
+            "metadata",
+            Box::new(|row| row.metadata = trace_read_audit_metadata("contributor_status", 4)),
+        ),
+        (
+            "actor_role",
+            Box::new(|row| row.actor_role = "admin".to_string()),
+        ),
+        (
+            "actor_principal_ref",
+            Box::new(|row| row.actor_principal_ref = "principal-mallory".to_string()),
+        ),
+        (
+            "reason",
+            Box::new(|row| {
+                row.reason = Some("surface=contributor_status;item_count=4".to_string())
+            }),
+        ),
+        (
+            "request_id",
+            Box::new(|row| row.request_id = Some("request".to_string())),
+        ),
+        (
+            "export_manifest_id",
+            Box::new(|row| row.export_manifest_id = Some(Uuid::new_v4())),
+        ),
+        (
+            "decision_inputs_hash",
+            Box::new(|row| row.decision_inputs_hash = Some(sha256_prefixed("inputs"))),
+        ),
+        (
+            "previous_event_hash",
+            Box::new(|row| row.previous_event_hash = Some(sha256_prefixed("previous"))),
+        ),
+        (
+            "canonical_event_json",
+            Box::new(|row| row.canonical_event_json = Some("{}".to_string())),
+        ),
+    ];
+    for (field, mutate) in mutations {
+        let mut rows = fixture.rows.clone();
+        mutate(&mut rows[3]);
+        assert_eq!(
+            legacy_plan_label(&fixture.events, &rows),
+            "legacy_row_mismatch",
+            "changing {field} must refuse the segment"
+        );
+    }
+    // A matching row that sits at or before the DB head is not one the
+    // rolled-back build wrote after it.
+    let mut rows = fixture.rows.clone();
+    rows[3].audit_sequence = 0;
+    assert_eq!(
+        legacy_plan_label(&fixture.events, &rows),
+        "legacy_row_before_db_head"
+    );
+}
+
+/// The old build wrote every event with its principal. An event without
+/// one cannot be matched to the row's principal, so the segment is refused
+/// rather than accepting any principal.
+#[test]
+fn legacy_segment_resume_refuses_an_event_without_a_principal() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let fixture = legacy_segment_fixture(temp.path());
+    let mut events = fixture.events.clone();
+    events[4].actor_principal_ref = None;
+    // Re-chain the file events after the change, so only the principal
+    // differs.
+    let mut previous = events[3].event_hash.clone().expect("hashed");
+    for event in events.iter_mut().skip(4) {
+        event.previous_event_hash = Some(previous.clone());
+        event.event_hash = None;
+        let hash = compute_audit_event_hash(&previous, event).expect("hash");
+        event.event_hash = Some(hash.clone());
+        previous = hash;
+    }
+    assert_eq!(
+        legacy_plan_label(&events, &fixture.rows),
+        "legacy_row_mismatch"
     );
 }
 
@@ -29217,6 +30759,83 @@ fn chain_mismatch_failures(report: &TraceDbAuditChainReport) -> Vec<&String> {
         .collect()
 }
 
+/// #1100 review Lows: the audit-chain drill's evidence shows a resume --
+/// how many, and how many file events it skips -- and each property of the
+/// repair row that lets the chain resume is load-bearing. Removing the
+/// `Retain` check, or the ancestry check, turns this red.
+#[test]
+fn db_audit_chain_resume_is_counted_and_every_repair_row_property_is_checked() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut file_events = chained_file_read_events(temp.path(), 4);
+    let db_head = file_events[1].event_hash.clone().expect("hashed");
+    let (resume_event, resume_row) = legacy_segment_resume_test_row(temp.path(), &db_head, 5);
+    file_events.push(resume_event);
+    // e0, e1 hashed; e2 and e3 from the rolled-back build (e3 file-only);
+    // then the repair's resume row.
+    let rows_with = |resume: StorageTraceAuditEventRecord| {
+        vec![
+            db_audit_row_for_file_event(&file_events[0], 1, true),
+            db_audit_row_for_file_event(&file_events[1], 2, true),
+            db_audit_row_for_file_event(&file_events[2], 3, false),
+            resume,
+        ]
+    };
+    let report = verify_db_audit_chain_records(&rows_with(resume_row.clone()), &file_events)
+        .expect("report computes");
+    assert!(
+        chain_mismatch_failures(&report).is_empty(),
+        "{:?}",
+        report.failures
+    );
+    assert_eq!(report.legacy_segment_resume_count, 1);
+    assert_eq!(report.legacy_segment_file_event_count, 2);
+
+    let refused = |resume: StorageTraceAuditEventRecord| {
+        let rows = rows_with(resume);
+        collect_db_audit_hash_chain_failures(&rows, &file_events).len() == 1
+            && verify_db_audit_chain_records(&rows, &file_events)
+                .expect("report computes")
+                .legacy_segment_resume_count
+                == 0
+    };
+    // Its action is not the repair's.
+    let mut wrong_action = resume_row.clone();
+    wrong_action.action = StorageTraceAuditAction::Read;
+    assert!(refused(wrong_action), "a non-Retain row must not resume");
+    // A dry run's row.
+    let mut dry_run = resume_row.clone();
+    dry_run.metadata = StorageTraceAuditSafeMetadata::Maintenance {
+        surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
+        purpose_hash: None,
+        dry_run: true,
+        action_counts: BTreeMap::new(),
+    };
+    assert!(refused(dry_run), "a dry-run row must not resume");
+    // No canonical payload, so the declaration is not covered by a hash.
+    let mut bare = resume_row.clone();
+    bare.canonical_event_json = None;
+    assert!(refused(bare), "a row without its payload must not resume");
+    // The declared head is not an ancestor of the resume in the file chain:
+    // the file forked after the DB head.
+    let forked_file = file_events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut event = event.clone();
+            if index == 2 {
+                event.previous_event_hash = Some(sha256_prefixed("elsewhere"));
+            }
+            event
+        })
+        .collect::<Vec<_>>();
+    let rows = rows_with(resume_row);
+    assert_eq!(
+        collect_db_audit_hash_chain_failures(&rows, &forked_file).len(),
+        1,
+        "a resume across a fork must not verify"
+    );
+}
+
 #[test]
 fn db_audit_chain_resumes_only_at_a_repair_row_declaring_the_db_head() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -29289,23 +30908,32 @@ fn db_audit_chain_resumes_only_at_a_repair_row_declaring_the_db_head() {
     );
 }
 
-/// Roll back to a build from before #1043, let it take traffic, then roll
-/// forward. The old build chained its events into the file but mirrored them
-/// with no chain fields, so the new build's next append chains from a file
-/// head the DB never hashed, and is refused as stale. The repair's legacy
-/// path resumes the DB chain across that segment: dry run first, then once,
-/// idempotently, audited hash-only. After it the tenant submits again and
-/// both drills read the chain as whole.
-#[tokio::test]
-async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
+async fn submit_low_risk_trace(state: Arc<AppState>) -> ApiResult<Uuid> {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
+        .await
+        .map(|_| submission_id)
+}
+
+/// A tenant after a binary rollback to a build from before #1043 and a roll
+/// forward, in the shape the cutover rehearsal saw: the rolled-back build
+/// took two submissions, one idempotent re-POST and one status read, so the
+/// file holds four events past the DB's latest hashed row, and the DB three
+/// rows without chain fields.
+struct RolledBackTenant {
+    state: Arc<AppState>,
+    /// The DB's latest hashed row: the new build's last before the rollback.
+    db_head: String,
+    /// Submitted on the new build, and re-POSTed during the rollback.
+    re_posted_submission: Uuid,
+}
+
+async fn roll_back_and_forward(backend: &Arc<PgBackend>, root: &Path) -> RolledBackTenant {
     let db_mirror: Arc<dyn Database> = backend.clone();
     let mut state = test_state_with_options(
-        temp.path().to_path_buf(),
+        root.to_path_buf(),
         Some(db_mirror),
         None,
         false,
@@ -29314,15 +30942,7 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
         false,
     );
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
-    let submit = |state: Arc<AppState>| async move {
-        let mut envelope = sample_envelope().await;
-        make_metadata_only_low_risk(&mut envelope);
-        let submission_id = envelope.submission_id;
-        submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
-            .await
-            .map(|_| submission_id)
-    };
-    submit(state.clone())
+    let re_posted_submission = submit_low_risk_trace(state.clone())
         .await
         .expect("submission on the new build");
     let db_head = backend
@@ -29334,81 +30954,130 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
         .find_map(|row| row.event_hash)
         .expect("the new build hashed its row");
 
-    // The rollback. A submission on the old build: its file `submitted`
-    // event chains from the file head, and the DB gets the store's own
-    // derived-id row with no chain fields instead of a mirror. (Modelled by
-    // submitting on this build and rewriting the DB row into that shape.)
-    let rolled_back_submission = submit(state.clone())
-        .await
-        .expect("submission during the rollback");
-    let submitted_event = read_all_audit_events(temp.path(), "tenant-a")
-        .expect("file log")
-        .into_iter()
-        .rfind(|event| event.kind == "submitted")
-        .expect("submitted event");
-    assert_eq!(submitted_event.submission_id, rolled_back_submission);
-    {
-        let client = backend
-            .raw_pool_for_tests_and_diagnostics()
-            .get()
-            .await
-            .expect("raw client");
-        client
-            .execute(
-                "DELETE FROM trace_audit_events WHERE tenant_id = 'tenant-a' AND audit_event_id = $1",
-                &[&submitted_event.event_id],
-            )
-            .await
-            .expect("new-build row removed");
+    // The rollback. Two submissions on the old build: each `submitted` event
+    // chains from the file head, and the DB gets the store's own derived-id
+    // row with no chain fields instead of a mirror. (Modelled by submitting on
+    // this build and rewriting the DB row into that shape.)
+    // Both submit before either row is rewritten: a rewritten row leaves the
+    // DB head behind the file, and this build would refuse the next append.
+    let mut rolled_back_submissions = Vec::new();
+    for _ in 0..2 {
+        rolled_back_submissions.push(
+            submit_low_risk_trace(state.clone())
+                .await
+                .expect("submission during the rollback"),
+        );
     }
-    let record = read_submission_record(temp.path(), "tenant-a", rolled_back_submission)
-        .expect("record reads")
-        .expect("record exists");
-    backend
-        .append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id: deterministic_trace_uuid("submit-audit", &record),
-            tenant_id: "tenant-a".to_string(),
-            actor_principal_ref: record.auth_principal_ref.clone(),
-            actor_role: "contributor".to_string(),
-            action: StorageTraceAuditAction::Submit,
-            reason: Some("auth_method=static_token".to_string()),
-            request_id: None,
-            submission_id: Some(rolled_back_submission),
-            object_ref_id: None,
-            export_manifest_id: None,
-            decision_inputs_hash: None,
-            previous_event_hash: None,
-            event_hash: None,
-            canonical_event_json: None,
-            metadata: StorageTraceAuditSafeMetadata::Submission {
-                status: storage_corpus_status(record.status),
-                privacy_risk: serde_storage_string(&record.privacy_risk).expect("risk"),
-            },
-        })
-        .await
-        .expect("old-build store row writes");
-    // And an event the old build mirrored: the DB row first, from the
+    for rolled_back_submission in rolled_back_submissions {
+        let submitted_event = read_all_audit_events(root, "tenant-a")
+            .expect("file log")
+            .into_iter()
+            .find(|event| {
+                event.kind == "submitted" && event.submission_id == rolled_back_submission
+            })
+            .expect("submitted event");
+        {
+            let client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .expect("raw client");
+            client
+                .execute(
+                    "DELETE FROM trace_audit_events WHERE tenant_id = 'tenant-a' AND audit_event_id = $1",
+                    &[&submitted_event.event_id],
+                )
+                .await
+                .expect("new-build row removed");
+        }
+        let record = read_submission_record(root, "tenant-a", rolled_back_submission)
+            .expect("record reads")
+            .expect("record exists");
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: deterministic_trace_uuid("submit-audit", &record),
+                tenant_id: "tenant-a".to_string(),
+                actor_principal_ref: record.auth_principal_ref.clone(),
+                actor_role: "contributor".to_string(),
+                action: StorageTraceAuditAction::Submit,
+                reason: Some("auth_method=static_token".to_string()),
+                request_id: None,
+                submission_id: Some(rolled_back_submission),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: None,
+                metadata: StorageTraceAuditSafeMetadata::Submission {
+                    status: storage_corpus_status(record.status),
+                    privacy_risk: serde_storage_string(&record.privacy_risk).expect("risk"),
+                },
+            })
+            .await
+            .expect("old-build store row writes");
+    }
+    // A re-POST of the submission from before the rollback: the old build
+    // wrote its `idempotent_submit` event to the file only.
+    let contributor = legacy_contributor_auth("principal-alice");
+    append_audit_event(
+        root,
+        "tenant-a",
+        TraceCommonsAuditEvent::idempotent_submit(&contributor, re_posted_submission),
+    )
+    .expect("old-build file append");
+    // And a status read the old build mirrored: the DB row first, from the
     // unchained event, then the file append chains it.
-    let reviewer = test_reviewer_auth("tenant-a");
-    let unchained = TraceCommonsAuditEvent::trace_content_read(
-        &reviewer,
-        rolled_back_submission,
-        "review_decision",
-        None,
-    );
+    let unchained = TraceCommonsAuditEvent::read(&contributor, "contributor_status", 3);
     mirror_audit_event_to_db(
         state.as_ref(),
-        &reviewer,
+        &contributor,
         &unchained,
         StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        trace_read_audit_metadata("contributor_status", 3),
     )
     .await
     .expect("old-build mirror row writes");
-    append_audit_event(temp.path(), "tenant-a", unchained).expect("old-build file append");
+    append_audit_event(root, "tenant-a", unchained).expect("old-build file append");
+    RolledBackTenant {
+        state,
+        db_head,
+        re_posted_submission,
+    }
+}
 
-    // Roll forward: the tenant is locked out, and the DB-ahead repair path
-    // has nothing to restore.
+/// Roll back to a build from before #1043, let it take traffic, then roll
+/// forward. The old build chained its events into the file but mirrored them
+/// with no chain fields, or not at all, so the new build's next append chains
+/// from a file head the DB never hashed, and is refused as stale. The
+/// repair's legacy path resumes the DB chain across that segment: dry run
+/// first, then once, idempotently, audited hash-only. After it the tenant
+/// submits again and every drill reads the tenant as whole.
+#[tokio::test]
+async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let RolledBackTenant {
+        state,
+        db_head,
+        re_posted_submission,
+    } = roll_back_and_forward(&backend, temp.path()).await;
+    let submit = submit_low_risk_trace;
+
+    // Roll forward: the tenant is locked out. The audit-chain drill says so
+    // before any audited write fails.
+    let (audit_chain, _) = run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(!audit_chain.ready, "a locked-out tenant is not ready");
+    assert!(
+        audit_chain
+            .blocking_gaps
+            .contains(&"audit_chain_file_head_not_db_head=1".to_string()),
+        "{:?}",
+        audit_chain.blocking_gaps
+    );
     let (status, _) = submit(state.clone())
         .await
         .expect_err("the first append after the roll-forward is refused as stale");
@@ -29429,9 +31098,17 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
     .await;
     assert_eq!(status, StatusCode::OK, "{dry_run}");
     assert_eq!(dry_run["divergence"], "file_ahead_through_legacy_rows");
-    assert_eq!(dry_run["legacy_segment_file_events"], 2);
-    assert_eq!(dry_run["legacy_segment_unhashed_db_rows"], 2);
-    assert_eq!(dry_run["legacy_segment_file_only_events"], 1);
+    // Two `submitted` and one `idempotent_submit` file-only; two derived-id
+    // rows and the read's unhashed mirror in the DB.
+    assert_eq!(dry_run["legacy_segment_file_events"], 4);
+    assert_eq!(dry_run["legacy_segment_unhashed_db_rows"], 3);
+    assert_eq!(dry_run["legacy_segment_file_only_events"], 3);
+    assert_eq!(dry_run["legacy_segment_resume_interrupted"], false);
+    assert!(
+        dry_run["legacy_segment_earliest_at"].is_string()
+            && dry_run["legacy_segment_latest_at"].is_string(),
+        "{dry_run}"
+    );
     assert_eq!(dry_run["chain_resumed"], false);
     assert!(dry_run["repair_audit_event_id"].is_null());
     assert_eq!(
@@ -29531,21 +31208,56 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
         .await
         .expect("the tenant submits again after the repair");
 
-    // Both drills read the chain as whole.
+    // Every drill reads the chain as whole. The file-only events inside the
+    // accepted segment -- the re-POST, which has no DB row at all -- are
+    // counted apart, not as drift.
     let (audit_chain, reconciliation) =
         run_audit_chain_and_reconciliation_drills(&state, false).await;
     assert!(audit_chain.ready, "{:?}", audit_chain.blocking_gaps);
     assert_eq!(audit_chain.db_verified, Some(true));
     assert!(audit_chain.file_verified);
+    assert_eq!(audit_chain.db_legacy_segment_resume_count, Some(1));
+    assert_eq!(audit_chain.db_legacy_segment_file_event_count, Some(4));
     for gap in &reconciliation.blocking_gaps {
         assert!(
             !gap.starts_with("db_audit_hash_chain_failures")
                 && !gap.starts_with("db_audit_canonical_projection_failures")
-                && !gap.starts_with("missing_audit_event_ids"),
+                && !gap.starts_with("missing_audit_event_ids")
+                && !gap.starts_with("audit_reader_parity")
+                && !gap.starts_with("audit_reader_sample"),
             "{:?}",
             reconciliation.blocking_gaps
         );
     }
+    assert_eq!(
+        reconciliation.db_audit_legacy_segment_file_only_event_count,
+        3
+    );
+    let Json(rollback) = rollback_drill_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceRollbackDrillRequest {
+            purpose: None,
+            record_evidence: false,
+        }),
+    )
+    .await
+    .expect("rollback drill runs");
+    for gap in &rollback.blocking_gaps {
+        assert!(
+            !gap.starts_with("missing_file_audit_events_in_db")
+                && !gap.starts_with("db_audit_events_not_in_file_fallback"),
+            "{:?}",
+            rollback.blocking_gaps
+        );
+    }
+    // The re-POST's submission is still whole: only its audit event was
+    // file-only.
+    assert!(
+        read_submission_record(temp.path(), "tenant-a", re_posted_submission)
+            .expect("record reads")
+            .is_some()
+    );
     for row in backend
         .list_trace_audit_events("tenant-a")
         .await
@@ -29556,6 +31268,174 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
             !row_text.contains("free text"),
             "free text leaked into audit row {}",
             row.audit_event_id
+        );
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+fn test_admin_auth(tenant_id: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_string(),
+        role: TokenRole::Admin,
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+async fn plan_rolled_back_tenant(backend: &PgBackend, root: &Path) -> LegacySegmentResume {
+    let file_events = read_audit_events_in_file_order(root, "tenant-a").expect("file log");
+    let db_rows = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("DB rows");
+    plan_legacy_segment_resume(&file_events, &db_rows)
+        .expect("a rollback plans")
+        .expect("there is a segment")
+}
+
+/// #1100 review M2: two repairs that overlap -- the old and the new process
+/// on one file root, each planning against the same DB head. The first
+/// resumes the chain. The second's plan is stale, and it must fail without
+/// touching the file: a resume line chained after the first's, with no DB
+/// row, would leave the file ahead of a hashed DB head with no legacy row
+/// after it, and lock the tenant out with no repair.
+#[tokio::test]
+async fn overlapping_legacy_segment_resumes_leave_the_tenant_appendable() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let RolledBackTenant { state, .. } = roll_back_and_forward(&backend, temp.path()).await;
+    let admin = test_admin_auth("tenant-a");
+    let purpose_hash = sha256_prefixed("overlap");
+    let db = state.db_mirror.clone().expect("DB mirror");
+
+    // Both plan before either writes.
+    let plan_a = plan_rolled_back_tenant(&backend, temp.path()).await;
+    let plan_b = plan_rolled_back_tenant(&backend, temp.path()).await;
+    write_legacy_segment_resume_event(&state, &admin, db.as_ref(), &plan_a, &purpose_hash)
+        .await
+        .expect("the first repair resumes the chain");
+    let file_after_first = read_all_audit_events(temp.path(), "tenant-a")
+        .expect("file log")
+        .len();
+    write_legacy_segment_resume_event(&state, &admin, db.as_ref(), &plan_b, &purpose_hash)
+        .await
+        .expect_err("the second repair planned against a DB head that has moved");
+    assert_eq!(
+        read_all_audit_events(temp.path(), "tenant-a")
+            .expect("file log")
+            .len(),
+        file_after_first,
+        "a refused resume writes nothing to the file"
+    );
+    submit_low_risk_trace(state.clone())
+        .await
+        .expect("the tenant is not locked out");
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// #1100 review Low: a resume whose file line went in but whose DB row did
+/// not commit leaves that line file-only. A rerun completes it -- writes its
+/// DB row -- instead of writing a second resume event past it, so no repair
+/// event stays file-only, and reconciliation can become ready.
+#[tokio::test]
+async fn an_interrupted_legacy_segment_resume_is_completed_on_rerun() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let RolledBackTenant { state, db_head, .. } =
+        roll_back_and_forward(&backend, temp.path()).await;
+    let admin = test_admin_auth("tenant-a");
+
+    // The file line of a resume, as a run whose commit failed left it.
+    let plan = plan_rolled_back_tenant(&backend, temp.path()).await;
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "legacy_segment_file_events".to_string(),
+        plan.file_events as u32,
+    );
+    action_counts.insert(
+        "legacy_segment_unhashed_db_rows".to_string(),
+        plan.unhashed_db_rows as u32,
+    );
+    action_counts.insert(
+        "legacy_segment_file_only_events".to_string(),
+        plan.file_only_events as u32,
+    );
+    let purpose_hash = sha256_prefixed("interrupted");
+    let mut interrupted = TraceCommonsAuditEvent::lifecycle_counts(
+        &admin,
+        Uuid::nil(),
+        AUDIT_CHAIN_REPAIR_AUDIT_KIND,
+        Some(&purpose_hash),
+        &action_counts,
+    );
+    interrupted.decision_inputs_hash = Some(db_head.clone());
+    let interrupted =
+        append_audit_event(temp.path(), "tenant-a", interrupted).expect("file line appends");
+    let file_count = read_all_audit_events(temp.path(), "tenant-a")
+        .expect("file log")
+        .len();
+
+    let (status, dry_run) =
+        post_audit_chain_repair(state.clone(), serde_json::json!({"dry_run": true})).await;
+    assert_eq!(status, StatusCode::OK, "{dry_run}");
+    assert_eq!(dry_run["divergence"], "file_ahead_through_legacy_rows");
+    assert_eq!(dry_run["legacy_segment_resume_interrupted"], true);
+    assert_eq!(dry_run["legacy_segment_file_events"], 4);
+
+    let (status, repaired) = post_audit_chain_repair(
+        state.clone(),
+        serde_json::json!({"dry_run": false, "accept_legacy_segment": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repaired}");
+    assert_eq!(repaired["chain_resumed"], true);
+    assert_eq!(
+        repaired["repair_audit_event_id"],
+        serde_json::json!(interrupted.event_id),
+        "the rerun completes the interrupted resume"
+    );
+    assert_eq!(
+        read_all_audit_events(temp.path(), "tenant-a")
+            .expect("file log")
+            .len(),
+        file_count,
+        "and writes no second resume event"
+    );
+    let row = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("DB rows")
+        .into_iter()
+        .find(|row| row.audit_event_id == interrupted.event_id)
+        .expect("the interrupted resume has its DB row now");
+    assert_eq!(row.event_hash, interrupted.event_hash);
+    assert_eq!(row.decision_inputs_hash.as_deref(), Some(db_head.as_str()));
+
+    submit_low_risk_trace(state.clone())
+        .await
+        .expect("the tenant submits again");
+    let (audit_chain, reconciliation) =
+        run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(audit_chain.ready, "{:?}", audit_chain.blocking_gaps);
+    for gap in &reconciliation.blocking_gaps {
+        assert!(
+            !gap.starts_with("missing_audit_event_ids")
+                && !gap.starts_with("db_audit_hash_chain_failures"),
+            "{:?}",
+            reconciliation.blocking_gaps
         );
     }
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -29946,6 +31826,8 @@ async fn account_withdrawal_revokes_the_file_side_records() {
         "reviewer_metadata_reader_parity",
         "analytics_reader_parity",
         "db_reader_parity_failures",
+        "missing_tombstone_submission_ids_in_db",
+        "missing_tombstone_submission_ids_in_files",
     ] {
         assert!(
             !gaps.iter().any(|gap| gap.starts_with(label)),
@@ -29953,6 +31835,452 @@ async fn account_withdrawal_revokes_the_file_side_records() {
         );
     }
 
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// POST an admin drill or repair route as `admin-token-a` and return its body.
+async fn post_admin_json(
+    state: &Arc<AppState>,
+    uri: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(AUTHORIZATION, "Bearer admin-token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("admin route responds");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body reads");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{uri}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    serde_json::from_slice(&bytes).expect("admin route response parses")
+}
+
+fn blocking_gap_labels(value: &serde_json::Value) -> Vec<String> {
+    value["blocking_gaps"]
+        .as_array()
+        .expect("blocking gaps array")
+        .iter()
+        .map(|gap| gap.as_str().expect("gap label").to_string())
+        .collect()
+}
+
+/// Submit one metadata-only trace for `tenant-a` against PostgreSQL and
+/// withdraw it through the account route. Returns the state and the
+/// withdrawn submission id.
+async fn withdraw_one_trace_through_account_route(
+    backend: &Arc<PgBackend>,
+    root: &Path,
+) -> (Arc<AppState>, Uuid) {
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        root.to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        true,
+        true,
+        true,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission mirrors to DB");
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+    let Json(withdrawn) =
+        account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(submission_id))
+            .await
+            .expect("own trace withdraws");
+    assert_eq!(withdrawn.prior_status, "accepted");
+    (state, submission_id)
+}
+
+/// An account withdrawal writes the DB tombstone row as well as the file
+/// tombstone, so the two tombstone records stay consistent and the rollback
+/// drill stays `ready`. Before this the account route wrote the file
+/// tombstone only, and the rollback drill reported
+/// `missing_file_tombstones_in_db=1` for every withdrawal.
+#[tokio::test]
+async fn account_withdrawal_keeps_file_and_db_tombstones_consistent() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (state, submission_id) =
+        withdraw_one_trace_through_account_route(&backend, temp.path()).await;
+
+    let file_tombstone = read_revocation(temp.path(), "tenant-a", submission_id)
+        .expect("file tombstone reads")
+        .expect("withdrawal writes a file tombstone");
+    let db_tombstones = backend
+        .list_trace_tombstones("tenant-a")
+        .await
+        .expect("DB tombstones list");
+    assert_eq!(
+        db_tombstones
+            .iter()
+            .map(|tombstone| tombstone.submission_id)
+            .collect::<Vec<_>>(),
+        vec![submission_id],
+        "withdrawal writes exactly one DB tombstone row"
+    );
+    let db_tombstone = &db_tombstones[0];
+    assert_eq!(db_tombstone.reason, TRACE_WITHDRAWAL_REASON);
+    assert_eq!(db_tombstone.redaction_hash, file_tombstone.redaction_hash);
+    assert_eq!(
+        db_tombstone.canonical_summary_hash,
+        file_tombstone.canonical_summary_hash
+    );
+
+    let rollback = post_admin_json(
+        &state,
+        "/v1/admin/rollback-drill",
+        serde_json::json!({ "purpose": "withdrawal rollback" }),
+    )
+    .await;
+    assert_eq!(
+        rollback["file_tombstone_count"], rollback["db_tombstone_count"],
+        "{rollback}"
+    );
+    assert_eq!(rollback["file_tombstone_count"], 1, "{rollback}");
+    assert!(
+        blocking_gap_labels(&rollback).is_empty(),
+        "withdrawal left rollback gaps: {rollback}"
+    );
+    assert_eq!(rollback["ready"], true, "{rollback}");
+
+    let reconciliation = post_admin_json(
+        &state,
+        "/v1/admin/db-reconciliation-drill",
+        serde_json::json!({ "purpose": "withdrawal reconciliation" }),
+    )
+    .await;
+    let gaps = blocking_gap_labels(&reconciliation);
+    assert!(
+        !gaps.iter().any(|gap| gap.contains("tombstone")),
+        "withdrawal left a tombstone reconciliation gap: {gaps:?}"
+    );
+
+    // Withdrawing again writes no second row.
+    let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+    let _ = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(submission_id))
+        .await
+        .expect("withdrawing twice is idempotent");
+    assert_eq!(
+        backend
+            .list_trace_tombstones("tenant-a")
+            .await
+            .expect("DB tombstones list")
+            .len(),
+        1
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Delete one tenant's DB tombstone rows through the raw test pool, to stand
+/// in for a withdrawal made by a build that wrote only the file tombstone.
+async fn delete_pg_trace_tombstones(backend: &PgBackend, tenant_id: &str) -> u64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get connection");
+    let tx = client.transaction().await.expect("start transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let deleted = tx
+        .execute(
+            "DELETE FROM trace_tombstones WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("delete tombstones");
+    tx.commit().await.expect("commit");
+    deleted
+}
+
+/// The db-reconciliation drill compares the file and DB tombstones by
+/// submission id and reports a file tombstone with no DB row as a blocking
+/// gap, as the rollback drill does. It previously reported both counts and
+/// stayed `ready` when they differed.
+#[tokio::test]
+async fn db_reconciliation_drill_reports_a_file_tombstone_missing_from_the_db() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (state, _submission_id) =
+        withdraw_one_trace_through_account_route(&backend, temp.path()).await;
+    // Stand in for a withdrawal made before the DB row was written.
+    delete_pg_trace_tombstones(backend.as_ref(), "tenant-a").await;
+
+    let reconciliation = post_admin_json(
+        &state,
+        "/v1/admin/db-reconciliation-drill",
+        serde_json::json!({ "purpose": "tombstone reconciliation" }),
+    )
+    .await;
+    assert_eq!(reconciliation["file_revocation_tombstone_count"], 1);
+    assert_eq!(reconciliation["db_tombstone_count"], 0);
+    assert_eq!(reconciliation["ready"], false, "{reconciliation}");
+    assert!(
+        blocking_gap_labels(&reconciliation)
+            .iter()
+            .any(|gap| gap == "missing_tombstone_submission_ids_in_db=1"),
+        "{reconciliation}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// A tombstone present on one side only is a blocking reconciliation gap, in
+/// either direction, as it is for the rollback drill.
+#[test]
+fn db_reconciliation_blocks_on_tombstones_present_on_one_side_only() {
+    let report = TraceDbReconciliationReport {
+        contributor_credit_reader_parity_ok: true,
+        reviewer_metadata_reader_parity_ok: true,
+        analytics_reader_parity_ok: true,
+        audit_reader_parity_ok: true,
+        audit_reader_sample_parity_ok: true,
+        replay_export_manifest_reader_parity_ok: true,
+        ..TraceDbReconciliationReport::default()
+    };
+    assert!(report.compute_blocking_gap_summaries().is_empty());
+
+    let file_only = TraceDbReconciliationReport {
+        missing_tombstone_submission_ids_in_db: vec![Uuid::new_v4()],
+        ..report
+    };
+    assert_eq!(
+        file_only.compute_blocking_gap_summaries(),
+        vec!["missing_tombstone_submission_ids_in_db=1".to_string()]
+    );
+    let db_only = TraceDbReconciliationReport {
+        missing_tombstone_submission_ids_in_db: Vec::new(),
+        missing_tombstone_submission_ids_in_files: vec![Uuid::new_v4(), Uuid::new_v4()],
+        ..file_only
+    };
+    assert_eq!(
+        db_only.compute_blocking_gap_summaries(),
+        vec!["missing_tombstone_submission_ids_in_files=2".to_string()]
+    );
+}
+
+/// The tombstone repair writes the DB row a file tombstone is missing, from
+/// the file tombstone itself: a dry run first, writing nothing, then the
+/// apply, then a second apply that finds nothing. Afterwards both drills
+/// agree on the tombstones. The fixture stands in for an account withdrawal
+/// made by a build that wrote only the file tombstone.
+#[tokio::test]
+async fn tombstone_repair_backfills_db_rows_from_file_tombstones() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (state, submission_id) =
+        withdraw_one_trace_through_account_route(&backend, temp.path()).await;
+    assert_eq!(
+        delete_pg_trace_tombstones(backend.as_ref(), "tenant-a").await,
+        1
+    );
+    let rollback = post_admin_json(
+        &state,
+        "/v1/admin/rollback-drill",
+        serde_json::json!({ "purpose": "before repair" }),
+    )
+    .await;
+    assert_eq!(
+        blocking_gap_labels(&rollback),
+        vec!["missing_file_tombstones_in_db=1".to_string()],
+        "{rollback}"
+    );
+
+    // Dry run by default: counts, writes nothing.
+    let dry_run = post_admin_json(
+        &state,
+        "/v1/admin/tombstone-repair",
+        serde_json::json!({ "purpose": "withdrawal tombstone repair" }),
+    )
+    .await;
+    assert_eq!(dry_run["dry_run"], true, "{dry_run}");
+    assert_eq!(dry_run["file_tombstone_count"], 1, "{dry_run}");
+    assert_eq!(dry_run["db_tombstone_count"], 0, "{dry_run}");
+    assert_eq!(dry_run["file_tombstones_missing_in_db"], 1, "{dry_run}");
+    assert_eq!(
+        dry_run["withdrawal_tombstones_missing_in_db"], 1,
+        "{dry_run}"
+    );
+    assert_eq!(dry_run["repairable"], 1, "{dry_run}");
+    assert_eq!(dry_run["db_tombstones_written"], 0, "{dry_run}");
+    assert!(dry_run["repair_audit_event_id"].is_null(), "{dry_run}");
+    // Hash-only: no submission id in the response.
+    assert!(
+        !dry_run.to_string().contains(&submission_id.to_string()),
+        "{dry_run}"
+    );
+    assert!(
+        backend
+            .list_trace_tombstones("tenant-a")
+            .await
+            .expect("DB tombstones list")
+            .is_empty()
+    );
+
+    let applied = post_admin_json(
+        &state,
+        "/v1/admin/tombstone-repair",
+        serde_json::json!({ "purpose": "withdrawal tombstone repair", "dry_run": false }),
+    )
+    .await;
+    assert_eq!(applied["dry_run"], false, "{applied}");
+    assert_eq!(applied["db_tombstones_written"], 1, "{applied}");
+    assert!(applied["repair_audit_event_id"].is_string(), "{applied}");
+
+    let file_tombstone = read_revocation(temp.path(), "tenant-a", submission_id)
+        .expect("file tombstone reads")
+        .expect("file tombstone exists");
+    let db_tombstones = backend
+        .list_trace_tombstones("tenant-a")
+        .await
+        .expect("DB tombstones list");
+    assert_eq!(db_tombstones.len(), 1);
+    assert_eq!(db_tombstones[0].submission_id, submission_id);
+    assert_eq!(db_tombstones[0].reason, TRACE_WITHDRAWAL_REASON);
+    assert_eq!(
+        db_tombstones[0].redaction_hash,
+        file_tombstone.redaction_hash
+    );
+    assert_eq!(
+        db_tombstones[0].canonical_summary_hash,
+        file_tombstone.canonical_summary_hash
+    );
+    assert_eq!(
+        db_tombstones[0].effective_at.timestamp_micros(),
+        file_tombstone.revoked_at.timestamp_micros()
+    );
+
+    // Idempotent: nothing left to write.
+    let again = post_admin_json(
+        &state,
+        "/v1/admin/tombstone-repair",
+        serde_json::json!({ "dry_run": false }),
+    )
+    .await;
+    assert_eq!(again["file_tombstones_missing_in_db"], 0, "{again}");
+    assert_eq!(again["db_tombstones_written"], 0, "{again}");
+
+    // Both drills agree, and the repair's own audit events kept audit parity.
+    let rollback = post_admin_json(
+        &state,
+        "/v1/admin/rollback-drill",
+        serde_json::json!({ "purpose": "after repair" }),
+    )
+    .await;
+    assert_eq!(rollback["ready"], true, "{rollback}");
+    assert_eq!(rollback["file_tombstone_count"], 1, "{rollback}");
+    assert_eq!(rollback["db_tombstone_count"], 1, "{rollback}");
+    let reconciliation = post_admin_json(
+        &state,
+        "/v1/admin/db-reconciliation-drill",
+        serde_json::json!({ "purpose": "after repair" }),
+    )
+    .await;
+    let gaps = blocking_gap_labels(&reconciliation);
+    assert!(
+        !gaps
+            .iter()
+            .any(|gap| gap.contains("tombstone") || gap.starts_with("missing_audit_event_ids")),
+        "{gaps:?}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The tombstone repair is admin-only and dry-run by default; a request
+/// with an unknown field is refused rather than read as a dry run.
+#[tokio::test]
+async fn tombstone_repair_requires_admin_and_known_fields() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        true,
+        true,
+        true,
+    );
+    for (token, body, expected) in [
+        (
+            "token-a",
+            serde_json::json!({ "dry_run": true }),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "admin-token-a",
+            serde_json::json!({ "dryrun": false }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/tombstone-repair")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("tombstone repair responds");
+        assert_eq!(response.status(), expected, "{token} {body}");
+    }
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
@@ -79574,7 +81902,7 @@ async fn logout_revokes_current_session() {
     );
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
 
     // The cookie resolves before logout.
     resolve_account_ctx(state.as_ref(), &headers)
@@ -79583,16 +81911,85 @@ async fn logout_revokes_current_session() {
 
     // Logout the current session.
     let logout_ext = account_ctx_ext(&state, &headers).await;
-    let status = account_logout_handler(State(state.clone()), logout_ext, headers.clone())
+    let response = account_logout_handler(State(state.clone()), logout_ext, headers.clone())
         .await
         .expect("logout succeeds");
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // A browser signing out also drops any pre-`__Host-` session cookie.
+    assert_clears_legacy_session_cookie(response.headers());
 
     // The same cookie now fails closed (revoked).
     let err = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect_err("revoked session must 401");
     assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The session cookie took the `__Host-` prefix, and the old name is ignored
+/// rather than accepted alongside it. A live session presented under the old
+/// name is unauthenticated, both at the resolver and through the full router,
+/// and the same value under the current name still works, so the refusal is
+/// about the name alone. PostgreSQL-backed; self-skips without a database.
+#[tokio::test]
+async fn legacy_session_cookie_name_is_not_authenticated() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    assert_ne!(LEGACY_ACCOUNT_SESSION_COOKIE, ACCOUNT_SESSION_COOKIE);
+    let legacy_headers = cookie_request_headers(LEGACY_ACCOUNT_SESSION_COOKIE, &cookie_value);
+
+    let err = resolve_account_ctx(state.as_ref(), &legacy_headers)
+        .await
+        .expect_err("the legacy cookie name must not authenticate");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    let legacy_response = {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/account/passkeys")
+                    .header(
+                        axum::http::header::COOKIE,
+                        format!("{LEGACY_ACCOUNT_SESSION_COOKIE}={cookie_value}"),
+                    )
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    };
+    assert_eq!(
+        legacy_response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the full router must refuse the legacy cookie name"
+    );
+
+    // The same value under the current name resolves: only the name differs.
+    resolve_account_ctx(
+        state.as_ref(),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value),
+    )
+    .await
+    .expect("the current cookie name resolves");
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -79620,8 +82017,8 @@ async fn revoke_all_invalidates_every_session() {
     // Two redeems for the SAME device principal -> same account, two sessions.
     let cookie_one = mint_redeem_session_cookie_value(&state, "token-a").await;
     let cookie_two = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers_one = cookie_request_headers("tc_account_session", &cookie_one);
-    let headers_two = cookie_request_headers("tc_account_session", &cookie_two);
+    let headers_one = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_one);
+    let headers_two = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_two);
 
     // Both resolve before revoke-all.
     resolve_account_ctx(state.as_ref(), &headers_one)
@@ -80050,7 +82447,7 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
     // Cookie session for token-a's account; the resolved actor ref will be
     // `account-actor:{account_id}`.
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("cookie resolves");
@@ -81136,7 +83533,7 @@ async fn near_payout_resolution_is_fail_closed() {
 //     exists for the account with the expected credential_id + passkey JSON, and
 //     the `account_passkey_enrolled` audit row is written.
 //   * `register/start` also asserted in isolation: returns WebAuthn options, sets
-//     the `tc_passkey_ceremony` cookie, stashes `CeremonyState::Registration`,
+//     the `ACCOUNT_PASSKEY_CEREMONY_COOKIE` cookie, stashes `CeremonyState::Registration`,
 //     and (after one credential is enrolled) carries that credential in the
 //     options' `exclude_credentials`.
 //   * `register/finish` ceremony-binding gate: a missing ceremony cookie and an
@@ -81252,7 +83649,7 @@ async fn passkey_register_start(
     session_cookie: &str,
 ) -> (serde_json::Value, String) {
     use axum::response::IntoResponse;
-    let headers = cookie_request_headers("tc_account_session", session_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, session_cookie);
     let ext = account_ctx_ext(state, &headers).await;
     let response = account_passkey_register_start_handler(State(state.clone()), ext)
         .await
@@ -81294,7 +83691,7 @@ async fn passkey_register_start_returns_options_and_stashes_ceremony() {
     let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
 
     let start_ext = account_ctx_ext(&state, &headers).await;
     let response = account_passkey_register_start_handler(State(state.clone()), start_ext)
@@ -81311,7 +83708,8 @@ async fn passkey_register_start_returns_options_and_stashes_ceremony() {
         .expect("ceremony cookie set")
         .to_str()
         .expect("ascii cookie");
-    assert!(set_cookie.starts_with("tc_passkey_ceremony="));
+    assert!(set_cookie.starts_with(&format!("{ACCOUNT_PASSKEY_CEREMONY_COOKIE}=")));
+    assert_set_cookies_are_host_bound(response.headers());
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("Secure"));
     assert!(set_cookie.contains("SameSite=Strict"));
@@ -81358,8 +83756,8 @@ async fn passkey_register_finish_without_ceremony_cookie_is_400() {
     let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    // Only the session cookie; no `tc_passkey_ceremony`.
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    // Only the session cookie; no `ACCOUNT_PASSKEY_CEREMONY_COOKIE`.
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
 
     let finish_ext = account_ctx_ext(&state, &headers).await;
     let err = account_passkey_register_finish_handler(
@@ -81395,7 +83793,7 @@ async fn passkey_register_finish_with_unknown_ceremony_is_400() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={session_cookie}; tc_passkey_ceremony=never-issued-ceremony-id"
+            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ACCOUNT_PASSKEY_CEREMONY_COOKIE}=never-issued-ceremony-id"
         ))
         .expect("valid cookie header"),
     );
@@ -81518,7 +83916,7 @@ async fn passkey_enroll_round_trip_persists_credential_and_audit() {
     finish_headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={session_cookie}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ceremony_pair}"
         ))
         .expect("valid cookie header"),
     );
@@ -81616,7 +84014,7 @@ async fn passkey_enroll_round_trip_persists_credential_and_audit() {
 // ceremony end-to-end with the dev-only SoftPasskey software authenticator.
 // Coverage:
 //   * Round-trip: enroll -> login/start -> SoftPasskey assertion -> login/finish
-//     mints a `tc_account_session` cookie (client_kind='passkey',
+//     mints a `ACCOUNT_SESSION_COOKIE` cookie (client_kind='passkey',
 //     auth_credential_id set) and 303s.
 //   * Sign-counter / clone defense: a stale (replayed) assertion is rejected
 //     with the uniform deny and mints no session.
@@ -81694,7 +84092,7 @@ async fn enroll_passkey_for_token(
     finish_headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={session_cookie}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ceremony_pair}"
         ))
         .expect("valid cookie header"),
     );
@@ -81786,8 +84184,12 @@ fn softpasskey_authenticate_discoverable(
 
 /// Call `login/start` and return `(challenge_json, ceremony_cookie_pair)`.
 async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, String) {
-    let response =
-        account_passkey_login_start_handler(State(state.clone()), HeaderMap::new()).await;
+    let response = account_passkey_login_start_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        axum::extract::RawQuery(None),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -81800,7 +84202,8 @@ async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, Strin
         .to_str()
         .expect("ascii cookie")
         .to_string();
-    assert!(set_cookie.starts_with("tc_passkey_ceremony="));
+    assert!(set_cookie.starts_with(&format!("{ACCOUNT_PASSKEY_CEREMONY_COOKIE}=")));
+    assert_set_cookies_are_host_bound(response.headers());
     let ceremony_pair = set_cookie
         .split(';')
         .next()
@@ -81849,19 +84252,21 @@ async fn passkey_login_cookie_value(
         StatusCode::SEE_OTHER,
         "passkey login 303s"
     );
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     response
         .headers()
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .and_then(|c| c.split(';').next())
         .and_then(|p| p.split_once('='))
         .map(|(_, v)| v.to_string())
         .expect("passkey session cookie value")
 }
 
-/// Full enroll -> discoverable login round trip: a `tc_account_session` cookie is
+/// Full enroll -> discoverable login round trip: a `ACCOUNT_SESSION_COOKIE` cookie is
 /// minted with `client_kind='passkey'` and `auth_credential_id` set, and the
 /// response is a 303 to the account view.
 #[tokio::test]
@@ -81917,7 +84322,7 @@ async fn passkey_login_round_trip_mints_passkey_session() {
         .collect::<Vec<_>>();
     let session_set = set_cookie
         .iter()
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .expect("session cookie set on login");
     assert!(session_set.contains("HttpOnly"));
     assert!(session_set.contains("Secure"));
@@ -81937,7 +84342,7 @@ async fn passkey_login_round_trip_mints_passkey_session() {
         "auth_credential_id records the asserting credential"
     );
 
-    let headers = cookie_request_headers("tc_account_session", value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("passkey session cookie resolves");
@@ -82075,12 +84480,12 @@ async fn passkey_login_binds_only_to_owning_account() {
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .and_then(|c| c.split(';').next())
         .and_then(|p| p.split_once('='))
         .map(|(_, v)| v.to_string())
         .expect("session cookie value");
-    let headers = cookie_request_headers("tc_account_session", &value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("session resolves");
@@ -82408,7 +84813,7 @@ async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .and_then(|c| c.split(';').next())
         .and_then(|p| p.split_once('='))
         .map(|(_, v)| v.to_string())
@@ -82417,7 +84822,7 @@ async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
     // (3) Cookie-session list flags cred1 as this_device, cred2 false.
     let cookie_list = list_passkeys(
         &state,
-        cookie_request_headers("tc_account_session", &passkey_cookie),
+        cookie_request_headers(ACCOUNT_SESSION_COOKIE, &passkey_cookie),
     )
     .await;
     assert_eq!(cookie_list.len(), 2);
@@ -82517,7 +84922,7 @@ async fn passkey_remove_soft_deletes_and_404s_unknown() {
     // must run from a strong (passkey-login) session. Log in with cred1.
     let strong_cookie = passkey_login_cookie_value(&state, &mut a1, &cred1, account_id).await;
     let (_a2, cred2) = enroll_passkey_for_token(&state, &strong_cookie).await;
-    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     // Remove cred1 from the STRONG session: removed=true, one remaining.
     let remove_ext = account_ctx_ext(&state, &strong_headers).await;
@@ -82732,13 +85137,14 @@ async fn near_enroll_start(
     session_cookie: &str,
 ) -> (String, [u8; 32], String, String) {
     use axum::response::IntoResponse;
-    let headers = cookie_request_headers("tc_account_session", session_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, session_cookie);
     let ext = account_ctx_ext(state, &headers).await;
     let response = account_near_enroll_start_handler(State(state.clone()), ext)
         .await
         .expect("enroll/start succeeds")
         .into_response();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_set_cookies_are_host_bound(response.headers());
 
     let set_cookie = response
         .headers()
@@ -82838,7 +85244,7 @@ async fn near_enroll_start_returns_challenge_and_stashes_ceremony() {
     assert_eq!(message, "Trace Commons account link");
     assert_eq!(recipient, NEAR_TEST_RECIPIENT);
     assert_ne!(nonce, [0u8; 32], "nonce is a real CSPRNG value");
-    assert!(ceremony_pair.starts_with("tc_near_ceremony="));
+    assert!(ceremony_pair.starts_with(&format!("{ACCOUNT_NEAR_CEREMONY_COOKIE}=")));
 
     // The ceremony state was stashed under the cookie's id as a NearChallenge.
     let (_name, ceremony_id) = ceremony_pair.split_once('=').expect("name=value");
@@ -82879,7 +85285,7 @@ async fn near_enroll_start_fails_closed_without_config() {
     );
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let ext = account_ctx_ext(&state, &headers).await;
     let err = account_near_enroll_start_handler(State(state.clone()), ext)
         .await
@@ -82919,7 +85325,7 @@ async fn near_enroll_finish_persists_identity_when_binding_holds() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={cookie_value}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={cookie_value}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -82975,7 +85381,7 @@ async fn near_enroll_finish_rejects_when_key_not_full_access() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={cookie_value}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={cookie_value}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -83030,7 +85436,7 @@ async fn near_enroll_finish_fails_closed_on_rpc_error() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={cookie_value}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={cookie_value}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -83085,7 +85491,7 @@ async fn near_enroll_finish_rejects_bad_signature() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={cookie_value}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={cookie_value}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -83124,8 +85530,8 @@ async fn near_enroll_finish_without_ceremony_is_400() {
     let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    // Only the session cookie; no tc_near_ceremony.
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    // Only the session cookie; no `ACCOUNT_NEAR_CEREMONY_COOKIE`.
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let ext = account_ctx_ext(&state, &headers).await;
 
     let kp = near_test_keypair();
@@ -83188,7 +85594,8 @@ async fn near_login_start(state: &Arc<AppState>) -> (String, [u8; 32], String, S
         .to_str()
         .expect("ascii cookie")
         .to_string();
-    assert!(set_cookie.starts_with("tc_near_ceremony="));
+    assert!(set_cookie.starts_with(&format!("{ACCOUNT_NEAR_CEREMONY_COOKIE}=")));
+    assert_set_cookies_are_host_bound(response.headers());
     let ceremony_pair = set_cookie
         .split(';')
         .next()
@@ -83232,7 +85639,7 @@ async fn seed_near_login_identity(
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={session_cookie}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -83274,7 +85681,7 @@ async fn deny_status_and_body(response: axum::response::Response) -> (StatusCode
 }
 
 /// Round-trip: enroll a NEAR identity, then `login/start` -> sign -> `login/finish`
-/// mints a `tc_account_session` cookie with `client_kind='near'` and
+/// mints a `ACCOUNT_SESSION_COOKIE` cookie with `client_kind='near'` and
 /// `auth_credential_id` = the public key, and 303s to the account view.
 #[tokio::test]
 async fn near_login_round_trip_mints_near_session() {
@@ -83322,10 +85729,12 @@ async fn near_login_round_trip_mints_near_session() {
         StatusCode::SEE_OTHER,
         "login/finish 303s on success"
     );
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     let set_cookies = all_set_cookies(&response);
     let session_set = set_cookies
         .iter()
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .expect("session cookie set on login");
     assert!(session_set.contains("HttpOnly"));
     assert!(session_set.contains("Secure"));
@@ -83346,7 +85755,7 @@ async fn near_login_round_trip_mints_near_session() {
     );
 
     // The minted cookie resolves to the SAME tenant + account.
-    let headers = cookie_request_headers("tc_account_session", value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("near session cookie resolves");
@@ -83520,7 +85929,7 @@ async fn near_login_rejects_replayed_ceremony() {
     assert!(
         !replay_set
             .iter()
-            .any(|c| c.starts_with("tc_account_session=")),
+            .any(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}="))),
         "a refused replay mints no session cookie"
     );
 
@@ -83579,7 +85988,7 @@ async fn near_login_rejects_enroll_message_signature() {
     assert!(
         !all_set_cookies(&response)
             .iter()
-            .any(|c| c.starts_with("tc_account_session=")),
+            .any(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}="))),
         "the refused enroll-replay mints no session cookie"
     );
 
@@ -83642,7 +86051,7 @@ async fn near_login_binds_session_to_owning_tenant() {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let cookie = all_set_cookies(&response)
         .into_iter()
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .expect("session cookie");
     let value = cookie
         .split(';')
@@ -83651,7 +86060,7 @@ async fn near_login_binds_session_to_owning_tenant() {
         .expect("name=value")
         .1
         .to_string();
-    let resolve_headers = cookie_request_headers("tc_account_session", &value);
+    let resolve_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &value);
     let ctx = resolve_account_ctx(state.as_ref(), &resolve_headers)
         .await
         .expect("session resolves");
@@ -83724,7 +86133,7 @@ async fn near_login_rejects_malformed_public_key_shape() {
         assert!(
             !all_set_cookies(&response)
                 .iter()
-                .any(|c| c.starts_with("tc_account_session=")),
+                .any(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}="))),
             "the refused malformed-key attempt mints no session cookie"
         );
     }
@@ -83809,7 +86218,7 @@ async fn gate_allows_first_authenticator_from_weak_session() {
     let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
 
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &weak_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // passkey register/start from the weak session -> 200 (carve-out).
     let ext = account_ctx_ext(&state, &headers).await;
@@ -83854,7 +86263,7 @@ async fn gate_blocks_second_authenticator_from_weak_session() {
     // Enroll the first passkey (carve-out) -> account now holds 1 strong.
     let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
 
-    let headers = cookie_request_headers("tc_account_session", &weak_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // passkey register/start from the weak session -> 403.
     let ext = account_ctx_ext(&state, &headers).await;
@@ -83903,7 +86312,7 @@ async fn gate_allows_any_authenticator_from_strong_session() {
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     // Log in with the passkey -> STRONG (`client_kind='passkey'`) session cookie.
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
-    let headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     use axum::response::IntoResponse;
     // passkey register/start from the strong session -> 200.
@@ -83956,7 +86365,7 @@ async fn gate_blocks_weak_remove_until_back_to_bootstrap() {
     .await;
     // Enroll the only passkey (carve-out) -> 1 strong.
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-    let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
+    let weak_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // Removing it from the WEAK session is blocked: 1 strong still present.
     let remove_ext = account_ctx_ext(&state, &weak_headers).await;
@@ -83974,7 +86383,7 @@ async fn gate_blocks_weak_remove_until_back_to_bootstrap() {
     // From a STRONG (passkey-login) session the remove is allowed; this returns the
     // account to zero strong authenticators.
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
-    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
     let remove_ext = account_ctx_ext(&state, &strong_headers).await;
     let Json(out) =
         account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred.clone()))
@@ -84111,7 +86520,7 @@ async fn list_near_identities(
 
 /// Drive `near/login/start` -> sign -> `near/login/finish` for an already-enrolled
 /// `(kp, public_key)` under `near_account_id`, returning the minted
-/// `tc_account_session` cookie VALUE (a `client_kind='near'` strong session whose
+/// `ACCOUNT_SESSION_COOKIE` cookie VALUE (a `client_kind='near'` strong session whose
 /// `auth_credential_id` is `public_key`).
 async fn near_login_cookie_value(
     state: &Arc<AppState>,
@@ -84139,7 +86548,7 @@ async fn near_login_cookie_value(
     assert_eq!(response.status(), StatusCode::SEE_OTHER, "near login 303s");
     all_set_cookies(&response)
         .iter()
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .and_then(|c| c.split(';').next())
         .and_then(|p| p.split_once('='))
         .map(|(_, v)| v.to_string())
@@ -84265,7 +86674,7 @@ async fn merge_start_then_confirm_folds_device_b_into_a() {
     .await;
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
-    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     // Device B: its own account + a webauthn credential + an UNREDEEMED login-link.
     let (merge_code, account_b) =
@@ -84374,7 +86783,7 @@ async fn merge_confirm_is_blocked_from_weak_session() {
     // Enroll a passkey so a strong authenticator EXISTS (arming the gate); the
     // account id is not needed since enrollment binds to the session cookie.
     let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-    let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
+    let weak_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // Device B with an unredeemed login-link.
     let (merge_code, account_b) =
@@ -84453,7 +86862,7 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
     .await;
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
-    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     // (1) start with a bogus code -> 400 (no matching login-link).
     let ext = account_ctx_ext(&state, &strong_headers).await;
@@ -84492,7 +86901,7 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
     .await;
     let (mut c_auth, c_cred) = enroll_passkey_for_token(&state, &c_weak).await;
     let c_strong = passkey_login_cookie_value(&state, &mut c_auth, &c_cred, account_c).await;
-    let c_headers = cookie_request_headers("tc_account_session", &c_strong);
+    let c_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &c_strong);
 
     let (merge_code, _account_b) =
         mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
@@ -84566,7 +86975,7 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
 
     // (2) NEAR-login with identity #1 -> that exact key flags this_session=true.
     let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
-    let near_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let near_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &near_cookie);
     let near_listed = list_near_identities(&state, near_headers).await;
     assert_eq!(near_listed.len(), 2);
     let flagged: Vec<&str> = near_listed
@@ -84585,7 +86994,7 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
     // then log in via passkey.
     let (mut auth, cred) = enroll_passkey_for_token(&state, &near_cookie).await;
     let passkey_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
-    let passkey_headers = cookie_request_headers("tc_account_session", &passkey_cookie);
+    let passkey_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &passkey_cookie);
     let passkey_listed = list_near_identities(&state, passkey_headers).await;
     assert!(
         passkey_listed.iter().all(|(_, _, _, this, _)| !*this),
@@ -84694,7 +87103,7 @@ async fn near_identity_remove_endpoint_gated_and_soft_deletes() {
     // From a STRONG (NEAR-login) session: remove identity #2 -> removed, one strong
     // (identity #1) remains.
     let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
-    let strong_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &near_cookie);
     let strong_ext = account_ctx_ext(&state, &strong_headers).await;
     let Json(body) = account_near_identity_remove_handler(
         State(state.clone()),
@@ -84905,7 +87314,7 @@ async fn near_payout_endpoint_designates_clears_and_flips_prior() {
         .expect("insert second identity");
 
     let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
-    let strong_headers = || cookie_request_headers("tc_account_session", &near_cookie);
+    let strong_headers = || cookie_request_headers(ACCOUNT_SESSION_COOKIE, &near_cookie);
 
     // Nothing designated initially.
     let listed =
@@ -85037,7 +87446,7 @@ async fn near_payout_endpoint_unknown_and_cross_account_404() {
         seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
             .await;
     let near_cookie = near_login_cookie_value(&state, &kp_a, &pk_a, "alice.testnet").await;
-    let strong_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &near_cookie);
 
     // Unknown key from A's strong session -> uniform 404.
     let err = payout_patch(&state, strong_headers, "ed25519:does-not-exist", true)
@@ -92678,10 +95087,18 @@ struct NativeTestSession {
 
 /// In-memory `Database` covering native sign-in plus the owned session-detail
 /// read. Everything else keeps the trait's fail-closed default.
+///
+/// The unbound-gate tests (Z2 S1) also set the binding state every session
+/// validates with (`None` is legacy), make the binding read fail, force a
+/// rotation, and read back the account audit rows.
 #[derive(Default)]
 struct NativeAuthTestDb {
     sessions: std::sync::Mutex<Vec<NativeTestSession>>,
     submissions: std::sync::Mutex<Vec<StorageTraceSubmissionRecord>>,
+    binding: std::sync::Mutex<Option<trace_commons_server::account_binding::AccountBindingState>>,
+    binding_read_fails: std::sync::atomic::AtomicBool,
+    rotate_to: std::sync::Mutex<Option<String>>,
+    account_audits: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
 }
 
 impl NativeAuthTestDb {
@@ -92772,8 +95189,11 @@ impl Database for NativeAuthTestDb {
         token_hash: &str,
     ) -> Result<Option<trace_commons_server::db::ValidatedSession>, DatabaseError> {
         let now = Utc::now();
+        let binding = (*self.binding.lock().unwrap())
+            .unwrap_or(trace_commons_server::account_binding::AccountBindingState::Legacy);
+        let rotated_secret = self.rotate_to.lock().unwrap().clone();
         let sessions = self.sessions.lock().unwrap();
-        Ok(sessions
+        let session = sessions
             .iter()
             .find(|s| {
                 s.tenant_id == tenant_id
@@ -92785,8 +95205,22 @@ impl Database for NativeAuthTestDb {
                 account_id: s.account_id,
                 auth_credential_id: None,
                 client_kind: s.client_kind.clone(),
-                rotated_secret: None,
-            }))
+                rotated_secret: rotated_secret.clone(),
+                binding,
+                expires_at: s.expires_at,
+            });
+        // The binding state is read in the same query as the session, so a
+        // failure is a failure of the whole validation.
+        if session.is_some()
+            && self
+                .binding_read_fails
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(DatabaseError::Serialization(
+                "account_binding_state_unknown".into(),
+            ));
+        }
+        Ok(session)
     }
 
     async fn expand_account_principals(
@@ -92834,11 +95268,16 @@ impl Database for NativeAuthTestDb {
     async fn append_account_audit(
         &self,
         _tenant_id: &str,
-        _action: &str,
-        _actor_ref: &str,
+        action: &str,
+        actor_ref: &str,
         _outcome: &str,
-        _metadata: serde_json::Value,
+        metadata: serde_json::Value,
     ) -> Result<(), DatabaseError> {
+        self.account_audits.lock().unwrap().push((
+            action.to_string(),
+            actor_ref.to_string(),
+            metadata,
+        ));
         Ok(())
     }
 
@@ -94610,7 +97049,7 @@ fn every_driver_registers_a_distinct_name() {
     }
     assert_eq!(
         seen.len(),
-        12,
+        13,
         "every spawned driver loop must register; got {seen:?}"
     );
 }
@@ -99782,6 +102221,10 @@ async fn near_provisioning_default_disabled_returns_uniform_denial() {
 #[path = "admission_pg_tests.rs"]
 mod admission_pg_tests;
 
+/// The migrated PostgreSQL the two ignored ceremony suites below share.
+#[path = "migrated_pg_fixture.rs"]
+mod migrated_pg_fixture;
+
 /// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
 ///
 /// **The module name is load-bearing.** The `postgres-suites` job selects this
@@ -99796,6 +102239,15 @@ mod nearai_ceremony_pg_tests;
 /// CI selects this ignored module explicitly with a fresh database.
 #[path = "wallet_v2_pg_tests.rs"]
 mod wallet_v2_pg_tests;
+
+/// Spec section 3D acceptance: a receipt through the real HTTP router, auth,
+/// and worker, surviving a crash and restart. Nested here (not declared
+/// directly in `trace-commons-ingest.rs`) for the same reason as
+/// `admission_pg_tests` and `nearai_ceremony_pg_tests` above: it reuses this
+/// module's private test-state and fixture helpers, which are visible only
+/// to `tests`'s descendants.
+#[path = "pipeline_http_pg_tests.rs"]
+mod pipeline_http_pg_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two
@@ -100178,4 +102630,61 @@ async fn account_trace_withdraw_reports_forfeited_unsettled_credit() {
         !retry.credit_retained,
         "a retry reports the same forfeiture"
     );
+}
+
+// -- Device-authenticated settlement posture (#1118 Z3a) --------------------
+
+/// `GET /v1/contributors/me/settlement-posture` reports the live settlement
+/// mode label to a device bearer, and the label matches what
+/// `GET /v1/account/credit-summary` reports for the same deployment, because
+/// both go through `credit_numbers::credit_posture`. `Disabled` is the
+/// fail-safe and must read as `disabled`, not as an absence.
+#[tokio::test]
+async fn settlement_posture_handler_reports_each_mode_to_a_device_bearer() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    for (mode, label) in [
+        (NearSettlementMode::Http, "http"),
+        (NearSettlementMode::DryRun, "dry_run"),
+        (NearSettlementMode::Disabled, "disabled"),
+    ] {
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_settlement_mode = mode;
+
+        let Json(posture) =
+            settlement_posture_handler(State(state.clone()), auth_headers("token-a"))
+                .await
+                .expect("device bearer reads the posture");
+
+        assert_eq!(posture.settlement, label);
+        assert!(!posture.graded, "the pipeline is shadow-mode");
+        assert_eq!(
+            posture,
+            trace_commons_server::credit_numbers::credit_posture(
+                state.near_settlement_mode_label(),
+                false
+            ),
+            "the account route derives its posture from the same function"
+        );
+        let body = serde_json::to_string(&posture).expect("posture serializes");
+        assert!(
+            !body.contains("://"),
+            "label-only: no URL in the body {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn settlement_posture_handler_refuses_without_a_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let err = settlement_posture_handler(State(state.clone()), HeaderMap::new())
+        .await
+        .expect_err("no bearer is refused");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    let err = settlement_posture_handler(State(state), auth_headers("not-a-token"))
+        .await
+        .expect_err("an unknown bearer is refused");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
 }

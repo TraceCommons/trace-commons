@@ -31,28 +31,18 @@ pub struct CurrencyBlock {
     pub earned_this_period: String,
 }
 
-/// What this deployment is actually doing with credit.
-#[derive(Debug, Clone, Serialize)]
-pub struct CreditPosture {
-    /// The live value of `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`.
-    pub settlement: String,
-    /// Whether quality, duplicate penalty and the per-contributor cap are
-    /// authoritative. False while that pipeline is shadow-mode, which is what
-    /// lets a client say a figure may still be revised.
-    pub graded: bool,
-    /// The same sentence the submission receipt gives, so two surfaces cannot
-    /// describe one deployment differently.
-    pub explanation: String,
-}
+/// The wire type lives in the permissive protocol crate so the contributor
+/// daemon can deserialize it; the derivation stays here, in `credit_posture`.
+pub use trace_commons_protocol::trace_contribution::CreditPosture;
 
-impl CreditPosture {
-    #[must_use]
-    pub fn current(settlement_mode: &str, graded: bool) -> Self {
-        Self {
-            settlement: settlement_mode.to_string(),
-            graded,
-            explanation: settlement_posture_sentence(settlement_mode, graded),
-        }
+/// The one place a deployment's posture is derived from its settlement mode
+/// label. Every route that reports posture calls this.
+#[must_use]
+pub fn credit_posture(settlement_mode: &str, graded: bool) -> CreditPosture {
+    CreditPosture {
+        settlement: settlement_mode.to_string(),
+        graded,
+        explanation: settlement_posture_sentence(settlement_mode, graded),
     }
 }
 
@@ -195,7 +185,7 @@ mod tests {
 
     #[test]
     fn posture_reports_ungraded_while_the_pipeline_is_shadow_mode() {
-        let posture = CreditPosture::current("disabled", false);
+        let posture = credit_posture("disabled", false);
         assert_eq!(posture.settlement, "disabled");
         assert!(!posture.graded);
         assert!(

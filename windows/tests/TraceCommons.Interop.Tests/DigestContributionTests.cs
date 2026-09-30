@@ -35,25 +35,18 @@ public class DigestContributionTests
             DigestText.ContributionLine(1, new[] { "api" }, 0));
     }
 
-    [Fact]
-    public void PluralNamesTheProjects()
-    {
-        Assert.Equal(
-            "4 sessions contributed from api and web.",
-            DigestText.ContributionLine(4, new[] { "api", "web" }, 0));
-    }
-
     /// <summary>
-    /// Three names, then a count -- the same rule the daemon's
-    /// <c>contribution_text</c>, the Linux shell's <c>contribution_body</c>,
-    /// and macOS's <c>DigestCopy.joined</c> follow. A contributor with eight
-    /// armed projects should read the same one-line summary here as there.
+    /// More than one project names none -- no partial list, no "and N more"
+    /// -- the same rule the daemon, Linux and macOS follow (K9, #1118).
     /// </summary>
     [Fact]
-    public void ManyProjectsSummariseAfterThree()
+    public void MoreThanOneProjectNamesNone()
     {
         Assert.Equal(
-            "9 sessions contributed from api, web, cli and 5 more.",
+            "4 sessions contributed.",
+            DigestText.ContributionLine(4, new[] { "api", "web" }, 0));
+        Assert.Equal(
+            "9 sessions contributed.",
             DigestText.ContributionLine(
                 9,
                 new[] { "api", "web", "cli", "docs", "infra", "mobile", "sdk", "tools" },
@@ -61,20 +54,23 @@ public class DigestContributionTests
     }
 
     /// <summary>
-    /// The boundary: exactly three still reads as a list, not "and 0 more".
+    /// The design's Flow 2 and Flow 3 evening-digest examples, verbatim --
+    /// the same two the daemon, Linux and macOS pin.
     /// </summary>
     [Fact]
-    public void ExactlyThreeProjectsStillReadAsAList()
+    public void MatchesTheDesignExamples()
     {
         Assert.Equal(
-            "3 sessions contributed from api, web and cli.",
-            DigestText.ContributionLine(3, new[] { "api", "web", "cli" }, 0));
+            "1 session contributed from orchard-api. 6.0 credit pending.",
+            DigestText.ContributionLine(1, new[] { "orchard-api" }, 6.0));
+        Assert.Equal(
+            "2 sessions contributed. 10.5 credit pending.",
+            DigestText.ContributionLine(2, new[] { "orchard-api", "portfolio" }, 10.5));
     }
 
     /// <summary>
-    /// The cap applies to the waiting half too. <c>Body</c> and
-    /// <c>ContributionLine</c> share <c>JoinProjects</c>, and the daemon caps
-    /// in both <c>digest_text</c> and <c>contribution_text</c>.
+    /// The waiting half still names up to three, then a count, as the
+    /// daemon's <c>digest_text</c> does.
     /// </summary>
     [Fact]
     public void TheWaitingHalfSummarisesAfterThreeToo()
@@ -88,18 +84,15 @@ public class DigestContributionTests
     }
 
     /// <summary>
-    /// De-duplication happens before the cap, so eight entries from four
-    /// distinct projects name all four rather than reporting phantom extras.
+    /// Duplicates collapse before counting, so repeated entries from one
+    /// project still name it.
     /// </summary>
     [Fact]
-    public void DuplicateLabelsAreCollapsedBeforeTheCap()
+    public void DuplicateLabelsAreCollapsedBeforeCounting()
     {
         Assert.Equal(
-            "8 sessions contributed from api, web, cli and 1 more.",
-            DigestText.ContributionLine(
-                8,
-                new[] { "api", "api", "web", "web", "cli", "cli", "docs", "docs" },
-                0));
+            "8 sessions contributed from api.",
+            DigestText.ContributionLine(8, new[] { "api", "api", " " }, 0));
     }
 
     /// <summary>

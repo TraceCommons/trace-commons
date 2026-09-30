@@ -366,11 +366,14 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     public string State => string.IsNullOrWhiteSpace(_entry.State) ? "—" : _entry.State!;
 
     /// <summary>
-    /// Why the entry is in its state. Already written to be read by a
-    /// contributor, so it is shown verbatim rather than remapped here -- a
-    /// second vocabulary in the UI would drift from the daemon's.
+    /// Why the entry is in its state, in words. The daemon sends a wire label
+    /// (<c>privacy-filter-transient</c>, say), not a sentence, so it goes
+    /// through the shared queue outcome copy that the history view and the
+    /// other shells use -- one vocabulary, drawn from the core, and never the
+    /// raw label.
     /// </summary>
-    public string? ReasonLabel => _entry.ReasonLabel;
+    public string? ReasonLabel =>
+        HasReason ? QueueOutcomeSurface.Line(_entry.ReasonLabel) : null;
 
     public bool HasReason => !string.IsNullOrWhiteSpace(_entry.ReasonLabel);
 

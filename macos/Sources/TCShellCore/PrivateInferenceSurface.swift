@@ -119,6 +119,11 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// Forget is offered -- `handle_forget`'s `revoked: false` in words, and
     /// a button labelled only "Forget" reads as a revocation it is not.
     public let credentialForgetExplains: String
+    /// The button behind `migration_available`, and the sentence drawn beside
+    /// it: moving copies the sign-in out of the login keychain, and macOS may
+    /// ask for the login password once to allow that.
+    public let credentialMigrate: String
+    public let credentialMigrateExplains: String
     public let credentialAbsent: String
     public let credentialObtaining: String
     public let credentialFailed: String
@@ -316,6 +321,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case credentialCancel = "credential_cancel"
         case credentialForget = "credential_forget"
         case credentialForgetExplains = "credential_forget_explains"
+        case credentialMigrate = "credential_migrate"
+        case credentialMigrateExplains = "credential_migrate_explains"
         case credentialAbsent = "credential_absent"
         case credentialObtaining = "credential_obtaining"
         case credentialFailed = "credential_failed"

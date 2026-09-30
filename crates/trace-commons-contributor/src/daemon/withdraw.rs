@@ -462,6 +462,8 @@ mod tests {
                 explanations: Vec::new(),
                 last_refreshed_at: None,
                 withdrawn_at: None,
+                approved_unattended: None,
+                approved_verdict: None,
             })
             .collect();
         HistoryCache::save(&s.store, &records).unwrap();

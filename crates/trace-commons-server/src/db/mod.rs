@@ -20,6 +20,10 @@ pub mod postgres_inference_connection;
 mod trace_corpus_common;
 mod trace_corpus_pg;
 
+pub(crate) use trace_corpus_pg::{
+    insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
+};
+
 pub use postgres::InviteRedemption;
 
 /// Result of redeeming a durable invite into an authenticated account.
@@ -1114,6 +1118,43 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Store a NEAR AI bind ceremony (Z2 S3) in the provisioning ceremony
+    /// table. Fail-closed by default.
+    async fn store_near_ai_bind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+        _pending: &crate::account_onboarding::NearAiBindPending,
+        _expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
+    /// Consume a NEAR AI bind ceremony. Single use; a row that is not a bind
+    /// ceremony (a provisioning or wallet row) is consumed and refused.
+    async fn take_near_ai_bind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
+    /// Bind a verified NEAR AI login to the unbound passkey account
+    /// `(tenant_id, account_id)` (Z2 S3), or, when the login's anchor already
+    /// belongs to another account, provision that account exactly as
+    /// [`Self::provision_near_ai_login`] would and close the passkey account.
+    /// The default refuses.
+    async fn bind_near_ai_login(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _login: &crate::near_ai_login::VerifiedNearAiLogin,
+        _device_public_key: &[u8; 32],
+        _session: NewSession<'_>,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
     async fn resolve_near_public_key_tenant(
         &self,
         _public_key: &str,
@@ -1389,7 +1430,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// for an unknown / already-revoked / other-account credential. Tenant- +
     /// account-scoped under forced RLS so a caller can never revoke a credential
     /// they do not own; the remaining-count lets the caller refuse to remove the
-    /// last passkey.
+    /// last passkey. When a credential is removed, every live session it
+    /// minted (`auth_credential_id` = that credential, browser or native) is
+    /// revoked in the same transaction. See
+    /// [`Database::revoke_account_credential_sparing_session`], which the
+    /// removal route calls to keep the caller's own session.
     async fn revoke_account_credential(
         &self,
         _tenant_id: &str,
@@ -1398,6 +1443,22 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<RevokeCredentialResult, DatabaseError> {
         Err(DatabaseError::Pool(
             "revoke_account_credential not implemented".to_string(),
+        ))
+    }
+
+    /// [`Database::revoke_account_credential`], sparing one session: the one
+    /// whose current or within-grace previous `token_hash` is
+    /// `caller_token_hash` (the session making the removal request). `None`
+    /// spares nothing. Sessions with no recorded credential are never touched.
+    async fn revoke_account_credential_sparing_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _credential_id: &str,
+        _caller_token_hash: Option<&str>,
+    ) -> Result<RevokeCredentialResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_account_credential_sparing_session not implemented".to_string(),
         ))
     }
 
@@ -1509,6 +1570,46 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<i64, DatabaseError> {
         Err(DatabaseError::Pool(
             "count_active_strong_authenticators not implemented".to_string(),
+        ))
+    }
+
+    /// Count passkey-origin accounts that hold a slot under the unbound-account
+    /// ceiling, in EVERY tenant (Z2 S2): `unbound` ones, and since V102
+    /// `closed` ones the reaper has not yet removed, so create-then-close
+    /// cycles cannot escape the ceiling. A cross-tenant read, so the
+    /// PostgreSQL backend answers through the V98 SECURITY DEFINER function,
+    /// never through a runtime-pool query. The default refuses: a backend that
+    /// cannot count cannot enforce the ceiling, so creation stays closed.
+    async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "unbound_passkey_account_count_unconfigured".to_string(),
+        ))
+    }
+
+    /// Create a passkey-origin account from a verified native `create/finish`
+    /// (Z2 S2): in ONE transaction under the freshly minted tenant, re-check
+    /// the unbound-account ceiling, then write the tenant, the account and its
+    /// `unbound` binding row, the credential, a native session and the audit
+    /// row. Either every row is written or none is. The default refuses.
+    async fn create_passkey_origin_account(
+        &self,
+        _account: NewPasskeyOriginAccount<'_>,
+    ) -> Result<PasskeyOriginAccountOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "create_passkey_origin_account not implemented".to_string(),
+        ))
+    }
+
+    /// The binding state of one account, read under its tenant's RLS. No
+    /// binding row is `Legacy`. Used by native passkey sign-in to report
+    /// `binding_state`; the unbound gate reads it inside `validate_session`.
+    async fn account_binding_state(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<crate::account_binding::AccountBindingState, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_binding_state not implemented".to_string(),
         ))
     }
 
@@ -1892,6 +1993,16 @@ pub struct ValidatedSession {
     /// matched the previous token within grace (multi-tab) does NOT re-rotate and
     /// leaves this `None`.
     pub rotated_secret: Option<String>,
+    /// The account's binding state (Z2 S1), read in the SAME query that
+    /// validated the session, so the unbound gate costs no second round trip
+    /// and cannot see a different account than the session did. No binding row
+    /// is [`AccountBindingState::Legacy`](crate::account_binding::AccountBindingState::Legacy),
+    /// which is never gated.
+    pub binding: crate::account_binding::AccountBindingState,
+    /// The session's absolute expiry, as stored. Rotation-on-use never moves
+    /// it; the auth middleware caps a rotated cookie's Max-Age at what is left
+    /// of it, so a rotated cookie never outlives its row.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A registered passkey resolved for the LOGIN (assertion) path. Carries only
@@ -1924,6 +2035,38 @@ pub struct AccountCredentialSummary {
 pub struct RevokeCredentialResult {
     pub removed: bool,
     pub remaining: i64,
+}
+
+/// Everything native passkey `create/finish` writes for a new passkey-origin
+/// account (Z2 S2). Every value is server-minted or came out of a verified
+/// attestation: the tenant from the OS RNG, the account id from `start`, the
+/// credential from `finish_passkey_registration`. Nothing here is client
+/// supplied except the optional label, which the start handler bounded.
+#[derive(Debug)]
+pub struct NewPasskeyOriginAccount<'a> {
+    pub tenant_id: &'a str,
+    pub account_id: uuid::Uuid,
+    /// Canonical base64url credential id; globally UNIQUE (V32), so a replayed
+    /// attestation fails the insert and rolls the whole account back.
+    pub credential_id: &'a str,
+    /// The serialized webauthn-rs `Passkey`.
+    pub passkey: &'a serde_json::Value,
+    pub label: Option<&'a str>,
+    /// The weak native session minted with the account. Its `client_kind`
+    /// must be `native`; the backend refuses anything else.
+    pub session: NewSession<'a>,
+    /// The unbound-account ceiling, re-checked inside the transaction.
+    pub ceiling: i64,
+}
+
+/// What `create_passkey_origin_account` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyOriginAccountOutcome {
+    /// Every row was written and committed.
+    Created,
+    /// The ceiling was reached when re-checked inside the transaction; nothing
+    /// was written.
+    CeilingReached,
 }
 
 /// A registered NEAR identity resolved for the LOGIN (wallet-assertion) path.
