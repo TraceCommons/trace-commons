@@ -79,11 +79,11 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// non-production-qualified dependency (the Reference scorer, the in-memory
 /// `IsolatedPipelineIndex`, `RecordingSettlementAdapter`, or the like) refuses
 /// startup with `pipeline_runtime_dependencies_not_production_qualified`
-/// whenever `tenants_routed` or `production_required` is true -- tenants
-/// routed to the pipeline is exactly the condition under which real receipts
-/// would otherwise be scored and settled by test doubles. This holds whether
-/// or not `production_required` itself is set; `tenants_routed` alone is
-/// enough. `allow_test_dependencies` is the only way past that refusal, is
+/// whenever `tenants_processed` or `production_required` is true -- tenants
+/// the worker processes (`pipeline_tenants_processed`: routed or drained) is
+/// exactly the condition under which real receipts would otherwise be
+/// scored, settled and paid by test doubles. This holds whether or not
+/// `production_required` itself is set; `tenants_processed` alone is enough. `allow_test_dependencies` is the only way past that refusal, is
 /// meant for tests and local development only, and never combines with
 /// `production_required` -- both set refuses startup at once with
 /// `pipeline_test_dependencies_not_allowed_when_required`, regardless of
@@ -101,7 +101,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     artifact_store: Option<&ConfiguredTraceArtifactStore>,
     production_required: bool,
     lease_config: PipelineLeaseConfig,
-    tenants_routed: bool,
+    tenants_processed: bool,
     allow_test_dependencies: bool,
     near_contract_id: Option<&str>,
     near_confirmation_interval: StdDuration,
@@ -176,7 +176,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         service.novelty_utility_checks() == novelty_utility_checks,
         "pipeline_runtime_novelty_utility_checks_mismatch"
     );
-    if (production_required || tenants_routed)
+    if (production_required || tenants_processed)
         && !pipeline_runtime_is_production_qualified(&service)
     {
         anyhow::ensure!(
@@ -583,6 +583,20 @@ pub(crate) async fn drain_pipeline_tenant(
             "pipeline worker receipt sweep failed"
         );
     }
+}
+
+/// Whether the pipeline worker processes any tenant: one routed to the
+/// pipeline (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) or on the drain
+/// list (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`). The worker drains a
+/// drain tenant's runs, ledger credit and payouts through the runtime's own
+/// dependencies, so the fail-closed qualification gate counts both lists
+/// (Zaki review 1, round 2, finding 3).
+pub(crate) fn pipeline_tenants_processed(
+    tenant_rollout_gates: &TraceTenantRolloutGates,
+    drain_tenant_ids: &BTreeSet<String>,
+) -> bool {
+    tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0
+        || !drain_tenant_ids.is_empty()
 }
 
 /// The tenants the pipeline worker drains on each pass, each once, in order:

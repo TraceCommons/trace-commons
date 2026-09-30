@@ -11338,6 +11338,54 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
     );
 }
 
+/// Zaki review 1, round 2, finding 3: the worker drains every tenant on
+/// `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` through the runtime's own
+/// dependencies -- Score, Settle's ledger credit, payouts -- so a drain list
+/// counts as routed tenants do. A drain-only configuration (the documented
+/// rollback, with the last tenant moved off the receipts list) with an
+/// unqualified runtime, no `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` and no
+/// opt-in refuses to start; with neither list it starts.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_only_drained() {
+    use super::pipeline_runtime::pipeline_tenants_processed;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |tenants_processed: bool| {
+        assemble_ingest_pipeline_runtime(
+            Some(&UnqualifiedAssembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            tenants_processed,
+            false,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+        )
+    };
+    let no_receipts = TraceTenantRolloutGates::default();
+
+    let drained = pipeline_tenants_processed(
+        &no_receipts,
+        &BTreeSet::from(["tenant-drained".to_string()]),
+    );
+    assert!(drained, "a drain list alone processes tenants");
+    let error = assemble(drained)
+        .err()
+        .expect("an unqualified runtime that drains a tenant is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+
+    let idle = pipeline_tenants_processed(&no_receipts, &BTreeSet::new());
+    assert!(!idle, "neither list processes no tenant");
+    assemble(idle).expect("an unqualified runtime with no tenant starts");
+}
+
 /// The same as above, with the test opt-in set --
 /// starts.
 #[tokio::test]

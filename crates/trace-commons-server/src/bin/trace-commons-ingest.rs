@@ -3892,8 +3892,12 @@ impl AppState {
         let pipeline_allow_test_dependencies =
             env_truthy(TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES);
         let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
-        let pipeline_receipts_tenants_routed =
-            tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0;
+        let pipeline_drain_tenant_ids =
+            parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS)?;
+        let pipeline_tenants_processed = pipeline_runtime::pipeline_tenants_processed(
+            &tenant_rollout_gates,
+            &pipeline_drain_tenant_ids,
+        );
         let novelty_utility_require_production_gate =
             env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
         // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
@@ -3920,7 +3924,7 @@ impl AppState {
             artifact_store.as_ref(),
             pipeline_runtime_required,
             pipeline_lease_config,
-            pipeline_receipts_tenants_routed,
+            pipeline_tenants_processed,
             pipeline_allow_test_dependencies,
             credit_settlement_near_contract_id.as_deref(),
             pipeline_near_confirmation_interval_from_env(pipeline_runtime_assembler.is_some())?,
@@ -3931,8 +3935,6 @@ impl AppState {
             &pipeline_novelty_utility_checks,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
-        let pipeline_drain_tenant_ids =
-            parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS)?;
         validate_pipeline_drain_tenants(&pipeline_drain_tenant_ids, pipeline_service.is_some())?;
         let pipeline_product = pipeline_service
             .as_ref()

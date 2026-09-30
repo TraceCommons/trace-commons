@@ -42,7 +42,12 @@ pipeline: runs in flight, withdrawal follow-ups, index invalidations, NEAR
 payouts and confirmations, and the staged-receipt sweep. The worker drains
 the union of the two lists. The drain list also needs a runtime: without
 one, ingest refuses to start with
-`pipeline_drain_tenants_configured_without_runtime`.
+`pipeline_drain_tenants_configured_without_runtime`. The worker drains a
+drain tenant's runs, credit and payouts through the runtime's own
+dependencies, so a runtime that drains any tenant must be
+production-qualified, as one that routes a tenant must: otherwise ingest
+refuses to start with `pipeline_runtime_dependencies_not_production_qualified`
+(unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set).
 `GET /v1/pipeline/readiness` reports the drain list's size as
 `drain_tenant_count` (a count, no tenant ids). A retried upload from a drain
 tenant that completed admission on the pipeline path replays its pipeline
