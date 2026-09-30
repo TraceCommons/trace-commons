@@ -139,7 +139,11 @@ impl TraceSource for GeminiCliSource {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        let Ok(projects) = std::fs::read_dir(&self.root) else {
+        // Fail closed: an unreadable root is an error, not an empty store.
+        // See `read_dir_for_discovery`.
+        let Some(projects) =
+            super::read_dir_for_discovery(&self.root, "gemini-cli-discovery-root-unreadable")?
+        else {
             return Ok(sessions);
         };
         for project in projects {
@@ -160,7 +164,13 @@ impl TraceSource for GeminiCliSource {
             }
             let project_dir = project.path();
             let cwd = project_root_cwd(&project_dir);
-            let Ok(entries) = std::fs::read_dir(project_dir.join(CHATS_DIR)) else {
+            // A project with no chats folder has no sessions; one whose
+            // chats folder cannot be read is an error, not an empty project.
+            let Some(entries) = super::read_dir_for_discovery(
+                &project_dir.join(CHATS_DIR),
+                "gemini-cli-discovery-project-unreadable",
+            )?
+            else {
                 continue;
             };
             for entry in entries {

@@ -117,7 +117,11 @@ impl TraceSource for OpenCodeSource {
         SOURCE_OPENCODE
     }
     fn discover(&self) -> Result<Vec<SessionRef>> {
-        let Ok(entries) = std::fs::read_dir(&self.root) else {
+        // Fail closed: an unreadable root is an error, not an empty store.
+        // See `read_dir_for_discovery`.
+        let Some(entries) =
+            super::read_dir_for_discovery(&self.root, "opencode-discovery-root-unreadable")?
+        else {
             return Ok(Vec::new());
         };
         let mut refs = Vec::new();

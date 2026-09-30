@@ -177,7 +177,11 @@ impl TraceSource for ClaudeCodeSource {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        let Ok(project_dirs) = std::fs::read_dir(&self.root) else {
+        // Fail closed: an unreadable root is an error, not an empty store.
+        // See `read_dir_for_discovery`.
+        let Some(project_dirs) =
+            super::read_dir_for_discovery(&self.root, "claude-code-discovery-root-unreadable")?
+        else {
             return Ok(sessions);
         };
         for project_dir in project_dirs {
@@ -199,7 +203,15 @@ impl TraceSource for ClaudeCodeSource {
                 continue;
             }
             let discovery_project = discovery_project_label(&project_dir.file_name());
-            let Ok(entries) = std::fs::read_dir(project_dir.path()) else {
+            // An unreadable project is an error too: skipping it would make
+            // the listing look complete while missing that project's
+            // sessions. A project removed since the root was listed is gone,
+            // not unreadable.
+            let Some(entries) = super::read_dir_for_discovery(
+                &project_dir.path(),
+                "claude-code-discovery-project-unreadable",
+            )?
+            else {
                 continue;
             };
             // Two passes, because `read_dir` order is unspecified and the

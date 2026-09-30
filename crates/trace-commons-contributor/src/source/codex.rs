@@ -38,7 +38,7 @@ impl TraceSource for CodexSource {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        collect_rollout_files(&self.root, &mut sessions, &mut skipped);
+        collect_rollout_files(&self.root, &mut sessions, &mut skipped)?;
         if skipped > 0 {
             tracing::warn!(
                 skipped,
@@ -92,9 +92,16 @@ fn is_rollout_file_name(file_name: &str) -> bool {
     file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
 }
 
-fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &mut usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+/// Fails closed: a folder anywhere in the walk that exists but cannot be
+/// read is an error, not an empty folder. See `read_dir_for_discovery`.
+fn collect_rollout_files(
+    dir: &Path,
+    sessions: &mut Vec<SessionRef>,
+    skipped: &mut usize,
+) -> anyhow::Result<()> {
+    let Some(entries) = super::read_dir_for_discovery(dir, "codex-discovery-folder-unreadable")?
+    else {
+        return Ok(());
     };
     for entry in entries {
         let entry = match entry {
@@ -113,7 +120,7 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             }
         };
         if file_type.is_dir() {
-            collect_rollout_files(&path, sessions, skipped);
+            collect_rollout_files(&path, sessions, skipped)?;
             continue;
         }
         let file_name = entry.file_name();
@@ -127,6 +134,7 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             sessions.push(session);
         }
     }
+    Ok(())
 }
 
 /// The one way a Codex `SessionRef` is built, used by `collect_rollout_files`

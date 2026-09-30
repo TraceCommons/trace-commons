@@ -394,6 +394,33 @@ pub trait TraceSource: Send + Sync {
     }
 }
 
+/// List a directory for `discover`, failing closed.
+///
+/// `Ok(None)` only when the directory does not exist: the tool is not
+/// installed, or a project has no sessions yet, and there is genuinely
+/// nothing to list. Any other failure -- permission denied, an unmounted
+/// volume, a transient I/O error -- is an `Err`, never an empty listing.
+///
+/// The distinction is load-bearing. Callers treat an `Ok` listing as
+/// complete: the Flow 1 grant records a source's `Ok` listing as everything
+/// that was on disk at the grant, so an unreadable folder listed as empty
+/// would make every session already in it read as new once it became
+/// readable again, and eligible for unattended upload. An `Err` leaves the
+/// source unrecorded, holding everything back until a listing succeeds.
+///
+/// The error names `label` and the error kind only, never the path: a path
+/// carries a username and a project name, and discovery errors reach logs.
+pub(crate) fn read_dir_for_discovery(
+    dir: &Path,
+    label: &'static str,
+) -> anyhow::Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("{label}: {:?}", e.kind())),
+    }
+}
+
 /// `path` if it is a real file genuinely inside `root`, otherwise `None`.
 ///
 /// The one containment check every adapter's `session_for_path` runs
@@ -890,6 +917,161 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Makes `dir` unreadable, and readable again when dropped, so a failing
+    /// assertion cannot leave an unreadable folder for the temp dir cleanup.
+    #[cfg(unix)]
+    struct Unreadable(PathBuf);
+
+    #[cfg(unix)]
+    impl Unreadable {
+        /// `None` when permission bits do not stop this user reading the
+        /// folder (running as root), so there is nothing to test.
+        fn new(dir: &Path) -> Option<Self> {
+            use std::os::unix::fs::PermissionsExt;
+            let guard = Self(dir.to_path_buf());
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read_dir(dir).is_ok() {
+                eprintln!("skipped: permissions do not apply to this user");
+                return None;
+            }
+            Some(guard)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Unreadable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    fn every_adapter_at(root: &Path) -> Vec<Box<dyn TraceSource>> {
+        vec![
+            Box::new(claude_code::ClaudeCodeSource::new(root.to_path_buf())),
+            Box::new(cline::ClineSource::new(root.to_path_buf())),
+            Box::new(codex::CodexSource::new(root.to_path_buf())),
+            Box::new(gemini_cli::GeminiCliSource::new(root.to_path_buf())),
+            Box::new(opencode::OpenCodeSource::new(root.to_path_buf())),
+        ]
+    }
+
+    /// Asserts discovery failed, and that the error names no part of the
+    /// path: discovery errors reach logs, and a path carries a username and a
+    /// project name.
+    fn assert_failed_without_path(result: anyhow::Result<Vec<SessionRef>>, root: &Path, who: &str) {
+        let err = match result {
+            Ok(refs) => panic!(
+                "{who}: an unreadable folder listed as {} sessions",
+                refs.len()
+            ),
+            Err(e) => format!("{e:#}"),
+        };
+        let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            !err.contains(&root_name) && !err.contains('/'),
+            "{who}: the discovery error names a path: {err}"
+        );
+    }
+
+    /// A missing root is a tool that is not installed: nothing to list, and
+    /// not an error.
+    #[test]
+    fn every_adapter_lists_a_missing_root_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("not-installed");
+        for source in every_adapter_at(&root) {
+            let refs = source
+                .discover()
+                .unwrap_or_else(|e| panic!("{}: {e:#}", source.name()));
+            assert!(refs.is_empty(), "{}", source.name());
+        }
+    }
+
+    /// A root that exists but cannot be read is an error, never an empty
+    /// listing: callers record an `Ok` listing as everything on disk.
+    #[cfg(unix)]
+    #[test]
+    fn every_adapter_fails_on_an_unreadable_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("private-store");
+        std::fs::create_dir_all(&root).unwrap();
+        let Some(_unreadable) = Unreadable::new(&root) else {
+            return;
+        };
+        for source in every_adapter_at(&root) {
+            assert_failed_without_path(source.discover(), &root, source.name());
+        }
+    }
+
+    /// Claude Code: one unreadable project folder fails the listing rather
+    /// than silently dropping that project's sessions from it.
+    #[cfg(unix)]
+    #[test]
+    fn claude_code_fails_on_an_unreadable_project_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let readable = root.join("-Users-someone-code-open");
+        let private = root.join("-Users-someone-code-private-project");
+        std::fs::create_dir_all(&readable).unwrap();
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(
+            readable.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            private.join("22222222-2222-2222-2222-222222222222.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        let source = claude_code::ClaudeCodeSource::new(root);
+        assert_eq!(source.discover().unwrap().len(), 2, "both readable");
+        let Some(_unreadable) = Unreadable::new(&private) else {
+            return;
+        };
+        assert_failed_without_path(source.discover(), &private, "claude-code");
+    }
+
+    /// Gemini CLI: a project's `chats` folder that exists but cannot be read
+    /// fails the listing; a project with no `chats` folder is just empty.
+    #[cfg(unix)]
+    #[test]
+    fn gemini_cli_fails_on_an_unreadable_chats_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tmp");
+        std::fs::create_dir_all(root.join("no-chats-yet")).unwrap();
+        let chats = root.join("private-project-hash").join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        let source = gemini_cli::GeminiCliSource::new(root);
+        assert!(source.discover().unwrap().is_empty());
+        let Some(_unreadable) = Unreadable::new(&chats) else {
+            return;
+        };
+        let err = format!("{:#}", source.discover().unwrap_err());
+        assert!(
+            !err.contains("private-project-hash") && !err.contains('/'),
+            "the discovery error names a path: {err}"
+        );
+    }
+
+    /// Codex walks nested date folders; an unreadable one anywhere in the
+    /// walk fails the listing.
+    #[cfg(unix)]
+    #[test]
+    fn codex_fails_on_an_unreadable_nested_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sessions");
+        let day = root.join("2026").join("09").join("30");
+        std::fs::create_dir_all(&day).unwrap();
+        let source = codex::CodexSource::new(root);
+        assert!(source.discover().unwrap().is_empty());
+        let Some(_unreadable) = Unreadable::new(&day) else {
+            return;
+        };
+        assert_failed_without_path(source.discover(), &day, "codex");
+    }
 
     /// The streaming hash and the whole-file hash must agree.
     ///

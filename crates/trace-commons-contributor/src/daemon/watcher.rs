@@ -193,10 +193,29 @@ fn tick_over(
     // Read before anything is listed: a grant given while discovery walks the
     // disk is recorded by a later pass, from a listing taken after it.
     let grant = shared.policy.lock().expect("policy lock").grant_id();
+    //
+    // A source whose folder cannot be read fails discovery rather than
+    // listing as empty (`read_dir_for_discovery`), so an `Ok` listing here is
+    // complete and a failed one is left out: not recorded for the grant, and
+    // not visited.
     let discovered: Vec<(&dyn TraceSource, Vec<SessionRef>)> = sources
         .iter()
-        .filter_map(|source| source.discover().ok().map(|refs| (source.as_ref(), refs)))
+        .filter_map(|source| match source.discover() {
+            Ok(refs) => Some((source.as_ref(), refs)),
+            Err(_) => {
+                // Label only: the error is not logged, in case some adapter's
+                // error ever carries a path.
+                tracing::warn!(
+                    source = source.name(),
+                    "session discovery failed; the source is left unrecorded until it can be read"
+                );
+                None
+            }
+        })
         .collect();
+    // Only a pass that listed every source may speak for all of them: retract
+    // a health flag, or report what the gate is holding across the corpus.
+    let every_source_listed = discovered.len() == sources.len();
     // Before any session is visited, so nothing on disk in a source recorded
     // now can be armed by the grant. A source whose discovery failed is not
     // recorded, and arms nothing until a pass records it.
@@ -210,7 +229,7 @@ fn tick_over(
     }
 
     let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
-    let report = finish_pass(shared, out, true)?;
+    let report = finish_pass(shared, out, every_source_listed)?;
     report_gate(shared, &ctx.gate, &report);
     record_gate_held(shared, &ctx, &report, held_by_project);
     Ok(report)
@@ -2352,6 +2371,36 @@ mod tests {
         assert_eq!(scoped.gate_blocked, None, "{scoped:?}");
     }
 
+    /// A full pass in which one source's folder could not be read has not
+    /// listed the corpus, so it does not speak for all of it: it reports no
+    /// held count (leaving the last complete one standing) until every source
+    /// lists again. Keyed on the same `every_source_listed` fact that the
+    /// cwd-cache prune in #1123 relies on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pass_with_an_unreadable_source_is_not_exhaustive() {
+        use std::os::unix::fs::PermissionsExt;
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let codex_root = f._dir.path().join("codex-sessions");
+        let restore = RestorePermissions(codex_root.clone());
+        std::fs::set_permissions(&codex_root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&codex_root).is_ok() {
+            ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+            eprintln!("skipped: permissions do not apply to this user");
+            return;
+        }
+        let partial = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        drop(restore);
+        let complete = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+
+        assert_eq!(partial.gate_blocked, None, "{partial:?}");
+        assert_eq!(complete.gate_blocked, Some(1), "{complete:?}");
+    }
+
     /// The held-folder notice's source: a full pass under an enforced gate
     /// reports what it holds, per folder, on `status`, and raises the health
     /// label. A scoped pass changes neither. When the gate stops holding, the
@@ -3092,6 +3141,98 @@ mod tests {
                 .recorded_sources
                 .is_empty(),
             "a scoped pass records nothing"
+        );
+    }
+
+    /// Restores a directory's permissions when dropped, so a failing
+    /// assertion cannot leave an unreadable directory behind for the temp
+    /// dir's cleanup.
+    #[cfg(unix)]
+    struct RestorePermissions(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// A source whose folder cannot be read when the grant is given is not
+    /// recorded as holding nothing. Before discovery failed closed, an
+    /// unreadable root listed as empty, the grant recorded it so, and once
+    /// the folder was readable again every session and project already on
+    /// disk read as new: the project was armed and its pre-grant session
+    /// approved unattended. (The probe from the #1134 review.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_source_unreadable_at_the_grant_arms_nothing_already_on_disk() {
+        unreadable_at_the_grant(false).await;
+    }
+
+    /// The same, with the pre-grant session already queued as pending when
+    /// the grant is given, as in the probe: a new session in its project
+    /// must not arm the project either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_source_unreadable_at_the_grant_arms_nothing_already_queued() {
+        unreadable_at_the_grant(true).await;
+    }
+
+    #[cfg(unix)]
+    async fn unreadable_at_the_grant(queued_before_the_grant: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let pre = f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        if queued_before_the_grant {
+            f.settle(Utc::now() + chrono::Duration::hours(29)).await;
+        }
+
+        let _restore = RestorePermissions(f.claude_root.clone());
+        std::fs::set_permissions(&f.claude_root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&f.claude_root).is_ok() {
+            // Running with privileges that ignore permission bits: there is
+            // no unreadable folder to test against.
+            eprintln!("skipped: permissions do not apply to this user");
+            return;
+        }
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        std::fs::set_permissions(&f.claude_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        // After the folder is back: a new session in the old project, and a
+        // project genuinely new since then.
+        f.write_session("old", "33333333-3333-3333-3333-333333333333", 0);
+        f.write_session("new", "22222222-2222-2222-2222-222222222222", 0);
+        for h in 32..35 {
+            f.settle(Utc::now() + chrono::Duration::hours(h)).await;
+        }
+
+        assert_eq!(
+            mode_of(&f, "old"),
+            (ProjectMode::NotifyOnly, false),
+            "a project on disk at the grant was armed"
+        );
+        assert_eq!(
+            mode_of(&f, "new"),
+            (ProjectMode::AutoUpload, true),
+            "a project new since the grant is still armed"
+        );
+        let queue = f.shared.queue.lock().unwrap();
+        let entry = queue
+            .all()
+            .iter()
+            .find(|e| e.path == pre)
+            .expect("the pre-grant session is queued");
+        assert_eq!(
+            (entry.state, entry.approved_unattended),
+            (QueueState::Pending, false),
+            "a session on disk at the grant was approved unattended"
         );
     }
 
