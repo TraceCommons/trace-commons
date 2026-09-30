@@ -10,11 +10,6 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::{
-    Router,
-    extract::DefaultBodyLimit,
-    routing::{get, post},
-};
 use trace_commons_protocol::mission_catalog::MissionCatalogQuery;
 use trace_commons_server::account_session::AccountCtx;
 use trace_commons_server::mission_rewards::RewardError;
@@ -22,8 +17,8 @@ use trace_commons_server::reward_participant::{RewardHistoryQuery, RewardReserva
 use uuid::Uuid;
 
 use crate::{
-    ACCOUNT_RATE_LIMITER, AccountRateLimiter, AppState, ConcurrencyGuard, account_auth_middleware,
-    api_error, client_ip_for_rate_limit, confirm_is_same_origin,
+    ACCOUNT_RATE_LIMITER, AccountRateLimiter, AppState, ConcurrencyGuard, api_error,
+    client_ip_for_rate_limit, confirm_is_same_origin,
 };
 
 type RewardHttpResult = Result<Response, RewardHttpError>;
@@ -45,25 +40,26 @@ impl IntoResponse for RewardHttpError {
     }
 }
 
-pub(crate) fn account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/v1/account/rewards", get(history))
-        .route(
+pub(crate) fn account_routes() -> crate::account_routes::AccountRoutes {
+    crate::account_routes::AccountRoutes::new()
+        .get("/v1/account/rewards", history)
+        .get(
             "/v1/account/reward-reservations/{reservation_id}",
-            get(reservation),
+            reservation,
         )
-        .route(
+        .post_with_body_limit(
             "/v1/account/reward-offers/{program_id}/reservations",
-            post(reserve).layer(DefaultBodyLimit::max(1024)),
+            reserve,
+            1024,
         )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state,
-            account_auth_middleware,
-        ))
-        // Covers early authentication refusals as well as handler responses.
-        .layer(axum::middleware::map_response(
-            |response: Response| async move { protected_response(response) },
-        ))
+}
+
+/// The reward routes' response headers, applied outside the auth middleware.
+pub(crate) fn protected(
+    routes: crate::account_routes::AuthenticatedAccountRoutes,
+) -> crate::account_routes::AuthenticatedAccountRoutes {
+    // Covers early authentication refusals as well as handler responses.
+    routes.map_response(|response: Response| async move { protected_response(response) })
 }
 
 fn protected_response(response: impl IntoResponse) -> Response {

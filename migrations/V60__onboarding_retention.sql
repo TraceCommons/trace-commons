@@ -1,7 +1,12 @@
 -- Repair deployments that already recorded the pre-revocation V59. Fresh V59
 -- already granted EXECUTE WITH GRANT OPTION; do not circularly re-grant it.
+-- USAGE, not MEMBER: since PostgreSQL 16 a CREATEROLE migrator that is not a
+-- superuser keeps the membership CREATE ROLE gave it (ADMIN, no INHERIT, no
+-- SET), which V59's REVOKE cannot remove and MEMBER counts. The re-grant below
+-- works only for a migrator that holds the owner's privileges, and USAGE is
+-- true exactly then.
 DO $$ BEGIN
- IF pg_has_role(current_user,'trace_admission_guard','MEMBER') THEN
+ IF pg_has_role(current_user,'trace_admission_guard','USAGE') THEN
   GRANT EXECUTE ON FUNCTION trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT) TO CURRENT_USER WITH GRANT OPTION;
   GRANT EXECUTE ON FUNCTION trace_transition_admission(TEXT,UUID,UUID,TEXT) TO CURRENT_USER WITH GRANT OPTION;
   REVOKE trace_admission_guard FROM CURRENT_USER;

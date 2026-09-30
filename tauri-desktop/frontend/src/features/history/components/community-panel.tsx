@@ -12,7 +12,7 @@ export function CommunityPanel({ standing }: { standing: CommunityStanding }) {
       })
     : "date unavailable";
   return (
-    <section className="mb-4 border-2 border-foreground bg-primary/10 p-6">
+    <section className="tc-card tc-card--quiet mb-4">
       <div className="flex items-start justify-between gap-4">
         <div>
           <span>COMMUNITY</span>

@@ -1,17 +1,11 @@
+import type { ReactNode } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import { ComputePage } from "../features/compute";
-import { HistoryPage } from "../features/history";
-import { InsightsPage } from "../features/insights";
-import { MissionDraftsPage } from "../features/mission-drafts";
+import { Pane, Window } from "../design-system";
 import { OnboardingPage } from "../features/onboarding";
 import type { useOnboardingCompletion } from "../features/onboarding/public";
-import { PrivateAiPage } from "../features/private-ai";
-import { ProfilePage } from "../features/profile";
 import type { usePublicProfile } from "../features/profile/public";
-import { SettingsPage } from "../features/settings";
-import { WaitingPage } from "../features/waiting";
 import type { useCoreStatus } from "../lib/tauri/use-core-status";
-import { NotFoundPage } from "./not-found-page";
+import { MonitorShell } from "./monitor/monitor-shell";
 import { flowPaths, routePaths } from "./routes";
 
 export function AppRoutes({
@@ -20,74 +14,75 @@ export function AppRoutes({
   publicProfile,
   initialInvite,
   onOnboardingComplete,
+  notices,
 }: {
   requiresOnboarding: boolean;
   core: ReturnType<typeof useCoreStatus>;
   publicProfile: ReturnType<typeof usePublicProfile>;
   initialInvite: string | null;
   onOnboardingComplete: ReturnType<typeof useOnboardingCompletion>["complete"];
+  notices: ReactNode;
 }) {
   return requiresOnboarding ? (
-    <OnboardingPage
-      key={core.scope}
-      alreadyEnrolled={core.data?.daemon.logged_in === true}
-      initialInvite={initialInvite}
-      onComplete={onOnboardingComplete}
-    />
+    <FirstRunWindow notices={notices}>
+      <OnboardingPage
+        key={core.scope}
+        alreadyEnrolled={core.data?.daemon.logged_in === true}
+        initialInvite={initialInvite}
+        onComplete={onOnboardingComplete}
+      />
+    </FirstRunWindow>
   ) : (
     <Routes>
-      <Route path="/" element={<Navigate to={routePaths.insights} replace />} />
-      <Route path={routePaths.insights} element={<InsightsPage />} />
-      <Route
-        path={routePaths.waiting}
-        element={<WaitingPage key={core.scope} status={core.data} />}
-      />
-      <Route
-        path={routePaths.history}
-        element={<HistoryPage key={core.scope} />}
-      />
-      <Route
-        path={routePaths.settings}
-        element={<SettingsWithGrantEntry key={core.scope} />}
-      />
-      <Route
-        path={routePaths.compute}
-        element={<ComputePage key={core.scope} />}
-      />
-      <Route
-        path={routePaths["private-ai"]}
-        element={<PrivateAiPage key={core.scope} />}
-      />
-      <Route
-        path={routePaths["mission-drafts"]}
-        element={<MissionDraftsPage />}
-      />
-      <Route
-        path={routePaths.profile}
-        element={
-          <ProfilePage
-            key={core.scope}
-            coreStatus={core.data}
-            coreStatusState={core.state}
-            onRefresh={core.refresh}
-            publicProfile={publicProfile.data}
-            publicProfileState={publicProfile.state}
-            onPublicProfileRefresh={publicProfile.refresh}
-          />
-        }
-      />
       <Route
         path={flowPaths["automatic-contributing"]}
         element={
           core.data?.daemon.logged_in === true ? (
-            <AutomaticContributingFlow key={core.scope} />
+            <FirstRunWindow notices={notices}>
+              <AutomaticContributingFlow key={core.scope} />
+            </FirstRunWindow>
           ) : (
             <Navigate to={routePaths.settings} replace />
           )
         }
       />
-      <Route path="*" element={<NotFoundPage />} />
+      <Route
+        path="*"
+        element={
+          <MonitorShell
+            core={core}
+            publicProfile={publicProfile}
+            notices={notices}
+          />
+        }
+      />
     </Routes>
+  );
+}
+
+/**
+ * First run, and the grant screens again: one pane over the scene, the
+ * modal width the FTUX flows use, with the core notices above the flow.
+ */
+function FirstRunWindow({
+  notices,
+  children,
+}: {
+  notices: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <Window className="h-screen justify-center">
+      <Pane
+        className="flex w-full max-w-[720px] flex-col overflow-hidden"
+        data-tauri-drag-region
+      >
+        <div className="min-h-0 flex-1 overflow-auto px-6 pt-10 pb-6">
+          <div className="tc-page mb-2.5">{notices}</div>
+          {children}
+        </div>
+      </Pane>
+    </Window>
   );
 }
 
@@ -107,14 +102,3 @@ function AutomaticContributingFlow() {
   );
 }
 
-/** Settings, with its way into the grant screens. */
-function SettingsWithGrantEntry() {
-  const navigate = useNavigate();
-  return (
-    <SettingsPage
-      onTurnOnAutomaticContributing={() =>
-        navigate(flowPaths["automatic-contributing"])
-      }
-    />
-  );
-}

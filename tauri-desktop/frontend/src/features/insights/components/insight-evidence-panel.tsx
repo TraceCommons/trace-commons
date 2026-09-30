@@ -53,11 +53,11 @@ export function InsightEvidencePanel({
     ? "Repository picker unavailable or cancelled."
     : null;
   return (
-    <section className="mt-6 border-t border-border pt-5">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="mt-3 pt-3 tc-hairline-top">
+      <span className="mb-1.5 block tc-eyebrow">
         OUTCOME EVIDENCE
       </span>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Git inspection is local and read-only. Imported reports are producer
         assertions. Neither link verifies task success.
       </p>
@@ -82,9 +82,9 @@ export function InsightEvidencePanel({
             message={errors.commit?.message}
           />
         </label>
-        <div className="mt-6 flex gap-2.5">
+        <div className="mt-3 flex flex-wrap gap-2">
           <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+            className="tc-btn tc-btn--glass"
             type="button"
             onClick={() => void chooseRepository()}
             disabled={!saved || busy || pickerBusy}
@@ -92,7 +92,7 @@ export function InsightEvidencePanel({
             {pickerBusy ? "Choosing…" : "Choose Git repository"}
           </Button>
           <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+            className="tc-btn tc-btn--primary tc-btn--sm"
             type="submit"
             disabled={!saved || busy || pickerBusy || !form.formState.isValid}
           >
@@ -111,7 +111,7 @@ export function InsightEvidencePanel({
           </code>
         )}
         {pickerError && (
-          <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+          <p className="tc-alert">
             {pickerError}
           </p>
         )}
@@ -136,7 +136,7 @@ export function InsightEvidencePanel({
           }}
         />
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={() => reportInput.current?.click()}
           disabled={!saved || busy || pickerBusy}
@@ -145,17 +145,17 @@ export function InsightEvidencePanel({
         </Button>
       </div>
       <div className="mt-3.5 grid gap-2.5">
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           SOURCE EVIDENCE
         </span>
         {insight.report.evidence.length === 0 ? (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p className="mt-3 mb-1 tc-body tc-text-tertiary">
             No source evidence retained.
           </p>
         ) : (
           insight.report.evidence.map((evidence) => (
             <div
-              className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 border-t border-border py-[9px] text-[11px] text-muted-foreground"
+              className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 tc-hairline-top py-2 tc-caption tc-text-tertiary"
               key={evidence.id}
             >
               <span>{evidence.id}</span>

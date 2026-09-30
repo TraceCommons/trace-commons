@@ -17,9 +17,9 @@ export function OnboardingProjectsStep({
         onSetMode={projects.setMode}
         allowAutoUpload={false}
       />
-      <div className="mt-6 flex gap-2.5">
+      <div className="mt-3 flex flex-wrap gap-2">
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={onboarding.back}
           disabled={busy}
@@ -27,7 +27,7 @@ export function OnboardingProjectsStep({
           Back
         </Button>
         <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+          className="tc-btn tc-btn--primary tc-btn--sm"
           type="button"
           onClick={onboarding.finishProjects}
           disabled={busy}

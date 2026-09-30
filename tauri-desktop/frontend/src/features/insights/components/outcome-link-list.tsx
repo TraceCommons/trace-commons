@@ -14,7 +14,7 @@ export function OutcomeLinkList({
 }: OutcomeLinkListProps) {
   if (links.length === 0) {
     return (
-      <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+      <p className="mt-3 mb-1 tc-body tc-text-tertiary">
         No outcome evidence linked.
       </p>
     );
@@ -23,10 +23,10 @@ export function OutcomeLinkList({
     <div className="mt-3.5 grid gap-2.5">
       {links.map((link) => (
         <article
-          className="rounded-[10px] border border-border bg-muted p-3"
+          className="tc-card tc-card--quiet"
           key={link.id}
         >
-          <div className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 border-t border-border py-[9px] text-[11px] text-muted-foreground">
+          <div className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 tc-hairline-top py-2 tc-caption tc-text-tertiary">
             <span>
               {link.evidence.type === "git_commit"
                 ? "Inspected Git object"
@@ -50,12 +50,12 @@ export function OutcomeLinkList({
               <span>Skipped {link.evidence.evidence.skipped}</span>
             </div>
           )}
-          <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+          <p className="m-0 tc-caption tc-text-tertiary">
             User-linked evidence. It does not prove task success, merge
             acceptance, or test execution here.
           </p>
           <Button
-            className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary text-destructive"
+            className="tc-link text-destructive"
             type="button"
             onClick={() => onUnlink(link.id)}
             disabled={busy}

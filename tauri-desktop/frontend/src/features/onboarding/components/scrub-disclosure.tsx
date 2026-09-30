@@ -58,7 +58,7 @@ export function ScrubDisclosure({
           </>
         )}
         {state === "ready" && (
-          <ul className="m-0 grid gap-2 rounded-lg border bg-muted/40 p-4 font-mono text-xs capitalize">
+          <ul className="tc-card tc-card--quiet m-0 grid gap-2 font-mono text-xs capitalize">
             {names.map((name) => (
               <li key={name}>{name.replaceAll("_", " ")}</li>
             ))}

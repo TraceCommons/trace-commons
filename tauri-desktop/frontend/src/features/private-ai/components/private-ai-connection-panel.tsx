@@ -34,10 +34,10 @@ export function PrivateAiConnectionPanel({
   const providerError = form.formState.errors.provider?.message;
   const provider = form.watch("provider");
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card mb-2.5">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             CONNECTION
           </span>
           {disclosure.data && (
@@ -45,7 +45,7 @@ export function PrivateAiConnectionPanel({
           )}
         </div>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={() => {
             void settings.refresh();
@@ -61,12 +61,12 @@ export function PrivateAiConnectionPanel({
         credentials, and retained sessions separate. This surface reports their
         presence and daemon runtime state without exposing secrets.
       </p>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Turning this on starts a local listener for configured tools.
         It does not publish traces. Credential enrollment remains separate.
       </p>
       {disclosure.data ? (
-        <div className="my-4 grid gap-2 rounded-md border border-border p-3 text-[11px] leading-[1.55] text-muted-foreground">
+        <div className="tc-card tc-card--quiet my-4 grid gap-2 text-[11px] leading-[1.55] text-muted-foreground">
           <p className="m-0 whitespace-pre-line">
             {disclosure.data.credential_cost}
           </p>
@@ -82,7 +82,7 @@ export function PrivateAiConnectionPanel({
         </p>
       )}
       {privateAi.error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {privateAi.error}
         </p>
       )}
@@ -121,10 +121,10 @@ export function PrivateAiConnectionPanel({
         </div>
       </form>
       {browserUrl && (
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           Open sign-in:{" "}
           <Button
-            className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+            className="tc-link"
             type="button"
             onClick={() => void privateAi.openBrowser(browserUrl)}
             disabled={privateAi.busy}
@@ -136,7 +136,7 @@ export function PrivateAiConnectionPanel({
       )}
       {privateAi.credential?.keychain && (
         <div className="grid gap-1 border-t border-border pt-4 text-[11px] leading-[1.55] text-muted-foreground">
-          <strong className="text-foreground">OS credential storage</strong>
+          <strong className="text-[var(--tc-text-primary)]">OS credential storage</strong>
           <span>
             {privateAi.credential.keychain.state} · migration{" "}
             {privateAi.credential.keychain.migration}

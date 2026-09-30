@@ -1,10 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "../../components/page-header";
+import { StepProgress } from "../../design-system";
 import { useProjects, useSettings, useSourceRoots } from "../settings/public";
 import { OnboardingStepContent } from "./components/onboarding-step-content";
 import { ScrubDisclosure } from "./components/scrub-disclosure";
 import { useOnboarding } from "./hooks/use-onboarding";
 import { useScrubberPatterns } from "./hooks/use-scrubber-patterns";
+
+/** Progress groups for the step indicator: sequential nodes, not tabs. */
+const progressGroups = [
+  { label: "Folders", steps: ["welcome", "roots"] },
+  { label: "Join", steps: ["connect"] },
+  { label: "Uses", steps: ["consent", "path", "privacy"] },
+  { label: "Inference", steps: ["inference"] },
+  { label: "Sharing", steps: ["disclosure_scrub", "disclosure_witness", "grant"] },
+  { label: "Projects", steps: ["projects", "done"] },
+] as const;
+
+function progressIndex(step: string) {
+  const index = progressGroups.findIndex((group) =>
+    (group.steps as readonly string[]).includes(step),
+  );
+  return index === -1 ? 0 : index;
+}
 
 export function OnboardingPage({
   onComplete,
@@ -71,15 +89,21 @@ export function OnboardingPage({
     done: "Nothing has been sent yet.",
   } as const;
   return (
-    <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14 block">
+    <div className="tc-page">
+      <StepProgress
+        labels={progressGroups.map((group) => group.label)}
+        current={
+          onboarding.step === "done"
+            ? progressGroups.length
+            : progressIndex(onboarding.step)
+        }
+      />
       <PageHeader
-        eyebrow="SETUP / CONTRIBUTION"
         title={pageTitles[onboarding.step]}
         description={pageDescriptions[onboarding.step]}
-        phase={`${onboarding.step.toUpperCase()} · SETUP`}
       />
       {onboarding.error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {onboarding.error}
         </p>
       )}
@@ -99,7 +123,7 @@ export function OnboardingPage({
         />
       </div>
       {onboarding.step !== "welcome" && onboarding.step !== "done" && (
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           This flow is resumable. A failed daemon call does not advance the
           step.
         </p>

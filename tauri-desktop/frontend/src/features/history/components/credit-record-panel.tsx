@@ -8,13 +8,13 @@ export function CreditRecordPanel({
   refreshedAt: string | null;
 }) {
   return (
-    <section className="mt-4 grid grid-cols-[64px_minmax(0,1fr)] gap-5 p-[26px] rounded-2xl border border-border bg-card/80">
+    <section className="mt-4 grid grid-cols-[64px_minmax(0,1fr)] gap-5 tc-card">
       <div
-        className="mt-[3px] ml-[3px] h-[58px] w-[58px] rounded-full border-2 border-foreground bg-primary/20 shadow-md"
+        className="tc-card mt-[3px] ml-[3px] h-[58px] w-[58px]"
         aria-hidden="true"
       />
       <div className="grid gap-2.5">
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           CREDIT RECORD
         </span>
         <h2>About credit.</h2>
@@ -29,11 +29,11 @@ export function CreditRecordPanel({
             <CreditFigure label="Still being scored" value={pendingPoints} />
           </div>
         ) : (
-          <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start bg-muted text-muted-foreground">
+          <span className="tc-chip self-start">
             Not synced yet
           </span>
         )}
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           A credit is a signed record that a contribution was accepted. It is
           not currency.
         </p>

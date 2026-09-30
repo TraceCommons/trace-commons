@@ -60,22 +60,22 @@ export function InsightDetail({
     }
   }, [form, insight]);
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card mb-2.5">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             {saved ? "SAVED SNAPSHOT" : "ANALYSIS RESULT"}
           </span>
           <h2>{formatSource(insight.source_format)}</h2>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+        <span className="tc-chip tc-chip--glass self-start">
           {formatDate(insight.analyzed_at)}
         </span>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         {insight.boundary}
       </p>
-      <div className="my-5 flex flex-wrap gap-x-[26px] gap-y-2 text-[11px] text-muted-foreground">
+      <div className="my-2.5 flex flex-wrap gap-x-4 gap-y-1.5 tc-caption tc-text-tertiary">
         <span>
           <b>Analyzer</b>
           {insight.report.provider.id} {insight.report.provider.version}
@@ -92,7 +92,7 @@ export function InsightDetail({
       <div className="grid grid-cols-3 gap-[9px]">
         {insight.report.metrics.map((metric) => (
           <div
-            className="grid gap-[6px] rounded-[10px] border border-border bg-muted p-3.5"
+            className="tc-card tc-card--quiet grid gap-[6px]"
             key={metric.id}
           >
             <span>{metric.id}</span>
@@ -104,13 +104,13 @@ export function InsightDetail({
         ))}
       </div>
       <form
-        className="mt-6 border-t border-border pt-5"
+        className="mt-3 pt-3 tc-hairline-top"
         onSubmit={form.handleSubmit(async (values) => {
           if (await onAnnotate(values.category, values.outcome))
             form.reset(values);
         })}
       >
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           USER-REPORTED ASSESSMENT
         </span>
         <div className="my-3 flex gap-3">
@@ -163,7 +163,7 @@ export function InsightDetail({
         />
         <div className="flex flex-wrap justify-end gap-[9px]">
           <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+            className="tc-btn tc-btn--glass"
             type="button"
             onClick={async () => {
               if (await onClearAnnotation())
@@ -174,7 +174,7 @@ export function InsightDetail({
             Clear assessment
           </Button>
           <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+            className="tc-btn tc-btn--glass"
             type="submit"
             disabled={!saved || busy}
           >
@@ -190,7 +190,7 @@ export function InsightDetail({
         onLinkGit={onLinkGit}
         onUnlink={onUnlinkEvidence}
       />
-      <div className="mt-[18px] flex justify-end gap-[9px]">
+      <div className="mt-3 flex justify-end gap-2">
         {saved ? (
           <ConfirmActionButton
             label={deleteCopy?.delete}
@@ -205,7 +205,7 @@ export function InsightDetail({
           />
         ) : (
           <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+            className="tc-btn tc-btn--primary tc-btn--sm"
             type="button"
             onClick={onSave}
             disabled={busy}

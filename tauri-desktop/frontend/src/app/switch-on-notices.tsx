@@ -55,7 +55,7 @@ export function ArmingRewordingNotices({
   } catch {
     return (
       <p
-        className="mx-6 mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+        className="tc-alert"
         role="alert"
       >
         What automatic contributing means for some of your projects may have
@@ -87,7 +87,7 @@ function ArmingRewordingCard({ rewording }: { rewording: ArmingRewording }) {
   const busy = acknowledge.isPending || askFirst.isPending;
 
   return (
-    <Alert className="mx-6 mt-4 w-auto border-amber-500/40 bg-amber-500/10">
+    <Alert className="tc-alert tc-alert--ask">
       {copy.data ? (
         <>
           <AlertTitle>{copy.data.title}</AlertTitle>
@@ -156,7 +156,7 @@ export function GateHeldNotice({ held }: { held: unknown }) {
   } catch {
     return (
       <p
-        className="mx-6 mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+        className="tc-alert"
         role="alert"
       >
         Some projects set to contribute automatically may be on hold, but this
@@ -171,7 +171,7 @@ export function GateHeldNotice({ held }: { held: unknown }) {
 function GateHeldCard({ held }: { held: GateHeld }) {
   const copy = useGateHeldNotice(held.wire);
   return (
-    <Alert className="mx-6 mt-4 w-auto border-amber-500/40 bg-amber-500/10">
+    <Alert className="tc-alert tc-alert--ask">
       {copy.data ? (
         <>
           <AlertTitle>{copy.data.title}</AlertTitle>

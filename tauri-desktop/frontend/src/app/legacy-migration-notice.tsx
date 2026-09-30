@@ -36,7 +36,7 @@ export function LegacyMigrationNotice({ status }: { status: unknown }) {
   });
   if (unreadable || notice === null || !copy.data) return null;
   return (
-    <Alert className="mx-6 mt-4 w-auto border-primary/40 bg-primary/10">
+    <Alert>
       <AlertTitle>{copy.data.title}</AlertTitle>
       <AlertDescription className="grid gap-2">
         <span>{copy.data.body}</span>

@@ -14,7 +14,7 @@ export function DaemonStartupNotice({ startup }: { startup: CoreStatus["startup"
   if (startup !== "daemon_unavailable") return null;
 
   return (
-    <Alert className="mx-6 mt-4 border-amber-500/40 bg-amber-500/10">
+    <Alert className="tc-alert tc-alert--ask">
       <AlertTitle>Rust core could not start</AlertTitle>
       <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
         <span>

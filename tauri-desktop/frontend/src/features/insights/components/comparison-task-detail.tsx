@@ -45,22 +45,22 @@ export function ComparisonTaskDetail({
 
   return (
     <div className="mt-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             TASK DETAIL
           </span>
           <h3>{detail.task.id}</h3>
         </div>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={onClose}
         >
           Back to tasks
         </Button>
       </div>
-      <div className="my-5 flex flex-wrap gap-x-[26px] gap-y-2 text-[11px] text-muted-foreground">
+      <div className="my-2.5 flex flex-wrap gap-x-4 gap-y-1.5 tc-caption tc-text-tertiary">
         <span>
           <b>Material</b>
           {detail.task.material_digest}
@@ -74,7 +74,7 @@ export function ComparisonTaskDetail({
           {new Date(detail.resolved_at).toLocaleString()}
         </span>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         {detail.stale_reasons.length
           ? `Review required: ${detail.stale_reasons.join(", ")}`
           : "No stale reason reported."}{" "}
@@ -82,7 +82,7 @@ export function ComparisonTaskDetail({
           ? `Overlaps ${detail.overlapping_task_ids.length} other tasks.`
           : ""}
       </p>
-      <div className="my-[18px] grid gap-px border-t border-border">
+      <div className="my-3 grid gap-px">
         {episodes.map((entry, index) => {
           const episodeId = `${idPrefix}-episode-${index}`;
           return (
@@ -99,7 +99,7 @@ export function ComparisonTaskDetail({
                 disabled={busy}
               />
               <Label
-                className="text-[12px] font-normal text-foreground"
+                className="text-[12px] font-normal text-[var(--tc-text-primary)]"
                 htmlFor={episodeId}
               >
                 <span>
@@ -112,7 +112,7 @@ export function ComparisonTaskDetail({
         })}
       </div>
       <Button
-        className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        className="tc-btn tc-btn--glass"
         type="button"
         onClick={() =>
           void form.handleSubmit(async (values) => {
@@ -244,7 +244,7 @@ export function ComparisonTaskDetail({
         </div>
       </div>
       <Button
-        className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        className="tc-btn tc-btn--glass"
         type="button"
         onClick={() =>
           void form.handleSubmit(async (values) => {
@@ -275,7 +275,7 @@ export function ComparisonTaskDetail({
           </NativeSelect>
         </div>
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={() =>
             void form.handleSubmit(async (values) => {
@@ -287,7 +287,7 @@ export function ComparisonTaskDetail({
           Save outcome
         </Button>
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={async () => {
             if (await onClearOutcome())
@@ -298,7 +298,7 @@ export function ComparisonTaskDetail({
           Clear outcome
         </Button>
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={() => void onReconfirm()}
           disabled={busy}
@@ -306,7 +306,7 @@ export function ComparisonTaskDetail({
           Reconfirm current material
         </Button>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Checkout provenance is unavailable in this desktop app. Reconfirmation
         binds current material digest; it does not verify model identity or task
         independence.

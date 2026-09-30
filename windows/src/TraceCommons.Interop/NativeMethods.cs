@@ -292,6 +292,18 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? voidJson);
 
     /// <summary>
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// from <c>status.legacy_invite_migration.notice</c> passed through as
+    /// the daemon sent it, as an owned JSON object (title, body, folders,
+    /// acknowledge). The folders sentence is chosen on the Rust side. NULL
+    /// for JSON null, an argument that is not a JSON object, and on a caught
+    /// panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_legacy_migration_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? noticeJson);
+
+    /// <summary>
     /// The notice for approved sessions held on a busy privacy witness, from
     /// <c>status.witness_capacity</c>, as an owned JSON object (title, body,
     /// next_check). Free it the way <see cref="TakeOwnedString"/> does. NULL

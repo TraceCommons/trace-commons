@@ -34,7 +34,7 @@ export function SkillCandidateForm({
       className="grid gap-4"
       onSubmit={form.handleSubmit((draft) => onReview(draft))}
     >
-      <div className="grid gap-[5px] border-l-[3px] border-chart-2 bg-background p-3.5">
+      <div className="grid gap-[5px] tc-card tc-card--quiet">
         <strong>{copy.generated_source}</strong>
         <span>{candidate.family}</span>
       </div>
@@ -86,8 +86,8 @@ export function SkillCandidateForm({
           message={errors.procedure?.message}
         />
       </label>
-      <div className="grid gap-px border-t border-border pt-4">
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+      <div className="grid gap-px pt-2">
+        <span className="mb-1.5 block tc-eyebrow">
           {copy.source_evidence}
         </span>
         {candidate.source_evidence.map((item) => (
@@ -100,11 +100,11 @@ export function SkillCandidateForm({
           </div>
         ))}
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         {copy.manual_instruction}
       </p>
-      <div className="grid gap-px border-t border-border pt-4">
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+      <div className="grid gap-px pt-2">
+        <span className="mb-1.5 block tc-eyebrow">
           {copy.test_contract}
         </span>
         <p>
@@ -128,9 +128,9 @@ export function SkillCandidateForm({
             )}
         </p>
       </div>
-      <div className="mt-6 flex gap-2.5">
+      <div className="mt-3 flex flex-wrap gap-2">
         <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+          className="tc-btn tc-btn--primary tc-btn--sm"
           type="submit"
           disabled={busy || !form.formState.isValid}
         >

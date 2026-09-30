@@ -1,0 +1,19 @@
+/* Trace Commons · WYSIWYG glass · typography (system SF Pro; SF Mono for paths, captions, chips) */
+:root {
+  --tc-font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  --tc-font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+
+  --tc-text-eyebrow: 600 10px/14px var(--tc-font-sans); /* uppercase, letter-spacing .08em */
+  --tc-text-caption: 400 11px/16px var(--tc-font-sans);
+  --tc-text-label: 500 12px/16px var(--tc-font-sans);
+  --tc-text-body: 400 13px/18px var(--tc-font-sans);
+  --tc-text-body-strong: 600 13px/18px var(--tc-font-sans);
+  --tc-text-title: 600 15px/20px var(--tc-font-sans);
+  --tc-text-heading: 600 17px/22px var(--tc-font-sans);
+  --tc-text-display: 700 22px/28px var(--tc-font-sans); /* letter-spacing -.01em */
+  --tc-text-number: 700 28px/34px var(--tc-font-sans); /* tabular-nums */
+  --tc-text-mono: 400 11px/16px var(--tc-font-mono);
+
+  --tc-tracking-eyebrow: 0.08em;
+  --tc-tracking-display: -0.01em;
+}

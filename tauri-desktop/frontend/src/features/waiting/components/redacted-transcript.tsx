@@ -11,7 +11,7 @@ const redactionPattern = /<PRIVATE_[A-Z0-9_]+>|\[REDACTED[^\]]*\]/g;
 export function RedactedTranscript({ body, turns }: RedactedTranscriptProps) {
   const segments = splitAtTurns(body, turns);
   return (
-    <pre className="my-1 max-h-[430px] overflow-auto rounded-[9px] border border-border bg-muted p-4 font-mono text-[11px] leading-[1.55] text-foreground whitespace-pre-wrap leading-[1.7]">
+    <pre className="tc-code my-1 max-h-[430px] overflow-auto leading-[1.55] whitespace-pre-wrap leading-[1.7]">
       {segments.map((segment) => (
         <span key={segment.id}>
           {segment.kind === "turn" && (
@@ -88,7 +88,7 @@ function highlightRedactions(text: string, keyPrefix: string): ReactNode[] {
     if (index > lastIndex) parts.push(text.slice(lastIndex, index));
     parts.push(
       <mark
-        className="rounded-[3px] bg-chart-4/20 px-1 font-bold text-foreground"
+        className="rounded-[3px] bg-chart-4/20 px-1 font-bold text-[var(--tc-text-primary)]"
         key={`${keyPrefix}-${index}`}
       >
         {match[0]}

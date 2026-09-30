@@ -23,11 +23,11 @@ export function OnboardingWalletConnect({
   return (
     <section className="grid gap-4 border-t border-border pt-5">
       <div>
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           NEAR WALLET
         </span>
         <h3>{disclosure?.heading ?? "NEAR wallet signup"}</h3>
-        <p className="m-0 text-[12px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-label font-normal leading-[17px] tc-text-secondary">
           {disclosure?.disclosure ??
             "Loading wallet connection disclosure…"}
         </p>
@@ -100,20 +100,20 @@ export function OnboardingWalletConnect({
         )}
       </div>
       {wallet.pending && (
-        <p className="m-0 text-[12px] text-muted-foreground">
+        <p className="m-0 tc-label font-normal tc-text-secondary">
           Waiting for wallet ceremony…
         </p>
       )}
       {flow.tone === "refused" && (
-        <p className="m-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert m-0">
           {flow.glyph} {flow.message}
         </p>
       )}
       {flow.tone !== "refused" && flow.message && (
-        <p className="m-0 text-[12px] text-muted-foreground">{flow.message}</p>
+        <p className="m-0 tc-label font-normal tc-text-secondary">{flow.message}</p>
       )}
       {wallet.error && (
-        <p className="m-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert m-0">
           {wallet.error}
         </p>
       )}

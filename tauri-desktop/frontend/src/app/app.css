@@ -1,84 +1,53 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/ibm-plex-sans";
-@import "@fontsource-variable/source-sans-3";
+@import "../design-system/styles.css";
+@import "../design-system/shadcn-bridge.css";
 
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.47 0.17 272);
-  --primary-foreground: oklch(0.985 0.012 272);
-  --secondary: oklch(0.967 0.001 286.375);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.585 0.233 277);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  /* shadcn semantic colours, mapped onto the glass tokens. The app is
+     dark-only: glass reads as glass over the scene, not over white. */
+  color-scheme: dark;
+  --background: transparent;
+  --foreground: #f2f2f4;
+  --card: rgba(255, 255, 255, 0.065);
+  --card-foreground: #f2f2f4;
+  --popover: rgba(34, 36, 42, 0.92);
+  --popover-foreground: #f2f2f4;
+  --primary: #8a3dff;
+  --primary-foreground: #ffffff;
+  --secondary: rgba(255, 255, 255, 0.1);
+  --secondary-foreground: #f2f2f4;
+  --muted: rgba(255, 255, 255, 0.06);
+  --muted-foreground: #b4b4bc;
+  --accent: rgba(255, 255, 255, 0.12);
+  --accent-foreground: #f2f2f4;
+  --destructive: #ff6b6b;
+  --border: rgba(255, 255, 255, 0.07);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #c9b3ff;
+  --chart-1: #8a3dff;
+  --chart-2: #3a7bd5;
+  --chart-3: #a78bfa;
+  --chart-4: #f5c142;
+  --chart-5: #3ddc84;
   --radius: 0.875rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.53 0.2 272);
-  --sidebar-primary-foreground: oklch(0.985 0.012 272);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.585 0.233 277);
-}
-
-.dark {
-  --background: oklch(0.155 0.018 265);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.2 0.02 265);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.2 0.02 265);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.585 0.233 277);
-  --primary-foreground: oklch(0.985 0.012 272);
-  --secondary: oklch(0.274 0.006 286.033);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.62 0.2 277);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.19 0.022 265);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.65 0.21 275);
-  --sidebar-primary-foreground: oklch(0.985 0.012 272);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.62 0.2 277);
+  --sidebar: transparent;
+  --sidebar-foreground: #f2f2f4;
+  --sidebar-primary: #8a3dff;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(255, 255, 255, 0.12);
+  --sidebar-accent-foreground: #f2f2f4;
+  --sidebar-border: rgba(255, 255, 255, 0.07);
+  --sidebar-ring: #c9b3ff;
 }
 
 @theme inline {
-  --font-sans: "IBM Plex Sans Variable", sans-serif;
-  --font-heading: "Source Sans 3 Variable", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --font-sans: var(--tc-font-sans);
+  --font-heading: var(--tc-font-sans);
+  --font-mono: var(--tc-font-mono);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -146,10 +115,14 @@
   }
 
   body {
-    @apply bg-background text-foreground;
     min-width: 0;
     margin: 0;
+    background: var(--tc-scene);
+    background-attachment: fixed;
+    color: var(--tc-text-primary);
+    font: var(--tc-text-body);
     font-synthesis: none;
+    -webkit-font-smoothing: antialiased;
   }
 
   button:not(:disabled),

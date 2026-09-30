@@ -73,7 +73,7 @@ export function HistoryRow({
       : visibleExplanations;
   return (
     <article className="grid grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3.5 border-b border-border py-3.5">
-      <div className="grid h-[34px] w-[34px] place-items-center rounded-[9px] bg-primary text-[12px] font-extrabold text-primary-foreground bg-blue">
+      <div className="tc-tool-tile tc-tool-tile--lg tc-tool-tile--folder">
         {record.project_label.slice(0, 1).toUpperCase()}
       </div>
       <div className="grid min-w-0 gap-1">
@@ -91,7 +91,7 @@ export function HistoryRow({
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={onOpen}
           disabled={!onOpen}

@@ -27,7 +27,7 @@ function CapabilityRow({
         <span className="block text-xs text-muted-foreground">{detail}</span>
       </div>
       <div className="flex shrink-0 items-center gap-3">
-        <span className="rounded-full bg-muted px-2.5 py-1 font-mono text-[10px] font-bold uppercase tracking-[.08em] text-muted-foreground">
+        <span className="tc-card font-mono text-[10px] font-bold uppercase tracking-[.08em] text-muted-foreground">
           {stateLabel(state)}
         </span>
         {action}
@@ -44,16 +44,16 @@ export function PlatformPanel() {
   const canToggleLogin =
     loginState === "not_registered" || loginState === "enabled";
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             DESKTOP
           </span>
           <h2>System integrations</h2>
         </div>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={() => void platform.refetch()}
           disabled={platform.isFetching || platform.busy}
@@ -61,12 +61,12 @@ export function PlatformPanel() {
           Refresh
         </Button>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Native permissions and startup state stay in Rust. Credentials and
         notification bodies never enter this UI state.
       </p>
       {platform.error && (
-        <p className="mt-4 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-card tc-card--quiet mt-4 border-destructive/30 text-[12px] text-destructive">
           {platform.error}
         </p>
       )}

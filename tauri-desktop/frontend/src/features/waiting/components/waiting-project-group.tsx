@@ -30,9 +30,9 @@ export function WaitingProjectGroup({
   const eligibility = useEligibilityGroupCopy(entries);
   return (
     <section className="border-t border-border py-[18px] first:border-t-0 first:pt-0">
-      <div className="flex items-start justify-between gap-[18px]">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             PROJECT
           </span>
           <h3>{label}</h3>
@@ -56,7 +56,7 @@ export function WaitingProjectGroup({
         {showSubmitAll && eligibility.data?.can_contribute === true && (
           <div className="flex flex-wrap gap-2">
             <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+              className="tc-btn tc-btn--glass"
               type="button"
               onClick={() => onSubmitAll(projectId)}
               disabled={busy}
@@ -74,11 +74,11 @@ export function WaitingProjectGroup({
         )}
       </div>
       {message && (
-        <p className="mt-[15px] text-[11px] leading-[1.5] text-primary">
+        <p className="mt-2 tc-caption tc-text-accent">
           {message}
         </p>
       )}
-      <div className="mt-[22px] grid gap-px border-t border-border">
+      <div className="mt-3 grid gap-px">
         {entries.map((entry) => (
           <WaitingEntryRow
             key={entry.entry_id}

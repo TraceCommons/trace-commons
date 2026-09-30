@@ -115,6 +115,13 @@ struct MainWindowView: View {
                 .padding(.horizontal, TC.Space.md)
                 .padding(.top, TC.Space.s)
             }
+            // Above the shell too: the contributor is told, wherever they
+            // are, that their contributions now go under their NEAR AI
+            // account (the consent spec requires it in every shell).
+            LegacyMigrationNoticeCard(
+                notice: model.legacyMigrationNotice,
+                onAcknowledge: { model.acknowledgeLegacyInviteMigration() }
+            )
             shell
         }
     }
@@ -800,6 +807,50 @@ struct GrantVoidNotices: View {
                     }
                 }
             }
+            .padding(.horizontal, TC.Space.md)
+            .padding(.top, TC.Space.s)
+        }
+    }
+}
+
+/// The notice after a legacy invite identity moved to a NEAR AI account. The
+/// words come from `consent_copy` across the ABI, worded once per notice by
+/// `AppModel.legacyMigrationNotice`; this view only lays them out, and draws
+/// nothing when there is no notice or it cannot be read.
+struct LegacyMigrationNoticeCard: View {
+    let notice: LegacyMigrationNotice?
+    let onAcknowledge: () -> Void
+
+    var body: some View {
+        if let notice {
+            HStack(alignment: .top, spacing: TC.Space.m) {
+                MacGlyph(glyph: .warningTriangle, size: 14, color: TC.Tone.attention.color)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    Text(notice.title)
+                        .font(TC.Font_.cardTitle)
+                        .foregroundStyle(TC.inkPrimary)
+                    Text(notice.body)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(notice.folders)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: TC.Space.m)
+                // Records that the notice was shown, and does nothing else.
+                Button(notice.acknowledge, action: onAcknowledge)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            .padding(.vertical, TC.Space.m)
+            .padding(.horizontal, TC.Space.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard(emphasised: true)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(Text(notice.title))
             .padding(.horizontal, TC.Space.md)
             .padding(.top, TC.Space.s)
         }

@@ -27,15 +27,15 @@ export function ComparisonTaskList({
 }) {
   return (
     <>
-      <div className="my-[18px] grid gap-px border-t border-border">
+      <div className="my-3 grid gap-px">
         {episodes.length === 0 ? (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p className="mt-3 mb-1 tc-body tc-text-tertiary">
             Create an episode first.
           </p>
         ) : (
           episodes.map((entry) => (
             <label
-              className="flex items-start gap-2.5 border-b border-border py-2.5 text-[12px] font-normal text-foreground"
+              className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal"
               key={entry.episode.id}
             >
               <Checkbox
@@ -52,7 +52,7 @@ export function ComparisonTaskList({
         )}
       </div>
       <Button
-        className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        className="tc-btn tc-btn--glass"
         type="button"
         onClick={() =>
           void form.handleSubmit(async (values) => {
@@ -65,16 +65,16 @@ export function ComparisonTaskList({
       >
         Create comparison task
       </Button>
-      <div className="mt-[22px] grid gap-px border-t border-border">
+      <div className="mt-3 grid gap-px">
         {tasks.map((item) => (
           <Button
-            className="grid w-full grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3.5 border-0 border-b border-border bg-transparent py-3.5 text-left hover:bg-muted"
+            className="grid w-full grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg border-0 bg-transparent px-1.5 py-2 text-left text-inherit hover:bg-white/5 tc-hairline-bottom"
             type="button"
             key={item.task.id}
             onClick={() => onOpen(item.task.id)}
             disabled={busy}
           >
-            <span className="grid h-[34px] w-[34px] place-items-center rounded-[9px] bg-primary text-[12px] font-extrabold text-primary-foreground">
+            <span className="tc-tool-tile tc-tool-tile--lg">
               C
             </span>
             <span className="grid min-w-0 gap-1">

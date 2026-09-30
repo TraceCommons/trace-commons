@@ -24,33 +24,33 @@ function modeLabel(value: unknown) {
 export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
   const connected = status?.daemon.logged_in === true;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px] mb-4">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card mb-4">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             CONNECTION
           </span>
           <h2>{connected ? "Connected" : "Not connected"}</h2>
         </div>
         <span
-          className={`whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start ${connected ? "" : "bg-muted text-muted-foreground"}`}
+          className={`tc-chip tc-chip--glass self-start ${connected ? "" : "bg-muted text-muted-foreground"}`}
         >
           {connected ? "Ready" : "Local only"}
         </span>
       </div>
       {!connected && (
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           Sessions may stay queued locally, but nothing can be sent until this
           device is enrolled.
         </p>
       )}
       {connected && (
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           Consent and source declarations come from Rust. This panel reports
           their current state without exposing paths or credentials.
         </p>
       )}
-      <div className="mt-5 grid gap-px border-t border-border">
+      <div className="mt-3 grid gap-px">
         {sources.map(([label, key]) => (
           <div
             className="flex items-start gap-2.5 border-b border-border py-3"

@@ -18,9 +18,9 @@ export function UndoBar({
 }) {
   if (!scope && !error) return null;
   return (
-    <section className="mb-4 flex items-center justify-between gap-[18px] rounded-2xl border border-border bg-card/80 p-[22px_26px] max-[860px]:items-stretch max-[860px]:flex-col">
+    <section className="tc-card mb-4 flex items-center justify-between gap-[18px]">
       <div>
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           APPROVAL SAVED
         </span>
         <strong>
@@ -35,9 +35,9 @@ export function UndoBar({
         )}
         {error && <small>{error}</small>}
       </div>
-      <div className="mt-6 flex gap-2.5">
+      <div className="mt-3 flex flex-wrap gap-2">
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={onUndo}
           disabled={busy || !scope}
@@ -45,7 +45,7 @@ export function UndoBar({
           {busy ? "Undoing…" : "Undo"}
         </Button>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={onDismiss}
         >

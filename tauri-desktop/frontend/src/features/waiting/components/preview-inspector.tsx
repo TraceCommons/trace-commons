@@ -52,18 +52,18 @@ export function PreviewInspector({
       }
     >
       <div className="grid gap-4">
-        <span className="font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="tc-eyebrow">
           LOOK INSIDE
         </span>
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           This is the redacted envelope. It stays local while you read it.
           Original-session search returns only a count; it never returns raw
           text.
         </p>
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           {preview.gate_statement}
         </p>
-        <div className="flex flex-wrap justify-between gap-x-[18px] gap-y-2 border border-border bg-muted px-3.5 py-3 text-[11px]">
+        <div className="tc-card tc-card--quiet flex flex-wrap justify-between gap-x-[18px] gap-y-2 text-[11px]">
           <strong>{preview.entry.source}</strong>
           <span>
             {formatBytes(preview.would_send_bytes)} would send ·{" "}
@@ -79,7 +79,7 @@ export function PreviewInspector({
           />
         )}
         {inspector.error && (
-          <p className="rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+          <p className="tc-card tc-card--quiet border-destructive/30 text-[12px] text-destructive">
             {inspector.error}
           </p>
         )}
@@ -175,7 +175,7 @@ function TranscriptTab({
       )}
       {inspector.nextOffset !== null && (
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={() => void inspector.loadMore()}
           disabled={inspector.state === "busy"}
@@ -190,7 +190,7 @@ function TranscriptTab({
       )}
       {loaded && inspector.turns.length === 0 && (
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={() => void inspector.loadTurns()}
           disabled={inspector.state === "busy"}
@@ -240,7 +240,7 @@ function SearchTab({
           <FormFieldError id="original-search-error" message={error} />
         </div>
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="submit"
           disabled={inspector.state === "busy" || !form.formState.isValid}
         >
@@ -267,13 +267,13 @@ function TurnTab({
   return (
     <div className="grid gap-3 border-0 pt-4" role="tabpanel">
       {!loaded && (
-        <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+        <p className="mt-3 mb-1 tc-body tc-text-tertiary">
           Read transcript fully before loading turn index.
         </p>
       )}
       {loaded && inspector.turns.length === 0 && (
         <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+          className="tc-btn tc-btn--primary tc-btn--sm"
           type="button"
           onClick={() => void inspector.loadTurns()}
           disabled={inspector.state === "busy"}
@@ -282,8 +282,8 @@ function TurnTab({
         </Button>
       )}
       {inspector.turns.length > 0 && (
-        <div className="mt-5 grid gap-px border-t border-border">
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <div className="mt-3 grid gap-px">
+          <span className="mb-1.5 block tc-eyebrow">
             TURN INDEX
           </span>
           {inspector.turns.map((turn) => (

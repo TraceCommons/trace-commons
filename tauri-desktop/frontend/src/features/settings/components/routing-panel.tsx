@@ -54,16 +54,16 @@ export function RoutingPanel({
     typeof declaration?.token_dir === "string" ? declaration.token_dir : "";
   const busy = state === "loading" || state === "busy";
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px] block">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card block">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             PRIVATE ROUTING
           </span>
           <h2>Local proxy boundary</h2>
         </div>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
@@ -71,17 +71,17 @@ export function RoutingPanel({
           Discover
         </Button>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Routing is opt-in. The daemon reads only a declared local proxy and
         never sends its token to the UI. A declaration does not prove that any
         agent is connected.
       </p>
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {error}
         </p>
       )}
-      <div className="mt-5 grid gap-[5px] border-l-[3px] border-chart-2 bg-secondary/50 p-3.5">
+      <div className="tc-card tc-card--quiet mt-5 grid gap-[5px]">
         <strong>
           {stateLabel(status?.daemon.routing?.state ?? "unknown")}
         </strong>

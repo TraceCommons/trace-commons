@@ -1,10 +1,14 @@
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { CenteredNotice } from "../../components/centered-notice";
-import { PageHeader } from "../../components/page-header";
-import { StatCard } from "../../components/stat-card";
+import { type ReactNode, useState } from "react";
+import {
+  Expander,
+  KeyValueList,
+  LegendCell,
+  StatusDot,
+  ToolTile,
+} from "../../design-system";
 import type { CoreStatus } from "../../lib/tauri/types";
-import { useProjects, useSettings } from "../settings/public";
+import { useContributorDisclosureCopy } from "../../lib/tauri/use-contributor-copy";
+import { ProjectModeField } from "../settings/public";
 import { ArmingOffer } from "./components/arming-offer";
 import { CertificatePanel } from "./components/certificate-panel";
 import { PreviewInspector } from "./components/preview-inspector";
@@ -13,73 +17,192 @@ import { QueueOutcomeDisclosure } from "./components/queue-outcome-disclosure";
 import { QueueStatusPanel } from "./components/queue-status-panel";
 import { UndoBar } from "./components/undo-bar";
 import { WaitingProjectFolder } from "./components/waiting-project-folder";
-import { WaitingProjectGroup } from "./components/waiting-project-group";
 import { WaitingReview } from "./components/waiting-review";
 import { useArmingOffer } from "./hooks/use-arming-offer";
 import { useCertificateCopy } from "./hooks/use-certificate-copy";
 import { usePrivateInferenceOffer } from "./hooks/use-private-inference-offer";
 import { useQueueOutcomeCounts } from "./hooks/use-queue-outcome-counts";
-import { useWaitingBulkApproval } from "./hooks/use-waiting-bulk-approval";
-import { useWaitingData } from "./hooks/use-waiting-data";
-import { useWaitingReview } from "./hooks/use-waiting-review";
-import { useWaitingUndo } from "./hooks/use-waiting-undo";
+import {
+  type FolderNode,
+  formatBytes,
+  isContributed,
+  MODE_LABEL,
+  plural,
+  type ToolNode,
+} from "./traces-model";
+import { useTracesWorkspace } from "./traces-workspace";
 
+/**
+ * The Traces inspector. With nothing selected it is the summary: what is
+ * waiting, what went, today's upload budget and the queue's safeguards.
+ * With a tool, folder or session selected it shows that item; a session
+ * opens its review, where "Exactly what would be sent" and Contribute live.
+ */
 export function WaitingPage({ status }: { status: CoreStatus | null }) {
-  const waiting = useWaitingData();
-  const undo = useWaitingUndo();
-  const review = useWaitingReview(undo.prepare);
-  const bulk = useWaitingBulkApproval(undo.prepare);
+  const workspace = useTracesWorkspace();
+  const { undo, selected } = workspace;
+  return (
+    <div className="tc-page">
+      <UndoBar
+        scope={undo.scope}
+        seconds={undo.seconds}
+        busy={undo.busy}
+        error={undo.error}
+        onUndo={() => void undo.undo()}
+        onDismiss={undo.dismiss}
+      />
+      {selected?.kind === "session" ? (
+        <SessionInspector />
+      ) : selected?.kind === "folder" ? (
+        <FolderInspector tool={selected.tool} folder={selected.folder} />
+      ) : selected?.kind === "tool" ? (
+        <ToolInspector tool={selected.tool} />
+      ) : (
+        <SummaryInspector status={status} />
+      )}
+    </div>
+  );
+}
+
+export function InspectorHeader({
+  tile,
+  title,
+  sub,
+}: {
+  tile?: ReactNode;
+  title: string;
+  sub: string;
+}) {
+  return (
+    <div className="flex items-center gap-2.5">
+      {tile}
+      <div className="min-w-0">
+        <div className="truncate text-[17px] font-bold leading-5">{title}</div>
+        <div className="truncate tc-caption tc-text-tertiary">{sub}</div>
+      </div>
+    </div>
+  );
+}
+
+function Section({
+  title,
+  children,
+  collapsible = false,
+}: {
+  title: string;
+  children: ReactNode;
+  collapsible?: boolean;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Expander open={open} onToggle={collapsible ? () => setOpen(!open) : undefined}>
+        {title}
+      </Expander>
+      {open ? <div className="px-1 tc-label font-normal leading-[17px]">{children}</div> : null}
+    </div>
+  );
+}
+
+function Stat({ label, lines }: { label: string; lines: Array<[string, string]> }) {
+  return (
+    <div>
+      <div className="tc-caption tc-text-tertiary">{label}</div>
+      {lines.map(([title, sub], index) => (
+        <div key={title} className={index ? "mt-1.5" : "mt-0.5"}>
+          <div className="text-[14px] font-semibold">{title}</div>
+          <div className="tc-caption tc-text-tertiary">{sub}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: the summary composes the queue safeguards; each block is a presence check.
+function SummaryInspector({ status }: { status: CoreStatus | null }) {
+  const workspace = useTracesWorkspace();
   const arming = useArmingOffer();
   const privateInference = usePrivateInferenceOffer();
   const outcomes = useQueueOutcomeCounts();
-  const settings = useSettings();
-  const projects = useProjects();
-  const evidenceAdmitted = settings.data?.admission_evidence_required === true;
+  const evidenceAdmitted =
+    workspace.settings.data?.admission_evidence_required === true;
   const certificateCopy = useCertificateCopy(evidenceAdmitted);
-  const [inspecting, setInspecting] = useState(false);
-  const entries = waiting.data?.pending ?? [];
-  const [openProjectId, setOpenProjectId] = useState<string | null>(null);
-  const groups = Array.from(
-    entries
-      .reduce((map, entry) => {
-        const group = map.get(entry.project_id) ?? {
-          label: entry.project_label,
-          entries: [] as typeof entries,
-        };
-        group.entries.push(entry);
-        map.set(entry.project_id, group);
-        return map;
-      }, new Map<string, { label: string; entries: typeof entries }>())
-      .entries(),
-  );
-  const openGroup = groups.find(([projectId]) => projectId === openProjectId);
+  const { tree, entries } = workspace;
+  const rollup = workspace.history.data?.rollup ?? null;
+  const records = workspace.history.data?.history ?? [];
+  const watched = tree.filter((tool) => tool.mode === "watch").length;
+  const sourced = tree.filter((tool) => tool.source).length;
+  const folders = tree.reduce((n, tool) => n + tool.folders.length, 0);
+  const attention = entries.filter(
+    (entry) =>
+      entry.attestation_copy?.tone === "attention" ||
+      entry.attestation_copy?.tone === "refused",
+  ).length;
+  const contributed = records.filter(isContributed).length;
+  const budget = status?.daemon.daily_budget;
+  const topFolders = tree
+    .flatMap((tool) => tool.folders)
+    .sort(
+      (a, b) =>
+        b.entries.length + b.contributed - (a.entries.length + a.contributed),
+    )
+    .slice(0, 2);
+  const topTools = tree
+    .filter((tool) => tool.waiting + tool.contributed > 0)
+    .slice(0, 2);
   return (
-    <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14">
-      <PageHeader
-        eyebrow="WORKSPACE / REVIEW"
-        title="Waiting"
-        description="Nothing is sent unless you say so."
-        phase="PHASE 1"
+    <>
+      <InspectorHeader
+        title="Summary"
+        sub={`${watched} of ${sourced} tools watched · ${plural(folders, "project")} · ${plural(entries.length, "session")} waiting`}
       />
-      <div className="mb-4 grid grid-cols-3 gap-3 max-[860px]:grid-cols-1">
-        <StatCard
-          label="Needs review"
-          value={waiting.state === "ready" ? `${entries.length}` : "—"}
-          detail="Pending local decisions"
-        />
-        <StatCard
-          label="Privacy boundary"
-          value="Local"
-          detail="Content stays on this machine"
-          tone="blue"
-        />
-        <StatCard
-          label="Daemon"
-          value={waiting.state === "error" ? "Offline" : "Watching"}
-          detail="Existing Rust contributor core"
-          tone={waiting.state === "error" ? "gold" : "green"}
-        />
+      <div className="tc-legend">
+        <LegendCell color="var(--tc-data-shared)" label="shared" value={contributed} />
+        <LegendCell color="var(--tc-data-kept)" label="kept" value={entries.length} />
       </div>
+      <Section title="Decisions" collapsible>
+        <ul className="m-0 flex list-none flex-col gap-2 p-0 text-[14px]">
+          <DecisionLine glyph="◫" tone="ask">
+            <strong>{status?.daemon.queue_depth ?? entries.length}</strong> waiting for you
+          </DecisionLine>
+          <DecisionLine glyph="⚠" tone="ask">
+            <strong>{attention}</strong> worth a second look
+          </DecisionLine>
+          <DecisionLine glyph="✓" tone="on">
+            <strong>{contributed}</strong> contributed
+            {rollup ? ` · ${rollup.credit_pending.toFixed(1)} credit pending` : ""}
+          </DecisionLine>
+          {budget ? (
+            <DecisionLine glyph="⏸">
+              <strong>{budget.uploads_today}</strong> of {budget.max_uploads_per_day} uploads today
+            </DecisionLine>
+          ) : null}
+        </ul>
+      </Section>
+      {topFolders.length || topTools.length ? (
+        <Section title="Statistics" collapsible>
+          <div className="flex flex-col gap-2.5">
+            {topFolders.length ? (
+              <Stat
+                label="Top projects"
+                lines={topFolders.map((folder) => [
+                  folder.label,
+                  `${folder.entries.length} waiting · ${folder.contributed} contributed${folder.mode ? ` · ${MODE_LABEL[folder.mode]}` : ""}`,
+                ])}
+              />
+            ) : null}
+            {topTools.length ? (
+              <Stat
+                label="Top tools"
+                lines={topTools.map((tool) => [
+                  tool.label,
+                  `${tool.waiting} waiting · ${tool.contributed} contributed`,
+                ])}
+              />
+            ) : null}
+          </div>
+        </Section>
+      ) : null}
       {status && (
         <QueueStatusPanel
           health={status.daemon.health}
@@ -102,144 +225,188 @@ export function WaitingPage({ status }: { status: CoreStatus | null }) {
         error={privateInference.error}
         onAnswer={(enabled) => void privateInference.answer(enabled)}
       />
-      <UndoBar
-        scope={undo.scope}
-        seconds={undo.seconds}
-        busy={undo.busy}
-        error={undo.error}
-        onUndo={() => void undo.undo()}
-        onDismiss={undo.dismiss}
-      />
       <CertificatePanel entries={entries} copy={certificateCopy.data ?? null} />
       <QueueOutcomeDisclosure
         reasons={outcomes.data?.reasons ?? null}
         lines={outcomes.data?.lines ?? {}}
       />
-      <section className="p-[26px] rounded-2xl border border-border bg-card/80">
-        <div className="flex items-start justify-between gap-[18px]">
-          <div>
-            <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
-              QUEUE
-            </span>
-            <h2>Sessions awaiting your decision</h2>
-          </div>
-          <Button
-            className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
-            type="button"
-            onClick={() =>
-              void Promise.all([waiting.refresh(), outcomes.refresh()])
-            }
-            disabled={
-              waiting.state === "loading" || outcomes.state === "loading"
-            }
-          >
-            Refresh
-          </Button>
-        </div>
-        {waiting.state === "loading" && (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
-            Reading local queue…
-          </p>
-        )}
-        {waiting.state === "error" && (
-          <CenteredNotice
-            title="The watcher isn't running."
-            body="It didn't answer. Nothing is being noticed or sent while it's stopped, and sessions already waiting stay on this machine."
+    </>
+  );
+}
+
+function DecisionLine({
+  glyph,
+  tone,
+  children,
+}: {
+  glyph: string;
+  tone?: "ask" | "on";
+  children: ReactNode;
+}) {
+  return (
+    <li className="flex items-center gap-2.5">
+      <span
+        aria-hidden="true"
+        className={`w-5 text-center ${tone === "ask" ? "tc-text-ask" : tone === "on" ? "tc-text-on" : "tc-text-tertiary"}`}
+      >
+        {glyph}
+      </span>
+      <span>{children}</span>
+    </li>
+  );
+}
+
+function ToolInspector({ tool }: { tool: ToolNode }) {
+  const disclosure = useContributorDisclosureCopy();
+  const statusLine = tool.source
+    ? disclosure.data?.source_check_lines[tool.source.name]?.[tool.mode]
+    : null;
+  return (
+    <>
+      <InspectorHeader
+        tile={<ToolTile tool={tool.logo} fallback={tool.label.slice(0, 2)} large />}
+        title={tool.label}
+        sub="Tool"
+      />
+      <div className="tc-legend">
+        <LegendCell color="var(--tc-data-shared)" label="shared" value={tool.contributed} />
+        <LegendCell color="var(--tc-data-kept)" label="kept" value={tool.waiting} />
+      </div>
+      <Section title="Tool">
+        <KeyValueList
+          items={[
+            {
+              label: "Watching",
+              value: (
+                <span className="inline-flex items-center gap-1.5">
+                  <StatusDot tone={tool.mode === "watch" ? "on" : "off"} size="md" />
+                  {tool.mode === "watch" ? "On" : tool.mode === "off" ? "Off" : "Not set"}
+                </span>
+              ),
+            },
+            { label: "Folders", value: tool.folders.length },
+            { label: "Waiting", value: tool.waiting },
+          ]}
+        />
+      </Section>
+      {statusLine ? <Section title="Sessions folder">{statusLine}</Section> : null}
+      <Section title="Decisions">
+        {plural(tool.waiting, "session")} waiting · {tool.contributed} contributed
+      </Section>
+    </>
+  );
+}
+
+function FolderInspector({ tool, folder }: { tool: ToolNode; folder: FolderNode }) {
+  const workspace = useTracesWorkspace();
+  const project = workspace.projects.projects.find(
+    (row) => row.project_id === folder.id,
+  );
+  const bytes = folder.entries.reduce((n, entry) => n + entry.size_bytes, 0);
+  return (
+    <>
+      <InspectorHeader
+        tile={<ToolTile kind="folder" large />}
+        title={folder.label}
+        sub={`Project · ${tool.label}`}
+      />
+      <div className="tc-legend">
+        <LegendCell color="var(--tc-data-shared)" label="shared" value={folder.contributed} />
+        <LegendCell color="var(--tc-data-kept)" label="kept" value={folder.entries.length} />
+      </div>
+      <Section title="Project">
+        <KeyValueList
+          items={[
+            { label: "Path", value: folder.path ?? "—", mono: true },
+            { label: "Waiting", value: folder.entries.length },
+            { label: "Size", value: formatBytes(bytes) },
+          ]}
+        />
+      </Section>
+      <Section title="Contribution rule">
+        {project ? (
+          <ProjectModeField
+            project={project}
+            allowAutoUpload
+            disabled={workspace.projects.state !== "ready"}
+            onSetMode={workspace.projects.setMode}
           />
+        ) : (
+          "This folder has no rule of its own yet."
         )}
-        {waiting.state === "ready" && entries.length === 0 && (
-          <CenteredNotice
-            title="Nothing is waiting."
-            body="When a session finishes and goes quiet, it shows up here. Nothing is sent unless you say so."
+      </Section>
+      {folder.entries.length ? (
+        <Section title="Decisions">
+          <WaitingProjectFolder
+            projectId={folder.id}
+            label={folder.label}
+            path={folder.path ?? undefined}
+            count={folder.entries.length}
+            entries={folder.entries}
+            busy={
+              workspace.bulk.busyId === folder.id ||
+              workspace.projects.state === "busy"
+            }
+            message={workspace.bulk.messages[folder.id]}
+            onOpen={(id) => workspace.reveal([tool.id, id])}
+            onSubmitAll={(id) => void workspace.bulk.approve(id, folder.label)}
+            onSubmitAllAs={(id, outcome) =>
+              void workspace.bulk.approve(id, folder.label, outcome)
+            }
+            onIgnore={async (id) => {
+              await workspace.projects.setMode(id, "ignore");
+              await workspace.waiting.refresh();
+            }}
           />
-        )}
-        {waiting.state === "ready" &&
-          entries.length > 0 &&
-          (openGroup ? (
-            <div className="block">
-              <Button
-                className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
-                type="button"
-                onClick={() => {
-                  setOpenProjectId(null);
-                  review.clear();
-                }}
-              >
-                ‹ All projects
-              </Button>
-              <WaitingProjectGroup
-                projectId={openGroup[0]}
-                label={openGroup[1].label}
-                entries={openGroup[1].entries}
-                selectedId={review.selectedId}
-                busy={bulk.busyId === openGroup[0]}
-                message={bulk.messages[openGroup[0]]}
-                showSubmitAll={false}
-                onReview={(entryId) => void review.review(entryId)}
-                onSubmitAll={(id) => void bulk.approve(id, openGroup[1].label)}
-                onSubmitAllAs={(id, outcome) =>
-                  void bulk.approve(id, openGroup[1].label, outcome)
-                }
-              />
-            </div>
-          ) : (
-            <div className="mt-[22px] grid gap-2.5">
-              {groups.map(([projectId, group]) => (
-                <WaitingProjectFolder
-                  key={projectId}
-                  projectId={projectId}
-                  label={group.label}
-                  path={group.entries[0]?.project_path}
-                  count={group.entries.length}
-                  entries={group.entries}
-                  busy={bulk.busyId === projectId || projects.state === "busy"}
-                  message={bulk.messages[projectId]}
-                  onOpen={(id) => {
-                    review.clear();
-                    setOpenProjectId(id);
-                  }}
-                  onSubmitAll={(id) => void bulk.approve(id, group.label)}
-                  onSubmitAllAs={(id, outcome) =>
-                    void bulk.approve(id, group.label, outcome)
-                  }
-                  onIgnore={async (id) => {
-                    await projects.setMode(id, "ignore");
-                    await waiting.refresh();
-                  }}
-                />
-              ))}
-            </div>
-          ))}
-        <WaitingReview
-          preview={review.preview}
-          state={review.state}
+        </Section>
+      ) : null}
+    </>
+  );
+}
+
+function SessionInspector() {
+  const workspace = useTracesWorkspace();
+  const { review, waiting, selected } = workspace;
+  if (selected?.kind !== "session") return null;
+  return (
+    <>
+      <InspectorHeader
+        tile={<ToolTile kind="session" large />}
+        title={selected.folder.label}
+        sub={`Session · ${selected.tool.label}`}
+      />
+      <WaitingReview
+        preview={review.preview}
+        state={review.state}
         error={review.error}
-          errorKind={review.errorKind}
-          eligibilityCopy={review.eligibilityCopy}
-          eligibilityPending={review.eligibilityPending}
-          eligibilityError={review.eligibilityError}
-          outcomeCopy={review.outcomeCopy}
-          outcomeCopyPending={review.outcomeCopyPending}
-          outcomeCopyError={review.outcomeCopyError}
-          verdict={review.verdict}
-          correction={review.correction}
-          credentialRefusal={review.credentialRefusal}
-          onVerdictChange={review.setVerdict}
-          onCorrectionChange={review.setCorrection}
-          onApprove={() => void review.approve()}
-          onDismiss={() => void review.dismiss()}
-          onInspect={() => setInspecting(true)}
-        />
-        <PreviewInspector
-          preview={review.preview}
-          open={inspecting}
-          onClose={() => setInspecting(false)}
-          onReviewed={() => {
-            void review.refetch();
-            void waiting.refresh();
-          }}
-        />
-      </section>
-    </div>
+        errorKind={review.errorKind}
+        eligibilityCopy={review.eligibilityCopy}
+        eligibilityPending={review.eligibilityPending}
+        eligibilityError={review.eligibilityError}
+        outcomeCopy={review.outcomeCopy}
+        outcomeCopyPending={review.outcomeCopyPending}
+        outcomeCopyError={review.outcomeCopyError}
+        verdict={review.verdict}
+        correction={review.correction}
+        credentialRefusal={review.credentialRefusal}
+        onVerdictChange={review.setVerdict}
+        onCorrectionChange={review.setCorrection}
+        onApprove={() => void review.approve()}
+        onDismiss={() => {
+          void review.dismiss();
+          workspace.select(null);
+        }}
+        onInspect={() => workspace.setInspecting(true)}
+      />
+      <PreviewInspector
+        preview={review.preview}
+        open={workspace.inspecting}
+        onClose={() => workspace.setInspecting(false)}
+        onReviewed={() => {
+          void review.refetch();
+          void waiting.refresh();
+        }}
+      />
+    </>
   );
 }

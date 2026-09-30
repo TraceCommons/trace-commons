@@ -9,7 +9,7 @@ export function CertificatePanel({
 }) {
   const certified = entries.filter((entry) => entry.holds_certificate === true);
   return (
-    <section className="mb-4 grid gap-2.5 rounded-xl border border-chart-4/30 bg-chart-4/10 p-[22px_26px]">
+    <section className="tc-card tc-card--quiet mb-4 grid gap-2.5 border-chart-4/30">
       <div>
         <h2>{copy?.list_title ?? "Witness certificates"}</h2>
       </div>

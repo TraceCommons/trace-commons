@@ -98,7 +98,7 @@ export function AdmissionPreparationOverlay({
         </p>
       )}
       {disclosure && (
-        <label className="mt-4 flex items-start gap-2.5 rounded-[9px] border border-border p-3.5 text-[12px] text-foreground">
+        <label className="tc-card tc-card--quiet mt-4 flex items-start gap-2.5 text-[12px] text-foreground">
           <Checkbox
             checked={confirmed}
             onCheckedChange={(value) => setConfirmed(value === true)}
@@ -114,7 +114,7 @@ export function AdmissionPreparationOverlay({
         </p>
       )}
       {error && (
-        <p className="mt-4 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-card tc-card--quiet mt-4 border-destructive/30 text-[12px] text-destructive">
           {error}
         </p>
       )}

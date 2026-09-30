@@ -63,16 +63,16 @@ export function WitnessPanel({
     }
   };
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px] block">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card block">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             REDACTION WITNESS
           </span>
           <h2>Certificate boundary</h2>
         </div>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
@@ -80,13 +80,13 @@ export function WitnessPanel({
           Refresh
         </Button>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         A witness receives raw sessions only after local consent and measurement
         verification. A configured witness without a valid pin refuses
         submissions; no witness keeps local redaction.
       </p>
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {error}
         </p>
       )}
@@ -162,7 +162,7 @@ export function WitnessPanel({
         </label>
         <div className="mt-2 flex gap-2.5">
           <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+            className="tc-btn tc-btn--primary tc-btn--sm"
             type="submit"
             disabled={busy || !form.formState.isValid}
           >
@@ -170,7 +170,7 @@ export function WitnessPanel({
           </Button>
           {configured && (
             <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary text-destructive"
+              className="tc-btn tc-btn--glass tc-text-outside"
               type="button"
               onClick={() => void onClear()}
               disabled={busy}

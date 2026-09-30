@@ -9,14 +9,23 @@ export function IgnoreProjectControl({
   pending,
   disabled,
   onIgnore,
+  open: controlledOpen,
+  onOpenChange,
+  hideTrigger = false,
 }: {
   projectId: string;
   label: string;
   pending: number;
   disabled: boolean;
   onIgnore: (projectId: string) => Promise<unknown>;
+  /** Controlled from the Traces tree (watch switch, row menu). */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  hideTrigger?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = onOpenChange ?? setUncontrolledOpen;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const copy = useProjectIgnoreCopy(label, pending);
@@ -34,15 +43,17 @@ export function IgnoreProjectControl({
   };
   return (
     <>
-      <Button
-        type="button"
-        variant="outline"
-        title={copy.data?.tooltip}
-        onClick={() => setOpen(true)}
-        disabled={disabled || !copy.data}
-      >
-        {copy.data?.button ?? "Ignore project"}
-      </Button>
+      {hideTrigger ? null : (
+        <Button
+          type="button"
+          variant="outline"
+          title={copy.data?.tooltip}
+          onClick={() => setOpen(true)}
+          disabled={disabled || !copy.data}
+        >
+          {copy.data?.button ?? "Ignore project"}
+        </Button>
+      )}
       <ResponsiveOverlay
         open={open}
         onOpenChange={setOpen}
@@ -70,17 +81,17 @@ export function IgnoreProjectControl({
         }
       >
         {copy.data ? (
-          <p className="whitespace-pre-line text-sm leading-[1.55] text-muted-foreground">
+          <p className="whitespace-pre-line tc-label font-normal leading-[17px] tc-text-secondary">
             {copy.data.body}
           </p>
         ) : (
-          <p className="text-sm text-destructive">
+          <p className="tc-label font-normal tc-text-outside">
             {copy.isError
               ? "Ignore confirmation unavailable. Ignoring is disabled."
               : "Loading ignore confirmation…"}
           </p>
         )}
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        {error && <p className="tc-label font-normal tc-text-outside">{error}</p>}
       </ResponsiveOverlay>
     </>
   );

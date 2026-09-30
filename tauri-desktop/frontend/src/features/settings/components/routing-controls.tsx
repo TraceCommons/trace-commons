@@ -67,7 +67,7 @@ export function RoutingControls({
   );
   return (
     <form onSubmit={form.handleSubmit(save)}>
-      <label className="mt-5 flex items-start gap-2.5 text-[12px] font-normal text-foreground">
+      <label className="mt-5 flex items-start gap-2.5 text-[12px] font-normal text-[var(--tc-text-primary)]">
         <Checkbox
           checked={enabled}
           onCheckedChange={(checked) =>
@@ -116,9 +116,9 @@ export function RoutingControls({
           />
         </label>
       </div>
-      <div className="mt-6 flex gap-2.5">
+      <div className="mt-3 flex flex-wrap gap-2">
         <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+          className="tc-btn tc-btn--primary tc-btn--sm"
           type="submit"
           disabled={busy || !form.formState.isValid}
         >
@@ -126,7 +126,7 @@ export function RoutingControls({
         </Button>
         {enabled && (
           <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+            className="tc-btn tc-btn--glass"
             type="button"
             onClick={() => void check()}
             disabled={busy || !form.formState.isValid}
@@ -136,7 +136,7 @@ export function RoutingControls({
         )}
       </div>
       {evidence && (
-        <div className="mt-[22px] grid gap-px border-t border-border">
+        <div className="mt-3 grid gap-px">
           <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.08em] text-primary">
             PROXY EVIDENCE · {evidence.outcome}
           </span>

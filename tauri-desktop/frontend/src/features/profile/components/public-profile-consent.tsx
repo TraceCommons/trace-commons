@@ -66,13 +66,13 @@ export function PublicProfileConsent({
         className="grid gap-4 pb-2"
         onSubmit={form.handleSubmit(() => onConfirm())}
       >
-        <div className="grid gap-4 rounded-lg border p-4 sm:grid-cols-2">
+        <div className="tc-card tc-card--quiet grid gap-4 sm:grid-cols-2">
           <section className="grid gap-2">
             <h3 className="font-heading text-base font-medium">What gets published</h3>
             <p className="text-sm text-muted-foreground">
               Your handle, aggregate counts, public date, and bio if provided.
             </p>
-            <code className="rounded-md bg-muted px-2 py-1 text-xs">
+            <code className="tc-card tc-card--quiet text-xs">
               {handle.trim() || "handle not set"}
               {bio.trim() ? ` · ${bio.trim().length} bio chars` : ""}
             </code>
@@ -87,7 +87,7 @@ export function PublicProfileConsent({
         </div>
         <label
           htmlFor="profile-consent-acknowledged"
-          className="flex items-start gap-3 rounded-lg border bg-muted/40 p-3 text-sm"
+          className="tc-card tc-card--quiet flex items-start gap-3 text-sm"
         >
           <Checkbox
             id="profile-consent-acknowledged"

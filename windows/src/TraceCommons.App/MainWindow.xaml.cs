@@ -903,6 +903,24 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The button on the legacy invite migration notice.
+    /// </summary>
+    private async void OnAcknowledgeLegacyMigration(object sender, RoutedEventArgs e)
+    {
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AcknowledgeLegacyMigrationAsync();
+
+        if (sender is Control again)
+        {
+            again.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
     /// The button on a void notice. Tag first, DataContext second, as for a
     /// queue row: which notice a click acknowledges must never be ambiguous.
     /// </summary>

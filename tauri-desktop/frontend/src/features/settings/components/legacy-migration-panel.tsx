@@ -48,8 +48,8 @@ export function LegacyMigrationPanel({ status }: { status: unknown }) {
   if (!offered || !copy.data) return null;
   const needsInvite = answer?.kind === "invite_needed";
   return (
-    <section className="mb-4 rounded-2xl border border-border bg-card/80 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="mb-4 tc-card">
+      <span className="mb-1.5 block tc-eyebrow">
         ACCOUNT
       </span>
       <h2>{copy.data.title}</h2>

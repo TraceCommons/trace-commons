@@ -33,7 +33,7 @@ export function NativeReviewActions({
       <span className="font-mono text-[10px] font-extrabold tracking-[.16em] text-primary">
         NATIVE REVIEW
       </span>
-      <p className="m-0 text-[11px] leading-[1.5] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Optional daemon-backed checks stay local until you explicitly confirm.
       </p>
       <div className="flex flex-wrap gap-2.5">

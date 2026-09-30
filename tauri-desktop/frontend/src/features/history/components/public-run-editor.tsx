@@ -19,7 +19,7 @@ export function PublicRunEditor({
     detail.contribution_status === "accepted" && detail.task_success !== null;
   if (!eligible && !publication)
     return (
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground mt-4 py-[18px]">
+      <p className="m-0 tc-caption tc-text-tertiary mt-4 py-[18px]">
         A public page becomes available after this contribution is accepted.
       </p>
     );
@@ -39,15 +39,15 @@ export function PublicRunEditor({
       />
     );
   return (
-    <section className="mt-4 grid gap-[18px] rounded-2xl border border-border bg-card/80 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="mt-4 grid gap-[18px] tc-card">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             PUBLIC WORKFLOW
           </span>
           <h2>{publication ? "Edit public page" : "Create public page"}</h2>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+        <span className="tc-chip tc-chip--glass self-start">
           Separate consent
         </span>
       </div>
@@ -91,39 +91,39 @@ function PublishedPage({
   onUnpublish: () => void;
 }) {
   return (
-    <section className="mt-4 grid gap-[18px] rounded-2xl border border-border bg-card/80 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="mt-4 grid gap-[18px] tc-card">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             PUBLIC WORKFLOW
           </span>
           <h2>Published page</h2>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+        <span className="tc-chip tc-chip--glass self-start">
           Published
         </span>
       </div>
       <h3>{publication.title}</h3>
       <p>{publication.outcome_summary}</p>
       {publication.source && (
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           Varies: {publication.source.title}
         </p>
       )}
       {publication.source_unavailable && (
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           Source public run is unavailable.
         </p>
       )}
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive m-0">
+        <p className="tc-alert m-0">
           {error}
         </p>
       )}
-      <div className="mt-6 flex gap-2.5">
+      <div className="mt-3 flex flex-wrap gap-2">
         {onOpen && (
           <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+            className="tc-btn tc-btn--glass"
             type="button"
             onClick={onOpen}
             disabled={working}
@@ -132,7 +132,7 @@ function PublishedPage({
           </Button>
         )}
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={onEdit}
           disabled={working}
@@ -140,7 +140,7 @@ function PublishedPage({
           Edit page
         </Button>
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary text-destructive"
+          className="tc-btn tc-btn--glass tc-text-outside"
           type="button"
           onClick={onUnpublish}
           disabled={working}

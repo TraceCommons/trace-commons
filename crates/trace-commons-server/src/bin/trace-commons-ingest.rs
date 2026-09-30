@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "trace_commons_ingest_internal/account_routes.rs"]
+mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
 mod account_trust_growth_routes;
 #[path = "trace_commons_ingest_internal/admission.rs"]
@@ -40,7 +42,7 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Query};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{
     Extension, Json, Router, extract::Path as AxumPath, extract::Request, extract::State,
     middleware::Next,
@@ -59,12 +61,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, privacy_filter_backend_from_env,
-    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
-    retention_policy_for_trace, run_privacy_filter_canary,
+    ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
+    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
+    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
+    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -96,6 +98,7 @@ use trace_commons_server::account_passkey::{
 };
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
+use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
     CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
     TraceCorpusRlsDiagnostics,
@@ -249,6 +252,11 @@ use trace_commons_server::trace_gate_service::{
 use trace_commons_server::trace_score_attestation::{
     AttestationConfig, AttestationSigningState, ScoreAttestationCoverage, ScoreAttestationScope,
     ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
+};
+use trace_commons_server::versioned_pipeline::{
+    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
+    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
+    PipelineService,
 };
 use uuid::Uuid;
 
@@ -649,6 +657,30 @@ const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS";
 const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS";
+const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
+    "TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS";
+/// Fails ingest startup closed when no pipeline runtime was injected (or an
+/// injected one is not production-qualified) rather than booting without one.
+/// See `assemble_ingest_pipeline_runtime`.
+const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED";
+/// Test-and-local-development-only opt-in that lets an injected pipeline
+/// runtime start with a non-production-qualified dependency even though
+/// tenants are routed to it or `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` is
+/// set. Production must never set this. Refused together with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` (see
+/// `assemble_ingest_pipeline_runtime`). Documented in
+/// `docs/operator/pipeline-activation.md`.
+const TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES: &str =
+    "TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES";
+/// Whole-seconds overrides for the per-phase claim lease; see
+/// `parse_pipeline_lease_config_from_env`. Unset keeps
+/// `PipelineLeaseConfig::default()`'s value for that phase.
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW";
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE";
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE";
 const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
     "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
@@ -1220,6 +1252,24 @@ SUBCOMMANDS:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    run_ingest(None).await
+}
+
+/// Starts ingest with an optional production pipeline assembly.
+///
+/// The repository build deliberately passes `None`: proprietary scorer,
+/// index, settlement, and payout implementations do not live in this tree. A
+/// production distribution must pass an assembler and set
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED=true`. Startup then fails closed
+/// if assembly is absent or an injected dependency is not production
+/// qualified -- and fails closed on a non-production-qualified dependency
+/// even without that flag once tenants are routed to the pipeline
+/// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`), unless the test-only
+/// `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` opt-in is set. See
+/// `assemble_ingest_pipeline_runtime`.
+pub async fn run_ingest(
+    pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+) -> anyhow::Result<()> {
     // Choose the rustls crypto provider before anything can open a TLS
     // connection.
     //
@@ -1304,7 +1354,9 @@ async fn main() -> anyhow::Result<()> {
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
-    let state = Arc::new(AppState::from_env().await?);
+    let state = Arc::new(
+        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?,
+    );
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
     validate_trace_near_credit_outbox_scheduler_config(
@@ -1412,18 +1464,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind trace commons ingestion service at {addr}"))?;
     tracing::info!(%addr, "Trace Commons ingestion service listening");
-    let shutdown_grace_seconds = parse_usize_env(
-        TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
-        TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS,
-    )? as u64;
     let shutdown_state = Arc::clone(&state);
-    let result = serve_ingest_with_graceful_shutdown(
-        listener,
-        app(state),
-        shutdown_grace_seconds,
-        wait_for_shutdown_signal(),
-    )
-    .await;
+    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
     // Runs on the way out of BOTH a clean drain and an aborted one: the
     // novelty corpus is the gate's memory of what "duplicate" means, and a
     // restart that drops it silently re-scores every subsequent trace against
@@ -1564,6 +1606,19 @@ struct AppState {
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
+    pipeline_service: Option<Arc<PipelineService>>,
+    /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
+    /// / `pipeline_runtime_required_but_not_injected`) instead of silently
+    /// running ingest without a pipeline runtime. See
+    /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` and
+    /// `validate_pipeline_receipt_rollout`.
+    pipeline_runtime_required: bool,
+    /// Set by the owned pipeline worker loop (`spawn_pipeline_worker`) once
+    /// its first readiness probe succeeds, and cleared on a failing one.
+    /// `GET /v1/pipeline/readiness` reads this same `Arc` -- it is `false`
+    /// unconditionally when no worker is running at all (no runtime
+    /// injected).
+    pipeline_worker_ready: Arc<std::sync::atomic::AtomicBool>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -1776,6 +1831,16 @@ struct AppState {
     /// Single-instance only (see `account_passkey` module docs). Consumed by
     /// the register/login ceremony handlers in later Slice 2 tasks.
     account_ceremony_store: Arc<CeremonyStore>,
+    /// Z2 S2: the cap on unbound passkey-origin accounts, from
+    /// `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`. Unset disables native
+    /// passkey creation.
+    account_unbound_ceiling:
+        Arc<trace_commons_server::account_native_passkey::UnboundAccountCeiling>,
+    /// Z2 S2: successful native passkey creations per client IP in a rolling
+    /// 24 hours, from `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY`
+    /// (default 10). In process, like the other account limiters.
+    account_native_creation_cap:
+        Arc<trace_commons_server::account_native_passkey::PerSourceCreationCap>,
     /// Loopback native-app sign-in: pending authorization requests, keyed by
     /// `request_id`, holding only the PKCE challenge and the validated loopback
     /// redirect. Single-use and TTL-bounded, same in-process store and same
@@ -2144,10 +2209,16 @@ enum TraceTenantRolloutFeature {
     ObjectPrimarySubmitReview,
     ObjectPrimaryReplayExport,
     ObjectPrimaryDerivedExports,
+    /// Tenants whose new receipts are routed to the versioned pipeline
+    /// instead of the legacy corpus path. Unlike every other feature here,
+    /// there is no paired "globally enabled" `AppState` bool -- this rollout
+    /// is tenant-list-only, and additionally requires an injected pipeline
+    /// runtime (`validate_pipeline_receipt_rollout`).
+    PipelineReceipts,
 }
 
 impl TraceTenantRolloutFeature {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::DbContributorReads,
         Self::DbReviewerReads,
         Self::DbReviewerRequireObjectRefs,
@@ -2159,6 +2230,7 @@ impl TraceTenantRolloutFeature {
         Self::ObjectPrimarySubmitReview,
         Self::ObjectPrimaryReplayExport,
         Self::ObjectPrimaryDerivedExports,
+        Self::PipelineReceipts,
     ];
 
     fn env_key(self) -> &'static str {
@@ -2186,6 +2258,7 @@ impl TraceTenantRolloutFeature {
             Self::ObjectPrimaryDerivedExports => {
                 TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS
             }
+            Self::PipelineReceipts => TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS,
         }
     }
 
@@ -2202,6 +2275,7 @@ impl TraceTenantRolloutFeature {
             Self::ObjectPrimarySubmitReview => "object_primary_submit_review",
             Self::ObjectPrimaryReplayExport => "object_primary_replay_export",
             Self::ObjectPrimaryDerivedExports => "object_primary_derived_exports",
+            Self::PipelineReceipts => "pipeline_receipts",
         }
     }
 }
@@ -3532,7 +3606,9 @@ impl AppState {
         )
     }
 
-    async fn from_env() -> anyhow::Result<Self> {
+    async fn from_env_with_pipeline_runtime_assembler(
+        pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+    ) -> anyhow::Result<Self> {
         let root = std::env::var("TRACE_COMMONS_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
@@ -3561,7 +3637,10 @@ impl AppState {
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
-        let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        let db_connections = trace_corpus_db_mirror_from_env().await?;
+        let db_mirror = db_connections
+            .as_ref()
+            .map(|connections| connections.database.clone());
         let postgres_runtime_role_sha256 = parse_postgres_runtime_role_sha256_from_env()?;
         let require_postgres_trace_rls_ready =
             env_truthy(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
@@ -3736,6 +3815,23 @@ impl AppState {
             require_object_store_versioning,
             artifact_store.as_ref(),
         )?;
+        let pipeline_runtime_required = env_truthy(TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED);
+        let pipeline_allow_test_dependencies =
+            env_truthy(TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES);
+        let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
+        let pipeline_receipts_tenants_routed =
+            tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0;
+        let pipeline_service = assemble_ingest_pipeline_runtime(
+            pipeline_runtime_assembler,
+            db_connections.as_ref(),
+            artifact_store.as_ref(),
+            pipeline_runtime_required,
+            pipeline_lease_config,
+            pipeline_receipts_tenants_routed,
+            pipeline_allow_test_dependencies,
+        )?;
+        validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
+        let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
             .as_ref()
@@ -4147,6 +4243,16 @@ impl AppState {
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
+        // Z2 S2: unset disables native passkey creation; a malformed value
+        // fails startup rather than guessing either way.
+        let account_unbound_ceiling = Arc::new(
+            trace_commons_server::account_native_passkey::UnboundAccountCeiling::from_env()
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
+        let account_native_creation_cap = Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::from_env()
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
         let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
         let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
@@ -4198,6 +4304,9 @@ impl AppState {
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
+            pipeline_service,
+            pipeline_runtime_required,
+            pipeline_worker_ready,
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -4318,6 +4427,8 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            account_unbound_ceiling,
+            account_native_creation_cap,
             near_provisioning_public_origin: std::env::var(
                 "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
             )
@@ -4502,6 +4613,22 @@ fn enforce_db_mirror_write_result(
         ))),
         Err(_) => Ok(()),
     }
+}
+
+/// Refuses to start ingest with `pipeline_receipts_configured_without_runtime`
+/// when `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` names tenants but no
+/// pipeline runtime was injected -- a configured tenant would otherwise fall
+/// straight through `route_pipeline_receipt` to the legacy path with no
+/// indication the rollout gate did nothing (D3).
+fn validate_pipeline_receipt_rollout(
+    gates: &TraceTenantRolloutGates,
+    runtime_present: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        runtime_present || gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) == 0,
+        "pipeline_receipts_configured_without_runtime"
+    );
+    Ok(())
 }
 
 fn validate_rollout_gate_dependency(
@@ -7219,7 +7346,16 @@ fn parse_optional_scheduler_i64_env(
     Ok(value)
 }
 
-async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
+/// The DB-mirror connection pair: the type-erased `Database` mirror ingest's
+/// existing DB-mirror paths use, and the concrete `PgBackend` the pipeline
+/// runtime needs (`assemble_ingest_pipeline_runtime`). Both wrap the same
+/// PostgreSQL pool.
+struct TraceCorpusDbConnections {
+    database: Arc<dyn Database>,
+    postgres: Arc<PgBackend>,
+}
+
+async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<TraceCorpusDbConnections>> {
     if !env_truthy("TRACE_COMMONS_DB_DUAL_WRITE") {
         return Ok(None);
     }
@@ -7231,11 +7367,18 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Data
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(5);
     let config = DatabaseConfig::from_postgres_url(&url, pool_size);
-    let db = trace_commons_server::db::connect_from_config(&config)
+    let postgres = Arc::new(
+        PgBackend::new(&config)
+            .await
+            .context("failed to connect Trace Commons DB dual-write mirror")?,
+    );
+    postgres
+        .run_migrations()
         .await
-        .context("failed to connect Trace Commons DB dual-write mirror")?;
+        .context("failed to migrate Trace Commons DB dual-write mirror")?;
+    let database = postgres.clone() as Arc<dyn Database>;
     tracing::info!("Trace Commons PostgreSQL DB dual-write mirror enabled");
-    Ok(Some(db))
+    Ok(Some(TraceCorpusDbConnections { database, postgres }))
 }
 
 async fn validate_required_postgres_trace_rls_ready(
@@ -7558,111 +7701,159 @@ fn community_routes() -> Router<Arc<AppState>> {
 /// response. `from_fn_with_state` binds the shared `AppState` the middleware needs
 /// to resolve + rotate.
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    let reward_routes = rewards::account_routes(state.clone());
-    Router::new()
-        .route(
+    authenticated_account_surface(state).into_router()
+}
+
+/// Every authenticated account route, with the record of what was registered.
+///
+/// Routes join ONLY through [`account_routes::AccountRoutes`], which records
+/// each `(method, path)`. Each one must also be classified in
+/// [`account_routes::UNBOUND_ACCOUNT_ROUTE_POLICY`] -- the unbound gate in
+/// `account_auth_middleware` refuses any route that is not -- and the test
+/// `every_authenticated_account_route_is_classified_for_unbound_accounts`
+/// fails until it is.
+fn authenticated_account_surface(
+    state: Arc<AppState>,
+) -> account_routes::AuthenticatedAccountRoutes {
+    let (general, rewards) = account_route_groups();
+    general
+        .authenticated(state.clone())
+        .merge(rewards::protected(rewards.authenticated(state)))
+}
+
+/// The account routes before authentication, as two groups because the reward
+/// routes take an extra response layer outside the auth middleware. The
+/// production surface above and the gate tests both build from this, so they
+/// cannot disagree about which routes exist.
+fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::AccountRoutes) {
+    let general = account_routes::AccountRoutes::new()
+        .get(
             "/v1/account/contribution-status",
-            get(admission::account_status_handler),
+            admission::account_status_handler,
         )
-        .route(
-            "/v1/account/invites/redeem",
-            post(account_invite_redeem_handler),
-        )
+        // Z2 S1: the caller's binding state, for the native app's state machine.
+        .get("/v1/account/binding", account_binding_handler)
+        .post("/v1/account/invites/redeem", account_invite_redeem_handler)
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
-        .route("/v1/account/traces", get(account_traces_list_handler))
-        .route(
+        .get("/v1/account/traces", account_traces_list_handler)
+        .post(
             "/v1/account/source-sessions/status",
-            post(account_source_session_status_handler),
+            account_source_session_status_handler,
         )
-        .route(
-            "/v1/account/credit-summary",
-            get(account_credit_summary_handler),
-        )
-        .route(
+        .get("/v1/account/credit-summary", account_credit_summary_handler)
+        .get(
             "/v1/account/traces/{submission_id}",
-            get(account_trace_detail_handler),
+            account_trace_detail_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/content",
-            get(account_trace_content_handler),
+            account_trace_content_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/session-detail",
-            get(account_public_run_session_detail_handler),
+            account_public_run_session_detail_handler,
         )
-        .route(
+        .post(
             "/v1/account/traces/{submission_id}/withdraw",
-            post(account_trace_withdraw_handler),
+            account_trace_withdraw_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/publication",
-            get(account_public_run_handler)
-                .put(account_public_run_publish_handler)
-                .delete(account_public_run_unpublish_handler),
+            account_public_run_handler,
         )
-        .route("/v1/account/logout", post(account_logout_handler))
-        .route(
+        .put(
+            "/v1/account/traces/{submission_id}/publication",
+            account_public_run_publish_handler,
+        )
+        .delete(
+            "/v1/account/traces/{submission_id}/publication",
+            account_public_run_unpublish_handler,
+        )
+        .post("/v1/account/logout", account_logout_handler)
+        .post(
             "/v1/account/sessions/revoke-all",
-            post(account_revoke_all_handler),
+            account_revoke_all_handler,
         )
-        .route(
+        .post(
             "/v1/account/passkeys/register/start",
-            post(account_passkey_register_start_handler),
+            account_passkey_register_start_handler,
         )
-        .route(
+        .post(
             "/v1/account/passkeys/register/finish",
-            post(account_passkey_register_finish_handler),
+            account_passkey_register_finish_handler,
+        )
+        // The native sibling (Z2 S2): the same registration with the ceremony
+        // id in the body instead of a cookie, native session only.
+        .post(
+            "/v1/account/passkeys/native/register/start",
+            account_passkey_native_register_start_handler,
+        )
+        .post(
+            "/v1/account/passkeys/native/register/finish",
+            account_passkey_native_register_finish_handler,
         )
         // Passkey credential management (Slice 2 Task 7). list / rename / remove the
         // caller's OWN credentials. `{credential_id}` is the public base64url id.
-        .route("/v1/account/passkeys", get(account_passkeys_list_handler))
-        .route(
+        .get("/v1/account/passkeys", account_passkeys_list_handler)
+        .patch(
             "/v1/account/passkeys/{credential_id}",
-            patch(account_passkey_rename_handler).delete(account_passkey_remove_handler),
+            account_passkey_rename_handler,
+        )
+        .delete(
+            "/v1/account/passkeys/{credential_id}",
+            account_passkey_remove_handler,
         )
         // Login-with-NEAR enroll ceremony (Slice 3a Task 6). Links a NEAR access
         // key to the caller's account behind the same account-auth middleware.
-        .route(
+        .post(
             "/v1/account/near/enroll/start",
-            post(account_near_enroll_start_handler),
+            account_near_enroll_start_handler,
         )
-        .route(
+        .post(
             "/v1/account/near/enroll/finish",
-            post(account_near_enroll_finish_handler),
+            account_near_enroll_finish_handler,
         )
         // NEAR identity management (Slice 3a Task 9). list / rename / remove the
         // caller's OWN NEAR identities. `{public_key}` is the public NEAR access
         // key. Removal shares the Task 8 strong-authenticator gate; list/rename
         // are not gated.
-        .route(
+        .get(
             "/v1/account/near-identities",
-            get(account_near_identities_list_handler),
+            account_near_identities_list_handler,
         )
-        .route(
+        .patch(
             "/v1/account/near-identities/{public_key}",
-            patch(account_near_identity_rename_handler)
-                .delete(account_near_identity_remove_handler),
+            account_near_identity_rename_handler,
+        )
+        .delete(
+            "/v1/account/near-identities/{public_key}",
+            account_near_identity_remove_handler,
         )
         // Payout designation (Slice 3b Task 6). Designate / clear where credit
         // settles. Money-sensitive, so it shares the strong-authenticator gate.
-        .route(
+        .patch(
             "/v1/account/near-identities/{public_key}/payout",
-            patch(account_near_identity_payout_handler),
+            account_near_identity_payout_handler,
         )
         // Device-principal merge (Slice 3b Task 8). `start` stages a proposal by
         // consuming device B's login-link as proof-of-control (a weak session may
         // stage); `confirm` performs the irreversible fold and is strong-auth-gated.
-        .route("/v1/account/merge/start", post(account_merge_start_handler))
-        .route(
-            "/v1/account/merge/confirm",
-            post(account_merge_confirm_handler),
+        .post("/v1/account/merge/start", account_merge_start_handler)
+        .post("/v1/account/merge/confirm", account_merge_confirm_handler)
+        // Connect near.ai (Z2 S3): bind this unbound passkey account to a NEAR
+        // AI login through the provisioning ceremony. Behind the account
+        // middleware, unlike the unauthenticated provisioning pair: the account
+        // comes from the session, and the ceremony is bound to it.
+        .post(
+            "/v1/account/near-ai/provision/bind/start",
+            near_ai_bind_start_handler,
         )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state,
-            account_auth_middleware,
-        ))
-        .merge(reward_routes)
+        .post(
+            "/v1/account/near-ai/provision/bind/finish",
+            near_ai_bind_finish_handler,
+        );
+    (general, rewards::account_routes())
 }
 
 fn community_cors_layer() -> CorsLayer {
@@ -7723,6 +7914,7 @@ fn app(state: Arc<AppState>) -> Router {
             axum::routing::put(token_bundles::put).get(token_bundles::read),
         )
         .route("/health", get(health_handler))
+        .route("/v1/pipeline/readiness", get(pipeline_readiness_handler))
         .route("/v1/source", get(source_offer_handler))
         // Unauthenticated, like /v1/source above and for the same structural
         // reason: it is registered here, outside every auth layer, on purpose.
@@ -7748,6 +7940,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(recompute_community_snapshot_handler),
         )
         .route("/v1/contributors/me/credit", get(credit_handler))
+        .route(
+            "/v1/contributors/me/settlement-posture",
+            get(settlement_posture_handler),
+        )
         .route(
             "/v1/contributors/me/credit-events",
             get(credit_events_handler),
@@ -7783,6 +7979,28 @@ fn app(state: Arc<AppState>) -> Router {
             post(native_authorize_start_handler),
         )
         .route("/v1/account/native/token", post(native_token_handler))
+        // Native passkey identity (Z2 S2). Unauthenticated for the same reason
+        // as the pair above: create/finish and login/finish CREATE the
+        // session, so they cannot require one. The credential is the verified
+        // WebAuthn ceremony itself; every refusal is `native_generic_deny`.
+        // Outside `AccountRoutes` on purpose, so the unbound gate and its
+        // classification table do not apply to them.
+        .route(
+            "/v1/account/native/passkey/create/start",
+            post(native_passkey_create_start_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/create/finish",
+            post(native_passkey_create_finish_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/login/start",
+            post(native_passkey_login_start_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/login/finish",
+            post(native_passkey_login_finish_handler),
+        )
         .route(
             "/v1/account/near/provision/capabilities",
             get(near_provisioning::capabilities),
@@ -9118,6 +9336,52 @@ fn parse_signed_token_max_ttl_seconds_from_env() -> anyhow::Result<Option<i64>> 
         Err(error) => Err(error).with_context(|| {
             format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS}")
         }),
+    }
+}
+
+/// The per-phase claim lease from
+/// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_{REVIEW,SCORE,SETTLE}` (whole
+/// seconds each; unset keeps `PipelineLeaseConfig::default()`'s value for
+/// that phase). Fails closed with the single safe label
+/// `pipeline_lease_config_invalid` for either failure mode -- a value that
+/// does not parse as a non-negative integer, or one that parses but falls
+/// outside `PipelineLeaseConfig::new`'s [1 second, 2 hours] bound -- rather
+/// than two different messages for what is, from an operator's point of
+/// view, the same misconfiguration.
+fn parse_pipeline_lease_config_from_env() -> anyhow::Result<PipelineLeaseConfig> {
+    let defaults = PipelineLeaseConfig::default();
+    let review = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW,
+        defaults.review(),
+    )?;
+    let score = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE,
+        defaults.score(),
+    )?;
+    let settle = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE,
+        defaults.settle(),
+    )?;
+    PipelineLeaseConfig::new(review, score, settle)
+}
+
+fn parse_pipeline_lease_seconds_env(
+    var: &'static str,
+    default: chrono::Duration,
+) -> anyhow::Result<chrono::Duration> {
+    match optional_trimmed_env(var)? {
+        Some(raw) => {
+            let seconds: i64 = raw
+                .parse()
+                .map_err(|_| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))?;
+            // `chrono::Duration::seconds` panics above
+            // `i64::MAX / 1_000`; `try_seconds` reports that the same way
+            // every other malformed value is reported here, rather than
+            // taking the process down on an operator typo.
+            chrono::Duration::try_seconds(seconds)
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))
+        }
+        None => Ok(default),
     }
 }
 
@@ -11890,6 +12154,9 @@ struct TraceCommonsObjectStoreConfigStatus {
 struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
+    pipeline_runtime_configured: bool,
+    pipeline_runtime_required: bool,
+    pipeline_runtime_production_qualified: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -12151,6 +12418,12 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
+        pipeline_runtime_configured: state.pipeline_service.is_some(),
+        pipeline_runtime_required: state.pipeline_runtime_required,
+        pipeline_runtime_production_qualified: state
+            .pipeline_service
+            .as_deref()
+            .is_some_and(pipeline_runtime_is_production_qualified),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -13415,6 +13688,164 @@ async fn reject_conflicting_witness_retry(
     Ok(())
 }
 
+/// The pipeline runtime for a tenant routed to `PipelineReceipts`, if any.
+///
+/// `Some` only when the tenant is in the `PipelineReceipts` rollout set AND a
+/// runtime was injected -- the same two conditions `route_pipeline_receipt`
+/// and the completed-admission branch of `submit_trace_handler` both gate
+/// on; shared here so the two cannot drift. A tenant listed without an
+/// injected runtime is refused at startup instead
+/// (`validate_pipeline_receipt_rollout`), so it can never reach either
+/// caller with `state.pipeline_service` still `None`.
+fn pipeline_runtime_for_tenant<'a>(
+    state: &'a AppState,
+    tenant: &TenantCtx,
+) -> Option<&'a Arc<PipelineService>> {
+    if !state.tenant_rollout_gates.enabled_for(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        false,
+        tenant.tenant_id(),
+    ) {
+        return None;
+    }
+    state.pipeline_service.as_ref()
+}
+
+/// The fixed receipt a pipeline-routed submission returns for `Created` and
+/// `Replayed` alike -- shared between `route_pipeline_receipt` (a fresh
+/// submission or its ordinary retry) and the completed-admission branch of
+/// `submit_trace_handler` (a retry that `admission::reserve` already found
+/// terminal), so the two describe the exact same outcome the exact same way.
+fn pipeline_processing_receipt() -> TraceSubmissionReceipt {
+    TraceSubmissionReceipt {
+        status: "processing".to_string(),
+        credit_points_pending: None,
+        credit_points_final: None,
+        explanation: vec!["Accepted for pipeline processing.".to_string()],
+    }
+}
+
+/// The 409 a pipeline-routed submission returns when its idempotency key is
+/// reused with different content -- shared between `route_pipeline_receipt`
+/// and the completed-admission branch of `submit_trace_handler`, which reach
+/// `PipelineReceiptResult::ContentConflict` from `submit` and
+/// `PipelineService::replay_receipt` respectively.
+fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
+    api_error(
+        StatusCode::CONFLICT,
+        "receipt id reused with different content",
+    )
+}
+
+/// Routes a receipt to the versioned pipeline instead of the legacy corpus
+/// path, for a `PipelineReceipts`-rollout tenant with an injected runtime.
+///
+/// Called from `submit_trace_handler` only after the legacy handler's
+/// authentication, submit rate limit, admission reservation,
+/// tenant-access-grant check, envelope validation, and server re-scrub have
+/// all already run (D15) -- this function does none of that itself and
+/// trusts its caller for it. `envelope` is that re-scrubbed envelope.
+/// Returns `Ok(None)` -- meaning "stay on the legacy path" -- unless the
+/// tenant is in the `PipelineReceipts` rollout set AND a runtime was
+/// injected; a tenant listed without an injected runtime is refused at
+/// startup instead (`validate_pipeline_receipt_rollout`), so it can never
+/// reach this function.
+///
+/// A `Replayed` outcome always means a run already exists for this key. A
+/// `ContentConflict` outcome usually does too, but not always: it can also
+/// come from an attempt staged with different content for which no run was
+/// ever created, in which case `replay_receipt` returns `None` below, no
+/// ownership check runs, and the generic content-conflict response is
+/// returned as-is. When a run does exist, this checks that the caller is
+/// the principal who created it, the same way the completed-admission
+/// branch of `submit_trace_handler` checks a replay it finds there. A
+/// pipeline-routed tenant never writes the legacy file record the ordinary
+/// `can_access_submission` check reads, so without this check here that
+/// check would never run against a receipt key at all.
+async fn route_pipeline_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    envelope: &TraceContributionEnvelope,
+    raw_body: &[u8],
+    residual_risk_basis: &[ResidualRiskCondition],
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let Some(pipeline_service) = pipeline_runtime_for_tenant(state, tenant) else {
+        return Ok(None);
+    };
+    let idempotency_key = envelope.submission_id.to_string();
+    let result = pipeline_service
+        .submit(PipelineReceiptRequest {
+            tenant_id: tenant.tenant_id(),
+            actor_principal_ref: tenant.principal_ref(),
+            counts_toward_quota: tenant.role() == TokenRole::Contributor,
+            request_idempotency_key: &idempotency_key,
+            request_bytes: raw_body,
+            server_envelope: envelope,
+            residual_risk_basis,
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: state.submission_quota.max_per_tenant_per_hour,
+                max_per_principal_per_hour: state.submission_quota.max_per_principal_per_hour,
+            },
+        })
+        .await
+        .map_err(internal_error)?;
+    match result {
+        PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
+        replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
+        | PipelineReceiptResult::ContentConflict) => {
+            // A replay means a run already exists for this key, created by
+            // a submission from some principal -- possibly not this one. A
+            // content conflict usually means the same, but not always: it
+            // can also come from an attempt staged with different content
+            // for which no run was ever created, in which case
+            // `replay_receipt` below returns `None` and there is no owner
+            // to check. `read_submission_record` finds no legacy file
+            // record for a pipeline-routed tenant (the pipeline never
+            // writes one), so the legacy `can_access_submission` check --
+            // which already ran earlier, in `submit_trace_handler`, before
+            // this function was ever called -- never ran against this key;
+            // apply the same ownership predicate here, against the
+            // principal the pipeline recorded when it first created the
+            // run.
+            if let Some(replay) = pipeline_service
+                .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
+                .await
+                .map_err(internal_error)?
+            {
+                if !can_access_submission_ref(tenant.auth(), &replay.auth_principal_ref) {
+                    return Err(api_error(
+                        StatusCode::CONFLICT,
+                        "submission id already belongs to another principal",
+                    ));
+                }
+            }
+            match replayed_or_conflicting {
+                PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
+                PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
+                _ => unreachable!("matched above to be Replayed or ContentConflict"),
+            }
+        }
+        // Same message as the legacy `ensure_not_revoked_by_tombstone` check
+        // this bypasses -- the pipeline keeps its own tombstone record, but
+        // the caller-visible refusal is the same one.
+        PipelineReceiptResult::Tombstoned => Err(api_error(
+            StatusCode::CONFLICT,
+            "trace content was previously revoked for this tenant",
+        )),
+        // Same messages as the legacy `enforce_submission_quota` check: the
+        // pipeline enforces its own quota over pipeline receipts only (D10;
+        // see the "Submission quota at switch-over" operator doc section).
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Tenant) => Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "trace contribution tenant submission quota exceeded",
+        )),
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Principal) => Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "trace contribution principal submission quota exceeded",
+        )),
+    }
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13499,6 +13930,74 @@ async fn submit_trace_handler(
             &raw_body,
         )
         .await?;
+        // A pipeline-routed tenant never writes the legacy file record
+        // `read_submission_record` below looks for, so a retried upload that
+        // already completed admission must ask the pipeline for its receipt
+        // first.
+        //
+        // A principal check is still required on this pipeline lookup:
+        // `admission::reserve`'s completed-lookup binds a retry to the
+        // account's admission anchor, not to one principal. An anchor
+        // covers every device the account has provisioned (one principal per
+        // device, `trace_near_provisioned_devices` keyed on
+        // `(tenant_id, principal_ref)` under the same `anchor_hash`), so a
+        // second device on the same account can retry the first device's
+        // submission id and reach this branch as a `completed` retry too.
+        // `replay_receipt` returns the principal the pipeline recorded when
+        // it first created the run (`trace_submissions.auth_principal_ref`),
+        // and the same ownership predicate the legacy fallback below applies
+        // (`can_access_submission`, here via its principal-ref form) is
+        // applied to it before either pipeline outcome is returned.
+        if let Some(pipeline_service) = pipeline_runtime_for_tenant(state.as_ref(), &tenant) {
+            let idempotency_key = envelope.submission_id.to_string();
+            if let Some(PipelineReplayReceipt {
+                result,
+                auth_principal_ref,
+            }) = pipeline_service
+                .replay_receipt(tenant.tenant_id(), &idempotency_key, &raw_body)
+                .await
+                .map_err(internal_error)?
+            {
+                if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
+                    return Err(api_error(
+                        StatusCode::CONFLICT,
+                        "admission_identity_conflict",
+                    ));
+                }
+                match result {
+                    PipelineReceiptResult::Replayed(_) => {
+                        return Ok(Json(pipeline_processing_receipt()));
+                    }
+                    // Defensive, not reachable over HTTP today:
+                    // `admission::reserve`'s own completed-lookup is keyed on
+                    // the request body's hash, so a retry with different
+                    // content for a submission id that is already
+                    // `completed` never reaches this branch as a completed
+                    // retry in the first place -- `reserve` answers it
+                    // first, either refusing a new submission outright (no
+                    // evidence) or with its own identity-conflict decision
+                    // (with evidence). See the third POST in
+                    // `real_http_pipeline_receipt_replays_on_retry`.
+                    PipelineReceiptResult::ContentConflict => {
+                        return Err(pipeline_content_conflict());
+                    }
+                    // `replay_receipt` only ever builds a `Replayed` or a
+                    // `ContentConflict` result (`replay_result`, over a run
+                    // `existing_receipt_run` already found); a read-only
+                    // replay lookup neither creates a run, stages an
+                    // attempt, checks a tombstone, nor counts a quota, so
+                    // none of these three variants can come from it. Kept
+                    // only so this match stays exhaustive against the
+                    // shared `PipelineReceiptResult` enum.
+                    PipelineReceiptResult::Created(_)
+                    | PipelineReceiptResult::Tombstoned
+                    | PipelineReceiptResult::QuotaExceeded(_) => {}
+                }
+            }
+            // No run under this key: a submission that completed admission
+            // on the legacy path before this tenant was routed to the
+            // pipeline. Fall back to the legacy read below, unchanged.
+        }
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)
             .map_err(internal_error)?
@@ -13649,6 +14148,26 @@ async fn submit_trace_handler(
         // the ranker exports read them) and holds `credit_points_pending` at
         // 0.0: the contributor's figure is the gate's, once it has scored.
         apply_credit_estimate_to_envelope(&mut envelope);
+
+        // Tenant rollout gate (D3, D15): every legacy check above --
+        // authentication, the submit rate limit, admission reservation, the
+        // tenant-access-grant check, envelope validation, and the server
+        // re-scrub -- has already run, so a `PipelineReceipts`-listed tenant
+        // with an injected runtime can be hived off to the pipeline here.
+        // Every other tenant falls through unchanged to the legacy path
+        // below.
+        if let Some(receipt) = route_pipeline_receipt(
+            state.as_ref(),
+            &tenant,
+            &envelope,
+            &raw_body,
+            &residual_risk_basis,
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
+        }
+
         let corpus_status = status_for_risk(
             envelope.privacy.residual_pii_risk,
             state.accept_medium_risk_submissions,
@@ -15253,6 +15772,26 @@ async fn credit_handler(
     ))
 }
 
+/// `GET /v1/contributors/me/settlement-posture`
+///
+/// The deployment's settlement posture for a caller holding a device
+/// credential. `GET /v1/account/credit-summary` reports the same object but is
+/// an account route that refuses device bearers, so a contributor daemon
+/// cannot read it. The posture is deployment-wide and label-only (`settlement`
+/// is `http`, `dry_run` or `disabled`; no URL, account or transaction
+/// reference), so any authenticated caller may read it. Both routes derive it
+/// through `credit_numbers::credit_posture`, so they cannot disagree.
+async fn settlement_posture_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<trace_commons_server::credit_numbers::CreditPosture>> {
+    let _tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    Ok(Json(trace_commons_server::credit_numbers::credit_posture(
+        state.near_settlement_mode_label(),
+        false,
+    )))
+}
+
 async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -15799,7 +16338,7 @@ fn cookie_value_from_headers<'a>(headers: &'a HeaderMap, name: &str) -> Option<&
     })
 }
 
-/// Parse a `tc_account_session` cookie value (`{b64url(tenant_id)}.{secret}`)
+/// Parse an [`ACCOUNT_SESSION_COOKIE`] value (`{b64url(tenant_id)}.{secret}`)
 /// into `(tenant_id, token_hash)`. Returns `None` for any malformed value: no '.'
 /// separator, an empty secret, or a tenant prefix that is not valid base64url /
 /// UTF-8. The stored `token_hash` is `sha256(secret)` ONLY — the tenant is carried
@@ -15825,7 +16364,7 @@ fn account_session_cookie_parts(cookie: &str) -> Option<(String, String)> {
 /// Resolve the dual-auth `AccountCtx` guarding the `/v1/account/*` read surface.
 ///
 /// Exactly one credential is accepted:
-/// - Both a `Authorization: Bearer` AND the `tc_account_session` cookie present →
+/// - Both a `Authorization: Bearer` AND the [`ACCOUNT_SESSION_COOKIE`] present →
 ///   `400` ambiguous credentials. No silent precedence.
 /// - Bearer only → authenticate the device token, resolve its linked account, and
 ///   expand active memberships. `auth_method = DeviceBearer`; actor = device ref.
@@ -15858,7 +16397,7 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_secret_value) =
+    let (ctx, rotated_secret_value, binding) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
@@ -15872,6 +16411,23 @@ async fn account_auth_middleware(
             }
         };
 
+    // The unbound gate (Z2 S1). An account whose binding state is gated
+    // reaches only the routes `UNBOUND_ACCOUNT_ROUTE_POLICY` marks `Allowed`,
+    // looked up by method and matched path template; anything else, including
+    // a route missing from the policy, is refused here, before any handler.
+    // Legacy (no binding row) and bound accounts skip this entirely. The
+    // binding state was read in the same query that validated the session, and
+    // a failed read already refused above.
+    //
+    // A refusal still flows through the rotation attach below: the session may
+    // have rotated in this very request, and withholding the new secret would
+    // sign the client out once the grace window lapses.
+    let gate_refused = binding.is_gated()
+        && account_routes::unbound_access(
+            request.method(),
+            request.extensions().get::<axum::extract::MatchedPath>(),
+        ) != account_routes::UnboundAccess::Allowed;
+
     // A native token rotates exactly like a cookie session, but a native client
     // has no cookie jar. Hand the new token back in a response header — the
     // bearer analogue of `Set-Cookie`, on the same channel, to the same
@@ -15879,8 +16435,13 @@ async fn account_auth_middleware(
     // ever emitted for a native client.
     let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
     if native_rotation {
-        request.extensions_mut().insert(ctx);
-        let mut response = next.run(request).await;
+        let mut response = if gate_refused {
+            unbound_gate_refusal(state.as_ref(), &ctx).await
+        } else {
+            request.extensions_mut().insert(ctx);
+            request.extensions_mut().insert(binding);
+            next.run(request).await
+        };
         if let Some(token) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
@@ -15895,8 +16456,13 @@ async fn account_auth_middleware(
         return response;
     }
 
-    request.extensions_mut().insert(ctx);
-    let mut response = next.run(request).await;
+    let mut response = if gate_refused {
+        unbound_gate_refusal(state.as_ref(), &ctx).await
+    } else {
+        request.extensions_mut().insert(ctx);
+        request.extensions_mut().insert(binding);
+        next.run(request).await
+    };
 
     if let Some(cookie_value) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
@@ -15921,6 +16487,7 @@ async fn account_auth_middleware(
             response
                 .headers_mut()
                 .append(axum::http::header::SET_COOKIE, value);
+            append_legacy_account_session_clear(response.headers_mut());
             // Cache-Control is single-valued: insert (overwrite) is correct here.
             response.headers_mut().insert(
                 axum::http::header::CACHE_CONTROL,
@@ -15938,8 +16505,63 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
     // call sites (which assert resolver semantics, not cookie attach) keep working.
     // The PRODUCTION attach point is `account_auth_middleware`, which calls
     // `resolve_account_ctx_with_rotation` and emits the `Set-Cookie` itself.
-    let (ctx, _rotated) = resolve_account_ctx_with_rotation(state, headers).await?;
+    let (ctx, _rotated, _binding) = resolve_account_ctx_with_rotation(state, headers).await?;
     Ok(ctx)
+}
+
+/// The unbound gate's refusal: `403 account_unbound`, one label-only audit row
+/// (`account_unbound_gate_denied`, empty metadata), and a label-only log line.
+/// The refusal does not depend on the audit write: if that fails, the request
+/// is refused all the same.
+async fn unbound_gate_refusal(state: &AppState, ctx: &AccountCtx) -> axum::response::Response {
+    if let Some(db) = state.db_mirror.as_ref() {
+        if db
+            .append_account_audit(
+                &ctx.tenant_id,
+                "account_unbound_gate_denied",
+                &ctx.actor_ref,
+                "denied",
+                serde_json::json!({}),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                label = "account_unbound_gate_audit_failed",
+                "unbound gate refusal could not be audited"
+            );
+        }
+    }
+    tracing::info!(
+        label = account_routes::ACCOUNT_UNBOUND,
+        "unbound gate refusal"
+    );
+    let mut response =
+        api_error(StatusCode::FORBIDDEN, account_routes::ACCOUNT_UNBOUND).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// `GET /v1/account/binding` (Z2 S1): the caller's binding state, as a label.
+///
+/// `unbound` and `bound` for a passkey-origin account, `closed` for one closed
+/// by the existing-account branch of bind, and `legacy` for an account with no
+/// binding row. The state comes from `account_auth_middleware`, which read it
+/// in the session validation query; a request that did not pass through the
+/// middleware has no such extension and is refused by the extractor.
+async fn account_binding_handler(
+    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
+) -> axum::response::Response {
+    let mut response =
+        Json(serde_json::json!({ "binding_state": binding.label() })).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
@@ -15949,7 +16571,11 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
 async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -16009,7 +16635,11 @@ async fn resolve_account_ctx_with_rotation(
 async fn resolve_account_ctx_native(
     state: &AppState,
     bearer: &str,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -16054,10 +16684,15 @@ async fn resolve_account_ctx_native(
             auth_method: AccountAuthMethod::NativeToken,
             tenant_id,
             actor_ref: account_actor_ref(&account),
-            auth_credential_id: None,
+            // The passkey that minted a native session (Z2 S2), so the passkey
+            // list can mark `this_device`. NULL for loopback and NEAR AI
+            // sessions. A public id; it confers no strength (see below).
+            auth_credential_id: session.auth_credential_id,
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
+            session_token_hash: Some(token_hash),
         },
         rotated,
+        session.binding,
     ))
 }
 
@@ -16069,7 +16704,11 @@ async fn resolve_account_ctx_native(
 async fn resolve_account_ctx_cookie(
     state: &AppState,
     cookie: &str,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -16117,8 +16756,10 @@ async fn resolve_account_ctx_cookie(
             // Session strength for the authenticator-change gate: `'web'` is weak,
             // `'passkey'`/`'near'` are strong.
             client_kind: session.client_kind,
+            session_token_hash: Some(token_hash),
         },
         rotated_cookie_value,
+        session.binding,
     ))
 }
 
@@ -16395,10 +17036,7 @@ async fn account_credit_summary_handler(
             earned_this_period,
             rate.as_ref(),
         ),
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
         period: AccountCreditPeriod {
             start: period_start,
             end: period_end,
@@ -16928,6 +17566,71 @@ async fn delete_withdrawn_trace_objects(
     Ok(())
 }
 
+/// Record a withdrawal on the file side, as `revoke_submission` does for an
+/// operator revocation: a first-writer-wins revocation tombstone, and the
+/// submission and derived records marked revoked. The submission record also
+/// takes the DB's `purged_at`, which withdrawal sets because the content is
+/// deleted.
+///
+/// Without this the DB says `revoked` while the file records keep their old
+/// status. The reconciliation drill then reports a status mismatch and reader
+/// parity failures for every withdrawal, and file-driven maintenance keeps
+/// treating the trace as live, for example expiring it. A submission with no
+/// file-side record (written to the DB only) has nothing to update.
+///
+/// Must run before the content is deleted: the tombstone's redaction hash
+/// comes from the stored envelope. On a retry the tombstone already exists
+/// and is left as first written.
+async fn revoke_withdrawn_trace_file_records(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    let record = read_submission_record(&state.root, tenant_id, submission_id)?;
+    let derived = read_derived_record(&state.root, tenant_id, submission_id)?;
+    if record.is_none() && derived.is_none() {
+        return Ok(());
+    }
+    if read_revocation(&state.root, tenant_id, submission_id)?.is_none() {
+        write_revocation(
+            &state.root,
+            &TraceCommonsRevocation {
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                submission_id,
+                revoked_at: Utc::now(),
+                reason: TRACE_WITHDRAWAL_REASON.to_string(),
+                redaction_hash: record
+                    .as_ref()
+                    .and_then(|record| redaction_hash_for_record(state, record)),
+                canonical_summary_hash: derived
+                    .as_ref()
+                    .map(|derived| derived.canonical_summary_hash.clone()),
+            },
+        )?;
+    }
+    if let Some(mut record) = record {
+        let purged_at = db
+            .get_trace_submission(tenant_id, submission_id)
+            .await?
+            .and_then(|db_record| db_record.purged_at)
+            .or(record.purged_at);
+        if record.status != TraceCorpusStatus::Revoked || record.purged_at != purged_at {
+            record.status = TraceCorpusStatus::Revoked;
+            record.purged_at = purged_at;
+            write_submission_record(&state.root, &record)?;
+        }
+    }
+    if let Some(mut derived) = derived
+        && derived.status != TraceCorpusStatus::Revoked
+    {
+        derived.status = TraceCorpusStatus::Revoked;
+        write_derived_record(&state.root, &derived)?;
+    }
+    Ok(())
+}
+
 /// Evict a withdrawn trace from every derived surface that would otherwise
 /// keep its content alive in derived form: the vector index (both the DB rows
 /// and the gate service's in-memory ANN index), the dedup clusters, and future
@@ -17142,6 +17845,14 @@ async fn account_trace_withdraw_handler(
     let credit_retained = affected_ids.iter().all(|affected_id| {
         withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
     });
+
+    // The file side records the withdrawal too, before any content is deleted:
+    // the file tombstone's redaction hash is read from the stored envelope.
+    for affected_id in affected_ids.iter().copied() {
+        revoke_withdrawn_trace_file_records(state.as_ref(), &db, &ctx.tenant_id, affected_id)
+            .await
+            .map_err(|error| withdrawal_failed(&error))?;
+    }
 
     // Retained mappings make this list stable across retries. Complete the
     // external deletion for every content version before reporting success.
@@ -17459,11 +18170,28 @@ async fn native_authorize_start_handler(
     response
 }
 
+#[path = "trace_commons_ingest_internal/native_passkey.rs"]
+mod native_passkey;
+#[cfg(test)]
+use native_passkey::NATIVE_PASSKEY_PER_IP_LIMIT;
+use native_passkey::{
+    account_passkey_native_register_finish_handler, account_passkey_native_register_start_handler,
+    native_passkey_create_finish_handler, native_passkey_create_start_handler,
+    native_passkey_login_finish_handler, native_passkey_login_start_handler,
+};
+
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
-    near_ai_provision_finish_handler, near_ai_provision_start_handler,
-    near_provision_finish_handler, near_provision_start_handler,
+    near_ai_bind_finish_handler, near_ai_bind_start_handler, near_ai_provision_finish_handler,
+    near_ai_provision_start_handler, near_provision_finish_handler, near_provision_start_handler,
+};
+
+#[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
+mod pipeline_runtime;
+use pipeline_runtime::{
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime, pipeline_readiness_handler,
+    pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and
@@ -17659,7 +18387,48 @@ const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
 /// lets the (tenant-less) browser request bootstrap an RLS tenant tx without the
 /// narrow login-resolver pool; see `confirm_login_handler` / `resolve_account_ctx`.
-const ACCOUNT_SESSION_COOKIE: &str = "tc_account_session";
+///
+/// The `__Host-` prefix binds the cookie to the exact host that set it: a
+/// browser accepts it only with `Secure`, `Path=/` and no `Domain`, so the
+/// cookie can be neither set nor shadowed from any other host. Every
+/// `Set-Cookie` for this name must therefore keep those three attributes.
+const ACCOUNT_SESSION_COOKIE: &str = "__Host-tc_account_session";
+
+/// The session cookie's name before it took the `__Host-` prefix. It is never
+/// read: a request that carries only this name is unauthenticated, and the
+/// person signs in again (a one-time sign-out, see
+/// `docs/operator/deployment.md`). Accepting it would keep the old,
+/// host-unbound name alive. The server only ever writes it to expire it; see
+/// [`append_legacy_account_session_clear`].
+const LEGACY_ACCOUNT_SESSION_COOKIE: &str = "tc_account_session";
+
+/// Append a `Set-Cookie` that expires the pre-`__Host-` session cookie, so a
+/// browser still holding it drops it. Same attributes it was set with
+/// (`Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Domain`), with
+/// `Max-Age=0`. Emitted on logout and on every response that sets
+/// [`ACCOUNT_SESSION_COOKIE`]. Append, never insert: it rides alongside the
+/// cookies the response already carries. Idempotent, because a logout that
+/// also rotates reaches this twice (handler, then middleware).
+fn append_legacy_account_session_clear(headers: &mut HeaderMap) {
+    let prefix = format!("{LEGACY_ACCOUNT_SESSION_COOKIE}=");
+    let already = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .any(|v| v.to_str().is_ok_and(|v| v.starts_with(&prefix)));
+    if already {
+        return;
+    }
+    let clear = cookie::Cookie::build((LEGACY_ACCOUNT_SESSION_COOKIE, ""))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .build();
+    if let Ok(value) = HeaderValue::from_str(&clear.to_string()) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
+}
 
 /// Code-free account view path the redeem flow redirects to. The view itself is
 /// a later concern (Tasks 9-10); redirecting here keeps the secret out of any
@@ -18070,12 +18839,28 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 ///
 /// `confirm_is_same_origin` is deliberately kept as well. This does not
 /// replace it; it covers what it cannot.
-const LOGIN_CEREMONY_COOKIE: &str = "tc_login_ceremony";
+const LOGIN_CEREMONY_COOKIE: &str = "__Host-tc_login_ceremony";
 
 /// How long a rendered interstitial stays confirmable. Long enough for a human
 /// to read the page and click, short enough that a leaked nonce is not a
 /// standing credential.
 const LOGIN_CEREMONY_TTL_SECONDS: i64 = 600;
+
+/// Expire the sign-in link ceremony cookie once a confirm has spent it. The
+/// nonce is single-use, and since the `__Host-` prefix put it on `Path=/` it
+/// would otherwise ride along on every request until its lifetime ran out.
+fn append_login_ceremony_clear(headers: &mut HeaderMap) {
+    let clear = cookie::Cookie::build((LOGIN_CEREMONY_COOKIE, ""))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .build();
+    if let Ok(value) = HeaderValue::from_str(&clear.to_string()) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
+}
 
 /// A fresh, unguessable ceremony nonce.
 fn new_login_ceremony_nonce() -> String {
@@ -18230,7 +19015,10 @@ Confirm only if you started this.</p>"
         .secure(true)
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
-        .path("/account/login")
+        // `/`, not `/account/login`: the `__Host-` prefix requires `Path=/`.
+        // The value is a single-use nonce that is useless without the form
+        // it is embedded in, so the wider path exposes nothing.
+        .path("/")
         .max_age(cookie::time::Duration::seconds(LOGIN_CEREMONY_TTL_SECONDS))
         .build()
         .to_string();
@@ -18432,6 +19220,8 @@ async fn confirm_login_inner(
     match HeaderValue::from_str(&cookie.to_string()) {
         Ok(value) => {
             resp_headers.insert(axum::http::header::SET_COOKIE, value);
+            append_legacy_account_session_clear(resp_headers);
+            append_login_ceremony_clear(resp_headers);
         }
         Err(_) => return redeem_generic_deny(),
     }
@@ -18449,7 +19239,7 @@ async fn confirm_login_inner(
 /// `POST /v1/account/logout` — revoke the CURRENT session (Task 11, Part 1).
 ///
 /// Guarded by `resolve_account_ctx` (dual-auth). On the COOKIE path we re-parse
-/// the presented `tc_account_session` cookie to recover the secret, recompute its
+/// the presented session cookie to recover the secret, recompute its
 /// `token_hash`, and revoke exactly that session row (tenant- + token-scoped under
 /// forced RLS, so only the caller's own session is ever touched). On the BEARER
 /// path there is no browser session to revoke (the device token is the
@@ -18459,7 +19249,7 @@ async fn account_logout_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
     headers: HeaderMap,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<axum::response::Response> {
     let db = account_db(state.as_ref())?;
 
     let revoked = match ctx.auth_method {
@@ -18518,7 +19308,13 @@ async fn account_logout_handler(
     .await
     .map_err(internal_error)?;
 
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    // A browser signing out drops any pre-`__Host-` session cookie it still
+    // holds. Native and device callers have no cookie jar, so nothing is sent.
+    if matches!(ctx.auth_method, AccountAuthMethod::SessionCookie) {
+        append_legacy_account_session_clear(response.headers_mut());
+    }
+    Ok(response)
 }
 
 /// `POST /v1/account/sessions/revoke-all` — revoke EVERY session for the caller's
@@ -18556,7 +19352,7 @@ async fn account_revoke_all_handler(
 // Two dual-auth handlers guarded by `resolve_account_ctx`. `register/start`
 // issues a WebAuthn registration challenge, stashes the server-side
 // `PasskeyRegistration` state in the in-process ceremony store, and binds the
-// ceremony to the browser via a short-lived `tc_passkey_ceremony` cookie.
+// ceremony to the browser via a short-lived `__Host-tc_passkey_ceremony` cookie.
 // `register/finish` consumes that cookie (single-use), verifies the attestation,
 // and persists the resulting passkey. Discoverable login (Task 6) and credential
 // management (Task 7+) are intentionally out of scope here.
@@ -18566,7 +19362,7 @@ async fn account_revoke_all_handler(
 /// that started it. Carries only the opaque ceremony id (an unguessable CSPRNG
 /// token), never any key or challenge material; the server-side challenge state
 /// lives in the ceremony store keyed by this id.
-const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "tc_passkey_ceremony";
+const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "__Host-tc_passkey_ceremony";
 
 /// Ceremony cookie lifetime. Matches the ceremony-store TTL window (a few
 /// minutes): long enough for an interactive authenticator tap, short enough to
@@ -18647,7 +19443,7 @@ struct AccountPasskeyRegisterFinishBody {
 /// `exclude_credentials` from the account's existing active credentials so the
 /// same authenticator cannot enroll twice, stashes the server-side
 /// `PasskeyRegistration` state in the ceremony store, and returns the
-/// `CreationChallengeResponse` plus a short-lived `tc_passkey_ceremony` cookie
+/// `CreationChallengeResponse` plus a short-lived `__Host-tc_passkey_ceremony` cookie
 /// binding the ceremony to this browser.
 async fn account_passkey_register_start_handler(
     State(state): State<Arc<AppState>>,
@@ -18744,7 +19540,7 @@ async fn account_passkey_register_start_handler(
 /// `POST /v1/account/passkeys/register/finish` — complete passkey enrollment
 /// (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`; fails closed with 503
 /// if the relying party is unconfigured. Recovers the pending
-/// `PasskeyRegistration` via the single-use `tc_passkey_ceremony` cookie
+/// `PasskeyRegistration` via the single-use `__Host-tc_passkey_ceremony` cookie
 /// (missing / expired / already-consumed / wrong-variant -> 400), verifies the
 /// browser's attestation, and persists the resulting passkey under the canonical
 /// credential-id encoding. A failed/invalid attestation is rejected with a 400
@@ -18856,7 +19652,7 @@ const NEAR_LOGIN_MESSAGE: &str = "Trace Commons sign-in";
 /// Ceremony cookie binding a NEAR enroll ceremony to this browser. Shares the
 /// shape (Secure + HttpOnly + SameSite=Strict + Path=/ + short Max-Age) of the
 /// passkey ceremony cookie but a distinct name so the two ceremonies never alias.
-const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "tc_near_ceremony";
+const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "__Host-tc_near_ceremony";
 
 /// Encode the 32-byte challenge nonce for the wire as lowercase hex (64 chars).
 ///
@@ -18871,7 +19667,7 @@ fn near_nonce_to_wire(nonce: &[u8; 32]) -> String {
 /// `POST /v1/account/near/enroll/start` — begin linking a NEAR access key to the
 /// authenticated account. Fails closed (503) when NEAR sign-in is unconfigured.
 /// Generates a fresh 32-byte CSPRNG nonce, stashes a `NearChallenge` ceremony
-/// keyed by an opaque ceremony id, sets the short-lived `tc_near_ceremony`
+/// keyed by an opaque ceremony id, sets the short-lived `__Host-tc_near_ceremony`
 /// cookie, and returns the `{ message, nonce, recipient }` the wallet's
 /// `signMessage` consumes.
 async fn account_near_enroll_start_handler(
@@ -18964,7 +19760,7 @@ struct AccountNearEnrollFinishBody {
 
 /// `POST /v1/account/near/enroll/finish` — complete the NEAR access-key link.
 /// Fails closed (503) when NEAR sign-in is unconfigured. Recovers and CONSUMES
-/// the `NearChallenge` via the single-use `tc_near_ceremony` cookie (missing /
+/// the `NearChallenge` via the single-use `__Host-tc_near_ceremony` cookie (missing /
 /// expired / wrong-variant -> 400), verifies the NEP-413 wallet signature over
 /// the stashed challenge, then performs the BINDING CHECK: the signing key must
 /// be a FullAccess key of the named NEAR account (a non-FullAccess key or any RPC
@@ -19243,8 +20039,15 @@ async fn account_passkey_remove_handler(
 
     let db = account_db(state.as_ref())?;
 
+    // Z2 S2: every live session this passkey minted is revoked with it, browser
+    // and native, except the session making this request.
     let result = db
-        .revoke_account_credential(&ctx.tenant_id, ctx.account_id.as_uuid(), &credential_id)
+        .revoke_account_credential_sparing_session(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &credential_id,
+            ctx.session_token_hash.as_deref(),
+        )
         .await
         .map_err(internal_error)?;
 
@@ -19651,7 +20454,7 @@ async fn account_merge_confirm_handler(
 //   * `/account/passkey/login/start` issues a discoverable-credential WebAuthn
 //     challenge (no allow-list), stashes the server-side
 //     `DiscoverableAuthentication` state in the in-process ceremony store, and
-//     binds it to the browser via the same short-lived `tc_passkey_ceremony`
+//     binds it to the browser via the same short-lived `__Host-tc_passkey_ceremony`
 //     cookie used by enrollment.
 //   * `/account/passkey/login/finish` verifies the browser's assertion and, on
 //     success, mints the IDENTICAL Slice 1 session cookie. It bootstraps the
@@ -19718,7 +20521,7 @@ where
 /// discoverable-credential challenge (no allow-list — the authenticator
 /// "discovers" the credential and user handle), stashes the server-side
 /// `DiscoverableAuthentication` state under a fresh ceremony id, and binds it to
-/// this browser with the short-lived `tc_passkey_ceremony` cookie. Returns the
+/// this browser with the short-lived `__Host-tc_passkey_ceremony` cookie. Returns the
 /// `RequestChallengeResponse`. ANY failure collapses to the uniform deny.
 async fn account_passkey_login_start_handler(
     State(state): State<Arc<AppState>>,
@@ -19786,6 +20589,103 @@ async fn account_passkey_login_start_handler(
     response
 }
 
+/// A discoverable passkey assertion that verified: the tenant the credential
+/// lives in, the account it belongs to, and its canonical credential id.
+struct VerifiedPasskeyAssertion {
+    tenant: String,
+    account_id: uuid::Uuid,
+    credential_id: String,
+}
+
+/// The ONE passkey login verifier, shared by the browser
+/// (`/account/passkey/login/finish`) and native
+/// (`/v1/account/native/passkey/login/finish`) sign-ins. The two differ only in
+/// how the ceremony state was recovered (a cookie or a body-borne id) and what
+/// they issue; every check on the assertion itself lives here, so the surfaces
+/// cannot drift apart. `None` on any failure; the caller answers with its own
+/// uniform deny.
+///
+/// Steps, in order: identify the asserted handle and credential id (no tenant
+/// context yet); the per-credential ceiling; resolve the tenant through the
+/// NARROW resolver pool with NO tenant write; load the active credential under
+/// that tenant's RLS; require the asserted user handle to equal the
+/// credential's account (before verification runs); verify, which enforces the
+/// signature and the sign-counter clone check; persist the advanced counter.
+async fn verify_discoverable_passkey_assertion(
+    webauthn: &webauthn_rs::Webauthn,
+    db: &dyn Database,
+    assertion: &webauthn_rs::prelude::PublicKeyCredential,
+    auth_state: webauthn_rs::prelude::DiscoverableAuthentication,
+) -> Option<VerifiedPasskeyAssertion> {
+    // Extract the asserted user handle + credential id from the assertion (no
+    // tenant context yet). Encode the credential id with the SAME canonical
+    // base64url encoding enrollment used so the lookup agrees byte-for-byte.
+    let (account_handle_uuid, cred_id_bytes) = webauthn
+        .identify_discoverable_authentication(assertion)
+        .ok()?;
+    let credential_id =
+        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
+
+    // Per-credential hard ceiling (replay/brute bound on one specific credential,
+    // IP-independent, and shared by both surfaces).
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("passkey-login-cred:{credential_id}"),
+        PASSKEY_LOGIN_PER_CRED_LIMIT,
+    ) {
+        return None;
+    }
+
+    // Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
+    // ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
+    // -> deny, and critically NO tenant row is written for a forged id.
+    let tenant = db.resolve_credential_tenant(&credential_id).await.ok()??;
+
+    // Under the resolved tenant's RLS, load the active credential. Deserialize
+    // the stored passkey JSON into a webauthn-rs `Passkey`; a corrupt row also
+    // denies.
+    let credential = db
+        .load_webauthn_credential_for_login(&tenant, &credential_id)
+        .await
+        .ok()??;
+    let credential_account_id = credential.account_id;
+    let mut passkey: webauthn_rs::prelude::Passkey =
+        serde_json::from_value(credential.passkey).ok()?;
+
+    // Cross-account / handle binding (checked BEFORE finish so a mismatch never
+    // reaches verification): the user handle the authenticator asserted MUST
+    // equal the account the stored credential belongs to. Defense-in-depth on
+    // top of the credential_id -> account binding.
+    if account_handle_uuid != credential_account_id {
+        return None;
+    }
+
+    // Verify the assertion. The SIGN-COUNTER regression / clone-detection check
+    // is enforced INSIDE finish_discoverable_authentication (a regressed counter
+    // -> Err), as is the allowed-credential / signature check.
+    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
+    let auth_result = webauthn
+        .finish_discoverable_authentication(assertion, auth_state, &[discoverable_key])
+        .ok()?;
+
+    // Persist the advanced sign counter (clone-detection state) when it moved.
+    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
+    // property (counter / backup flags) actually changed. A persistence failure is
+    // NOT fatal to this login (the assertion already verified), but we fail closed
+    // so a stuck counter can't silently accumulate.
+    if matches!(passkey.update_credential(&auth_result), Some(true)) {
+        let updated = serde_json::to_value(&passkey).ok()?;
+        db.update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
+            .await
+            .ok()?;
+    }
+
+    Some(VerifiedPasskeyAssertion {
+        tenant,
+        account_id: credential_account_id,
+        credential_id,
+    })
+}
+
 /// `POST /account/passkey/login/finish` — complete a discoverable passkey login
 /// and issue a session (Slice 2 Task 6). UNAUTHENTICATED, with full redeem-style
 /// hardening: a fixed timing floor wraps the WHOLE handler so success and every
@@ -19844,93 +20744,18 @@ async fn account_passkey_login_finish_inner(
         None => return passkey_login_generic_deny(),
     };
 
-    // 4. Extract the asserted user handle + credential id from the assertion (no
-    //    tenant context yet). Encode the credential id with the SAME canonical
-    //    base64url encoding enrollment used so the lookup agrees byte-for-byte.
-    let (account_handle_uuid, cred_id_bytes) =
-        match webauthn.identify_discoverable_authentication(&assertion) {
-            Ok(parts) => parts,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-    let credential_id =
-        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
-
-    // Per-credential hard ceiling (replay/brute bound on one specific credential,
-    // IP-independent). Same uniform deny.
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-cred:{credential_id}"),
-        PASSKEY_LOGIN_PER_CRED_LIMIT,
-    ) {
+    // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
+    //    the advanced sign counter: the verification core shared with native
+    //    passkey sign-in. Any failure -> uniform deny.
+    let Some(VerifiedPasskeyAssertion {
+        tenant,
+        account_id: credential_account_id,
+        credential_id,
+    }) =
+        verify_discoverable_passkey_assertion(&webauthn, db.as_ref(), &assertion, auth_state).await
+    else {
         return passkey_login_generic_deny();
-    }
-
-    // 5. Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
-    //    ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
-    //    -> uniform deny, and critically NO tenant row is written for a forged id.
-    let tenant = match db.resolve_credential_tenant(&credential_id).await {
-        Ok(Some(tenant)) => tenant,
-        Ok(None) | Err(_) => return passkey_login_generic_deny(),
     };
-
-    // 6. Under the resolved tenant's RLS, load the active credential. None ->
-    //    uniform deny. Deserialize the stored passkey JSON into a webauthn-rs
-    //    `Passkey`; a corrupt row also collapses to the uniform deny.
-    let credential = match db
-        .load_webauthn_credential_for_login(&tenant, &credential_id)
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) | Err(_) => return passkey_login_generic_deny(),
-    };
-    // Move the owned `passkey` JSON out of the row (no clone) for deserialization;
-    // `account_id` is retained for the handle-binding check below.
-    let credential_account_id = credential.account_id;
-    let mut passkey: webauthn_rs::prelude::Passkey =
-        match serde_json::from_value(credential.passkey) {
-            Ok(passkey) => passkey,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-
-    // 8. Cross-account / handle binding (checked BEFORE finish so a mismatch never
-    //    reaches verification): the user handle the authenticator asserted MUST
-    //    equal the account the stored credential belongs to. Defense-in-depth on
-    //    top of the credential_id -> account binding.
-    if account_handle_uuid != credential_account_id {
-        return passkey_login_generic_deny();
-    }
-
-    // 7. Verify the assertion. The SIGN-COUNTER regression / clone-detection check
-    //    is enforced INSIDE finish_discoverable_authentication (a regressed counter
-    //    -> Err), as is the allowed-credential / signature check. Any Err ->
-    //    uniform deny.
-    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
-    let auth_result = match webauthn.finish_discoverable_authentication(
-        &assertion,
-        auth_state,
-        &[discoverable_key],
-    ) {
-        Ok(auth_result) => auth_result,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    // Persist the advanced sign counter (clone-detection state) when it moved.
-    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
-    // property (counter / backup flags) actually changed. A persistence failure is
-    // NOT fatal to this login (the assertion already verified), but we fail closed
-    // to the uniform deny so a stuck counter can't silently accumulate.
-    if matches!(passkey.update_credential(&auth_result), Some(true)) {
-        let updated = match serde_json::to_value(&passkey) {
-            Ok(value) => value,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-        if db
-            .update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
-            .await
-            .is_err()
-        {
-            return passkey_login_generic_deny();
-        }
-    }
 
     // 9. Mint the session secret (>=128-bit CSPRNG); store ONLY its hash. Insert
     //    the session (client_kind='passkey', auth_credential_id=credential_id) +
@@ -19943,7 +20768,7 @@ async fn account_passkey_login_finish_inner(
     if db
         .issue_passkey_session(
             &tenant,
-            credential.account_id,
+            credential_account_id,
             trace_commons_server::db::NewSession {
                 token_hash: &token_hash,
                 client_kind: "passkey",
@@ -20002,6 +20827,7 @@ async fn account_passkey_login_finish_inner(
     if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
         resp_headers.append(axum::http::header::SET_COOKIE, value);
     }
+    append_legacy_account_session_clear(resp_headers);
     resp_headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -20021,7 +20847,7 @@ async fn account_passkey_login_finish_inner(
 //
 //   * `/account/near/login/start` mints a fresh 32-byte challenge nonce, stashes
 //     a `NearChallenge` ceremony in the in-process store, binds it to the browser
-//     via the short-lived `tc_near_ceremony` cookie, and returns
+//     via the short-lived `__Host-tc_near_ceremony` cookie, and returns
 //     `{ message: NEAR_LOGIN_MESSAGE, nonce, recipient }`.
 //   * `/account/near/login/finish` verifies the wallet's NEP-413 assertion
 //     OFFLINE (NO RPC at login), bootstraps the tenant from the asserted public
@@ -20098,7 +20924,7 @@ where
 /// (Slice 3a Task 7). UNAUTHENTICATED. Fails closed (uniform deny) when NEAR
 /// sign-in is unconfigured. Rate-limited per-IP + global. Mints a fresh 32-byte
 /// challenge nonce, stashes a `NearChallenge` ceremony under a fresh ceremony id,
-/// binds it to this browser with the short-lived `tc_near_ceremony` cookie, and
+/// binds it to this browser with the short-lived `__Host-tc_near_ceremony` cookie, and
 /// returns `{ message: NEAR_LOGIN_MESSAGE, nonce: hex, recipient }`. ANY failure
 /// collapses to the uniform deny.
 async fn account_near_login_start_handler(
@@ -20373,6 +21199,7 @@ async fn account_near_login_finish_inner(
     if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
         resp_headers.append(axum::http::header::SET_COOKIE, value);
     }
+    append_legacy_account_session_clear(resp_headers);
     resp_headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -46579,6 +47406,9 @@ fn rollout_feature_global_enabled(state: &AppState, feature: TraceTenantRolloutF
         TraceTenantRolloutFeature::ObjectPrimaryDerivedExports => {
             state.object_primary_derived_exports
         }
+        // Tenant-list-only: no paired "globally enabled" `AppState` bool (see
+        // the variant's doc comment).
+        TraceTenantRolloutFeature::PipelineReceipts => false,
     }
 }
 
@@ -51638,10 +52468,7 @@ fn register_stats_response(
         withheld,
         scope: REGISTER_STATS_SCOPE,
         as_of: row.as_of,
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
     }
 }
 
@@ -57350,6 +58177,19 @@ fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecor
     auth.role.can_review() || principal_owns_submission(auth, record)
 }
 
+/// The same predicate `can_access_submission` applies, taking the stored
+/// owner's principal ref directly rather than a full
+/// `TraceCommonsSubmissionRecord` -- for a caller whose only record of a
+/// submission's ownership is that one field, such as the pipeline's
+/// `trace_submissions.auth_principal_ref` read for a completed-admission
+/// retry (`submit_trace_handler`). Built from the same
+/// `principal_owns_submission_ref` predicate `can_access_submission` itself
+/// resolves to (through `principal_owns_submission`), so the two can never
+/// drift apart.
+fn can_access_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
+    auth.role.can_review() || principal_owns_submission_ref(auth, auth_principal_ref)
+}
+
 /// Owned quarantined submissions may be superseded by a corrected envelope on
 /// the same `submission_id` (#214). Accepted / rejected / revoked rows stay
 /// classic-idempotent; reviewers use the dedicated rescrub route instead.
@@ -57366,8 +58206,12 @@ fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmiss
 }
 
 fn principal_owns_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
-    record.auth_principal_ref == legacy_principal_ref()
-        || auth.matches_stored_principal(&record.auth_principal_ref)
+    principal_owns_submission_ref(auth, &record.auth_principal_ref)
+}
+
+fn principal_owns_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
+    auth_principal_ref == legacy_principal_ref()
+        || auth.matches_stored_principal(auth_principal_ref)
 }
 
 fn principal_owns_storage_submission(
@@ -58595,9 +59439,18 @@ impl<'a> DbAuditChainFileAnchors<'a> {
         previous_event_hash: &str,
         event_hash: &str,
     ) -> bool {
-        if previous_event_hash == TRACE_AUDIT_EVENT_GENESIS_HASH {
-            return true;
-        }
+        previous_event_hash == TRACE_AUDIT_EVENT_GENESIS_HASH
+            || self.anchored_in_file(row, previous_event_hash, event_hash)
+    }
+
+    /// The row carries exactly the chain fields of the file event with its
+    /// id, and that event chains from a file event.
+    fn anchored_in_file(
+        &self,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> bool {
         let Some(file_event) = self.by_id.get(&row.audit_event_id) else {
             return false;
         };
@@ -58606,7 +59459,37 @@ impl<'a> DbAuditChainFileAnchors<'a> {
             && self.event_hashes.contains(previous_event_hash)
     }
 
-    /// Whether a hashed row chains: from the hashed row before it, or, for
+    /// The row an operator audit-chain repair writes to resume the chain
+    /// across a legacy segment -- file events a rolled-back build chained
+    /// into the file but mirrored without chain fields. It chains from the
+    /// file head, not from `expected_previous_hash`, and names
+    /// `expected_previous_hash` as its `decision_inputs_hash`; its canonical
+    /// payload, whose hash the chain check recomputes, carries that
+    /// declaration. So the DB chain continues through it only from the exact
+    /// hashed row it was written against: a hashed row lost before it still
+    /// breaks the chain.
+    fn accepts_legacy_segment_resume(
+        &self,
+        expected_previous_hash: &str,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> bool {
+        row.decision_inputs_hash.as_deref() == Some(expected_previous_hash)
+            && row.canonical_event_json.is_some()
+            && row.action == StorageTraceAuditAction::Retain
+            && matches!(
+                &row.metadata,
+                StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(surface),
+                    ..
+                } if surface == AUDIT_CHAIN_REPAIR_AUDIT_KIND
+            )
+            && self.anchored_in_file(row, previous_event_hash, event_hash)
+    }
+
+    /// Whether a hashed row chains: from the hashed row before it, or across
+    /// a legacy segment by [`Self::accepts_legacy_segment_resume`], or, for
     /// the first hashed row (`expected_previous_hash` is `None`), from a
     /// start [`Self::accepts_chain_start`] allows.
     fn chains(
@@ -58617,7 +59500,15 @@ impl<'a> DbAuditChainFileAnchors<'a> {
         event_hash: &str,
     ) -> bool {
         match expected_previous_hash {
-            Some(expected) => previous_event_hash == expected,
+            Some(expected) => {
+                previous_event_hash == expected
+                    || self.accepts_legacy_segment_resume(
+                        expected,
+                        row,
+                        previous_event_hash,
+                        event_hash,
+                    )
+            }
             None => self.accepts_chain_start(row, previous_event_hash, event_hash),
         }
     }
@@ -66083,6 +66974,202 @@ fn plan_audit_chain_repair(
     Ok(plan)
 }
 
+/// A legacy segment the DB audit chain can resume across. Hash and counts
+/// only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacySegmentResume {
+    /// The DB's latest hashed row's `event_hash`: where the DB chain stopped.
+    db_head_event_hash: String,
+    /// File events after the DB head.
+    file_events: usize,
+    /// DB rows after the DB head, all without chain fields.
+    unhashed_db_rows: usize,
+    /// File events after the DB head that have no DB row of their id.
+    file_only_events: usize,
+}
+
+/// Plans the repair for a file log that ran ahead of the DB through legacy
+/// rows: the state a binary rollback to a build from before #1043 leaves.
+///
+/// That build chained every event into the file, but under required mirror
+/// writes it wrote the DB row before the event was chained, so the row has
+/// no chain fields; and some of its events (a submission's `submitted`, an
+/// idempotent re-POST) were written to the file only. After the roll-forward
+/// the new build chains from the file head, which is no hashed DB row, and
+/// every append is refused as stale.
+///
+/// `file_events` must be in file-line order. `Ok(None)` means nothing is
+/// locked: there is no hashed DB row (the DB accepts any first one), or the
+/// file ends at the DB's latest hashed row. The plan is only ever this shape:
+/// - the DB's latest hashed row is a file event, with the same chain fields
+///   (else `db_head_not_in_file`: a fork or a tampered row);
+/// - the file events after it chain from it, each reproducing its own hash
+///   (else `file_chain_break_after_db_head`);
+/// - none of them has a hashed DB row, and every DB row of one's id is an
+///   unhashed row agreeing with it (else `legacy_row_mismatch`);
+/// - at least one DB row after the latest hashed row is unhashed -- the mark
+///   of the old build. Without it, a file ahead of the DB is unexplained and
+///   is refused as before (`file_head_not_in_db`).
+fn plan_legacy_segment_resume(
+    file_events: &[TraceCommonsAuditEvent],
+    db_rows: &[StorageTraceAuditEventRecord],
+) -> Result<Option<LegacySegmentResume>, &'static str> {
+    let Some(db_head) = db_rows
+        .iter()
+        .filter(|row| row.event_hash.is_some())
+        .max_by_key(|row| row.audit_sequence)
+    else {
+        return Ok(None);
+    };
+    let db_head_hash = db_head.event_hash.clone().ok_or("db_head_not_in_file")?;
+    let head_index = file_events
+        .iter()
+        .position(|event| event.event_id == db_head.audit_event_id)
+        .ok_or("db_head_not_in_file")?;
+    let head_event = &file_events[head_index];
+    if head_event.event_hash.as_deref() != Some(db_head_hash.as_str())
+        || head_event.previous_event_hash != db_head.previous_event_hash
+    {
+        return Err("db_head_not_in_file");
+    }
+    let segment = &file_events[head_index + 1..];
+    if segment.is_empty() {
+        return Ok(None);
+    }
+    let mut expected_previous = db_head_hash.clone();
+    for event in segment {
+        let Some(event_hash) = event.event_hash.as_deref() else {
+            return Err("file_chain_break_after_db_head");
+        };
+        if event.previous_event_hash.as_deref() != Some(expected_previous.as_str())
+            || compute_audit_event_hash(&expected_previous, event)
+                .map_err(|_| "file_chain_break_after_db_head")?
+                != event_hash
+        {
+            return Err("file_chain_break_after_db_head");
+        }
+        expected_previous = event_hash.to_string();
+    }
+    let rows_by_id = db_rows
+        .iter()
+        .map(|row| (row.audit_event_id, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut file_only_events = 0usize;
+    for event in segment {
+        let Some(row) = rows_by_id.get(&event.event_id) else {
+            file_only_events += 1;
+            continue;
+        };
+        if !legacy_audit_row_matches_file_event(row, event) {
+            return Err("legacy_row_mismatch");
+        }
+    }
+    let unhashed_db_rows = db_rows
+        .iter()
+        .filter(|row| row.audit_sequence > db_head.audit_sequence)
+        .count();
+    if unhashed_db_rows == 0 {
+        return Err("file_head_not_in_db");
+    }
+    Ok(Some(LegacySegmentResume {
+        db_head_event_hash: db_head_hash,
+        file_events: segment.len(),
+        unhashed_db_rows,
+        file_only_events,
+    }))
+}
+
+/// Whether an unhashed DB row is the mirror a build from before #1043 wrote
+/// for this file event: that build copied these fields from the unchained
+/// event, so any difference is not its doing.
+fn legacy_audit_row_matches_file_event(
+    row: &StorageTraceAuditEventRecord,
+    event: &TraceCommonsAuditEvent,
+) -> bool {
+    row.event_hash.is_none()
+        && row.previous_event_hash.is_none()
+        && row.canonical_event_json.is_none()
+        && row.tenant_id == event.tenant_id
+        && row.submission_id == (event.submission_id != Uuid::nil()).then_some(event.submission_id)
+        && row.reason == event.reason
+        && row.export_manifest_id == event.export_id
+        && row.decision_inputs_hash == event.decision_inputs_hash
+        && event
+            .actor_principal_ref
+            .as_deref()
+            .is_none_or(|principal| principal == row.actor_principal_ref)
+}
+
+enum AuditChainRepairOutcome {
+    Restore {
+        restorable: usize,
+        restored_event_ids: Vec<Uuid>,
+    },
+    ResumeLegacySegment {
+        resume: LegacySegmentResume,
+        /// Absent for a dry run.
+        resume_event_id: Option<Uuid>,
+    },
+}
+
+/// Writes the event that resumes the DB audit chain across a legacy segment:
+/// a hash-only `audit_chain_repair` event, chained from the file head like
+/// any other, whose `decision_inputs_hash` names the DB's latest hashed row.
+/// The caller holds the tenant's audit append lock.
+///
+/// The file line goes first. If the DB insert then fails, the event is one
+/// more file-only event past the DB head and a rerun resumes across it; the
+/// DB insert refuses a DB head that has moved since the plan.
+async fn write_legacy_segment_resume_event(
+    state: &AppState,
+    tenant: &TenantAuth,
+    db: &dyn Database,
+    resume: &LegacySegmentResume,
+    purpose_hash: &str,
+) -> anyhow::Result<Uuid> {
+    let mut action_counts = BTreeMap::new();
+    for (key, value) in [
+        ("legacy_segment_file_events", resume.file_events),
+        ("legacy_segment_unhashed_db_rows", resume.unhashed_db_rows),
+        ("legacy_segment_file_only_events", resume.file_only_events),
+    ] {
+        action_counts.insert(key.to_string(), value.min(u32::MAX as usize) as u32);
+    }
+    let mut event = TraceCommonsAuditEvent::lifecycle_counts(
+        tenant,
+        Uuid::nil(),
+        AUDIT_CHAIN_REPAIR_AUDIT_KIND,
+        Some(purpose_hash),
+        &action_counts,
+    );
+    event.decision_inputs_hash = Some(resume.db_head_event_hash.clone());
+    event.created_at = Utc::now().max(latest_audit_event_created_at(
+        &audit_events_path(&state.root, &tenant.tenant_id),
+        &tenant.tenant_id,
+    )?);
+    let event = chain_audit_event(&state.root, &tenant.tenant_id, event)?;
+    let write = audit_event_storage_write(
+        tenant,
+        &event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Retain,
+            metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
+                purpose_hash: Some(purpose_hash.to_string()),
+                dry_run: false,
+                action_counts,
+            },
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+    )?;
+    write_chained_audit_event(&state.root, &tenant.tenant_id, &event)?;
+    db.append_trace_audit_chain_resume_event(write, &resume.db_head_event_hash)
+        .await
+        .context("failed to write the audit chain resume row")?;
+    Ok(event.event_id)
+}
+
 fn default_audit_chain_repair_dry_run() -> bool {
     true
 }
@@ -66094,6 +67181,14 @@ struct TraceAuditChainRepairRequest {
     /// Defaults to true: a repair writes only when asked to.
     #[serde(default = "default_audit_chain_repair_dry_run")]
     dry_run: bool,
+    /// Required, on top of `dry_run: false`, before a repair resumes the DB
+    /// chain across a legacy segment (`file_ahead_through_legacy_rows`).
+    /// That path accepts DB rows it cannot verify by hash -- the unhashed
+    /// rows a rolled-back build wrote -- so it is a separate, deliberate act
+    /// after reviewing the dry run's counts. Without it such a run refuses
+    /// `legacy_segment_not_accepted` and writes nothing.
+    #[serde(default)]
+    accept_legacy_segment: bool,
 }
 
 /// Hash-only: counts, the purpose's hash, and the ids of the audit events
@@ -66105,11 +67200,21 @@ struct TraceAuditChainRepairResponse {
     purpose_hash: String,
     dry_run: bool,
     /// `clean` when the file log already holds every hashed DB row;
-    /// `db_ahead_of_file` when it lacks a verifiable tail of them.
+    /// `db_ahead_of_file` when it lacks a verifiable tail of them;
+    /// `file_ahead_through_legacy_rows` when the file ran ahead of the DB's
+    /// latest hashed row through rows a rolled-back build wrote unhashed.
     divergence: &'static str,
     file_events_restorable: usize,
     file_events_restored: usize,
     restored_event_ids: Vec<Uuid>,
+    /// For `file_ahead_through_legacy_rows`: the file events past the DB's
+    /// latest hashed row, how many DB rows (all unhashed) the rolled-back
+    /// build wrote there, and how many of those file events have no DB row.
+    legacy_segment_file_events: usize,
+    legacy_segment_unhashed_db_rows: usize,
+    legacy_segment_file_only_events: usize,
+    /// Whether this run wrote the row that resumes the DB chain.
+    chain_resumed: bool,
     /// The repair's own audit event; absent for a dry run.
     repair_audit_event_id: Option<Uuid>,
 }
@@ -66179,7 +67284,7 @@ async fn run_audit_chain_repair(
         .unwrap_or("trace_commons_audit_chain_repair");
     let purpose_hash = sha256_prefixed(purpose);
 
-    let (restorable, restored_event_ids) = {
+    let outcome = {
         let lock = audit_append_lock(&state.root, &tenant.tenant_id);
         let _guard = lock.lock().await;
         let file_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
@@ -66187,25 +67292,81 @@ async fn run_audit_chain_repair(
             .list_trace_audit_events(&tenant.tenant_id)
             .await
             .context("failed to list DB audit rows for audit chain repair")?;
-        let plan = plan_audit_chain_repair(&file_events, &db_rows).map_err(|label| {
+        let refuse = |label: &'static str| {
             tracing::warn!(
                 refusal = label,
                 "Trace Commons audit chain repair refused a divergence it cannot restore"
             );
             anyhow::Error::new(TraceAuditChainRepairRefused(label))
-        })?;
-        let mut restored = Vec::new();
-        if !request.dry_run {
-            for event in &plan {
-                write_chained_audit_event(&state.root, &tenant.tenant_id, event)?;
-                restored.push(event.event_id);
+        };
+        match plan_audit_chain_repair(&file_events, &db_rows) {
+            Ok(plan) => {
+                let mut restored = Vec::new();
+                if !request.dry_run {
+                    for event in &plan {
+                        write_chained_audit_event(&state.root, &tenant.tenant_id, event)?;
+                        restored.push(event.event_id);
+                    }
+                }
+                AuditChainRepairOutcome::Restore {
+                    restorable: plan.len(),
+                    restored_event_ids: restored,
+                }
             }
+            // The file is ahead of the DB. That is a fork -- unless a
+            // rolled-back build wrote it, with unhashed DB rows.
+            Err("file_head_not_in_db") => {
+                let file_events_in_order =
+                    read_audit_events_in_file_order(&state.root, &tenant.tenant_id)?;
+                match plan_legacy_segment_resume(&file_events_in_order, &db_rows).map_err(refuse)? {
+                    None => AuditChainRepairOutcome::Restore {
+                        restorable: 0,
+                        restored_event_ids: Vec::new(),
+                    },
+                    Some(resume) => {
+                        if !request.dry_run && !request.accept_legacy_segment {
+                            return Err(refuse("legacy_segment_not_accepted"));
+                        }
+                        let resume_event_id = if request.dry_run {
+                            None
+                        } else {
+                            Some(
+                                write_legacy_segment_resume_event(
+                                    state,
+                                    tenant,
+                                    db.as_ref(),
+                                    &resume,
+                                    &purpose_hash,
+                                )
+                                .await?,
+                            )
+                        };
+                        AuditChainRepairOutcome::ResumeLegacySegment {
+                            resume,
+                            resume_event_id,
+                        }
+                    }
+                }
+            }
+            Err(label) => return Err(refuse(label)),
         }
-        (plan.len(), restored)
     };
 
+    let (restorable, restored_event_ids, resume, resume_event_id) = match outcome {
+        AuditChainRepairOutcome::Restore {
+            restorable,
+            restored_event_ids,
+        } => (restorable, restored_event_ids, None, None),
+        AuditChainRepairOutcome::ResumeLegacySegment {
+            resume,
+            resume_event_id,
+        } => (0, Vec::new(), Some(resume), resume_event_id),
+    };
     let repair_audit_event_id = if request.dry_run {
         None
+    } else if resume.is_some() {
+        // The row that resumed the chain is this repair's audit event.
+        resume_event_id
     } else {
         let mut action_counts = BTreeMap::new();
         action_counts.insert(
@@ -66248,7 +67409,9 @@ async fn run_audit_chain_repair(
         generated_at: Utc::now(),
         purpose_hash,
         dry_run: request.dry_run,
-        divergence: if restorable == 0 {
+        divergence: if resume.is_some() {
+            "file_ahead_through_legacy_rows"
+        } else if restorable == 0 {
             "clean"
         } else {
             "db_ahead_of_file"
@@ -66256,6 +67419,14 @@ async fn run_audit_chain_repair(
         file_events_restorable: restorable,
         file_events_restored: restored_event_ids.len(),
         restored_event_ids,
+        legacy_segment_file_events: resume.as_ref().map_or(0, |resume| resume.file_events),
+        legacy_segment_unhashed_db_rows: resume
+            .as_ref()
+            .map_or(0, |resume| resume.unhashed_db_rows),
+        legacy_segment_file_only_events: resume
+            .as_ref()
+            .map_or(0, |resume| resume.file_only_events),
+        chain_resumed: resume_event_id.is_some(),
         repair_audit_event_id,
     })
 }
@@ -66687,6 +67858,17 @@ async fn mirror_audit_event_row_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
+    db.append_trace_audit_event(audit_event_storage_write(tenant, event, row)?)
+        .await
+        .context("failed to mirror trace audit event")
+}
+
+/// The DB row `event` is mirrored as.
+fn audit_event_storage_write(
+    tenant: &TenantAuth,
+    event: &TraceCommonsAuditEvent,
+    row: AuditRowMirror,
+) -> anyhow::Result<StorageTraceAuditEventWrite> {
     let AuditRowMirror {
         action,
         metadata,
@@ -66699,7 +67881,7 @@ async fn mirror_audit_event_row_to_db(
         .as_deref()
         .map(|previous_event_hash| canonical_audit_event_json(previous_event_hash, event))
         .transpose()?;
-    db.append_trace_audit_event(StorageTraceAuditEventWrite {
+    Ok(StorageTraceAuditEventWrite {
         audit_event_id: event.event_id,
         tenant_id: tenant.tenant_id.clone(),
         actor_principal_ref: event
@@ -66723,8 +67905,6 @@ async fn mirror_audit_event_row_to_db(
         canonical_event_json,
         metadata,
     })
-    .await
-    .context("failed to mirror trace audit event")
 }
 
 fn normalize_audit_event_metadata(
@@ -66978,6 +68158,18 @@ fn read_all_audit_events(
     root: &Path,
     tenant_id: &str,
 ) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
+    let mut events = read_audit_events_in_file_order(root, tenant_id)?;
+    events.sort_by_key(|event| event.created_at);
+    Ok(events)
+}
+
+/// The tenant's file audit events in line order: the file chain's order.
+/// Events a build from before #1043 wrote were stamped before the append
+/// lock, so their `created_at` order need not be the chain's.
+fn read_audit_events_in_file_order(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
     let path = audit_events_path(root, tenant_id);
     if !path.exists() {
         return Ok(Vec::new());
@@ -67001,7 +68193,6 @@ fn read_all_audit_events(
         ensure_audit_event_tenant(&event, tenant_id)?;
         events.push(event);
     }
-    events.sort_by_key(|event| event.created_at);
     Ok(events)
 }
 

@@ -20,7 +20,7 @@ export function RouteDisclosureBody({
       <p className="m-0">{copy.route}</p>
       {copy.local_filter && <p className="m-0">{copy.local_filter}</p>}
       {facts.witness && copy.witness && (
-        <div className="grid gap-2 rounded-md border border-border p-3">
+        <div className="tc-card tc-card--quiet grid gap-2">
           <strong className="text-[12px]">{copy.witness.heading}</strong>
           <dl className="m-0 grid gap-1 font-mono text-[11px]">
             <dt className="text-muted-foreground">
@@ -61,8 +61,8 @@ export function RouteDisclosurePanel() {
   const core = useCoreStatus();
   const disclosure = useRouteDisclosure(core.scope, core.isSuccess);
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card">
+      <span className="mb-1.5 block tc-eyebrow">
         WHERE SESSIONS GO
       </span>
       {disclosure.data ? (
