@@ -118,6 +118,21 @@ never set it.** Setting it:
   `pipeline_test_dependencies_not_allowed_when_required`, regardless of
   whether the injected dependency is actually qualified.
 
+This check is scoped to one bundle, not to every dependency the service
+happens to hold (decision P4-D7): `pipeline_runtime_is_production_qualified`
+inspects only the dependencies `PipelineService::default_package()` --
+the package this service registers as every rollout tenant's active bundle
+-- actually uses: the scorer and embedder it names, the held index reader
+and writer, one settlement-adapter check per instrument the package pins,
+the authority provider, the privacy boundary, and payout when the package
+pins `trace_credit`. A non-production-qualified dependency the default
+bundle never touches (for example, a scorer registered for a different
+bundle that is not yet the active one) does not block startup. The same
+per-bundle check is available as `PipelineService::bundle_qualification`
+for any package, which is what the `pipeline_bundle_qualification` required
+check (`qualification_inspects_the_objects_the_constructor_receives`)
+exercises.
+
 ## Per-phase claim lease
 
 Each pipeline phase claims its run under its own lease length, sized for how
@@ -161,10 +176,23 @@ token-only fence in `record_lease_expired`), so it changes nothing -- that
 attempt is silently lost, not recorded as `lease_expired` and not otherwise
 un-charged.
 
-Lease renewal (extending a lease a phase still holds, mid-phase) is PR 4
-work and not implemented yet. It is what will close both gaps above -- a
-live worker renewing its lease before it expires, rather than a phase
-finding out only after the fact (or a crash never finding out at all).
+While a phase runs, a background task renews its lease: every
+`max(lease / 3, 100ms)`, it extends the live claim's lease, stopping as soon
+as the phase ends, the lease is lost (reclaimed by someone else, or already
+cleared), or renewal reaches its cap. The cap is
+`PIPELINE_LEASE_RENEWAL_CAP_FACTOR` (4) times the phase's own configured
+lease, measured from the moment the phase claimed the run: an honest phase
+that is merely slow keeps being renewed, but a phase that never comes back
+at all still surrenders its claim within a bounded multiple of its own
+lease rather than being renewed forever. The commit fences
+(`ensure_current_lease`, `ensure_live_lease`, every lease-checked `UPDATE`)
+stay the only authority over what a phase is allowed to write; renewal only
+keeps an honest slow phase from being reclaimed out from under it before it
+finishes. This closes both gaps above for a live worker: it renews its own
+lease before `lease_expires_at` passes, rather than finding out about an
+expiry only after the fact. The gap only reopens for a lease that was never
+renewed at all -- a worker that crashes before its first renewal, or one
+held past the renewal cap.
 
 ## Authority and privacy at the receipt
 
@@ -815,6 +843,49 @@ unaffected: the failed attempt never created a run, so the retry is a new
 attempt that creates the run itself, and the caller gets the same 200 it
 would have gotten on a first success.
 
+### The attempt artifact sweep
+
+A second, parallel table, `pipeline_attempt_artifacts` (V104), stages the
+objects a phase attempt writes mid-phase -- Review's approved revision,
+and Score's index command and neighbour set -- the same way
+`pipeline_receipt_artifacts` stages the receipt's envelope. Who owns
+deleting which row is a fixed split (controller ruling R2-1):
+
+- A `staged` row's object is named by no object ref yet, so no withdrawal
+  can ever reach it. `PipelineService::sweep_attempt_artifacts` owns it: on
+  each pass, for up to 32 of the tenant's `staged` rows whose
+  `cleanup_after` has passed, it deletes the object (skipping the delete
+  only when the store confirms the object is already absent) and then the
+  row. `cleanup_after` is set when the row is staged, to
+  `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times that phase's configured lease
+  plus one hour of margin for the commit to land -- the same bound a live
+  lease renewal is capped at, so an attempt that is still legitimately
+  renewing its lease never has its own object swept out from under it. A
+  delete failure logs `pipeline_attempt_sweep_delete_failed` and keeps the
+  row for the next pass.
+- A `committed` row's object is an object ref of the submission, recorded
+  by the same phase commit that committed the row. Deleting it belongs to
+  the withdrawal, not this sweep: a withdrawal invalidates the object ref
+  and queues its payload deletion in the same transaction as the tombstone
+  (see "Withdrawal follow-ups and index invalidation" above), and `main`'s
+  revocation-propagation worker deletes it. This sweep never touches a
+  `committed` row.
+- A phase attempt whose commit is refused because the submission stopped
+  being operable deletes the objects it wrote itself, best effort (Review
+  its approved object, Score its index command and neighbour set). Its
+  `staged` row stays either way; this sweep later finds the object already
+  absent and drops the row with no delete, or deletes an object that
+  refusal path failed to clean up.
+
+Score's withdrawal rule follows from the same split: withdrawing a
+submission whose run already committed Score deletes the index command and
+neighbour set through the ordinary object-ref invalidation path above, the
+same as Review's approved revision -- never through the attempt sweep. A
+run withdrawn before Score commits has nothing there yet; a run whose Score
+attempt staged an object but never committed (a crash, a lost lease, a
+refused commit) leaves that object to the attempt sweep, not to any
+withdrawal, because no object ref names it yet.
+
 ## Submission quota at switch-over
 
 The pipeline counts only pipeline receipts against the hourly submission
@@ -840,8 +911,10 @@ pre-switch receipt, unique ledger sources, tenant expansion gates,
 rollback, containment, suspension instead of rebinding, and writer
 retirement after pending work completes.
 
-The [local pipeline lab](pipeline-lab.md) `qualify` command runs this suite as part of pipeline qualification. Lab corpus and package evidence remains in local files;
-these PostgreSQL integration tests remain separate schema and recovery checks.
+[`pipeline.py qualify`](pipeline-qualification.md) runs the
+`versioned_pipeline_runtime_pg` suite as one of its required database
+checks. Corpus and package evidence stays in local files; these PostgreSQL
+integration tests remain separate schema and recovery checks.
 
 ## Local operator routes
 

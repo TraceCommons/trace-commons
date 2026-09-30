@@ -690,6 +690,38 @@ jobs:
           exit $fail
       - uses: ./.github/actions/trim-cargo-cache
 
+  pipeline-qualification:
+    # Not a required status check (owner decision P4-D17): it runs on every
+    # pull request and in the merge queue, and it blocks nothing until the
+    # owner promotes it. `pipeline.py` starts its own digest-pinned
+    # PostgreSQL container, so this job has no `services:` block.
+    name: pipeline qualification and restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-pipeline-qualification-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-pipeline-qualification-
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: pipeline tooling self-tests
+        run: python3 scripts/operator/test_pipeline_tooling.py
+      - name: pipeline qualify
+        run: python3 scripts/operator/pipeline.py qualify
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why.
+      - uses: ./.github/actions/trim-cargo-cache
+
   mark-assets-drift:
     name: mark assets match the generator
     runs-on: ubuntu-latest

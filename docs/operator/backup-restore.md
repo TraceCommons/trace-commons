@@ -106,6 +106,49 @@ persistent disk with snapshots) so the file-level restore is the
 primary recovery and `trace-commons-vector-replay` is the fallback when
 that's lost too.
 
+## Versioned pipeline
+
+`python3 scripts/operator/pipeline.py restore-drill` (also run as the last
+step of `pipeline.py qualify`) is the versioned pipeline's own restore
+check. See
+[pipeline-qualification.md](pipeline-qualification.md#pipelinepy-restore-drill---postgres-admin-url-url)
+for what it runs, step by step.
+
+**What it proves.** A `pg_dump` / `pg_restore` round trip of the pipeline's
+PostgreSQL rows, plus a byte-for-byte copy of the encrypted artifact
+directory, resumes a pending run to the same settlement legs and Trace
+Credit ledger event the original run reached, with the index's entry set
+and the pending-run set unchanged and no duplicate effect.
+
+**What it does not prove.** The artifact "restore" is a local filesystem
+copy (`shutil.copytree`), never a restore from a remote object store; the
+drill's report always carries the `filesystem_restore_local_only` blocker.
+A remote-provider restore drill (GCS or another configured object store) is
+promotion work, not part of this release. Host client-tool versions also
+matter here: with `--postgres-admin-url`, the drill's dump and restore run
+the *host's* installed `pg_dump` / `pg_restore` against that server, not a
+version pinned in a container. A host `pg_restore` 17 emits `SET
+transaction_timeout`, which a PostgreSQL 16 server refuses -- keep the
+host's client major version equal to the target server's. The default
+container mode is unaffected: it starts and restores against its own
+digest-pinned `postgres:16` image regardless of the host's installed
+client tools.
+
+**After a real restore,** rebuild the pipeline's index before starting
+ingest, in this order:
+
+1. Restore PostgreSQL (the pipeline's rows restore with everything else --
+   there is no separate pipeline backup or restore path for the database).
+2. Restore the encrypted object store.
+3. Rebuild the pipeline's index: `POST /v1/workers/pipeline/index-rebuild`,
+   behind the same vector worker bearer-token gate as `main`'s vector index
+   worker route (see [`env-reference.md`](env-reference.md) for the
+   credential). It replays every complete, included run's authoritative
+   commands through the service's own index writer and returns a hash-only
+   report. It creates no outcomes and no credit, so it is safe to run again
+   if it is interrupted.
+4. Start `trace-commons-ingest`.
+
 ## Model weights
 
 Re-downloadable via `stage-models.sh`. Keep
