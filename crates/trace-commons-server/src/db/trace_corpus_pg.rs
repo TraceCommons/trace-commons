@@ -30,20 +30,21 @@ use crate::trace_corpus_storage::{
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceGateChunkVectorEntryRow, TraceGateCreditDecisionRow,
-    TraceGateDecisionRow, TraceNearCreditOutboxItemRecord, TraceNearCreditOutboxItemWrite,
-    TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceRankingCalibrationDatasetRecord, TraceRankingCalibrationDatasetStatus,
-    TraceRankingCalibrationDatasetStatusUpdate, TraceRankingCalibrationDatasetWrite,
-    TraceRankingCalibrationRunRecord, TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord,
-    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelRecord,
-    TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
-    TraceRankingModelVersionRecord, TraceRankingModelVersionWrite, TraceRankingPredictionRecord,
-    TraceRankingPredictionWrite, TraceRankingPreferenceLabelRecord,
-    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
-    TraceRankingWorkerRunRecord, TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite,
-    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
-    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
-    TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
+    TraceGateDecisionRow, TraceIncompleteSourceSessionWithdrawal, TraceNearCreditOutboxItemRecord,
+    TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind, TraceObjectRefRecord,
+    TraceObjectRefWrite, TraceRankingCalibrationDatasetRecord,
+    TraceRankingCalibrationDatasetStatus, TraceRankingCalibrationDatasetStatusUpdate,
+    TraceRankingCalibrationDatasetWrite, TraceRankingCalibrationRunRecord,
+    TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord, TraceRankingFeatureWrite,
+    TraceRankingLabelOutcome, TraceRankingLabelRecord, TraceRankingLabelSource,
+    TraceRankingLabelWrite, TraceRankingModelStatus, TraceRankingModelVersionRecord,
+    TraceRankingModelVersionWrite, TraceRankingPredictionRecord, TraceRankingPredictionWrite,
+    TraceRankingPreferenceLabelRecord, TraceRankingPreferenceLabelWrite,
+    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunRecord,
+    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
+    TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
+    TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
+    TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSourceSessionStatus, TraceSourceSessionWithdrawal,
@@ -1913,6 +1914,86 @@ impl TraceCorpusStore for PgBackend {
                 distribution_reach: row.get(4),
             },
         }))
+    }
+
+    async fn list_incomplete_source_session_withdrawals(
+        &self,
+        tenant_id: &str,
+        account_id: Option<Uuid>,
+        held_retention_policy_ids: &[String],
+        limit: i64,
+    ) -> Result<Vec<TraceIncompleteSourceSessionWithdrawal>, DatabaseError> {
+        let invalidated = enum_to_storage(TraceVectorEntryStatus::Invalidated)?;
+        let revoked = enum_to_storage(TraceDerivedStatus::Revoked)?;
+        let limit = limit.max(0);
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT mapping.account_id, mapping.submission_id,
+                        EXISTS (SELECT 1 FROM trace_withdrawals withdrawal
+                                 WHERE withdrawal.tenant_id = mapping.tenant_id
+                                   AND withdrawal.submission_id = mapping.submission_id)
+                   FROM trace_submission_sessions mapping
+                   JOIN trace_source_sessions source
+                     ON source.tenant_id = mapping.tenant_id
+                    AND source.account_id = mapping.account_id
+                    AND source.session_digest = mapping.session_digest
+                  WHERE mapping.tenant_id = $1
+                    AND ($2::uuid IS NULL OR mapping.account_id = $2)
+                    AND source.withdrawn_at IS NOT NULL
+                    AND (
+                        NOT EXISTS (SELECT 1 FROM trace_withdrawals withdrawal
+                                     WHERE withdrawal.tenant_id = mapping.tenant_id
+                                       AND withdrawal.submission_id = mapping.submission_id)
+                     OR EXISTS (SELECT 1 FROM trace_object_refs object_ref
+                                 WHERE object_ref.tenant_id = mapping.tenant_id
+                                   AND object_ref.submission_id = mapping.submission_id
+                                   AND object_ref.deleted_at IS NULL)
+                     OR EXISTS (SELECT 1 FROM trace_vector_entries vector_entry
+                                 WHERE vector_entry.tenant_id = mapping.tenant_id
+                                   AND vector_entry.submission_id = mapping.submission_id
+                                   AND vector_entry.status <> $3
+                                   AND vector_entry.deleted_at IS NULL)
+                     OR EXISTS (SELECT 1 FROM trace_gate_decisions decision
+                                 WHERE decision.tenant_id = mapping.tenant_id
+                                   AND decision.submission_id = mapping.submission_id
+                                   AND (decision.dedup_cluster_id IS NOT NULL
+                                        OR decision.dedup_simhash IS NOT NULL))
+                     OR EXISTS (SELECT 1 FROM trace_derived_records derived
+                                 WHERE derived.tenant_id = mapping.tenant_id
+                                   AND derived.submission_id = mapping.submission_id
+                                   AND derived.status <> $4)
+                     OR EXISTS (SELECT 1 FROM trace_token_attachments attachment
+                                  JOIN trace_submissions submission
+                                    ON submission.tenant_id = attachment.tenant_id
+                                   AND submission.submission_id = attachment.submission_id
+                                 WHERE attachment.tenant_id = mapping.tenant_id
+                                   AND attachment.submission_id = mapping.submission_id
+                                   AND attachment.deleted = FALSE
+                                   AND NOT (submission.retention_policy_id = ANY($5)))
+                    )
+                  ORDER BY mapping.submission_id
+                  LIMIT $6",
+                &[
+                    &tenant_id,
+                    &account_id,
+                    &invalidated,
+                    &revoked,
+                    &held_retention_policy_ids,
+                    &limit,
+                ],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows
+            .iter()
+            .map(|row| TraceIncompleteSourceSessionWithdrawal {
+                account_id: row.get(0),
+                submission_id: row.get(1),
+                withdrawal_recorded: row.get(2),
+            })
+            .collect())
     }
 
     fn supports_token_bundles(&self) -> bool {
