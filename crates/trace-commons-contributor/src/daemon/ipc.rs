@@ -340,6 +340,8 @@ pub const METHODS: &[&str] = &[
     "inference_connection_select",
     "inference_connection_install",
     "inference_connection_disconnect",
+    "inference_calls",
+    "tool_destinations",
     "list_audit",
     "list_history",
     "list_pending",
@@ -1222,6 +1224,31 @@ impl DaemonShared {
             "state": state.label_for(destination),
             "port": state.port(),
         })
+    }
+
+    /// The label `private_inference_state.state` carries right now.
+    ///
+    /// For `inference_map`, which must draw the same answer `status` gives.
+    pub(crate) fn private_inference_label(&self) -> &'static str {
+        let state = self
+            .private_inference_state
+            .lock()
+            .expect("private inference state lock")
+            .clone();
+        let destination = self
+            .routing_ledger()
+            .and_then(|ledger| ledger.nearai_authenticated());
+        state.label_for(destination)
+    }
+
+    /// Hold `ledger` as the routing ledger, for tests.
+    #[cfg(test)]
+    pub(crate) fn install_routing_ledger_for_test(
+        &self,
+        ledger: crate::routing::ironwire::IronWireLedger,
+    ) {
+        let mut held = self.routing.write().expect("routing lock");
+        held.ledger = Some(Arc::new(ledger));
     }
 
     /// The port a tool's config would be pointed at, or `None`.
@@ -2392,6 +2419,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "status" => Response::ok(req.id, shared.status_value()),
         "certificate_detail" => handle_certificate_detail(shared, req),
         "route_disclosure" => handle_route_disclosure(shared, req),
+        "tool_destinations" => super::inference_map::handle_destinations(shared, req),
+        "inference_calls" => super::inference_map::handle_calls(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_projects" => handle_list_projects(shared, req),
         "project_automatic_copy" => handle_project_automatic_copy(shared, req),
@@ -13099,7 +13128,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 50, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 52, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

@@ -2541,6 +2541,167 @@ was written. Only the **first** backup of a file is kept -- it is the only copy
 holding the file as it was before any of our edits -- so this is `null` on a
 second edit to the same file, and on a file that did not exist before.
 
+### The map and the Inference tab
+
+K8 of #1118, the client half. `tool_destinations` feeds the map and
+`inference_calls` feeds the Inference tab's routing table. Both are
+synchronous and local. They read state this daemon already holds -- the
+harness list, the private-inference state, the route `route_disclosure`
+reports, the source settings, the project policy and the local routing
+ledger -- and make no network call and read no body.
+
+Every value on the wire is a fixed label, a count, a time or a ledger row id,
+with one exception: `model` is free text (see below). No prompt, response,
+body reference, body digest, provider exchange identifier, session id, token
+or URL crosses the socket, and nothing here is logged.
+
+#### `tool_destinations`
+
+```json
+{
+  "private_ai": "running",
+  "sessions_route": "witness",
+  "folders": { "armed": 1, "ask_first": 3, "ignored": 0 },
+  "tools": [
+    {
+      "tool": "claude-code",
+      "name": "Claude Code",
+      "sessions": { "watch": "watched", "to": ["commons", "witness"] },
+      "model_calls": { "to": "near_ai", "basis": "observed" }
+    }
+  ]
+}
+```
+
+No parameters. One row per session source this build has (`claude-code`,
+`codex`, `gemini-cli`, `cline`, `opencode`).
+
+`sessions.watch` is `watched` when an adapter is actually built for the tool
+(an undeclared Claude Code or Codex still falls back to its conventional
+folder, and reads `watched`), `off` when the contributor said they do not use
+it, and `not_watched` otherwise. `sessions.to` is empty unless the tool is
+watched, and then it is what `sessions_route` sends: `["commons", "witness"]`
+on `witness`, `["commons"]` on `local`, and nothing on `witness_refusing`,
+`not_enrolled` or `settings_unreadable`. `sessions_route` is the same value
+`route_disclosure.route` carries, so the map cannot draw a witness disclosure
+does not name; the witness a connected inference offer installs
+(`inference_connection_install`) reaches the map through it. `folders` counts
+the per-repository rules (`auto_upload`, `notify_only`, `ignore`). They are
+per repository across tools, so they say *when* a session goes, not *where*.
+
+`model_calls.to` and `basis`:
+
+| `to` | `basis` | when |
+|---|---|---|
+| `near_ai` | `observed` | connected to this daemon's port, `private_ai` is `running`, and every labelled call in the window in the tool's protocol family was routed |
+| `near_ai` | `configured` | as above, but the window has no labelled call in the family to confirm it. **A shell must not draw this as confirmed** |
+| vendor | `answered_elsewhere` | connected, and the proxy answers with the tool's own credentials (`running_answered_elsewhere`) |
+| vendor | `tool_default` | the tool's config names no local proxy |
+| `unknown` | `unknown` | connected while any labelled call in the family went `outside`, or while the proxy is in any other state; or wired to a local proxy that is not this daemon's |
+
+`running` says NEAR AI reports a credential, not that a given family is
+answered there -- the proxy can hold other backends -- which is why it is
+confirmed against the ledger's own labels rather than trusted on its own.
+
+The vendor is a fixed label: `anthropic` (Claude Code), `openai` (Codex),
+`google` (Gemini CLI), and `unknown` for Cline and OpenCode, which talk to
+many providers. It is the tool's **default**, not a reading of its config: a
+tool whose own config names another gateway is still drawn at its default.
+Which tool has a fixed default is now read from K2's `source_default_family`
+and confirmed against `source::vendor_label` (#1130), rather than kept in a
+separate local table. The word on the wire stays the family's own lowercase
+spelling above, not `vendor_label`'s returned word (`Anthropic`, `OpenAI`,
+`Google`), which is capitalized for the "answers at" display and is a
+different surface from this one. `private_ai` is the
+`private_inference_state.state` label `status` carries.
+
+#### `inference_calls`
+
+```json
+{
+  "readable": true,
+  "window_hours": 24,
+  "calls": [
+    {
+      "id": 412,
+      "at": "2026-09-28T18:04:11+00:00",
+      "tool": "codex",
+      "family": "openai",
+      "model": "Qwen/Qwen3.6-27B-FP8",
+      "route": "routed",
+      "cost": { "known": true, "priced_micros": 12300 },
+      "proof": "gateway_only"
+    }
+  ],
+  "next_cursor": "1790000000000:411"
+}
+```
+
+Newest first. `limit` is 1 to 200 (default 50); out of range or not an
+integer is `bad_params` / `limit-invalid`, refused rather than capped so a
+caller paging by the size it asked for never skips rows. `cursor` is the
+previous page's `next_cursor`, passed back unread; anything else is
+`bad_params` / `cursor-invalid`. `next_cursor` is `null` on the last page.
+The order is `(started_at, id)`, which is total; rows from a proxy too old to
+expose an `id` are not listed.
+
+`readable: false` means no ledger has answered, which is not evidence of no
+calls and must not be drawn as an empty table. The window is the ledger's
+own 24 hours.
+
+- `tool` is named only when exactly one tool connected **now** speaks the
+  call's protocol family (the rule `harness_list` applies to `answering`);
+  otherwise `unknown`. It is approximate: a row from before a connection
+  changed can carry the wrong name. `family` is `anthropic`, `openai` or
+  `unknown`.
+- `model` is **free text, not a fixed label**: the served model as recorded,
+  else the requested one, passed through when it is at most 128 characters of
+  `[A-Za-z0-9._:/@-]` and names no URL; else `unknown`. It comes from a proxy
+  the contributor can patch.
+- `cost.priced_micros` is the ledger's price in millionths of a dollar. It is
+  **priced, not billed** -- work a plan already paid for is priced at the
+  meter -- and must not be drawn as money spent. `known: false` is not zero.
+
+`proof` is IronWire's own label for the row (`RoutedExchange.proof`),
+passed through unchanged -- the stored verdict of IronWire's receipt check,
+never re-derived here -- or `unrecorded`:
+
+| `proof` | Means |
+|---|---|
+| `verified` | proof: a model receipt over this call's digests, signed by a key a verified, measurement-pinned TDX quote binds |
+| `gateway_only` | a valid receipt, but the gateway's; it names the relay, not the model. Not proof |
+| `unattested` | a valid model receipt whose key nothing tied to a verified quote. Not proof |
+| `pending` | a NEAR AI call not checked yet, or receipt checks are off |
+| `unavailable` | no receipt to be had or checked |
+| `failed` | a receipt that does not check out -- possibly tampering |
+| `outside` | not a NEAR AI backend: an outside call, never checked |
+| `unrecorded` | IronWire recorded no label: an older proxy, a row that predates proof tracking, or a label this build does not know. Not `outside`, not `pending` |
+
+Only `verified` is proof. The labels are deliberately not collapsed: a shell
+that wants fewer buckets maps them itself, and must keep `failed` distinct.
+
+`route` is taken from that label and nothing else: `outside` for `outside`,
+`routed` (through NEAR AI) for any other label, and `unknown` for
+`unrecorded`. It is never taken from the backend id, which is whatever the
+contributor named it.
+
+#### What the ledger does not record (Z4)
+
+The table the design draws is work x model x calls x cost with a proof per
+routed answer. These are not in the local ledger, and nothing here invents
+them:
+
+- **kind of work** -- no field records it; there is no classifier;
+- **tool** -- the ledger records a facade, so a call is attributable only
+  when one connected tool speaks that family;
+- **billed cost** -- the ledger prices every call; only the day's metered
+  total (`harness_list.spend`) is billed spend;
+- **outside calls that bypass the proxy** -- a tool not connected to Private
+  AI never reaches the ledger, so it is not in this list at all;
+  interception (Stop / Send anyway) needs the proxy in the path;
+- **the smart router's choice** -- nothing records which model a router
+  picked or why.
+
 ### `set_settings`
 
 Takes a JSON object whose top-level keys must come from
