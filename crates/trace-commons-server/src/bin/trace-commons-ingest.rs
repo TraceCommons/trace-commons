@@ -8389,6 +8389,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/audit-chain-repair",
             post(audit_chain_repair_handler),
         )
+        .route("/v1/admin/tombstone-repair", post(tombstone_repair_handler))
         .route(
             "/v1/admin/db-reconciliation-drill",
             post(db_reconciliation_drill_handler),
@@ -18367,21 +18368,26 @@ async fn delete_withdrawn_trace_objects(
 /// Must run before the content is deleted: the tombstone's redaction hash
 /// comes from the stored envelope. On a retry the tombstone already exists
 /// and is left as first written.
+///
+/// The file tombstone is also written to the DB's `trace_tombstones`, as an
+/// operator revocation's mirror writes it, so the two tombstone records stay
+/// consistent: the rollback drill compares them by submission id.
 async fn revoke_withdrawn_trace_file_records(
     state: &AppState,
     db: &Arc<dyn Database>,
     tenant_id: &str,
     submission_id: Uuid,
+    created_by_principal_ref: &str,
 ) -> anyhow::Result<()> {
     let record = read_submission_record(&state.root, tenant_id, submission_id)?;
     let derived = read_derived_record(&state.root, tenant_id, submission_id)?;
     if record.is_none() && derived.is_none() {
         return Ok(());
     }
-    if read_revocation(&state.root, tenant_id, submission_id)?.is_none() {
-        write_revocation(
-            &state.root,
-            &TraceCommonsRevocation {
+    let file_tombstone = match read_revocation(&state.root, tenant_id, submission_id)? {
+        Some(existing) => existing,
+        None => {
+            let tombstone = TraceCommonsRevocation {
                 tenant_id: tenant_id.to_string(),
                 tenant_storage_ref: tenant_storage_ref(tenant_id),
                 submission_id,
@@ -18393,9 +18399,25 @@ async fn revoke_withdrawn_trace_file_records(
                 canonical_summary_hash: derived
                     .as_ref()
                     .map(|derived| derived.canonical_summary_hash.clone()),
-            },
-        )?;
-    }
+            };
+            write_revocation(&state.root, &tombstone)?;
+            tombstone
+        }
+    };
+    let trace_id = match record.as_ref() {
+        Some(record) => Some(record.trace_id),
+        None => db
+            .get_trace_submission(tenant_id, submission_id)
+            .await?
+            .map(|db_record| db_record.trace_id),
+    };
+    write_file_tombstone_to_db(
+        db.as_ref(),
+        &file_tombstone,
+        trace_id,
+        created_by_principal_ref,
+    )
+    .await?;
     if let Some(mut record) = record {
         let purged_at = db
             .get_trace_submission(tenant_id, submission_id)
@@ -18415,6 +18437,37 @@ async fn revoke_withdrawn_trace_file_records(
         write_derived_record(&state.root, &derived)?;
     }
     Ok(())
+}
+
+/// Write a file revocation tombstone's DB row in `trace_tombstones`, with the
+/// file tombstone's own reason, hashes and time, under the same deterministic
+/// tombstone id the revocation mirror uses. First writer wins
+/// (`ON CONFLICT DO NOTHING`), so a retry, or a repair run over a withdrawal
+/// that already has its row, changes nothing.
+async fn write_file_tombstone_to_db(
+    db: &dyn Database,
+    file_tombstone: &TraceCommonsRevocation,
+    trace_id: Option<Uuid>,
+    created_by_principal_ref: &str,
+) -> anyhow::Result<()> {
+    db.write_trace_tombstone(StorageTraceTombstoneWrite {
+        tombstone_id: deterministic_trace_uuid_for(
+            "revocation-tombstone",
+            &file_tombstone.tenant_id,
+            file_tombstone.submission_id,
+        ),
+        tenant_id: file_tombstone.tenant_id.clone(),
+        submission_id: file_tombstone.submission_id,
+        trace_id,
+        redaction_hash: file_tombstone.redaction_hash.clone(),
+        canonical_summary_hash: file_tombstone.canonical_summary_hash.clone(),
+        reason: file_tombstone.reason.clone(),
+        effective_at: file_tombstone.revoked_at,
+        retain_until: None,
+        created_by_principal_ref: created_by_principal_ref.to_string(),
+    })
+    .await
+    .context("failed to write the DB row for a file revocation tombstone")
 }
 
 /// Evict a withdrawn trace from every derived surface that would otherwise
@@ -18712,10 +18765,18 @@ async fn finish_account_trace_withdrawal(
 
     // The file side records the withdrawal too, before any content is deleted:
     // the file tombstone's redaction hash is read from the stored envelope.
+    // Its DB row is written from the same tombstone.
+    let tombstone_actor = account_audit_tenant(ctx).principal_ref;
     for affected_id in affected_ids.iter().copied() {
-        revoke_withdrawn_trace_file_records(state, db, &ctx.tenant_id, affected_id)
-            .await
-            .map_err(|error| withdrawal_failed(&error))?;
+        revoke_withdrawn_trace_file_records(
+            state,
+            db,
+            &ctx.tenant_id,
+            affected_id,
+            &tombstone_actor,
+        )
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
     }
 
     // Retained mappings make this list stable across retries. Complete the
@@ -23007,6 +23068,10 @@ const RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND: &str =
 /// file lines it restored from the DB. Hash-only.
 const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str = "audit_chain_repair";
 
+/// The file audit event recording an operator tombstone repair: how many DB
+/// tombstone rows it wrote from file tombstones. Hash-only.
+const TOMBSTONE_REPAIR_AUDIT_KIND: &str = "tombstone_repair";
+
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -23014,6 +23079,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+            | TOMBSTONE_REPAIR_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -68792,6 +68858,230 @@ async fn run_audit_chain_repair(
     })
 }
 
+fn default_tombstone_repair_dry_run() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceTombstoneRepairRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    /// Defaults to true: a repair writes only when asked to.
+    #[serde(default = "default_tombstone_repair_dry_run")]
+    dry_run: bool,
+}
+
+/// Hash-only: counts and the purpose's hash. No submission ids and no
+/// revocation reasons, which an operator revocation may carry as free text.
+#[derive(Debug, Serialize)]
+struct TraceTombstoneRepairResponse {
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose_hash: String,
+    dry_run: bool,
+    /// Both counts as read before the repair wrote anything.
+    file_tombstone_count: usize,
+    db_tombstone_count: usize,
+    /// File tombstones with no `trace_tombstones` row.
+    file_tombstones_missing_in_db: usize,
+    /// Of those, the ones an account withdrawal wrote.
+    withdrawal_tombstones_missing_in_db: usize,
+    /// Of those, the ones whose DB submission is `revoked`: the rows this
+    /// repair writes, or would write on a dry run.
+    repairable: usize,
+    /// Skipped: the DB has no submission row for the tombstone to reference.
+    skipped_db_submission_missing: usize,
+    /// Skipped: the DB submission is not `revoked`, so a tombstone row alone
+    /// would disagree with it. Read these with the db-reconciliation drill's
+    /// `status_mismatches`; this repair does not change a submission's status.
+    skipped_db_submission_not_revoked: usize,
+    db_tombstones_written: usize,
+    /// The repair's own audit event; absent for a dry run.
+    repair_audit_event_id: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct TraceTombstoneRepairRequiresDbMirror;
+
+impl std::fmt::Display for TraceTombstoneRepairRequiresDbMirror {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons tombstone repair requires TRACE_COMMONS_DB_DUAL_WRITE"
+        )
+    }
+}
+
+impl std::error::Error for TraceTombstoneRepairRequiresDbMirror {}
+
+async fn tombstone_repair_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceTombstoneRepairRequest>,
+) -> ApiResult<Json<TraceTombstoneRepairResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_tombstone_repair(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
+/// Writes the missing `trace_tombstones` row for each of the caller's
+/// tenant's file revocation tombstones that has none, from the file
+/// tombstone itself (its reason, hashes and time), so the file and DB
+/// tombstone records are consistent again. An account withdrawal made by a
+/// build that wrote only the file tombstone is the case this exists for.
+///
+/// Writes only where the DB submission exists and is already `revoked`. A
+/// dry run (the default) counts and writes nothing. Idempotent: the rows are
+/// first-writer-wins, and a second run finds nothing missing. A non-dry run
+/// is itself audited, as a hash-only `tombstone_repair` counts event.
+async fn run_tombstone_repair(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceTombstoneRepairRequest,
+) -> anyhow::Result<TraceTombstoneRepairResponse> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or(TraceTombstoneRepairRequiresDbMirror)?;
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_tombstone_repair");
+    let purpose_hash = sha256_prefixed(purpose);
+
+    let file_tombstones = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let db_tombstones = db
+        .list_trace_tombstones(&tenant.tenant_id)
+        .await
+        .context("failed to list DB tombstones for tombstone repair")?;
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|tombstone| tombstone.submission_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut file_tombstones_missing_in_db = 0usize;
+    let mut withdrawal_tombstones_missing_in_db = 0usize;
+    let mut repairable = 0usize;
+    let mut skipped_db_submission_missing = 0usize;
+    let mut skipped_db_submission_not_revoked = 0usize;
+    let mut db_tombstones_written = 0usize;
+    for file_tombstone in &file_tombstones {
+        if db_tombstone_submission_ids.contains(&file_tombstone.submission_id) {
+            continue;
+        }
+        file_tombstones_missing_in_db += 1;
+        if file_tombstone.reason == TRACE_WITHDRAWAL_REASON {
+            withdrawal_tombstones_missing_in_db += 1;
+        }
+        let Some(db_submission) = db
+            .get_trace_submission(&tenant.tenant_id, file_tombstone.submission_id)
+            .await
+            .context("failed to read the DB submission for tombstone repair")?
+        else {
+            skipped_db_submission_missing += 1;
+            continue;
+        };
+        if db_submission.status != StorageTraceCorpusStatus::Revoked {
+            skipped_db_submission_not_revoked += 1;
+            continue;
+        }
+        repairable += 1;
+        if request.dry_run {
+            continue;
+        }
+        write_file_tombstone_to_db(
+            db.as_ref(),
+            file_tombstone,
+            Some(db_submission.trace_id),
+            &tenant.principal_ref,
+        )
+        .await?;
+        db_tombstones_written += 1;
+    }
+
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        dry_run = request.dry_run,
+        file_tombstones_missing_in_db,
+        withdrawal_tombstones_missing_in_db,
+        repairable,
+        skipped_db_submission_missing,
+        skipped_db_submission_not_revoked,
+        db_tombstones_written,
+        "Trace Commons tombstone repair"
+    );
+
+    let repair_audit_event_id = if request.dry_run {
+        None
+    } else {
+        let saturate = |count: usize| count.min(u32::MAX as usize) as u32;
+        let mut action_counts = BTreeMap::new();
+        action_counts.insert(
+            "file_tombstones_missing_in_db".to_string(),
+            saturate(file_tombstones_missing_in_db),
+        );
+        action_counts.insert(
+            "db_tombstones_written".to_string(),
+            saturate(db_tombstones_written),
+        );
+        action_counts.insert(
+            "skipped_db_submission_missing".to_string(),
+            saturate(skipped_db_submission_missing),
+        );
+        action_counts.insert(
+            "skipped_db_submission_not_revoked".to_string(),
+            saturate(skipped_db_submission_not_revoked),
+        );
+        let event = append_audit_event_mirrored(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::lifecycle_counts(
+                tenant,
+                Uuid::nil(),
+                TOMBSTONE_REPAIR_AUDIT_KIND,
+                Some(&purpose_hash),
+                &action_counts,
+            ),
+            AuditRowMirror {
+                action: StorageTraceAuditAction::Retain,
+                metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(TOMBSTONE_REPAIR_AUDIT_KIND.to_string()),
+                    purpose_hash: Some(purpose_hash.clone()),
+                    dry_run: false,
+                    action_counts,
+                },
+                object_ref_id: None,
+                actor_role_label: None,
+            },
+            "tombstone repair audit event",
+        )
+        .await?;
+        Some(event.event_id)
+    };
+
+    Ok(TraceTombstoneRepairResponse {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at: Utc::now(),
+        purpose_hash,
+        dry_run: request.dry_run,
+        file_tombstone_count: file_tombstones.len(),
+        db_tombstone_count: db_tombstones.len(),
+        file_tombstones_missing_in_db,
+        withdrawal_tombstones_missing_in_db,
+        repairable,
+        skipped_db_submission_missing,
+        skipped_db_submission_not_revoked,
+        db_tombstones_written,
+        repair_audit_event_id,
+    })
+}
+
 /// Chains and appends a file-only event: for a deployment without a DB
 /// mirror, and for tests. Production paths go through
 /// [`append_audit_event_mirrored`], which holds the append lock.
@@ -71688,9 +71978,9 @@ fn audit_backfill_storage_projection(
             .status
             .map(lifecycle_status_audit_action)
             .unwrap_or(StorageTraceAuditAction::Review),
-        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND | AUDIT_CHAIN_REPAIR_AUDIT_KIND => {
-            StorageTraceAuditAction::Retain
-        }
+        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
+        | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        | TOMBSTONE_REPAIR_AUDIT_KIND => StorageTraceAuditAction::Retain,
         RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND => StorageTraceAuditAction::Purge,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
@@ -71815,6 +72105,7 @@ fn audit_backfill_storage_projection(
         | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        | TOMBSTONE_REPAIR_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -72708,6 +72999,25 @@ async fn reconcile_db_mirror(
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
     let file_revocations = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let file_tombstone_submission_ids = file_revocations
+        .iter()
+        .map(|revocation| revocation.submission_id)
+        .collect::<BTreeSet<_>>();
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|tombstone| tombstone.submission_id)
+        .collect::<BTreeSet<_>>();
+    let missing_tombstone_submission_ids_in_db = file_tombstone_submission_ids
+        .difference(&db_tombstone_submission_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    // A pipeline withdrawal writes its tombstone to the database only, so a
+    // pipeline submission's database tombstone has no file tombstone.
+    let missing_tombstone_submission_ids_in_files = db_tombstone_submission_ids
+        .difference(&file_tombstone_submission_ids)
+        .copied()
+        .filter(|submission_id| !pipeline_rows.submission_ids.contains(submission_id))
+        .collect::<Vec<_>>();
     let file_credit_event_ids = file_credit_events
         .iter()
         .map(|event| event.event_id)
@@ -73602,6 +73912,8 @@ async fn reconcile_db_mirror(
                 .collect(),
         file_revocation_tombstone_count: file_revocations.len(),
         db_tombstone_count: db_tombstones.len(),
+        missing_tombstone_submission_ids_in_db,
+        missing_tombstone_submission_ids_in_files,
         db_object_ref_count,
         accepted_without_active_envelope_object_ref,
         unreadable_active_envelope_object_refs,
@@ -74258,6 +74570,9 @@ fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     }
     if let Some(error) = error.downcast_ref::<TraceAuditChainRepairRefused>() {
         return api_error(StatusCode::CONFLICT, error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<TraceTombstoneRepairRequiresDbMirror>() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
     internal_error(error)
 }
@@ -76444,6 +76759,10 @@ struct TraceDbReconciliationReport {
     active_export_manifest_ids_with_ineligible_items: Vec<Uuid>,
     file_revocation_tombstone_count: usize,
     db_tombstone_count: usize,
+    /// File revocation tombstones with no `trace_tombstones` row, and the
+    /// reverse, compared by submission id as the rollback drill compares them.
+    missing_tombstone_submission_ids_in_db: Vec<Uuid>,
+    missing_tombstone_submission_ids_in_files: Vec<Uuid>,
     db_object_ref_count: usize,
     accepted_without_active_envelope_object_ref: Vec<Uuid>,
     unreadable_active_envelope_object_refs: Vec<Uuid>,
@@ -76718,6 +77037,16 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "current_retention_job_item_count_mismatches",
             self.current_retention_job_item_count_mismatches.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_tombstone_submission_ids_in_db",
+            self.missing_tombstone_submission_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_tombstone_submission_ids_in_files",
+            self.missing_tombstone_submission_ids_in_files.len(),
         );
         push_gap_count(
             &mut gaps,
