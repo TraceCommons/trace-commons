@@ -276,7 +276,7 @@ class Environment:
                 self._enter_admin_mode()
             else:
                 self._enter_container_mode()
-            self._psql(_LOGIN_RESOLVER_ROLES_SQL)
+            self._psql(_LOGIN_RESOLVER_ROLES_SQL, step="environment_setup")
         except BaseException:
             self._teardown()
             raise
@@ -352,10 +352,21 @@ class Environment:
         require(returncode == 0, "pipeline_tooling_container_start_failed")
         self._container = name
 
+        # `-h 127.0.0.1 -p 5432` probes TCP on the container's own loopback,
+        # not the default unix socket. The official postgres image runs a
+        # transient, unix-socket-only server (`listen_addresses=''`) to
+        # execute init scripts, then stops it and starts the real,
+        # TCP-listening one; a socket-only probe can report ready against
+        # that transient server moments before it shuts down mid-restart.
+        # Measured locally: a socket probe's very next SQL call failed 6 of
+        # 12 times ("FATAL: the database system is shutting down" /
+        # "server closed the connection unexpectedly"); the same TCP probe
+        # was 0 of 12. The temporary server never listens on TCP at all, so
+        # a successful TCP probe can only mean the final server is up.
         ready = False
         for _ in range(60):
             returncode, _ = _invoke(
-                ["docker", "exec", name, "pg_isready", "-U", "trace"],
+                ["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "trace"],
                 env=child_environment({}),
                 capture=True,
             )
@@ -416,11 +427,24 @@ class Environment:
             ]
         return ["psql", self._url_for_database(database), "-v", "ON_ERROR_STOP=1", "-qtA"]
 
-    def _psql(self, sql, *, database="postgres"):
+    def _psql(self, sql, *, database="postgres", step=None):
+        """Runs `sql` (through the connection-retry wrapper) and returns its
+        output. On failure: with a `step` label, writes the combined output
+        to that step's protected log (the same `log_path` helper
+        `run_child` uses) and raises `StepFailed`, so `main` reports the
+        step, the exit code, and the log path -- never the output itself.
+        Without one (a call with no natural step, such as a post-test
+        check), raises the plain, label-only `pipeline_tooling_sql_failed`
+        as before."""
         returncode, output = _invoke_psql(
             self._psql_command(database), env=child_environment({}), input_text=sql
         )
-        require(returncode == 0, "pipeline_tooling_sql_failed")
+        if returncode != 0:
+            if step is not None:
+                log_path = self._run.log_path(step)
+                log_path.write_text(output or "")
+                raise StepFailed(step, returncode, log_path)
+            raise ToolingError("pipeline_tooling_sql_failed")
         return output
 
     def scenario(self, label):
@@ -430,8 +454,8 @@ class Environment:
         run8 = self._run.run_id[1:]
         runtime_database = f"admission_test_{run8}_{counter}"
         upgrade_database = f"pipeline_test_{run8}_{counter}"
-        self._psql(f"CREATE DATABASE {runtime_database};")
-        self._psql(f"CREATE DATABASE {upgrade_database};")
+        self._psql(f"CREATE DATABASE {runtime_database};", step=label)
+        self._psql(f"CREATE DATABASE {upgrade_database};", step=label)
         artifact_root = self._run.run_dir / "artifacts" / counter
         artifact_root.mkdir(parents=True, exist_ok=True)
         scenario = Scenario(

@@ -471,6 +471,7 @@ class EnterFailureTeardownTests(unittest.TestCase):
 
     def test_admin_url_role_sql_failure_drops_the_lock_database(self):
         calls = []
+        fake_output = "ERROR: permission denied\n"
 
         def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
             calls.append((list(command), input_text))
@@ -481,22 +482,78 @@ class EnterFailureTeardownTests(unittest.TestCase):
             if input_text and "CREATE ROLE trace_login_resolver" in input_text:
                 # The step after the lock database is acquired: login-
                 # resolver role creation fails.
-                return 1, "ERROR: permission denied"
+                return 1, fake_output
             return 0, ""
 
         run = _scratch_run()
         try:
             with mock.patch.object(environment, "_invoke", fake_invoke):
-                with self.assertRaises(errors.ToolingError) as ctx:
+                with self.assertRaises(errors.StepFailed) as ctx:
                     with environment.Environment(
                         run, postgres_admin_url="postgres://trace@127.0.0.1:55431/postgres"
                     ):
                         pass
-            self.assertEqual(str(ctx.exception), "pipeline_tooling_sql_failed")
+            failure = ctx.exception
+            self.assertEqual(failure.step, "environment_setup")
+            self.assertEqual(failure.exit_code, 1)
+            self.assertEqual(failure.log_path.read_text(), fake_output)
             drops = [
                 text for _, text in calls if text and "DROP DATABASE IF EXISTS pipeline_tooling_lock" in text
             ]
             self.assertEqual(len(drops), 1)
+        finally:
+            shutil.rmtree(run.run_dir, ignore_errors=True)
+
+
+class SetupQueryFailureLoggingTests(unittest.TestCase):
+    """R2: a failed setup query (one `Environment` runs on its own, not a
+    `cargo`/`python` step) must leave the same evidence a `StepFailed` step
+    does -- a protected log with the real output, and a terminal line that
+    names the log path but carries none of that output."""
+
+    def test_scenario_creation_sql_failure_logs_output_and_reports_only_the_path(self):
+        fake_output = (
+            'psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" '
+            "failed: FATAL:  the database system is shutting down\n"
+            "sk-should-never-reach-the-terminal\n"
+        )
+
+        def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+            if input_text and "CREATE DATABASE admission_test_" in input_text:
+                return 2, fake_output
+            return (0, "0") if capture else (0, None)
+
+        run = _scratch_run()
+
+        def handler(args, r):
+            with mock.patch.object(environment, "_invoke", fake_invoke):
+                with environment.Environment(
+                    r, postgres_admin_url="postgres://trace@127.0.0.1:55431/postgres"
+                ) as env:
+                    env.scenario("postgres_probe_step")
+
+        try:
+            with mock.patch.object(pipeline, "Run") as mock_run_cls, mock.patch.object(
+                pipeline, "parse_args", return_value=argparse.Namespace(handler=handler)
+            ):
+                mock_run_cls.create.return_value = run
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    code = pipeline.main([])
+                output = stderr.getvalue()
+
+            self.assertEqual(code, 2)
+            lines = [line for line in output.splitlines() if line]
+            self.assertEqual(len(lines), 1)
+            self.assertIn("postgres_probe_step", lines[0])
+            self.assertIn("exit=2", lines[0])
+            self.assertIn("log=", lines[0])
+            self.assertNotIn(fake_output.strip(), output)
+            self.assertNotIn("sk-should-never-reach-the-terminal", output)
+
+            log_path = run.run_dir / "logs" / "postgres_probe_step.log"
+            self.assertTrue(log_path.is_file())
+            self.assertEqual(log_path.read_text(), fake_output)
         finally:
             shutil.rmtree(run.run_dir, ignore_errors=True)
 
