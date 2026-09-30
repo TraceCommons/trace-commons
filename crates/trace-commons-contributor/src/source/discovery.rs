@@ -56,11 +56,22 @@ const MESSAGES_JSON_SUFFIX: &str = ".messages.json";
 
 /// OpenCode's own export writes one `<session-id>.json` file per session,
 /// directly in the declared folder -- see `source::opencode`, which reads
-/// that folder non-recursively. Counting descends into any subdirectory
-/// anyway, which is harmless here: a real OpenCode export never has one, so
-/// this only ever reports what a recursive walk and a flat one would agree
-/// on.
+/// that folder non-recursively. The count here is flat too, so "N sessions
+/// found" never includes a file the adapter would not read.
 const OPENCODE_JSON_SUFFIX: &str = ".json";
+
+/// How far [`count_sessions`] may look below the store it was handed.
+#[derive(Debug, Clone, Copy)]
+enum Walk {
+    /// Descend into every subdirectory. Only for the conventional stores
+    /// [`probe`] derives itself, whose layouts nest by project or by date.
+    Recursive,
+    /// Read the one directory and nothing below it, stopping after
+    /// `entry_budget` directory entries. For a folder a shell named -- if it
+    /// passes `$HOME` by mistake, this reads one directory's first entries on
+    /// the calling thread rather than the whole tree.
+    Flat { entry_budget: usize },
+}
 
 /// One candidate session store, described well enough to consent to.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -131,6 +142,7 @@ where
                 .join("projects"),
             claude_base.is_some(),
             JSONL_SUFFIX,
+            Walk::Recursive,
         ),
         describe(
             SOURCE_CODEX,
@@ -140,6 +152,7 @@ where
                 .join("sessions"),
             codex_base.is_some(),
             JSONL_SUFFIX,
+            Walk::Recursive,
         ),
         // Appended rather than inserted: a shell written before this source
         // existed indexes the first two rows by position.
@@ -150,6 +163,7 @@ where
             conventional_root(home, &env),
             gemini_relocated,
             JSON_SUFFIX,
+            Walk::Recursive,
         ),
         // Appended: shells index the first rows by position.
         describe(
@@ -159,6 +173,7 @@ where
             cline_root(home, &env),
             cline_relocated,
             MESSAGES_JSON_SUFFIX,
+            Walk::Recursive,
         ),
     ]
 }
@@ -195,12 +210,21 @@ pub fn describe_opencode(path: &Path) -> SourceCandidate {
         path.to_path_buf(),
         false,
         OPENCODE_JSON_SUFFIX,
+        Walk::Flat {
+            entry_budget: super::opencode::DISCOVERY_ENTRY_BUDGET,
+        },
     )
 }
 
-fn describe(source: &str, path: PathBuf, relocated_by_env: bool, suffix: &str) -> SourceCandidate {
+fn describe(
+    source: &str,
+    path: PathBuf,
+    relocated_by_env: bool,
+    suffix: &str,
+    walk: Walk,
+) -> SourceCandidate {
     let (exists, session_count, most_recent) = if path.is_dir() {
-        let (count, recent) = count_sessions(&path, suffix);
+        let (count, recent) = count_sessions(&path, suffix, walk);
         (true, count, recent)
     } else {
         (false, 0, None)
@@ -225,7 +249,7 @@ fn describe(source: &str, path: PathBuf, relocated_by_env: bool, suffix: &str) -
 /// symlinks: a symlinked directory could point anywhere, and this is a
 /// counting pass whose whole justification is that it stays inside the store
 /// it is describing.
-fn count_sessions(root: &Path, suffix: &str) -> (u64, Option<DateTime<Utc>>) {
+fn count_sessions(root: &Path, suffix: &str, walk: Walk) -> (u64, Option<DateTime<Utc>>) {
     let mut count = 0_u64;
     let mut most_recent: Option<DateTime<Utc>> = None;
     let mut stack = vec![root.to_path_buf()];
@@ -234,7 +258,15 @@ fn count_sessions(root: &Path, suffix: &str) -> (u64, Option<DateTime<Utc>>) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
+        for (index, entry) in entries.enumerate() {
+            if let Walk::Flat { entry_budget } = walk
+                && index >= entry_budget
+            {
+                break;
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
@@ -243,7 +275,9 @@ fn count_sessions(root: &Path, suffix: &str) -> (u64, Option<DateTime<Utc>>) {
             }
             let path = entry.path();
             if file_type.is_dir() {
-                stack.push(path);
+                if matches!(walk, Walk::Recursive) {
+                    stack.push(path);
+                }
                 continue;
             }
             let is_session = entry
@@ -496,6 +530,33 @@ mod tests {
         assert!(candidate.exists);
         assert_eq!(candidate.session_count, 2);
         assert!(!candidate.relocated_by_env);
+    }
+
+    #[test]
+    fn an_opencode_folder_is_counted_flat_like_the_adapter_reads_it() {
+        // `source::opencode` reads the declared folder non-recursively, so a
+        // nested `.json` must not show up in "N sessions found".
+        let exports = Scratch::new("opencode-flat");
+        write_session(exports.path(), "ses_a.json");
+        let nested = exports.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        write_session(&nested, "ses_b.json");
+
+        assert_eq!(describe_opencode(exports.path()).session_count, 1);
+    }
+
+    #[test]
+    fn an_opencode_folder_count_stops_at_the_adapters_entry_budget() {
+        // A shell that passes a huge folder (say `$HOME` by mistake) gets a
+        // bounded read on the calling thread, not a full listing.
+        let exports = Scratch::new("opencode-budget");
+        let budget = crate::source::opencode::DISCOVERY_ENTRY_BUDGET;
+        for i in 0..budget + 10 {
+            write_session(exports.path(), &format!("ses_{i}.json"));
+        }
+
+        let counted = describe_opencode(exports.path()).session_count;
+        assert_eq!(counted, budget as u64);
     }
 
     #[test]
