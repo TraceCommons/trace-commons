@@ -67,6 +67,15 @@
 //!
 //! **DRAFT, NEEDS APPROVAL**, every sentence in both: the spec's Open list
 //! says the wording is open.
+//!
+//! # The submit toast and the per-session notification (K9, #1118)
+//!
+//! Two more WYSIWYG design sentences, matched here so no shell writes its
+//! own: [`toast_sent_text`] (`tc_toast_sent_text`), "Sent. N left to decide
+//! (middle dot) upload limit X of Y"; and [`session_notification_copy`]
+//! (`tc_session_notification_copy`), the per-session notification whose body
+//! is [`GATE_STATEMENT`] and whose one action is "Look, then decide". Both
+//! **DRAFT, NEEDS APPROVAL**.
 
 /// The sentence that replaced the acknowledgement checkbox.
 ///
@@ -1672,6 +1681,75 @@ pub fn inference_connection_copy() -> InferenceConnectionCopy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The submit toast (K9, #1118): "Sent. N left to decide - upload limit X of Y"
+// ---------------------------------------------------------------------------
+//
+// Not the same sentence as the GTK/macOS/Windows "one-click submit" toast
+// (`crate::daemon::queue`'s redaction-count toast, e.g. "Approved. 4
+// redactions applied. 1 flagged."). This is a second, later line from the
+// WYSIWYG design's Flow 2 and Flow 3: after a submit, how many decisions are
+// still owed and where today's upload cap stands. It lives here, not in a
+// shell, for the reason the module doc gives -- one Rust sentence rather
+// than three native copies of the same arithmetic.
+
+/// **DRAFT, NEEDS APPROVAL.** The toast after a submit, matching the design's
+/// worked example exactly: "Sent. 1 left to decide - upload limit 7 of 20".
+///
+/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
+/// fields of the same names. `decisions_owed` is `status.decisions_owed`
+/// (K6, a separate branch): this function only formats the count it is
+/// given and never reads the queue itself, so it has nothing to say about
+/// what counts as "owed" -- that is K6's decision, not this one's.
+#[must_use]
+pub fn toast_sent_text(
+    uploads_today: u64,
+    max_uploads_per_day: u64,
+    decisions_owed: u64,
+) -> String {
+    // `\u{b7}` is the design's middle dot (·), written as an escape so the
+    // source stays plain ASCII like the rest of this file's comments.
+    format!(
+        "Sent. {decisions_owed} left to decide \u{b7} upload limit {uploads_today} of {max_uploads_per_day}"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The per-session notification (K9, #1118)
+// ---------------------------------------------------------------------------
+
+/// **DRAFT, NEEDS APPROVAL.** The one action on a per-session notification
+/// (the design's Flow 2, "Notification. Body is the consent sentence; one
+/// action, 'Look, then decide'"). Named for what it is, not what it does:
+/// the notification offers no way to decide without looking, because the
+/// review sheet is where [`GATE_STATEMENT`] and the verdict live, and a
+/// second action here would be a second, undisclosed way to approve.
+pub const NOTIFICATION_LOOK_THEN_DECIDE_ACTION: &str = "Look, then decide";
+
+/// A per-session notification's words: the body and its one action.
+///
+/// The body is [`GATE_STATEMENT`] itself, not a paraphrase of it -- the
+/// design calls for "the consent sentence", and that is the one this crate
+/// already ships above an irreversible Submit. A notification that said
+/// something adjacent would be a second, drifting copy of the one sentence
+/// this module exists to keep singular.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SessionNotificationCopy {
+    pub body: &'static str,
+    pub action: &'static str,
+}
+
+/// The per-session notification's copy. Takes no argument: like
+/// [`consent_copy`], it describes the build rather than a running daemon, so
+/// there is nothing to look up.
+#[must_use]
+pub fn session_notification_copy() -> SessionNotificationCopy {
+    SessionNotificationCopy {
+        body: GATE_STATEMENT,
+        action: NOTIFICATION_LOOK_THEN_DECIDE_ACTION,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2680,5 +2758,34 @@ mod tests {
             WitnessOrigin::ConnectedInference,
         ));
         assert!(line.contains("connected inference"));
+    }
+
+    /// The design's own worked example (Flow 2), verbatim.
+    #[test]
+    fn toast_sent_text_matches_the_design_example() {
+        assert_eq!(
+            toast_sent_text(7, 20, 1),
+            "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
+        );
+    }
+
+    #[test]
+    fn toast_sent_text_states_both_counts_whatever_they_are() {
+        let text = toast_sent_text(0, 50, 0);
+        assert!(text.starts_with("Sent."), "{text}");
+        assert!(text.contains("0 left to decide"), "{text}");
+        assert!(text.contains("upload limit 0 of 50"), "{text}");
+    }
+
+    /// The per-session notification's body is the consent sentence itself,
+    /// not a paraphrase -- the same string a shell shows above Submit.
+    #[test]
+    fn session_notification_copy_uses_the_consent_sentence_and_look_then_decide() {
+        let copy = session_notification_copy();
+        assert_eq!(copy.body, GATE_STATEMENT);
+        assert_eq!(copy.action, "Look, then decide");
+        let value = serde_json::to_value(copy).expect("serialises");
+        assert_eq!(value["body"], GATE_STATEMENT);
+        assert_eq!(value["action"], "Look, then decide");
     }
 }

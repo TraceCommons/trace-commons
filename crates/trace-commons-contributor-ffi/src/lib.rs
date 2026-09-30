@@ -3224,6 +3224,23 @@ pub extern "C" fn tc_certificate_detail_copy() -> *mut c_char {
     })
 }
 
+/// K9 (#1118): the per-session notification's words -- the design's
+/// "Notification. Body is the consent sentence; one action, 'Look, then
+/// decide'."
+///
+/// Needs no handle, like [`tc_consent_copy`]: it describes the build, not a
+/// running daemon. Returns an owned JSON object with `body` (the same
+/// sentence [`tc_consent_copy`]'s `gate_statement` carries) and `action`;
+/// free it with [`tc_string_free`]. NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_session_notification_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::session_notification_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// Parse `arg` as JSON and hand it to `build`, returning its answer as an
 /// owned JSON string, or NULL for a NULL, non-UTF-8 or unparseable argument
 /// and whenever `build` answers `None`.
@@ -4007,6 +4024,33 @@ pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
         Ok(to_owned_cstring(
             &trace_commons_contributor::private_inference_copy::group_withheld_line(
                 u64::try_from(withheld).unwrap_or(0),
+            ),
+        ))
+    })
+}
+
+/// K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
+/// limit X of Y", the WYSIWYG design's Flow 2/3 example.
+///
+/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
+/// fields of the same names; `decisions_owed` is `status.decisions_owed`
+/// (K6, a separate branch). All three are clamped to 0 on a negative value,
+/// which no honest caller sends.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_toast_sent_text(
+    uploads_today: i64,
+    max_uploads_per_day: i64,
+    decisions_owed: i64,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::consent_copy::toast_sent_text(
+                u64::try_from(uploads_today).unwrap_or(0),
+                u64::try_from(max_uploads_per_day).unwrap_or(0),
+                u64::try_from(decisions_owed).unwrap_or(0),
             ),
         ))
     })

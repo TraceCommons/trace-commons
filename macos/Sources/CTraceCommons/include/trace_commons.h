@@ -1065,6 +1065,19 @@ int32_t     tc_contribution_group_control(int64_t pending, int64_t contributable
  */
 char*       tc_contribution_withheld_line(int64_t withheld);
 
+/* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
+ * limit X of Y", the WYSIWYG design's Flow 2/3 example.
+ *
+ * uploads_today and max_uploads_per_day are status.daily_budget's fields of
+ * the same names; decisions_owed is status.decisions_owed (K6, a separate
+ * branch). All three are clamped to 0 on a negative value, which no honest
+ * caller sends.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a
+ * caught panic.
+ */
+char*       tc_toast_sent_text(int64_t uploads_today, int64_t max_uploads_per_day, int64_t decisions_owed);
+
 /* The sentence for one near_ai_balance state.
  *
  * state is the state field of a near_ai_balance answer. A NULL or non-UTF-8
@@ -1583,6 +1596,17 @@ char*       tc_route_disclosure_copy(const char* facts_json);
  * tc_string_free. NULL only on a caught panic.
  */
 char*       tc_certificate_detail_copy(void);
+
+/* K9 (#1118): the per-session notification's words -- the design's
+ * "Notification. Body is the consent sentence; one action, 'Look, then
+ * decide'."
+ *
+ * Needs no handle, like tc_consent_copy: it describes the build, not a
+ * running daemon. Returns an owned JSON object with body (the same sentence
+ * tc_consent_copy's gate_statement carries) and action; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_session_notification_copy(void);
 
 /* What a disclosure surface says when tc_route_disclosure_copy answers NULL:
  * title, panel and session. Owned JSON; free it with tc_string_free. NULL only on a
