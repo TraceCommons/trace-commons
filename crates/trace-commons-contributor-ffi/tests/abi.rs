@@ -39,11 +39,12 @@ use trace_commons_contributor_ffi::{
     tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
     tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
     tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
-    tc_session_detail_error_line, tc_skill_draft_validate, tc_skill_learning_copy,
-    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
-    tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
+    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
+    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
+    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
+    tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -3386,6 +3387,48 @@ fn the_consent_bundle_crossing_the_abi_is_the_one_in_the_rust() {
     assert_eq!(
         parsed, expected,
         "the ABI must hand over the payload unchanged"
+    );
+}
+
+/// K9 (#1118): the per-session notification's copy crosses the ABI as the
+/// payload the crate builds, and its body is the consent sentence itself.
+#[test]
+fn the_session_notification_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy as copy;
+    let json = take_owned(tc_session_notification_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::session_notification_copy()).expect("the payload serialises");
+    assert_eq!(
+        parsed, expected,
+        "the ABI must hand over the payload unchanged"
+    );
+    assert_eq!(parsed["body"], copy::GATE_STATEMENT);
+    assert_eq!(parsed["action"], copy::NOTIFICATION_LOOK_THEN_DECIDE_ACTION);
+    assert_eq!(
+        parsed.as_object().map(|o| o.len()),
+        Some(2),
+        "body and action, nothing else: {json}"
+    );
+}
+
+/// K9 (#1118): the submit toast crosses the ABI unchanged, argument order
+/// intact, and a negative count (nobody's honest answer) clamps to zero
+/// instead of wrapping.
+#[test]
+fn the_sent_toast_crosses_the_abi_and_clamps_negatives() {
+    use trace_commons_contributor::consent_copy as copy;
+    assert_eq!(
+        take_owned(tc_toast_sent_text(7, 20, 1)),
+        copy::toast_sent_text(7, 20, 1)
+    );
+    assert_eq!(
+        take_owned(tc_toast_sent_text(7, 20, 1)),
+        "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
+    );
+    assert_eq!(
+        take_owned(tc_toast_sent_text(-3, -1, -9)),
+        copy::toast_sent_text(0, 0, 0)
     );
 }
 

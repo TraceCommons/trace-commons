@@ -65,6 +65,11 @@ pub fn interval_elapsed(
 ) -> bool {
     match last_digest_at {
         None => true,
+        // The clock was moved backwards after the last digest, so the stored
+        // stamp is in the future. Waiting for `now` to catch up would hold
+        // every digest off for as long as the clock moved; treat the stamp
+        // as stale instead, exactly as if nothing had fired.
+        Some(last) if last > now => true,
         Some(last) => now.signed_duration_since(last) >= Duration::seconds(interval_secs as i64),
     }
 }
@@ -79,10 +84,11 @@ pub fn interval_elapsed(
 /// just as well, as long as every caller agrees, which is why one function
 /// makes the choice rather than leaving it to each call site.
 ///
-/// `None` (a spring-forward skips a local hour, so the naive target never
+/// `None` (a spring-forward skips local time, so the naive target never
 /// happened) walks forward a minute at a time until a real instant is found.
-/// A one-hour spring-forward gap is the largest in real use, so this always
-/// terminates quickly; the bound below is generous rather than tight.
+/// Spring-forward gaps are one hour almost everywhere and never more than two
+/// in the tz database, so the 240-minute bound below is generous rather than
+/// tight.
 fn resolve_local<Tz: chrono::TimeZone>(tz: &Tz, naive: chrono::NaiveDateTime) -> DateTime<Utc> {
     use chrono::LocalResult;
     match tz.from_local_datetime(&naive) {
@@ -96,11 +102,23 @@ fn resolve_local<Tz: chrono::TimeZone>(tz: &Tz, naive: chrono::NaiveDateTime) ->
                     return dt.with_timezone(&Utc);
                 }
             }
-            // Never reached in any real zone (the widest spring-forward gap
-            // is two hours); a naive UTC reading beats panicking.
+            // Never reached in any real zone (no gap exceeds two hours, well
+            // inside the bound); a naive UTC reading beats panicking.
             DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
         }
     }
+}
+
+/// `hour:00:00` on local calendar `date`, in `tz`, as a UTC instant.
+///
+/// `hour` is validated to 0..=23 when settings are loaded or set (see
+/// `DaemonSettings::validate_digest_schedule`); the clamp here only keeps a
+/// value that somehow bypassed that from panicking.
+fn target_on<Tz: chrono::TimeZone>(date: chrono::NaiveDate, hour: u8, tz: &Tz) -> DateTime<Utc> {
+    let naive = date
+        .and_hms_opt(u32::from(hour.min(23)), 0, 0)
+        .expect("hour is clamped to 0..=23");
+    resolve_local(tz, naive)
 }
 
 /// `hour:00:00` on `now`'s local calendar date, in `tz`, as a UTC instant.
@@ -109,18 +127,29 @@ fn evening_target_utc<Tz: chrono::TimeZone>(
     hour: u8,
     tz: &Tz,
 ) -> DateTime<Utc> {
-    let local_date = now.with_timezone(tz).date_naive();
-    let naive = local_date
-        .and_hms_opt(u32::from(hour.min(23)), 0, 0)
-        .expect("hour is clamped to 0..=23");
-    resolve_local(tz, naive)
+    target_on(now.with_timezone(tz).date_naive(), hour, tz)
+}
+
+/// The most recent evening target at or before `now`: today's once it has
+/// passed, otherwise yesterday's. This is the target a missed window is
+/// measured against -- a laptop that slept from 17:30 to 07:00 wakes after
+/// yesterday's 18:00, and that is the digest it owes, not tonight's.
+fn most_recent_evening_target<Tz: chrono::TimeZone>(
+    now: DateTime<Utc>,
+    hour: u8,
+    tz: &Tz,
+) -> DateTime<Utc> {
+    let today = evening_target_utc(now, hour, tz);
+    if now >= today {
+        return today;
+    }
+    let yesterday = now.with_timezone(tz).date_naive() - Duration::days(1);
+    target_on(yesterday, hour, tz)
 }
 
 /// The next evening target strictly after `now`: today's if it has not
-/// passed yet, otherwise tomorrow's. For `status.next_digest_at` under
-/// `DigestSchedule::Evening` -- unlike [`evening_window_elapsed`], this does
-/// not need a `last_digest_at` because it only ever looks forward.
-pub fn next_evening_at<Tz: chrono::TimeZone>(
+/// passed yet, otherwise tomorrow's.
+fn next_evening_target<Tz: chrono::TimeZone>(
     now: DateTime<Utc>,
     hour: u8,
     tz: &Tz,
@@ -130,23 +159,54 @@ pub fn next_evening_at<Tz: chrono::TimeZone>(
         return today;
     }
     let tomorrow = now.with_timezone(tz).date_naive() + Duration::days(1);
-    let naive = tomorrow
-        .and_hms_opt(u32::from(hour.min(23)), 0, 0)
-        .expect("hour is clamped to 0..=23");
-    resolve_local(tz, naive)
+    target_on(tomorrow, hour, tz)
+}
+
+/// When the evening digest is next expected, for `status.next_digest_at`
+/// under `DigestSchedule::Evening`. Honours `last_digest_at` the same way
+/// [`evening_window_elapsed`] does, so the two cannot disagree:
+///
+/// - window already open (a target has passed that no digest has answered,
+///   e.g. the laptop slept through it, or it had nothing to say): the target
+///   it is owed for, which is at or before `now` -- the same "already due"
+///   reading `Interval` gives when `last + interval` is in the past;
+/// - otherwise: the next target strictly after `now`.
+#[must_use]
+pub fn next_evening_at<Tz: chrono::TimeZone>(
+    last_digest_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    hour: u8,
+    tz: &Tz,
+) -> DateTime<Utc> {
+    if evening_window_elapsed(last_digest_at, now, hour, tz) {
+        match last_digest_at.filter(|last| *last <= now) {
+            // First digest ever: it only opens at today's target.
+            None => evening_target_utc(now, hour, tz),
+            Some(_) => most_recent_evening_target(now, hour, tz),
+        }
+    } else {
+        next_evening_target(now, hour, tz)
+    }
 }
 
 /// The clock half of the evening schedule, parallel to [`interval_elapsed`].
 ///
-/// Fires once `now` reaches today's local `hour`, and not again the same
-/// day: the second half of the `&&` is false as soon as a digest has fired
-/// at or after today's target, however many times this is called afterward.
+/// Fires once `now` reaches the local `hour`, and not again until the next
+/// target: false as soon as a digest has fired at or after the most recent
+/// target, however many times this is called afterward.
 ///
 /// A missed window -- the daemon asleep, paused, or simply not polled across
-/// one or more evenings -- fires exactly once, at the next call after the
-/// most recent target has passed, never once per missed day: `last_digest_at`
-/// only has to be older than TODAY's target, no matter how many evenings
-/// separate them.
+/// one or more evenings -- fires exactly once, at the next call, never once
+/// per missed day. The comparison is against the most recent target at or
+/// before `now`, not today's: a laptop asleep from 17:30 to 07:00 fires on
+/// waking at 07:00 for yesterday's 18:00, rather than waiting until tonight's.
+///
+/// The first digest ever (`last_digest_at` is `None`) waits for today's
+/// target rather than firing on the spot, so switching to `Evening` in the
+/// morning does not produce a morning digest.
+///
+/// A `last_digest_at` in the future (the clock was moved backwards) is read
+/// as stale, the same as `None`, so it cannot hold digests off for days.
 ///
 /// DST is handled by delegating every local/UTC conversion to `tz` itself
 /// (via [`evening_target_utc`]) rather than adding or subtracting a fixed
@@ -159,13 +219,9 @@ pub fn evening_window_elapsed<Tz: chrono::TimeZone>(
     hour: u8,
     tz: &Tz,
 ) -> bool {
-    let target = evening_target_utc(now, hour, tz);
-    if now < target {
-        return false;
-    }
-    match last_digest_at {
-        None => true,
-        Some(last) => last < target,
+    match last_digest_at.filter(|last| *last <= now) {
+        None => now >= evening_target_utc(now, hour, tz),
+        Some(last) => last < most_recent_evening_target(now, hour, tz),
     }
 }
 
@@ -275,14 +331,22 @@ pub fn digest_text(pending: &[&QueueEntry]) -> String {
 /// for (an armed folder usually contributes from one place at a time), so
 /// the one-project rule is not expected to make this line silent about
 /// where things came from as often as it looks.
+///
+/// The same sentence is built by the macOS shell
+/// (`DigestCopy.contributionLine`), the Windows shell
+/// (`DigestText.ContributionLine`) and the Linux shell
+/// (`notify::contribution_body`). All four use one rule -- a project is
+/// named only when exactly one distinct, non-blank label is present, the
+/// clause always ends with a period, and credit follows as its own
+/// sentence -- and each pins the design's two examples verbatim.
 pub fn contribution_text(count: usize, projects: &BTreeSet<String>, credit_pending: f32) -> String {
     let noun = if count == 1 { "session" } else { "sessions" };
     let mut line = format!("{count} {noun} contributed");
-    if projects.len() == 1 {
-        if let Some(only) = projects.iter().next() {
-            line.push_str(&format!(" from {only}"));
-        }
+    let mut named = projects.iter().filter(|p| !p.trim().is_empty());
+    if let (Some(only), None) = (named.next(), named.next()) {
+        line.push_str(&format!(" from {only}"));
     }
+    line.push('.');
     // One decimal place: credit is a score, not an amount, and trailing
     // precision invites the reader to treat it as a balance.
     //
@@ -295,7 +359,7 @@ pub fn contribution_text(count: usize, projects: &BTreeSet<String>, credit_pendi
     // before formatting.
     if credit_pending > 0.0 {
         let rounded = (credit_pending * 10.0).round() / 10.0;
-        line.push_str(&format!(". {rounded:.1} credit pending."));
+        line.push_str(&format!(" {rounded:.1} credit pending."));
     }
     line
 }
@@ -461,14 +525,19 @@ mod tests {
         );
         // The whole sentence, not a substring check: proves nothing beyond
         // the count and noun survives, no partial list and no "and N more".
-        assert_eq!(text, "9 sessions contributed");
+        assert_eq!(text, "9 sessions contributed.");
     }
 
     #[test]
     fn contribution_text_copes_with_missing_labels() {
         assert_eq!(
             contribution_text(2, &labels(&[]), 0.0),
-            "2 sessions contributed"
+            "2 sessions contributed."
+        );
+        // A blank label beside a real one does not count as a second project.
+        assert_eq!(
+            contribution_text(2, &labels(&["", "api"]), 0.0),
+            "2 sessions contributed from api."
         );
     }
 
@@ -679,6 +748,73 @@ mod tests {
         ));
     }
 
+    /// The review's case: asleep from 17:30 to 07:00, so the 18:00 digest
+    /// was missed. Waking at 07:00 fires for yesterday's target instead of
+    /// waiting ~35 hours for tonight's.
+    #[test]
+    fn evening_digest_fires_on_wake_the_morning_after_a_missed_evening() {
+        let last = at("2026-08-07T18:00:00Z");
+        // Went to sleep 17:30 on the 8th, before that evening's 18:00.
+        assert!(!evening_window_elapsed(
+            Some(last),
+            at("2026-08-08T17:30:00Z"),
+            18,
+            &Utc,
+        ));
+        // Woke 07:00 on the 9th.
+        let wake = at("2026-08-09T07:00:00Z");
+        assert!(evening_window_elapsed(Some(last), wake, 18, &Utc));
+        assert_eq!(
+            next_evening_at(Some(last), wake, 18, &Utc),
+            at("2026-08-08T18:00:00Z"),
+            "already due, for the evening it missed"
+        );
+        // Having fired on wake, it waits for tonight's target.
+        assert!(!evening_window_elapsed(
+            Some(wake),
+            at("2026-08-09T17:59:00Z"),
+            18,
+            &Utc,
+        ));
+        assert!(evening_window_elapsed(
+            Some(wake),
+            at("2026-08-09T18:00:00Z"),
+            18,
+            &Utc,
+        ));
+        assert_eq!(
+            next_evening_at(Some(wake), at("2026-08-09T08:00:00Z"), 18, &Utc),
+            at("2026-08-09T18:00:00Z")
+        );
+    }
+
+    /// A first-ever digest waits for the evening: switching to `Evening` in
+    /// the morning is not a reason to notify in the morning.
+    #[test]
+    fn the_first_evening_digest_waits_for_the_evening() {
+        let morning = at("2026-08-09T07:00:00Z");
+        assert!(!evening_window_elapsed(None, morning, 18, &Utc));
+        assert_eq!(
+            next_evening_at(None, morning, 18, &Utc),
+            at("2026-08-09T18:00:00Z")
+        );
+    }
+
+    /// The clock was moved backwards after a digest, so `last_digest_at` is
+    /// in the future. That must not suppress digests until the clock catches
+    /// up, under either schedule.
+    #[test]
+    fn a_digest_stamp_from_the_future_does_not_suppress_digests() {
+        let future = at("2026-08-12T18:00:00Z");
+        let now = at("2026-08-09T18:30:00Z");
+        assert!(evening_window_elapsed(Some(future), now, 18, &Utc));
+        assert!(interval_elapsed(Some(future), now, 14_400));
+        assert_eq!(
+            next_evening_at(Some(future), now, 18, &Utc),
+            at("2026-08-09T18:00:00Z")
+        );
+    }
+
     #[test]
     fn evening_digest_never_fires_with_nothing_to_say() {
         assert!(!evening_digest_due(
@@ -757,18 +893,92 @@ mod tests {
 
     #[test]
     fn next_evening_at_is_today_before_the_hour_and_tomorrow_after() {
+        let fired = Some(at("2026-08-07T18:00:00Z"));
         assert_eq!(
-            next_evening_at(at("2026-08-08T10:00:00Z"), 18, &Utc),
+            next_evening_at(fired, at("2026-08-08T10:00:00Z"), 18, &Utc),
             at("2026-08-08T18:00:00Z")
         );
+        let fired_tonight = Some(at("2026-08-08T18:00:00Z"));
         assert_eq!(
-            next_evening_at(at("2026-08-08T18:00:00Z"), 18, &Utc),
+            next_evening_at(fired_tonight, at("2026-08-08T18:00:00Z"), 18, &Utc),
             at("2026-08-09T18:00:00Z")
         );
         assert_eq!(
-            next_evening_at(at("2026-08-08T23:59:00Z"), 18, &Utc),
+            next_evening_at(fired_tonight, at("2026-08-08T23:59:00Z"), 18, &Utc),
             at("2026-08-09T18:00:00Z")
         );
+    }
+
+    /// `next_digest_at` honours `last_digest_at`: at 20:00 with tonight's
+    /// digest not yet sent (it had nothing to say at 18:00), the digest is
+    /// still owed for tonight, not pushed to tomorrow.
+    #[test]
+    fn next_evening_at_reports_an_unanswered_window_as_due() {
+        let last = Some(at("2026-08-07T18:05:00Z"));
+        let now = at("2026-08-08T20:00:00Z");
+        assert!(evening_window_elapsed(last, now, 18, &Utc));
+        assert_eq!(
+            next_evening_at(last, now, 18, &Utc),
+            at("2026-08-08T18:00:00Z")
+        );
+    }
+
+    /// DST, with a `last_digest_at`: America/New_York springs forward on
+    /// 2026-03-08 and falls back on 2026-11-01. An 18:00 local target is
+    /// 23:00 UTC before spring-forward and 22:00 UTC after it, and back to
+    /// 23:00 UTC after fall-back. Each transition day fires exactly once,
+    /// and `next_evening_at` names the local 18:00 in the right offset.
+    #[test]
+    fn evening_digest_honours_last_digest_across_dst_transitions() {
+        let tz = chrono_tz::America::New_York;
+
+        // Spring forward. Fired 18:00 EST on the 7th (23:00 UTC).
+        let fired = Some(at("2026-03-07T23:00:00Z"));
+        let midday = at("2026-03-08T16:00:00Z");
+        assert!(!evening_window_elapsed(fired, midday, 18, &tz));
+        assert_eq!(
+            next_evening_at(fired, midday, 18, &tz),
+            at("2026-03-08T22:00:00Z"),
+            "18:00 EDT is 22:00 UTC"
+        );
+        assert!(evening_window_elapsed(
+            fired,
+            at("2026-03-08T22:00:00Z"),
+            18,
+            &tz
+        ));
+        let fired = Some(at("2026-03-08T22:00:00Z"));
+        assert!(!evening_window_elapsed(
+            fired,
+            at("2026-03-09T03:00:00Z"),
+            18,
+            &tz
+        ));
+        // Asleep through the transition evening, woke the next morning.
+        let before = Some(at("2026-03-07T23:00:00Z"));
+        let wake = at("2026-03-09T11:00:00Z");
+        assert!(evening_window_elapsed(before, wake, 18, &tz));
+        assert_eq!(
+            next_evening_at(before, wake, 18, &tz),
+            at("2026-03-08T22:00:00Z")
+        );
+
+        // Fall back. Fired 18:00 EDT on 10-31 (22:00 UTC).
+        let fired = Some(at("2026-10-31T22:00:00Z"));
+        let midday = at("2026-11-01T17:00:00Z");
+        assert!(!evening_window_elapsed(fired, midday, 18, &tz));
+        assert_eq!(
+            next_evening_at(fired, midday, 18, &tz),
+            at("2026-11-01T23:00:00Z"),
+            "18:00 EST is 23:00 UTC"
+        );
+        let fired = Some(at("2026-11-01T23:00:00Z"));
+        assert!(!evening_window_elapsed(
+            fired,
+            at("2026-11-02T04:30:00Z"),
+            18,
+            &tz
+        ));
     }
 
     #[test]

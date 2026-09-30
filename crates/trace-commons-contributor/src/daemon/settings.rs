@@ -442,6 +442,18 @@ pub enum DigestSchedule {
     },
 }
 
+impl DigestSchedule {
+    /// Whether an `Evening` hour is a real hour of the day. `Interval` is
+    /// always valid.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        match self {
+            DigestSchedule::Interval => true,
+            DigestSchedule::Evening { hour } => hour <= 23,
+        }
+    }
+}
+
 fn default_digest_evening_hour() -> u8 {
     DEFAULT_DIGEST_EVENING_HOUR
 }
@@ -853,7 +865,24 @@ impl DaemonSettings {
             .context("parsing daemon settings")
             .context(crate::daemon::StartFailure::SettingsUnreadable)?;
         settings.absorb_legacy_roots();
+        settings.validate_digest_schedule();
         Ok(settings)
+    }
+
+    /// Refuse an evening `hour` outside 0..=23 read from the file (a hand
+    /// edit, or a future build's value), rather than letting
+    /// `daemon::notify` clamp it silently -- a clamped 99 fires at 23:00 and
+    /// nobody learns why. The schedule falls back to `Interval`, the
+    /// shipped default, and says so in a label-only log line; the rest of
+    /// the file still loads, since a notification schedule is no reason to
+    /// refuse to start.
+    fn validate_digest_schedule(&mut self) {
+        if !self.digest_schedule.is_valid() {
+            tracing::warn!(
+                "digest_schedule hour out of range in daemon settings; using interval schedule"
+            );
+            self.digest_schedule = DigestSchedule::Interval;
+        }
     }
 
     /// Fold `claude_root` / `codex_root` from an older file into the source
@@ -1272,10 +1301,8 @@ fn parse_digest_schedule(
 ) -> std::result::Result<DigestSchedule, &'static str> {
     let schedule: DigestSchedule =
         serde_json::from_value(value.clone()).map_err(|_| ERR_SETTINGS_INVALID_VALUE)?;
-    if let DigestSchedule::Evening { hour } = schedule {
-        if hour > 23 {
-            return Err(ERR_SETTINGS_INVALID_VALUE);
-        }
+    if !schedule.is_valid() {
+        return Err(ERR_SETTINGS_INVALID_VALUE);
     }
     Ok(schedule)
 }
@@ -2592,6 +2619,46 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert_eq!(s.digest_schedule, DigestSchedule::Interval);
+    }
+
+    /// A settings file written before K9 has no `digest_schedule` key and
+    /// must load as `Interval`, the behaviour it already had.
+    #[test]
+    fn a_settings_file_written_before_the_digest_schedule_loads_as_interval() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("digest_schedule");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.digest_schedule, DigestSchedule::Interval);
+    }
+
+    /// `hour: 99` in the file is refused on load, not clamped: the schedule
+    /// falls back to `Interval` and every other setting still loads.
+    #[test]
+    fn an_out_of_range_evening_hour_in_the_file_is_refused_on_load() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["digest_schedule"] = serde_json::json!({"mode": "evening", "hour": 99});
+        v["queue_ttl_days"] = serde_json::json!(3);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.digest_schedule, DigestSchedule::Interval);
+        assert_eq!(loaded.queue_ttl_days, 3);
+
+        // A valid hour survives the same path untouched.
+        v["digest_schedule"] = serde_json::json!({"mode": "evening", "hour": 23});
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().digest_schedule,
+            DigestSchedule::Evening { hour: 23 }
+        );
     }
 
     #[test]

@@ -565,8 +565,11 @@ healthy.
 `interval` it is `null` until a first digest has fired, then that digest's
 time plus `digest_interval_secs` -- unchanged from before `digest_schedule`
 existed. Under `evening` it is always a timestamp, whether or not a digest
-has ever fired: the next occurrence of the configured local hour is knowable
-either way.
+has ever fired, and it honours the last digest: when an evening target has
+passed that no digest answered (the daemon slept through it, or it had
+nothing to say), it is that target, at or before now -- already due, the
+same reading `interval` gives when last-plus-interval is in the past.
+Otherwise it is the next occurrence of the configured local hour.
 
 #### `daily_budget`
 
@@ -2217,8 +2220,13 @@ day at local hour `H` (0-23; omitted, it defaults to 18, i.e. 18:00 local).
 "Local" is computed in the contributor's own timezone (`chrono::Local` on
 the daemon's host), handling DST transitions and a missed window: an
 evening the daemon was asleep or unreachable through still fires once, at
-the next opportunity, never once per missed day. `hour` outside `0..=23` is
-`bad_params` / `settings-invalid-value`. Either mode keeps "only with
+the next opportunity (a laptop that sleeps from 17:30 and wakes at 07:00
+fires at 07:00), never once per missed day. The first digest after
+switching to `evening` waits for that day's hour. A last-digest time in the
+future (the clock was moved backwards) is treated as stale on either
+schedule rather than holding digests off. `hour` outside `0..=23` is
+`bad_params` / `settings-invalid-value` from `set_settings`; read from a
+settings file, it falls back to `interval` with a label-only log line. Either mode keeps "only with
 something to say" unchanged (see the `digest_due` event, under "Events"
 below): a digest with nothing pending and nothing contributed since the
 last one never fires, on either schedule. This is open decision #5 on issue

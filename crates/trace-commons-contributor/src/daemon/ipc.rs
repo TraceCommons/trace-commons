@@ -1742,8 +1742,8 @@ impl DaemonShared {
     /// The next time a digest is expected, or `None` when nothing has fired
     /// yet under `Interval` -- there is no fixed clock to project forward
     /// from in that case, only "some time after the interval next elapses".
-    /// `Evening` always answers `Some`: the next local `hour` is knowable
-    /// whether or not a digest has ever fired.
+    /// `Evening` always answers `Some`, and honours `last_digest_at` the way
+    /// the firing predicate does (see `notify::next_evening_at`).
     fn next_digest_at(&self, now: chrono::DateTime<Utc>) -> Option<chrono::DateTime<Utc>> {
         let state = self.state.lock().expect("state lock");
         let settings = self.settings.lock().expect("settings lock");
@@ -1751,9 +1751,12 @@ impl DaemonShared {
             super::settings::DigestSchedule::Interval => state
                 .last_digest_at
                 .map(|t| t + chrono::Duration::seconds(settings.digest_interval_secs as i64)),
-            super::settings::DigestSchedule::Evening { hour } => {
-                Some(notify::next_evening_at(now, hour, &chrono::Local))
-            }
+            super::settings::DigestSchedule::Evening { hour } => Some(notify::next_evening_at(
+                state.last_digest_at,
+                now,
+                hour,
+                &chrono::Local,
+            )),
         }
     }
 
