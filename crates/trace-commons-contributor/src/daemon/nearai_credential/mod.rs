@@ -379,6 +379,8 @@ fn forget_local(shared: &DaemonShared, req: &Request) -> Response {
                 settings.near_ai_session = None;
                 settings.cloud_credentials = None;
                 settings.cloud_storage_unavailable = false;
+                settings.cloud_storage_failure =
+                    crate::daemon::settings::CloudStorageFailure::default();
             }
             // Any balance this directory had cached was read with the session
             // just removed. Serving it again would put a figure from a

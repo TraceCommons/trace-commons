@@ -719,6 +719,12 @@ async fn the_move_copies_the_legacy_entry_and_keeps_it() {
     {
         let memory = shared.settings.lock().unwrap();
         assert!(!memory.cloud_storage_unavailable);
+        // Cleared with the flag, so a later failure that sets the flag
+        // without a reason can never be labelled as a move still pending.
+        assert_eq!(
+            memory.cloud_storage_failure,
+            crate::daemon::settings::CloudStorageFailure::default()
+        );
         assert_eq!(
             memory.near_ai_inference.as_ref().unwrap().key,
             "sk-synthetic-recovery-upgrade-move"

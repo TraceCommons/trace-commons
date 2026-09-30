@@ -883,6 +883,7 @@ impl DaemonShared {
         settings.near_ai_session = stored.near_ai_session;
         settings.cloud_credentials = stored.cloud_credentials;
         settings.cloud_storage_unavailable = false;
+        settings.cloud_storage_failure = super::settings::CloudStorageFailure::default();
         drop(settings);
         self.near_ai_credential_changes
             .store(observed, Ordering::Release);
