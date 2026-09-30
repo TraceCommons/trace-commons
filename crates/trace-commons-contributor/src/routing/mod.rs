@@ -26,6 +26,7 @@ pub mod attestation_report;
 pub mod attested;
 pub mod enriched;
 pub mod ironwire;
+pub mod proof_attestor;
 pub mod receipt;
 
 /// One inference hop, as the proxy recorded it.
@@ -37,7 +38,14 @@ pub mod receipt;
 /// Unknown fields are ignored, so a proxy release that adds a column does not
 /// break us. Missing fields that we need are `Option`, so one that goes away
 /// degrades a row rather than dropping it.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+///
+/// `Default` exists for code that builds a row by hand (fixtures, mostly):
+/// name the fields you care about and end the literal with
+/// `..Default::default()`, so a field added here later does not break the
+/// build of every crate that constructs one. The default row is not a
+/// meaningful exchange -- epoch start, empty facade and backend -- and nothing
+/// in the load path produces one.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct RoutedExchange {
     /// The proxy's rowid for this exchange, and the cursor a reader pages on.
     ///
@@ -109,6 +117,102 @@ pub struct RoutedExchange {
     #[serde(default)]
     pub cost_usd: Option<f64>,
     pub status: i64,
+    /// Whether the proxy proved which model answered this hop: IronWire's own
+    /// label for the row, read verbatim (`ironwire_proxy::proof`). It is the
+    /// field the Inference tab (K8, #1133) should consume once it lands --
+    /// nothing reads it yet -- because it is the stored verdict, not
+    /// something to re-derive.
+    ///
+    /// - `None` means an older proxy, or a row that predates proof tracking,
+    ///   or a label this client does not know. It is not `outside`.
+    /// - Only [`ProofStatus::Verified`] is proof.
+    /// - [`ProofStatus::GatewayOnly`] is never proof: a gateway receipt names
+    ///   the relay, not the model.
+    ///
+    /// Parsed leniently, as IronWire parses its own column: an unrecognised or
+    /// mistyped value is `None`, never an error that drops the row and never
+    /// `Verified`.
+    #[serde(default, deserialize_with = "lenient_proof_status")]
+    pub proof: Option<ProofStatus>,
+}
+
+/// IronWire's proof label for one exchange, mirroring
+/// `ironwire_ledger::proof::ProofStatus` label for label.
+///
+/// A local copy rather than IronWire's type, for the reason
+/// [`RoutedExchange`] is local: the labels are the contract, and this crate
+/// reads them off IronWire's JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProofStatus {
+    /// Not a NEAR AI backend: an outside call, never checked.
+    Outside,
+    /// A NEAR AI exchange not checked yet, or receipt checks are off.
+    Pending,
+    /// No receipt to be had or checked.
+    Unavailable,
+    /// A valid receipt, but the gateway's. Not proof.
+    GatewayOnly,
+    /// A valid model receipt whose key nothing tied to a verified quote.
+    Unattested,
+    /// Proof: a model receipt over this hop's digests, signed by a key a
+    /// verified, measurement-pinned TDX quote binds.
+    Verified,
+    /// A receipt that does not check out.
+    Failed,
+}
+
+impl ProofStatus {
+    /// Every label, in IronWire's display order.
+    pub const ALL: [Self; 7] = [
+        Self::Verified,
+        Self::GatewayOnly,
+        Self::Unattested,
+        Self::Pending,
+        Self::Unavailable,
+        Self::Failed,
+        Self::Outside,
+    ];
+
+    /// IronWire's spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Outside => "outside",
+            Self::Pending => "pending",
+            Self::Unavailable => "unavailable",
+            Self::GatewayOnly => "gateway_only",
+            Self::Unattested => "unattested",
+            Self::Verified => "verified",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Parse IronWire's spelling. Exact match: case is not folded and
+    /// whitespace is not trimmed, because a near miss of `verified` is a
+    /// label IronWire did not write.
+    #[must_use]
+    pub fn parse(label: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|status| status.as_str() == label)
+    }
+
+    /// Whether this label is proof. Only `verified` is.
+    #[must_use]
+    pub fn is_proof(self) -> bool {
+        self == Self::Verified
+    }
+}
+
+/// Read `proof` as a label if it is a string IronWire could have written, and
+/// as `None` otherwise -- including a value of the wrong JSON type -- so no
+/// proxy change can cost a row or promote one.
+fn lenient_proof_status<'de, D>(deserializer: D) -> Result<Option<ProofStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().and_then(ProofStatus::parse))
 }
 
 /// A source of routing rows.
@@ -179,6 +283,7 @@ mod tests {
             output_tokens: Some(200),
             cost_usd: Some(0.02),
             status: 200,
+            ..Default::default()
         }
     }
 
@@ -188,6 +293,108 @@ mod tests {
         let seen = ledger.exchanges_since(at(60));
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].started_at, at(60));
+    }
+
+    /// A `/_ironwire/log` row as IronWire serializes it, with `proof` set to
+    /// `label` verbatim -- or omitted when `label` is `None`.
+    fn log_row(label: Option<&str>) -> String {
+        let proof = match label {
+            Some(label) => format!(r#","proof":{}"#, serde_json::to_string(label).unwrap()),
+            None => String::new(),
+        };
+        format!(
+            r#"{{"id":7,"started_at":"2026-09-28T12:00:00Z","facade":"openai","backend":"nearai","served_model":"Qwen/Qwen3.6-35B-A3B-FP8","upstream_id":"c54961ab1d594cf591e5566caa21196b","rung":"same_model","attempts":1,"cost_usd":0.01,"status":200{proof}}}"#
+        )
+    }
+
+    fn parse(label: Option<&str>) -> RoutedExchange {
+        serde_json::from_str(&log_row(label)).expect("a /log row parses")
+    }
+
+    #[test]
+    fn each_of_ironwires_seven_labels_parses_to_its_variant() {
+        for (label, expected) in [
+            ("outside", ProofStatus::Outside),
+            ("pending", ProofStatus::Pending),
+            ("unavailable", ProofStatus::Unavailable),
+            ("gateway_only", ProofStatus::GatewayOnly),
+            ("unattested", ProofStatus::Unattested),
+            ("verified", ProofStatus::Verified),
+            ("failed", ProofStatus::Failed),
+        ] {
+            assert_eq!(parse(Some(label)).proof, Some(expected), "{label}");
+            assert_eq!(expected.as_str(), label, "the label round-trips");
+        }
+    }
+
+    /// An older proxy, or a row written before proof tracking, sends no field.
+    #[test]
+    fn a_row_without_the_field_has_no_proof_label() {
+        let row = parse(None);
+        assert_eq!(row.proof, None);
+        assert_eq!(row.id, Some(7));
+    }
+
+    #[test]
+    fn a_null_label_is_no_label() {
+        let json = log_row(None).replace(r#""status":200"#, r#""status":200,"proof":null"#);
+        let row: RoutedExchange = serde_json::from_str(&json).expect("parses");
+        assert_eq!(row.proof, None);
+    }
+
+    /// A label a newer IronWire might add degrades to no label, and does not
+    /// take the rest of the row with it.
+    #[test]
+    fn an_unknown_label_is_no_label_and_the_row_survives() {
+        let row = parse(Some("quantum_verified"));
+        assert_eq!(row.proof, None);
+        assert_eq!(row.backend, "nearai");
+        assert_eq!(
+            row.upstream_id.as_deref(),
+            Some("c54961ab1d594cf591e5566caa21196b")
+        );
+        assert_eq!(row.cost_usd, Some(0.01));
+        assert_eq!(row.status, 200);
+    }
+
+    /// A field of the wrong type is also no label rather than a lost row.
+    #[test]
+    fn a_non_string_label_is_no_label_and_the_row_survives() {
+        let json = log_row(None).replace(r#""status":200"#, r#""status":200,"proof":true"#);
+        let row: RoutedExchange = serde_json::from_str(&json).expect("the row survives");
+        assert_eq!(row.proof, None);
+        assert_eq!(row.status, 200);
+    }
+
+    /// Exact match only. Anything that merely resembles `verified` is not
+    /// proof: folding case or trimming would give a label IronWire never
+    /// wrote a meaning it never had.
+    #[test]
+    fn only_the_exact_label_verified_is_verified() {
+        for near_miss in [
+            "Verified",
+            "VERIFIED",
+            " verified",
+            "verified ",
+            "verified\n",
+            "verifed",
+            "",
+        ] {
+            let proof = parse(Some(near_miss)).proof;
+            assert_ne!(proof, Some(ProofStatus::Verified), "{near_miss:?}");
+            assert_eq!(proof, None, "{near_miss:?} is no label at all");
+        }
+    }
+
+    /// Only one label is proof, and `gateway_only` is not it.
+    #[test]
+    fn only_verified_is_proof() {
+        let proofs: Vec<_> = ProofStatus::ALL
+            .into_iter()
+            .filter(|status| status.is_proof())
+            .collect();
+        assert_eq!(proofs, vec![ProofStatus::Verified]);
+        assert!(!ProofStatus::GatewayOnly.is_proof());
     }
 
     #[test]

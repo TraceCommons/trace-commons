@@ -125,6 +125,29 @@ final class SourceCandidateTests: XCTestCase {
         XCTAssertEqual(SourceKind.codex.displayName, "Codex")
     }
 
+    func testAnswersAtDecodesWhenPresentAndTheDaemonMayOmitIt() throws {
+        let withVendor = """
+            [{"source":"claude-code","path":"/p","exists":true,
+              "session_count":1,"most_recent":null,"relocated_by_env":false,
+              "answers_at":"Anthropic"}]
+            """
+        let decoded = try SourceCandidate.decodeList(from: withVendor)
+        XCTAssertEqual(decoded[0].answersAt, "Anthropic")
+
+        // A payload from a daemon built before this field existed must still
+        // decode, with the field simply absent rather than the row dropped.
+        // Inline on purpose: a shared fixture could later gain the field and
+        // leave this assertion testing nothing.
+        let olderDaemon = """
+            [{"source":"claude-code","path":"/p","exists":true,
+              "session_count":1,"most_recent":null,"relocated_by_env":false}]
+            """
+        XCTAssertFalse(olderDaemon.contains("answers_at"))
+        let candidates = try SourceCandidate.decodeList(from: olderDaemon)
+        XCTAssertEqual(candidates.count, 1)
+        XCTAssertNil(candidates[0].answersAt)
+    }
+
     func testAnUnknownSourceSlugIsIgnoredRatherThanCrashingTheScreen() throws {
         // A future adapter this build has never heard of must not take the
         // roots screen down with it; the screen would then be unreachable

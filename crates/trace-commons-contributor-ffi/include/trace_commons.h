@@ -45,12 +45,13 @@
  * this library returns -- fixed labels only, the same discipline the
  * daemon's socket already applies.
  *
- * THREE NAMED EXEMPTIONS, and no others: tc_discover_sources returns
- * filesystem paths, tc_preview_body returns post-redaction trace content,
- * and tc_witness_status_json returns the witness URL and signing address.
- * Each is documented where it is declared, and each is a value the
- * contributor is being asked to make a decision about -- a consent prompt
- * that will not name what it is asking about is not a consent prompt.
+ * FOUR NAMED EXEMPTIONS, and no others: tc_discover_sources and
+ * tc_discover_opencode_export return filesystem paths, tc_preview_body
+ * returns post-redaction trace content, and tc_witness_status_json returns
+ * the witness URL and signing address. Each is documented where it is
+ * declared, and each is a value the contributor is being asked to make a
+ * decision about -- a consent prompt that will not name what it is asking
+ * about is not a consent prompt.
  *
  * THE PREVIEW EXEMPTION: tc_preview_body is the one and only interface here
  * that deliberately carries trace content, and the rule above is absolute
@@ -365,15 +366,22 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  * daemon from starting.
  *
  * Returns an owned JSON array; free it with tc_string_free. Each element:
- *   source            "claude-code" | "codex"
+ *   source            "claude-code" | "codex" | "gemini-cli" | "cline"
  *   path              where this store would be watched
  *   exists            whether that directory is there right now
  *   session_count     how many session files, counted recursively
  *   most_recent       RFC 3339 timestamp, or null
  *   relocated_by_env  whether CLAUDE_CONFIG_DIR / CODEX_HOME moved it
+ *   answers_at        the vendor this tool's own calls answer at by
+ *                     default (e.g. "Anthropic"), or null for a tool with
+ *                     no single default. A fixed label this build ships
+ *                     with, never a claim checked against the copy
+ *                     actually installed. OpenCode has none of these
+ *                     rows at all -- see tc_discover_opencode_export.
  *
- * This is the ONE place in this ABI that deliberately returns a filesystem
- * path. Everywhere else a path is withheld because the caller is being told
+ * This is one of the places in this ABI that deliberately returns a
+ * filesystem path -- see the exemptions listed at the top of this file.
+ * Everywhere else a path is withheld because the caller is being told
  * about a trace; here the caller is the contributor's own machine asking
  * which of their own folders to watch, and a consent prompt that will not
  * name what it is asking about is not a consent prompt.
@@ -382,6 +390,30 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  * Returns NULL only on a caught panic.
  */
 char*       tc_discover_sources(void);
+
+/* Describe a folder the contributor has already named as their OpenCode
+ * export directory, so a Customize screen can say "N sessions found" for
+ * the folder they just picked rather than trusting the folder name alone.
+ *
+ * Takes no handle, like tc_discover_sources, and for a stronger reason:
+ * OpenCode has no conventional per-user store to guess at before anyone
+ * has said anything -- its export folder is picked by the contributor, one
+ * at a time -- so it is not one of tc_discover_sources's rows at all,
+ * blind or otherwise. This call describes OpenCode once a folder IS named,
+ * whether that is moments after a folder chooser closes or on a later run
+ * reading back what was already declared (opencode_source in the daemon's
+ * settings).
+ *
+ * Returns an owned JSON object with the same shape as one row of
+ * tc_discover_sources: source (always "opencode"), path, exists,
+ * session_count, most_recent, relocated_by_env (always false) and
+ * answers_at (always null: OpenCode ships with no single default vendor to
+ * name). Free it with tc_string_free.
+ *
+ * Reads directory entries and metadata only; never opens a session file.
+ * Returns NULL for a NULL or non-UTF-8 path, and NULL on a caught panic.
+ */
+char*       tc_discover_opencode_export(const char* path);
 
 /* Every fixed word on the routing surface, in one call.
  *

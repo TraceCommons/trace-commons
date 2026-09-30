@@ -21,7 +21,8 @@ use std::{
 pub const QUALIFIED_VERSION: &str = "1.18.29";
 const BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 const RECORD_BUDGET: usize = 100_000;
-const DISCOVERY_ENTRY_BUDGET: usize = 256;
+/// Also caps the flat count `source::discovery` gives for a named folder.
+pub(crate) const DISCOVERY_ENTRY_BUDGET: usize = 256;
 const HEADER_BYTE_BUDGET: u64 = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
