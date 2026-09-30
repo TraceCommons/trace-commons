@@ -1,12 +1,10 @@
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { FormFieldError } from "../../../components/form-field-error";
 import { type SkillDraftFormValues, skillDraftFormSchema } from "../forms";
 import type { SkillCandidate, SkillCopy } from "../skill-types";
+import { ButtonPrimary, Input, TextArea } from "@/design-system";
 
 export function SkillCandidateForm({
   candidate,
@@ -52,7 +50,7 @@ export function SkillCandidateForm({
       </label>
       <label>
         {copy.applicability}
-        <Textarea
+        <TextArea
           {...form.register("description")}
           maxLength={1024}
           rows={4}
@@ -70,7 +68,7 @@ export function SkillCandidateForm({
       </label>
       <label>
         {copy.procedure}
-        <Textarea
+        <TextArea
           {...form.register("procedure")}
           maxLength={12000}
           rows={10}
@@ -92,7 +90,7 @@ export function SkillCandidateForm({
         </span>
         {candidate.source_evidence.map((item) => (
           <div
-            className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 border-b border-border py-2.5 text-[11px] leading-[1.5] text-muted-foreground max-[860px]:grid-cols-1"
+            className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 border-b border-tc-hairline py-2.5 text-[11px] leading-[1.5] text-tc-secondary max-[860px]:grid-cols-1"
             key={item.event_id}
           >
             <strong>{item.kind}</strong>
@@ -129,13 +127,12 @@ export function SkillCandidateForm({
         </p>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        <ButtonPrimary size="sm"
           type="submit"
           disabled={busy || !form.formState.isValid}
         >
           {busy ? copy.reviewing : copy.review_action}
-        </Button>
+        </ButtonPrimary>
       </div>
     </form>
   );

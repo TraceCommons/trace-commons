@@ -1,7 +1,11 @@
 import {
   type ButtonHTMLAttributes,
+  type ComponentProps,
+  createContext,
   type InputHTMLAttributes,
+  type KeyboardEvent,
   type ReactNode,
+  useContext,
   useId,
 } from "react";
 import { cx } from "./cx";
@@ -361,6 +365,7 @@ export function WatchSwitch(props: SwitchProps) {
 /**
  * 15px rounded checkbox: purple gradient + white check when on, dark well
  * when off. `indeterminate` is for a group checkbox whose children differ.
+ * `label` names it when no surrounding <label> or `aria-labelledby` does.
  */
 export function Checkbox({
   checked,
@@ -369,12 +374,13 @@ export function Checkbox({
   label,
   disabled,
   describedBy,
-}: {
+  className,
+  ...props
+}: Omit<ButtonProps, "onChange" | "onClick" | "role" | "type"> & {
   checked: boolean;
   indeterminate?: boolean;
   onChange?: (checked: boolean) => void;
-  label: string;
-  disabled?: boolean;
+  label?: string;
   describedBy?: string;
 }) {
   const state = indeterminate ? "mixed" : checked;
@@ -387,7 +393,8 @@ export function Checkbox({
       aria-label={label}
       aria-describedby={describedBy}
       disabled={disabled || !onChange}
-      className="tc-checkbox"
+      className={cx("tc-checkbox", className)}
+      {...props}
       onClick={() => onChange?.(!checked)}
     >
       {indeterminate ? (
@@ -472,5 +479,126 @@ export function TextField({
       )}
       {hint ? <p className="m-0 tc-caption tc-text-tertiary">{hint}</p> : null}
     </div>
+  );
+}
+
+/** Bare dark input, for fields that carry their own label. */
+export function Input({ className, ...props }: ComponentProps<"input">) {
+  return <input className={cx("tc-input", className)} {...props} />;
+}
+
+/** Bare dark multi-line input. */
+export function TextArea({ className, ...props }: ComponentProps<"textarea">) {
+  return <textarea className={cx("tc-input", className)} {...props} />;
+}
+
+/**
+ * A native select dressed as a glass pill, for forms that own the select
+ * (a form library's `register`, `<option>` children). `Picker` is the
+ * controlled variant with a status dot.
+ */
+export function Select({
+  className,
+  children,
+  ...props
+}: ComponentProps<"select">) {
+  return (
+    <span className={cx("tc-select", className)}>
+      <select {...props}>{children}</select>
+      <svg
+        className="tc-picker__chevron"
+        width="10"
+        height="10"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        aria-hidden="true"
+      >
+        <path d="M4 6.5l4 4 4-4" />
+      </svg>
+    </span>
+  );
+}
+
+type RadioGroupState = {
+  value: string;
+  onChange: (value: string) => void;
+};
+
+const RadioGroupContext = createContext<RadioGroupState | null>(null);
+
+/**
+ * One choice of several. Arrow keys move the choice between the enabled
+ * radios, as a native radio group does; only the chosen radio (or the
+ * first, when none is) takes Tab.
+ */
+export function RadioGroup({
+  value,
+  onChange,
+  className,
+  children,
+  ...props
+}: Omit<ComponentProps<"div">, "onChange" | "role"> & {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const move = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step =
+      event.key === "ArrowDown" || event.key === "ArrowRight"
+        ? 1
+        : event.key === "ArrowUp" || event.key === "ArrowLeft"
+          ? -1
+          : 0;
+    if (step === 0) return;
+    const radios = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>(
+        '[role="radio"]:not(:disabled)',
+      ),
+    );
+    if (radios.length === 0) return;
+    event.preventDefault();
+    const at = radios.indexOf(document.activeElement as HTMLButtonElement);
+    const next = radios[(at + step + radios.length) % radios.length];
+    next.focus();
+    next.click();
+  };
+  return (
+    <RadioGroupContext.Provider value={{ value, onChange }}>
+      <div
+        role="radiogroup"
+        className={cx("flex flex-col", className)}
+        onKeyDown={move}
+        {...props}
+      >
+        {children}
+      </div>
+    </RadioGroupContext.Provider>
+  );
+}
+
+/** A round checkbox inside a `RadioGroup`; the wrapping <label> names it. */
+export function Radio({
+  value,
+  className,
+  ...props
+}: Omit<ButtonProps, "value" | "role" | "type" | "onClick"> & {
+  value: string;
+}) {
+  const group = useContext(RadioGroupContext);
+  if (!group) throw new Error("Radio must be inside a RadioGroup");
+  const checked = group.value === value;
+  const first = group.value === "";
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: the design's glass radio; role and aria-checked carry the semantics.
+    <button
+      type="button"
+      role="radio"
+      aria-checked={checked}
+      tabIndex={checked || first ? 0 : -1}
+      className={cx("tc-radio", className)}
+      {...props}
+      onClick={() => group.onChange(value)}
+    />
   );
 }

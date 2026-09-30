@@ -5,6 +5,7 @@ import {
   useId,
   useRef,
 } from "react";
+import { createPortal } from "react-dom";
 import { cx } from "./cx";
 
 type DivProps = HTMLAttributes<HTMLDivElement>;
@@ -46,10 +47,16 @@ export function Popover({ className, ...props }: DivProps) {
   return <div className={cx("tc-popover", className)} {...props} />;
 }
 
+const FOCUSABLE =
+  'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
 /**
  * A modal over its container (settings, passkey). Closes on the scrim, on
- * Escape, and from its own close button. `narrow` fixes the width at 450px,
- * the width the FTUX flows use.
+ * Escape, and from its own close button; Tab stays inside it while it is
+ * open, and focus returns to where it was when it closes. `narrow` fixes the
+ * width at 450px, the width the FTUX flows use. `viewport` lifts it out of
+ * its container to cover the whole window (confirmations raised from deep
+ * inside a pane). `footer` holds the actions, below the scrolling body.
  */
 export function Modal({
   open,
@@ -57,7 +64,9 @@ export function Modal({
   title,
   subtitle,
   headerAccessory,
+  footer,
   narrow = false,
+  viewport = false,
   children,
   className,
   bodyClassName,
@@ -67,38 +76,79 @@ export function Modal({
   title: ReactNode;
   subtitle?: ReactNode;
   headerAccessory?: ReactNode;
+  footer?: ReactNode;
   narrow?: boolean;
+  viewport?: boolean;
   children: ReactNode;
   className?: string;
   bodyClassName?: string;
 }) {
   const titleId = useId();
+  const subtitleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
+  // Held in a ref so a caller's inline `onClose` does not re-run the focus
+  // effect (and pull focus back to the dialog) on every render.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement as HTMLElement | null;
     dialogRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      // Only the topmost dialog answers: a confirmation raised over the
+      // settings modal closes alone.
+      const open = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+      if (open[open.length - 1] !== dialogRef.current) return;
+      if (event.key === "Escape") {
+        closeRef.current();
+        return;
+      }
+      const dialog = dialogRef.current;
+      if (event.key !== "Tab" || !dialog) return;
+      const items = Array.from(
+        dialog.querySelectorAll<HTMLElement>(FOCUSABLE),
+      );
+      if (items.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === dialog)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!dialog.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
       previous?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
-  return (
+  const modal = (
     // biome-ignore lint/a11y/noStaticElementInteractions: the scrim closes on click; Escape and the close button are the keyboard paths.
-    <div className="tc-scrim" onClick={onClose} role="presentation">
+    <div
+      className={cx("tc-scrim", viewport && "tc-scrim--viewport tc-root")}
+      onClick={onClose}
+      role="presentation"
+    >
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: stops a click inside the dialog reaching the scrim; not an action. */}
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={subtitle ? subtitleId : undefined}
         tabIndex={-1}
         className={cx(
           "tc-modal flex flex-col outline-none",
@@ -113,7 +163,9 @@ export function Modal({
               {title}
             </div>
             {subtitle ? (
-              <div className="tc-caption tc-text-tertiary">{subtitle}</div>
+              <div id={subtitleId} className="tc-caption tc-text-tertiary">
+                {subtitle}
+              </div>
             ) : null}
           </div>
           <div className="flex items-center gap-2">
@@ -131,9 +183,11 @@ export function Modal({
           </div>
         </div>
         <div className={cx("min-h-0 flex-1", bodyClassName)}>{children}</div>
+        {footer ? <div className="tc-modal__footer">{footer}</div> : null}
       </div>
     </div>
   );
+  return viewport ? createPortal(modal, document.body) : modal;
 }
 
 /**

@@ -103,7 +103,7 @@
 }
 
 /* Error and caution lines: a quiet card carrying the status colour in its
-   text, never in its fill. */
+   text, never in its fill or its edge. */
 .tc-alert {
   display: block;
   margin: var(--tc-space-4) 0;
@@ -116,12 +116,19 @@
   font-weight: 400;
   line-height: 17px;
 }
-.tc-alert--ask {
+
+/* A notice: quiet card, the tone as a status dot beside the title. */
+.tc-notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tc-space-3);
   color: var(--tc-text-primary);
-  box-shadow: var(--tc-card-edge-quiet), inset 3px 0 0 var(--tc-status-ask);
+  font: var(--tc-text-label);
+  font-weight: 400;
+  line-height: 17px;
 }
-.tc-alert--ask [data-slot="alert-title"] {
-  color: var(--tc-status-ask);
+.tc-notice__body {
+  color: var(--tc-text-secondary);
 }
 
 /* A row inside a list: hairline on top, never around. */
@@ -230,6 +237,10 @@
   backdrop-filter: var(--tc-modal-scrim-blur);
   animation: tc-fade var(--tc-dur) var(--tc-ease);
 }
+.tc-scrim--viewport {
+  position: fixed;
+  z-index: 50;
+}
 .tc-modal {
   width: 100%;
   max-width: var(--tc-modal-width);
@@ -257,6 +268,14 @@
   gap: var(--tc-space-6);
   padding: 14px 16px 10px 18px;
   border-bottom: 0.5px solid rgba(255, 255, 255, 0.12);
+}
+.tc-modal__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--tc-space-4);
+  padding: 10px 16px 14px 18px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.12);
 }
 .tc-sheet {
   display: flex;
@@ -648,6 +667,13 @@
 .tc-btn--icon:hover:not(:disabled) {
   background: var(--tc-control-hover);
 }
+/* A glass button that is one of a set of choices reads purple when chosen. */
+.tc-btn--glass[aria-pressed="true"],
+.tc-btn--glass[aria-pressed="true"]:hover:not(:disabled) {
+  background: var(--tc-cta-fill);
+  box-shadow: var(--tc-cta-edge);
+  color: var(--tc-text-on-accent);
+}
 .tc-btn--round {
   width: var(--tc-size-control-lg);
   height: var(--tc-size-control-lg);
@@ -856,6 +882,41 @@
   cursor: default;
   opacity: 0.7;
 }
+.tc-radio {
+  position: relative;
+  flex: none;
+  width: var(--tc-size-checkbox);
+  height: var(--tc-size-checkbox);
+  box-sizing: border-box;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--tc-well-fill);
+  box-shadow: var(--tc-checkbox-edge);
+  transition: background var(--tc-dur-fast) var(--tc-ease);
+}
+.tc-radio[aria-checked="true"] {
+  background: var(--tc-checkbox-on-fill);
+}
+.tc-radio[aria-checked="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 5px;
+  height: 5px;
+  margin: auto;
+  border-radius: 50%;
+  background: var(--tc-text-on-accent);
+}
+.tc-radio:focus-visible {
+  outline: 2px solid var(--tc-purple-text);
+  outline-offset: 2px;
+}
+.tc-radio:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
 .tc-check-row {
   display: flex;
   align-items: flex-start;
@@ -921,6 +982,59 @@ textarea.tc-input {
   min-height: 56px;
   padding: 8px 10px;
 }
+input.tc-input,
+textarea.tc-input {
+  width: 100%;
+  min-width: 0;
+  box-shadow: var(--tc-well-edge);
+}
+.tc-input:focus-visible,
+.tc-select select:focus-visible {
+  outline: 2px solid var(--tc-purple-text);
+  outline-offset: 1px;
+}
+.tc-input[aria-invalid="true"] {
+  box-shadow: var(--tc-well-edge), inset 0 0 0 1px var(--tc-status-outside);
+}
+.tc-input:disabled {
+  cursor: default;
+  opacity: var(--tc-cta-disabled-opacity);
+}
+/* A native select the page owns, dressed as the glass picker pill. */
+.tc-select {
+  position: relative;
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+}
+.tc-select select {
+  height: var(--tc-size-control-lg);
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0 26px 0 10px;
+  border: 0;
+  border-radius: var(--tc-radius-pill);
+  appearance: none;
+  background: var(--tc-control-fill);
+  box-shadow: var(--tc-control-edge);
+  color: var(--tc-text-primary);
+  font: var(--tc-text-label);
+  font-weight: 600;
+}
+.tc-select select[aria-invalid="true"] {
+  box-shadow: var(--tc-control-edge), inset 0 0 0 1px var(--tc-status-outside);
+}
+.tc-select select:disabled {
+  cursor: default;
+  opacity: var(--tc-cta-disabled-opacity);
+}
+.tc-select .tc-picker__chevron {
+  position: absolute;
+  right: 10px;
+  pointer-events: none;
+}
 
 /* ── Indicators ───────────────────────────────────────────────────── */
 .tc-dot {
@@ -958,6 +1072,11 @@ textarea.tc-input {
   gap: 7px;
   font: var(--tc-text-label);
   color: var(--tc-text-secondary);
+}
+/* A notice's title is a status label in the primary text colour. */
+.tc-notice__title .tc-status {
+  color: var(--tc-text-primary);
+  font-weight: 600;
 }
 .tc-chip {
   display: inline-flex;
@@ -1024,6 +1143,11 @@ textarea.tc-input {
   background: rgba(255, 255, 255, 0.16);
   color: var(--tc-text-primary);
   line-height: 14px;
+}
+.tc-skeleton {
+  border-radius: var(--tc-radius-control);
+  background: rgba(255, 255, 255, 0.08);
+  animation: tc-pulse 1.6s var(--tc-ease) infinite;
 }
 .tc-tool-tile {
   display: inline-flex;
@@ -1210,6 +1334,11 @@ textarea.tc-input {
   }
   to {
     transform: none;
+  }
+}
+@keyframes tc-pulse {
+  50% {
+    opacity: 0.5;
   }
 }
 @keyframes tc-flow {

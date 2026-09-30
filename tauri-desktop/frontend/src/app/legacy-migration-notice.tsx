@@ -1,12 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
-import { Button } from "../components/ui/button";
 import {
   acknowledgeLegacyInviteMigration,
   getLegacyMigrationNotice,
 } from "../lib/tauri/core-api";
 import { parseLegacyMigrationStatus } from "../lib/tauri/legacy-migration";
 import { coreKeys } from "../lib/tauri/query-keys";
+import { GlassButton, Notice } from "@/design-system";
 
 /**
  * After a legacy invite identity moved to a NEAR AI account: the
@@ -36,23 +35,20 @@ export function LegacyMigrationNotice({ status }: { status: unknown }) {
   });
   if (unreadable || notice === null || !copy.data) return null;
   return (
-    <Alert>
-      <AlertTitle>{copy.data.title}</AlertTitle>
-      <AlertDescription className="grid gap-2">
+    <Notice tone="ask" title={copy.data.title}>
+      <div className="grid gap-2">
         <span>{copy.data.body}</span>
         <span>{copy.data.folders}</span>
         <div>
-          <Button
+          <GlassButton
             type="button"
-            size="sm"
-            variant="outline"
             disabled={acknowledge.isPending}
             onClick={() => acknowledge.mutate()}
           >
             {copy.data.acknowledge}
-          </Button>
+          </GlassButton>
         </div>
-      </AlertDescription>
-    </Alert>
+      </div>
+    </Notice>
   );
 }

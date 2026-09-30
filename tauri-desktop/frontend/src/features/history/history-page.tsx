@@ -108,7 +108,7 @@ export function HistoryPage() {
               <div className="mt-[22px] grid gap-6">
                 {groupedRecords.map((group) => (
                   <section
-                    className="border-t border-border pt-[18px] first:border-t-0 first:pt-0"
+                    className="border-t border-tc-hairline pt-[18px] first:border-t-0 first:pt-0"
                     key={group.id}
                   >
                     <div className="flex items-end justify-between gap-[18px]">

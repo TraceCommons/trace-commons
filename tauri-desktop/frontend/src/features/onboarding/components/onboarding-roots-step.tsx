@@ -1,8 +1,8 @@
-import { Button } from "@/components/ui/button";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import { SourceRootsPanel } from "../../settings/public";
 import { missingRequiredRoots } from "../roots-readiness";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 export function OnboardingRootsStep({
   onboarding,
@@ -37,34 +37,32 @@ export function OnboardingRootsStep({
         onSave={(source, mode, path) => roots.save(source, mode, path)}
       />
       {settings.state === "ready" && !rootsAnswered && shell && (
-        <p className="mt-4 mb-0 text-[12px] text-muted-foreground">
+        <p className="mt-4 mb-0 text-[12px] text-tc-secondary">
           {shell.roots_required}
         </p>
       )}
       {starting && shell && (
-        <p className="mt-4 mb-0 text-[12px] text-muted-foreground" role="status">
+        <p className="mt-4 mb-0 text-[12px] text-tc-secondary" role="status">
           {shell.watcher_starting}
         </p>
       )}
       {!starting && startError && (
         <p
-          className="tc-card tc-card--quiet mt-4 mb-0 border-destructive/30 text-[12px] text-destructive"
+          className="tc-card tc-card--quiet mt-4 mb-0 border-tc-outside/30 text-[12px] text-tc-outside"
           role="alert"
         >
           {startError}
         </p>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy || roots.busy || starting}
         >
           Back
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={() => void onboarding.continueRoots(snapshot)}
           disabled={
@@ -77,7 +75,7 @@ export function OnboardingRootsStep({
           }
         >
           {starting && shell ? shell.watcher_starting : "Continue"}
-        </Button>
+        </ButtonPrimary>
       </div>
     </>
   );

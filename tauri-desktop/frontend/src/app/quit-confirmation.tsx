@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { ResponsiveOverlay } from "../components/responsive-overlay";
-import { Button } from "../components/ui/button";
 import { quitApp } from "../lib/tauri/platform-api";
 import { useQuitConfirmationCopy } from "../lib/tauri/use-contributor-copy";
+import { GlassButton } from "@/design-system";
 
 export function QuitConfirmation({
   open,
@@ -31,33 +31,31 @@ export function QuitConfirmation({
       description={copy.data?.body}
       footer={
         <>
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => onOpenChange(false)}
           >
             {copy.data?.cancel ?? "Cancel"}
-          </Button>
-          <Button
+          </GlassButton>
+          <GlassButton className="tc-text-outside"
             type="button"
-            variant="destructive"
             // Wait for the true sentence, but never trap the contributor in
             // the app if it cannot be read.
             disabled={!copy.data && !copy.isError}
             onClick={() => void confirm()}
           >
             {copy.data?.confirm ?? "Quit"}
-          </Button>
+          </GlassButton>
         </>
       }
     >
       {copy.isError && (
-        <p className="text-sm text-destructive">
+        <p className="text-sm text-tc-outside">
           Trace Commons could not tell whether quitting stops it watching for
           finished sessions. Anything already waiting stays waiting.
         </p>
       )}
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {error && <p className="text-sm text-tc-outside">{error}</p>}
     </ResponsiveOverlay>
   );
 }

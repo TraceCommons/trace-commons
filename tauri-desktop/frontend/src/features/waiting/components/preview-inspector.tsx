@@ -1,8 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { FormFieldError } from "../../../components/form-field-error";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import {
@@ -14,6 +12,7 @@ import type { WaitingPreview } from "../types";
 import { NativeReviewActions } from "./native-review-actions";
 import { RedactedTranscript } from "./redacted-transcript";
 import { SessionSendDisclosure } from "./session-send-disclosure";
+import { ButtonPrimary, GlassButton, Input, TertiaryLink } from "@/design-system";
 
 type InspectorTab = "transcript" | "search" | "turns";
 
@@ -46,9 +45,9 @@ export function PreviewInspector({
       title="Exactly what would be sent"
       description="This is the redacted envelope. It stays local while you read it. Original-session search returns only a count; it never returns raw text."
       footer={
-        <Button type="button" variant="outline" onClick={onClose}>
+        <GlassButton type="button" onClick={onClose}>
           Close
-        </Button>
+        </GlassButton>
       }
     >
       <div className="grid gap-4">
@@ -79,24 +78,24 @@ export function PreviewInspector({
           />
         )}
         {inspector.error && (
-          <p className="tc-card tc-card--quiet border-destructive/30 text-[12px] text-destructive">
+          <p className="tc-card tc-card--quiet border-tc-outside/30 text-[12px] text-tc-outside">
             {inspector.error}
           </p>
         )}
         {inspector.state === "idle" && (
-          <Button type="button" onClick={() => void inspector.open()}>
+          <ButtonPrimary size="sm" type="button" onClick={() => void inspector.open()}>
             Load redacted transcript
-          </Button>
+          </ButtonPrimary>
         )}
         {inspector.state === "loading" && (
-          <p className="text-[13px] text-muted-foreground">
+          <p className="text-[13px] text-tc-secondary">
             Loading bounded transcript…
           </p>
         )}
         {inspector.digest && (
           <>
             <div
-              className="flex flex-wrap gap-1 border-b border-border"
+              className="flex flex-wrap gap-1 border-b border-tc-hairline"
               role="tablist"
               aria-label="Preview details"
             >
@@ -145,15 +144,15 @@ function TabButton({
   onClick: (tab: InspectorTab) => void;
 }) {
   return (
-    <Button
-      className={`border-0 border-b-2 border-transparent bg-transparent px-[11px] py-[9px] text-[11px] font-bold text-muted-foreground hover:border-primary hover:text-foreground${active ? " border-primary text-foreground" : ""}`}
+    <button
+      className={`border-0 border-b-2 border-transparent bg-transparent px-[11px] py-[9px] text-[11px] font-bold text-tc-secondary hover:border-tc-purple hover:text-tc-primary${active ? " border-tc-purple text-tc-primary" : ""}`}
       type="button"
       role="tab"
       aria-selected={active}
       onClick={() => onClick(id)}
     >
       {label}
-    </Button>
+    </button>
   );
 }
 
@@ -166,7 +165,7 @@ function TranscriptTab({
 }) {
   return (
     <div className="grid gap-3 border-0 pt-4" role="tabpanel">
-      <p className="mb-3 text-[11px] leading-[1.5] text-muted-foreground">
+      <p className="mb-3 text-[11px] leading-[1.5] text-tc-secondary">
         These are the exact redacted bytes an approval covers. Markers show
         where local scrubbing fired.
       </p>
@@ -174,8 +173,7 @@ function TranscriptTab({
         <RedactedTranscript body={inspector.body} turns={inspector.turns} />
       )}
       {inspector.nextOffset !== null && (
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={() => void inspector.loadMore()}
           disabled={inspector.state === "busy"}
@@ -186,17 +184,16 @@ function TranscriptTab({
               new TextEncoder().encode(inspector.body).byteLength,
           )}{" "}
           remaining)
-        </Button>
+        </GlassButton>
       )}
       {loaded && inspector.turns.length === 0 && (
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void inspector.loadTurns()}
           disabled={inspector.state === "busy"}
         >
           Add turn separators
-        </Button>
+        </TertiaryLink>
       )}
     </div>
   );
@@ -221,7 +218,7 @@ function SearchTab({
         (values) => void inspector.search(values.needle),
       )}
     >
-      <p className="mb-3 text-[11px] leading-[1.5] text-muted-foreground">
+      <p className="mb-3 text-[11px] leading-[1.5] text-tc-secondary">
         Search checks the original session locally and returns a count only. It
         never renders original text.
       </p>
@@ -239,13 +236,12 @@ function SearchTab({
           />
           <FormFieldError id="original-search-error" message={error} />
         </div>
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="submit"
           disabled={inspector.state === "busy" || !form.formState.isValid}
         >
           Check count
-        </Button>
+        </GlassButton>
         {inspector.matches !== null && (
           <strong>
             {inspector.matches} original match
@@ -272,14 +268,13 @@ function TurnTab({
         </p>
       )}
       {loaded && inspector.turns.length === 0 && (
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        <ButtonPrimary size="sm"
           type="button"
           onClick={() => void inspector.loadTurns()}
           disabled={inspector.state === "busy"}
         >
           Load turn index
-        </Button>
+        </ButtonPrimary>
       )}
       {inspector.turns.length > 0 && (
         <div className="mt-3 grid gap-px">

@@ -1,6 +1,7 @@
 import type { HTMLAttributes, ReactNode } from "react";
 import { cx } from "./cx";
-import { StatusDot } from "./indicators";
+import { StatusDot, StatusLabel } from "./indicators";
+import type { StatusTone } from "./status";
 
 type DivProps = HTMLAttributes<HTMLDivElement>;
 
@@ -164,6 +165,36 @@ function FragmentPair({
         {value}
       </dd>
     </>
+  );
+}
+
+/**
+ * A notice on a quiet card: the title carries the tone as a status dot, the
+ * body stays in the text colours. Tone never tints the card or its edge.
+ * `role` defaults to "alert"; pass "status" for news that is not a fault.
+ */
+export function Notice({
+  tone = "ask",
+  title,
+  children,
+  role = "alert",
+  className,
+}: {
+  tone?: StatusTone;
+  title?: ReactNode;
+  children?: ReactNode;
+  role?: "alert" | "status";
+  className?: string;
+}) {
+  return (
+    <div role={role} className={cx("tc-card tc-card--quiet tc-notice", className)}>
+      {title ? (
+        <div className="tc-notice__title">
+          <StatusLabel tone={tone}>{title}</StatusLabel>
+        </div>
+      ) : null}
+      {children ? <div className="tc-notice__body">{children}</div> : null}
+    </div>
   );
 }
 

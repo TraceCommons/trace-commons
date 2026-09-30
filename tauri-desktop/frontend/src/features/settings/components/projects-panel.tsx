@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button";
 import { ProjectModeField } from "./project-mode-field";
 import { ProjectAutomaticDisclosure } from "./project-automatic-disclosure";
 import type { Project, ProjectMode } from "../api/projects-api";
+import { TertiaryLink } from "@/design-system";
 
 export function ProjectsPanel({
   projects,
@@ -27,14 +27,13 @@ export function ProjectsPanel({
           </span>
           <h2>{allowAutoUpload ? "Projects" : "What to watch"}</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={state === "loading" || state === "busy"}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
         Every project starts at ask-first. Ignore a project to leave it out
@@ -64,7 +63,7 @@ export function ProjectsPanel({
         <div className="mt-3 grid gap-px">
           {projects.map((project) => (
             <div
-              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-[18px] border-b border-border py-[15px]"
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-[18px] border-b border-tc-hairline py-[15px]"
               key={project.project_id}
             >
               <div>

@@ -1,6 +1,3 @@
-import { NativeSelect } from "@/components/ui/native-select";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useController, useForm } from "react-hook-form";
@@ -11,6 +8,7 @@ import type {
   EpisodeListEntry,
   QuestionCardResult,
 } from "../workflows";
+import { Checkbox, GlassButton, Select, TertiaryLink } from "@/design-system";
 
 type WorkflowApi = {
   episodes: EpisodeListEntry[];
@@ -114,7 +112,7 @@ export function InsightsWorkflowsPanel({
               >
                 <Checkbox
                   checked={snapshotSelection.field.value.includes(snapshot.id)}
-                  onCheckedChange={() => toggle(snapshotSelection, snapshot.id)}
+                  onChange={() => toggle(snapshotSelection, snapshot.id)}
                   disabled={busy}
                 />
                 <span>
@@ -125,8 +123,7 @@ export function InsightsWorkflowsPanel({
             ))
           )}
         </div>
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={() =>
             void form.handleSubmit(async (values) => {
@@ -137,7 +134,7 @@ export function InsightsWorkflowsPanel({
           disabled={busy || snapshotSelection.field.value.length === 0}
         >
           Create episode
-        </Button>
+        </GlassButton>
         {workflow.detail ? (
           <div className="mt-4 p-[26px]">
             <div className="flex items-start justify-between gap-3">
@@ -147,13 +144,12 @@ export function InsightsWorkflowsPanel({
                 </span>
                 <h3>{workflow.detail.episode.id}</h3>
               </div>
-              <Button
-                className="tc-link"
+              <TertiaryLink
                 type="button"
                 onClick={workflow.close}
               >
                 Back to episodes
-              </Button>
+              </TertiaryLink>
             </div>
             <p className="m-0 tc-caption tc-text-tertiary">
               Resolved {new Date(workflow.detail.resolved_at).toLocaleString()}.
@@ -163,7 +159,7 @@ export function InsightsWorkflowsPanel({
             <div className="mt-3 grid gap-px">
               {workflow.detail.members.map((member) => (
                 <div
-                  className="grid grid-cols-[38px_minmax(0,1fr)_auto_auto] items-center gap-3.5 border-b border-border py-3.5 max-[860px]:grid-cols-[38px_minmax(0,1fr)_auto]"
+                  className="grid grid-cols-[38px_minmax(0,1fr)_auto_auto] items-center gap-3.5 border-b border-tc-hairline py-3.5 max-[860px]:grid-cols-[38px_minmax(0,1fr)_auto]"
                   key={member.id}
                 >
                   <span className="tc-tool-tile tc-tool-tile--lg">
@@ -185,27 +181,26 @@ export function InsightsWorkflowsPanel({
             <div className="my-3 flex gap-3">
               <label>
                 Category
-                <NativeSelect {...form.register("category")} disabled={busy}>
+                <Select {...form.register("category")} disabled={busy}>
                   <option value="unknown">Unknown</option>
                   <option value="refactor">Refactor</option>
                   <option value="tests">Tests</option>
                   <option value="docs">Docs</option>
                   <option value="debugging">Debugging</option>
                   <option value="other">Other</option>
-                </NativeSelect>
+                </Select>
               </label>
               <label>
                 Outcome
-                <NativeSelect {...form.register("outcome")} disabled={busy}>
+                <Select {...form.register("outcome")} disabled={busy}>
                   <option value="unknown">Unknown</option>
                   <option value="accepted">Accepted</option>
                   <option value="partial">Partial</option>
                   <option value="rejected">Rejected</option>
-                </NativeSelect>
+                </Select>
               </label>
             </div>
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={() =>
                 void form.handleSubmit(async (values) => {
@@ -216,7 +211,7 @@ export function InsightsWorkflowsPanel({
               disabled={busy}
             >
               Save episode assessment
-            </Button>
+            </GlassButton>
             <p className="m-0 tc-caption tc-text-tertiary">
               Assessment is user-reported. It does not turn member evidence into
               a verified result.
@@ -230,7 +225,7 @@ export function InsightsWorkflowsPanel({
               </p>
             ) : (
               workflow.episodes.map((entry) => (
-                <Button
+                <button
                   className="grid w-full grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg border-0 bg-transparent px-1.5 py-2 text-left text-inherit hover:bg-white/5 tc-hairline-bottom"
                   type="button"
                   key={entry.episode.id}
@@ -256,7 +251,7 @@ export function InsightsWorkflowsPanel({
                         : "No overlap"}
                     </span>
                   </span>
-                </Button>
+                </button>
               ))
             )}
           </div>
@@ -288,7 +283,7 @@ export function InsightsWorkflowsPanel({
                 checked={episodeSelection.field.value.includes(
                   entry.episode.id,
                 )}
-                onCheckedChange={() => toggle(episodeSelection, entry.episode.id)}
+                onChange={() => toggle(episodeSelection, entry.episode.id)}
                 disabled={busy}
               />
               <span>
@@ -300,8 +295,7 @@ export function InsightsWorkflowsPanel({
             </label>
           ))}
         </div>
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={() =>
             void form.handleSubmit((values) =>
@@ -318,7 +312,7 @@ export function InsightsWorkflowsPanel({
           }
         >
           Calculate cards
-        </Button>
+        </GlassButton>
         {workflow.cards && (
           <div className="mt-[18px] grid grid-cols-2 gap-2.5 max-[860px]:grid-cols-1">
             {workflow.cards.cards.map((card) => (
@@ -334,7 +328,7 @@ export function InsightsWorkflowsPanel({
                 </div>
                 {card.rows.map((row) => (
                   <div
-                    className="flex justify-between gap-3 border-t border-border pt-2 text-[11px] text-muted-foreground"
+                    className="flex justify-between gap-3 border-t border-tc-hairline pt-2 text-[11px] text-tc-secondary"
                     key={row.id}
                   >
                     <span>{row.label ?? row.id.replaceAll("_", " ")}</span>

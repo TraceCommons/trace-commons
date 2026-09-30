@@ -24,7 +24,7 @@ export function SessionSendDisclosure({
   if (!disclosure.data) {
     return (
       <p
-        className={`m-0 text-[11px] ${disclosure.isError ? "text-destructive" : "text-muted-foreground"}`}
+        className={`m-0 text-[11px] ${disclosure.isError ? "text-tc-outside" : "text-tc-secondary"}`}
         role={disclosure.isError ? "alert" : "status"}
       >
         {disclosure.isError
@@ -35,7 +35,7 @@ export function SessionSendDisclosure({
   }
   const { facts, copy } = disclosure.data;
   return (
-    <section className="grid gap-2 border border-border px-3.5 py-3 text-[11px] leading-[1.55]">
+    <section className="grid gap-2 border border-tc-hairline px-3.5 py-3 text-[11px] leading-[1.55]">
       <span className="tc-eyebrow">
         {copy.session.heading}
       </span>
@@ -55,13 +55,13 @@ export function SessionSendDisclosure({
         <div className="tc-card tc-card--quiet grid gap-1">
           <strong>{certificate.data.copy.heading}</strong>
           <dl className="m-0 grid gap-1 font-mono text-[11px]">
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {certificate.data.copy.measurement_label}
             </dt>
             <dd className="m-0 break-all">
               {certificate.data.detail.witness_measurement}
             </dd>
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {certificate.data.copy.signer_label}
             </dt>
             <dd className="m-0 break-all">{certificate.data.detail.signer}</dd>

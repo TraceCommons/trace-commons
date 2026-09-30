@@ -1,5 +1,3 @@
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRef } from "react";
 import { useForm } from "react-hook-form";
@@ -8,6 +6,7 @@ import { useDirectoryPicker } from "../../../lib/tauri/use-platform-actions";
 import { type GitEvidenceFormValues, gitEvidenceFormSchema } from "../forms";
 import type { Insight } from "../types";
 import { OutcomeLinkList } from "./outcome-link-list";
+import { ButtonPrimary, GlassButton, Input } from "@/design-system";
 
 type InsightEvidencePanelProps = {
   insight: Insight;
@@ -83,21 +82,19 @@ export function InsightEvidencePanel({
           />
         </label>
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button
-            className="tc-btn tc-btn--glass"
+          <GlassButton
             type="button"
             onClick={() => void chooseRepository()}
             disabled={!saved || busy || pickerBusy}
           >
             {pickerBusy ? "Choosing…" : "Choose Git repository"}
-          </Button>
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          </GlassButton>
+          <ButtonPrimary size="sm"
             type="submit"
             disabled={!saved || busy || pickerBusy || !form.formState.isValid}
           >
             Link commit
-          </Button>
+          </ButtonPrimary>
         </div>
         {errors.repository && (
           <FormFieldError
@@ -106,7 +103,7 @@ export function InsightEvidencePanel({
           />
         )}
         {form.watch("repository") && (
-          <code className="overflow-hidden text-[10px] text-muted-foreground text-ellipsis whitespace-nowrap">
+          <code className="overflow-hidden text-[10px] text-tc-secondary text-ellipsis whitespace-nowrap">
             {form.watch("repository")}
           </code>
         )}
@@ -135,14 +132,13 @@ export function InsightEvidencePanel({
             if (file) onLinkTestReport(file);
           }}
         />
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={() => reportInput.current?.click()}
           disabled={!saved || busy || pickerBusy}
         >
           Link test report
-        </Button>
+        </GlassButton>
       </div>
       <div className="mt-3.5 grid gap-2.5">
         <span className="mb-1.5 block tc-eyebrow">

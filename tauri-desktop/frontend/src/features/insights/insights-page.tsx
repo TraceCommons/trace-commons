@@ -1,6 +1,3 @@
-import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRef } from "react";
 import { useForm } from "react-hook-form";
@@ -16,6 +13,7 @@ import { useComparisonSpecifications } from "./hooks/use-comparison-specificatio
 import { useComparisonTasks } from "./hooks/use-comparison-tasks";
 import { useInsightsData } from "./hooks/use-insights-data";
 import { useInsightsWorkflows } from "./hooks/use-insights-workflows";
+import { ButtonPrimary, GlassButton, Input, Select } from "@/design-system";
 
 export function InsightsPage() {
   const insights = useInsightsData();
@@ -72,9 +70,9 @@ export function InsightsPage() {
           original file is never modified or uploaded.
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
-          <label className="grid min-w-[175px] gap-1.5 text-[11px] font-bold text-muted-foreground">
+          <label className="grid min-w-[175px] gap-1.5 text-[11px] font-bold text-tc-secondary">
             Format
-            <NativeSelect
+            <Select
               {...sourceForm.register("source")}
               disabled={insights.state === "busy"}
               aria-invalid={Boolean(sourceForm.formState.errors.source)}
@@ -82,24 +80,22 @@ export function InsightsPage() {
               <option value="codex">Codex rollout</option>
               <option value="claude_code">Claude Code session</option>
               <option value="trajectory">Trajectory</option>
-            </NativeSelect>
+            </Select>
           </label>
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => input.current?.click()}
             disabled={insights.state === "busy"}
           >
             {insights.state === "busy" ? "Working…" : "Choose file"}
-          </Button>
-          <Button
-            className="tc-btn tc-btn--glass"
+          </ButtonPrimary>
+          <GlassButton
             type="button"
             onClick={() => void insights.refresh()}
             disabled={insights.state === "busy"}
           >
             Refresh history
-          </Button>
+          </GlassButton>
         </div>
         <Input
           {...fileField}
@@ -168,7 +164,7 @@ export function InsightsPage() {
         ) : (
           <div className="mt-3 grid gap-px">
             {snapshots.map((snapshot) => (
-              <Button
+              <button
                 className="grid w-full grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg border-0 bg-transparent px-1.5 py-2 text-left text-inherit hover:bg-white/5 tc-hairline-bottom"
                 type="button"
                 key={snapshot.id}
@@ -192,7 +188,7 @@ export function InsightsPage() {
                     {snapshot.manual_annotation?.outcome ?? "Unassessed"}
                   </span>
                 </span>
-              </Button>
+              </button>
             ))}
           </div>
         )}

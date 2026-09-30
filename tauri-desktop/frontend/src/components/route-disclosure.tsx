@@ -23,15 +23,15 @@ export function RouteDisclosureBody({
         <div className="tc-card tc-card--quiet grid gap-2">
           <strong className="text-[12px]">{copy.witness.heading}</strong>
           <dl className="m-0 grid gap-1 font-mono text-[11px]">
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {copy.witness.address_label}
             </dt>
             <dd className="m-0 break-all">{facts.witness.url}</dd>
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {copy.witness.signing_label}
             </dt>
             <dd className="m-0 break-all">{facts.witness.signing_address}</dd>
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {copy.witness.measurements_label}
             </dt>
             {facts.witness.pinned_measurements.map((pin) => (
@@ -72,7 +72,7 @@ export function RouteDisclosurePanel() {
         </>
       ) : (
         <p
-          className={`m-0 text-[12px] ${disclosure.isError ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${disclosure.isError ? "text-tc-outside" : "text-tc-secondary"}`}
           role={disclosure.isError ? "alert" : "status"}
         >
           {disclosure.isError

@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
 import type { CoreStatus, CoreStatusState } from "../../../lib/tauri/types";
 import type { PublicProfile } from "../types";
+import { TertiaryLink } from "@/design-system";
 
 type ProfileSummaryProps = {
   coreStatus: CoreStatus | null;
@@ -24,7 +24,7 @@ export function ProfileSummary({
   return (
     <section className="tc-card">
       <div className="grid grid-cols-[auto_1fr_auto] items-center gap-[18px] max-[860px]:grid-cols-[auto_1fr]">
-        <div className="tc-card grid h-[66px] w-[66px] place-items-center text-[19px] font-extrabold text-primary-foreground">
+        <div className="tc-card grid h-[66px] w-[66px] place-items-center text-[19px] font-extrabold text-tc-on-accent">
           TC
         </div>
         <div>
@@ -46,7 +46,7 @@ export function ProfileSummary({
           {connected ? "Rust core connected" : "Connecting"}
         </span>
       </div>
-      <div className="mt-7 grid grid-cols-3 gap-px border-y border-border">
+      <div className="mt-7 grid grid-cols-3 gap-px border-y border-tc-hairline">
         <SummaryItem
           label="Handle"
           value={published ? `@${profile?.handle ?? "—"}` : "Not claimed"}
@@ -66,14 +66,13 @@ export function ProfileSummary({
             ? "Rust core status unavailable"
             : "Status read from existing contributor daemon"}
         </span>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={coreStatusState === "loading"}
         >
           Refresh status
-        </Button>
+        </TertiaryLink>
       </div>
     </section>
   );

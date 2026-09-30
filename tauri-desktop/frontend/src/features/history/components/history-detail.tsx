@@ -66,7 +66,7 @@ export function HistoryDetailView({
         </span>
       </div>
       {detail.permitted_uses.length > 0 && (
-        <div className="mt-5 border-t border-border pt-4">
+        <div className="mt-5 border-t border-tc-hairline pt-4">
           <span className="mb-1.5 block tc-eyebrow">
             PERMITTED USES
           </span>
@@ -78,7 +78,7 @@ export function HistoryDetailView({
         </div>
       )}
       {detail.human_correction && (
-        <div className="mt-5 border-t border-border pt-4">
+        <div className="mt-5 border-t border-tc-hairline pt-4">
           <span className="mb-1.5 block tc-eyebrow">
             DECISIVE CORRECTION
           </span>

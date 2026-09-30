@@ -1,8 +1,8 @@
-import { Button } from "@/components/ui/button";
 import { scrubDisclosureLines } from "../../../lib/tauri/automatic-grant-copy";
 import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 // K11, first screen: what is removed before an automatic send, and that no
 // one reviews it. The wording is the one the contributor core chose for this
@@ -32,7 +32,7 @@ export function OnboardingScrubDisclosureStep({
         </div>
       ) : (
         <p
-          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-tc-outside" : "text-tc-secondary"}`}
           role={grantCopy.isError ? "alert" : "status"}
         >
           {grantCopy.isError
@@ -41,22 +41,20 @@ export function OnboardingScrubDisclosureStep({
         </p>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy}
         >
           Back
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={onboarding.acknowledgeScrubDisclosure}
           disabled={busy || !copy}
         >
           Continue
-        </Button>
+        </ButtonPrimary>
       </div>
     </section>
   );

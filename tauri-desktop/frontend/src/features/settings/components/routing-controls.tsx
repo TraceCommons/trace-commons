@@ -1,12 +1,10 @@
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { FormFieldError } from "../../../components/form-field-error";
 import type { RoutingEvidence } from "../api/routing-api";
 import { type RoutingFormValues, routingFormSchema } from "../forms";
+import { ButtonPrimary, Checkbox, GlassButton, Input } from "@/design-system";
 
 export function RoutingControls({
   enabled: initialEnabled,
@@ -70,7 +68,7 @@ export function RoutingControls({
       <label className="mt-5 flex items-start gap-2.5 text-[12px] font-normal text-[var(--tc-text-primary)]">
         <Checkbox
           checked={enabled}
-          onCheckedChange={(checked) =>
+          onChange={(checked) =>
             form.setValue("enabled", checked === true, { shouldDirty: true })
           }
           disabled={busy}
@@ -117,27 +115,25 @@ export function RoutingControls({
         </label>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        <ButtonPrimary size="sm"
           type="submit"
           disabled={busy || !form.formState.isValid}
         >
           Save routing
-        </Button>
+        </ButtonPrimary>
         {enabled && (
-          <Button
-            className="tc-btn tc-btn--glass"
+          <GlassButton
             type="button"
             onClick={() => void check()}
             disabled={busy || !form.formState.isValid}
           >
             Check now
-          </Button>
+          </GlassButton>
         )}
       </div>
       {evidence && (
         <div className="mt-3 grid gap-px">
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.08em] text-primary">
+          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.08em] text-tc-accent">
             PROXY EVIDENCE · {evidence.outcome}
           </span>
           {evidence.tools.map((tool) => (

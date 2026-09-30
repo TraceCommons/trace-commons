@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { SkillCopy, SkillReview } from "../skill-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 export function SkillReviewPreview({
   copy,
@@ -16,7 +16,7 @@ export function SkillReviewPreview({
 }) {
   return (
     <div className="grid gap-4">
-      <div className="flex flex-wrap gap-x-5 gap-y-[9px] text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap gap-x-5 gap-y-[9px] text-[11px] text-tc-secondary">
         <span>
           <b>{copy.exact_package}</b> {review.draft.name}
         </span>
@@ -31,22 +31,20 @@ export function SkillReviewPreview({
         {review.skill_md}
       </pre>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onEdit}
           disabled={busy}
         >
           {copy.edit_skill}
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={onApprove}
           disabled={busy}
         >
           {busy ? copy.testing : copy.approve_and_test}
-        </Button>
+        </ButtonPrimary>
       </div>
     </div>
   );

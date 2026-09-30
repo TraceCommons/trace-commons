@@ -1,10 +1,9 @@
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import type { UseFormReturn } from "react-hook-form";
 import type { ComparisonTaskDetail } from "../comparisons";
 import type { ComparisonTaskFormValues } from "../forms";
 import type { EpisodeListEntry } from "../workflows";
 import type { SelectionField } from "./comparison-task-types";
+import { Checkbox, GlassButton } from "@/design-system";
 
 export function ComparisonTaskList({
   episodes,
@@ -40,7 +39,7 @@ export function ComparisonTaskList({
             >
               <Checkbox
                 checked={episodeSelection.value.includes(entry.episode.id)}
-                onCheckedChange={() => onToggle(episodeSelection, entry.episode.id)}
+                onChange={() => onToggle(episodeSelection, entry.episode.id)}
                 disabled={busy}
               />
               <span>
@@ -51,8 +50,7 @@ export function ComparisonTaskList({
           ))
         )}
       </div>
-      <Button
-        className="tc-btn tc-btn--glass"
+      <GlassButton
         type="button"
         onClick={() =>
           void form.handleSubmit(async (values) => {
@@ -64,10 +62,10 @@ export function ComparisonTaskList({
         disabled={busy || episodeSelection.value.length === 0}
       >
         Create comparison task
-      </Button>
+      </GlassButton>
       <div className="mt-3 grid gap-px">
         {tasks.map((item) => (
-          <Button
+          <button
             className="grid w-full grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg border-0 bg-transparent px-1.5 py-2 text-left text-inherit hover:bg-white/5 tc-hairline-bottom"
             type="button"
             key={item.task.id}
@@ -89,7 +87,7 @@ export function ComparisonTaskList({
                 {item.stale_reasons.length ? "Review required" : "Current"}
               </span>
             </span>
-          </Button>
+          </button>
         ))}
       </div>
     </>

@@ -1,7 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
-import { Button } from "@/components/ui/button";
-import { NativeSelect } from "@/components/ui/native-select";
 import { FormFieldError } from "../../../components/form-field-error";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import type { useSettings } from "../../settings/public";
@@ -11,6 +9,7 @@ import {
 } from "../forms";
 import type { usePrivateAi } from "../hooks/use-private-ai";
 import { PrivateAiCredentialAction } from "./private-ai-credential-action";
+import { ButtonPrimary, GlassButton, Select, TertiaryLink } from "@/design-system";
 
 type PrivateAiController = ReturnType<typeof usePrivateAi>;
 type SettingsController = ReturnType<typeof useSettings>;
@@ -44,8 +43,7 @@ export function PrivateAiConnectionPanel({
             <h2>{disclosure.data.private_inference.settings_title}</h2>
           )}
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => {
             void settings.refresh();
@@ -54,7 +52,7 @@ export function PrivateAiConnectionPanel({
           disabled={settings.state === "loading" || privateAi.busy}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       <p>
         The production flow keeps privacy-filter credentials, inference
@@ -66,7 +64,7 @@ export function PrivateAiConnectionPanel({
         It does not publish traces. Credential enrollment remains separate.
       </p>
       {disclosure.data ? (
-        <div className="tc-card tc-card--quiet my-4 grid gap-2 text-[11px] leading-[1.55] text-muted-foreground">
+        <div className="tc-card tc-card--quiet my-4 grid gap-2 text-[11px] leading-[1.55] text-tc-secondary">
           <p className="m-0 whitespace-pre-line">
             {disclosure.data.credential_cost}
           </p>
@@ -75,7 +73,7 @@ export function PrivateAiConnectionPanel({
           )}
         </div>
       ) : (
-        <p className="my-4 text-[11px] text-destructive">
+        <p className="my-4 text-[11px] text-tc-outside">
           {disclosure.isError
             ? "Credential disclosure unavailable. Sign-in is disabled."
             : "Loading credential disclosure…"}
@@ -96,7 +94,7 @@ export function PrivateAiConnectionPanel({
           <label className="sr-only" htmlFor="private-ai-provider">
             Credential provider
           </label>
-          <NativeSelect
+          <Select
             id="private-ai-provider"
             {...form.register("provider")}
             disabled={privateAi.busy}
@@ -108,7 +106,7 @@ export function PrivateAiConnectionPanel({
             <option value="github">GitHub</option>
             <option value="google">Google</option>
             <option value="near">NEAR wallet</option>
-          </NativeSelect>
+          </Select>
           <FormFieldError
             id="private-ai-provider-error"
             message={providerError}
@@ -123,19 +121,18 @@ export function PrivateAiConnectionPanel({
       {browserUrl && (
         <p className="m-0 tc-caption tc-text-tertiary">
           Open sign-in:{" "}
-          <Button
-            className="tc-link"
+          <TertiaryLink
             type="button"
             onClick={() => void privateAi.openBrowser(browserUrl)}
             disabled={privateAi.busy}
           >
             continue in browser
-          </Button>
+          </TertiaryLink>
           . URL is returned once by Rust.
         </p>
       )}
       {privateAi.credential?.keychain && (
-        <div className="grid gap-1 border-t border-border pt-4 text-[11px] leading-[1.55] text-muted-foreground">
+        <div className="grid gap-1 border-t border-tc-hairline pt-4 text-[11px] leading-[1.55] text-tc-secondary">
           <strong className="text-[var(--tc-text-primary)]">OS credential storage</strong>
           <span>
             {privateAi.credential.keychain.state} · migration{" "}
@@ -153,25 +150,29 @@ export function PrivateAiConnectionPanel({
           )}
         </div>
       )}
-      <div className="flex items-center justify-between gap-6 border-t border-border py-[15px] first:mt-5">
+      <div className="flex items-center justify-between gap-6 border-t border-tc-hairline py-[15px] first:mt-5">
         <div>
           <strong>Answer model calls on this computer</strong>
           <span>
             {inferenceEnabled ? "Enabled by explicit local choice" : "Disabled"}
           </span>
         </div>
-        <Button
-          variant={inferenceEnabled ? "secondary" : "default"}
-          type="button"
-          onClick={() => void privateAi.setEnabled(!inferenceEnabled)}
-          disabled={canEnable}
-        >
-          {privateAi.busy
-            ? "Applying…"
-            : inferenceEnabled
-              ? "Disable"
-              : "Enable"}
-        </Button>
+        {inferenceEnabled ? (
+          <GlassButton
+            onClick={() => void privateAi.setEnabled(!inferenceEnabled)}
+            disabled={canEnable}
+          >
+            {privateAi.busy ? "Applying…" : "Disable"}
+          </GlassButton>
+        ) : (
+          <ButtonPrimary
+            size="sm"
+            onClick={() => void privateAi.setEnabled(!inferenceEnabled)}
+            disabled={canEnable}
+          >
+            {privateAi.busy ? "Applying…" : "Enable"}
+          </ButtonPrimary>
+        )}
       </div>
     </section>
   );

@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { AutomaticGrant } from "../../onboarding/public";
+import { GlassButton, TertiaryLink } from "@/design-system";
 
 // The Flow 1 grant after onboarding: whether one is in force, as the daemon
 // reports it, and the way to withdraw it. Withdrawing stops new projects
@@ -37,25 +37,24 @@ export function AutomaticGrantPanel({
           </span>
           <h2 id="automatic-grant-heading">Automatic contributing</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       {error && (
         <p
-          className="tc-card tc-card--quiet mb-[18px] border-destructive/30 text-[12px] text-destructive"
+          className="tc-card tc-card--quiet mb-[18px] border-tc-outside/30 text-[12px] text-tc-outside"
           role="alert"
         >
           {error}
         </p>
       )}
       {state === "loading" && (
-        <p className="m-0 text-[13px] text-muted-foreground" role="status">
+        <p className="m-0 text-[13px] text-tc-secondary" role="status">
           Reading automatic contributing…
         </p>
       )}
@@ -79,7 +78,7 @@ export function AutomaticGrantPanel({
           )}
         </div>
       )}
-      <p className="mt-3 mb-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="mt-3 mb-0 text-[11px] leading-[1.55] text-tc-secondary">
         Turning it off stops new projects from contributing automatically.
         Projects it already turned on keep their mode; change each under
         Projects.
@@ -88,28 +87,26 @@ export function AutomaticGrantPanel({
         <div className="mt-3 flex flex-wrap gap-2">
           {/* Opens the grant screens (scope, path, both disclosures); it
               turns nothing on by itself. */}
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={onTurnOn}
             disabled={busy}
           >
             Turn on automatic contributing
-          </Button>
+          </GlassButton>
         </div>
       )}
       {granted && (
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => void onWithdraw()}
             disabled={busy}
           >
             {state === "busy"
               ? "Turning off…"
               : "Turn off automatic contributing"}
-          </Button>
+          </GlassButton>
         </div>
       )}
     </section>

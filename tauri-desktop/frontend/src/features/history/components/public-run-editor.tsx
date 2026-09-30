@@ -1,9 +1,9 @@
-import { Button } from "@/components/ui/button";
 import { useExternalUrl } from "../../../lib/tauri/use-platform-actions";
 import { usePublicRun } from "../hooks/use-public-run";
 import type { HistoryDetail } from "../types";
 import { PublicRunForm } from "./public-run-form";
 import { PublicRunPreview } from "./public-run-preview";
+import { GlassButton } from "@/design-system";
 
 export function PublicRunEditor({
   submissionId,
@@ -122,31 +122,29 @@ function PublishedPage({
       )}
       <div className="mt-3 flex flex-wrap gap-2">
         {onOpen && (
-          <Button
-            className="tc-btn tc-btn--glass"
+          <GlassButton
             type="button"
             onClick={onOpen}
             disabled={working}
           >
             Open page
-          </Button>
+          </GlassButton>
         )}
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onEdit}
           disabled={working}
         >
           Edit page
-        </Button>
-        <Button
-          className="tc-btn tc-btn--glass tc-text-outside"
+        </GlassButton>
+        <GlassButton
+          className="tc-text-outside"
           type="button"
           onClick={onUnpublish}
           disabled={working}
         >
           {working ? "Unpublishing…" : "Unpublish"}
-        </Button>
+        </GlassButton>
       </div>
     </section>
   );

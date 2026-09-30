@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { UndoScope } from "../api/undo-api";
+import { GlassButton, TertiaryLink } from "@/design-system";
 
 export function UndoBar({
   scope,
@@ -36,21 +36,19 @@ export function UndoBar({
         {error && <small>{error}</small>}
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onUndo}
           disabled={busy || !scope}
         >
           {busy ? "Undoing…" : "Undo"}
-        </Button>
-        <Button
-          className="tc-link"
+        </GlassButton>
+        <TertiaryLink
           type="button"
           onClick={onDismiss}
         >
           Dismiss
-        </Button>
+        </TertiaryLink>
       </div>
     </section>
   );

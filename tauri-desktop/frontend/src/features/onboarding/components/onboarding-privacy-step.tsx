@@ -1,11 +1,10 @@
-import { Button } from "@/components/ui/button";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { FormFieldError } from "../../../components/form-field-error";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import { type PrivacyFormValues, privacyFormSchema } from "../forms";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton, Radio, RadioGroup } from "@/design-system";
 
 export function OnboardingPrivacyStep({
   onboarding,
@@ -32,7 +31,7 @@ export function OnboardingPrivacyStep({
           <p>{copy.disclosure}</p>
         </>
       ) : (
-        <p className="text-destructive" role="alert">
+        <p className="text-tc-outside" role="alert">
           {disclosure.isError
             ? "Privacy scan disclosure unavailable. Continue is disabled."
             : "Loading privacy scan disclosure…"}
@@ -45,9 +44,9 @@ export function OnboardingPrivacyStep({
         )}
       >
         <RadioGroup
-          className="my-[18px] gap-px border-t border-border"
+          className="my-[18px] gap-px border-t border-tc-hairline"
           value={privacyChoice}
-          onValueChange={(value) =>
+          onChange={(value) =>
             form.setValue("privacyChoice", value as PrivacyFormValues["privacyChoice"], {
               shouldDirty: true,
               shouldValidate: true,
@@ -55,7 +54,7 @@ export function OnboardingPrivacyStep({
           }
         >
           <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
-            <RadioGroupItem
+            <Radio
               value="local"
               disabled={busy}
               aria-invalid={Boolean(choiceError)}
@@ -68,7 +67,7 @@ export function OnboardingPrivacyStep({
             </span>
           </label>
           <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
-            <RadioGroupItem
+            <Radio
               value="scan"
               disabled={busy}
               aria-invalid={Boolean(choiceError)}
@@ -83,21 +82,19 @@ export function OnboardingPrivacyStep({
         </RadioGroup>
         <FormFieldError id="privacy-choice-error" message={choiceError} />
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button
-            className="tc-btn tc-btn--glass"
+          <GlassButton
             type="button"
             onClick={onboarding.back}
             disabled={busy}
           >
             Back
-          </Button>
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          </GlassButton>
+          <ButtonPrimary size="sm"
             type="submit"
             disabled={busy || !copy}
           >
             Continue
-          </Button>
+          </ButtonPrimary>
         </div>
       </form>
     </section>

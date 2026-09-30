@@ -24,7 +24,7 @@ export function CreditRecordPanel({
           exchange rate, or date.
         </p>
         {refreshedAt ? (
-          <div className="mt-1 flex flex-wrap gap-8 border-t border-border pt-3.5">
+          <div className="mt-1 flex flex-wrap gap-8 border-t border-tc-hairline pt-3.5">
             <CreditFigure label="Final" value={finalPoints} />
             <CreditFigure label="Still being scored" value={pendingPoints} />
           </div>

@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
 import { ProjectsPanel } from "../../settings/public";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 export function OnboardingProjectsStep({
   onboarding,
@@ -18,22 +18,20 @@ export function OnboardingProjectsStep({
         allowAutoUpload={false}
       />
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy}
         >
           Back
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={onboarding.finishProjects}
           disabled={busy}
         >
           Continue
-        </Button>
+        </ButtonPrimary>
       </div>
     </>
   );

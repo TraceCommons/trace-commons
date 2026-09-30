@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { HistoryDetail, PublicRunDraft } from "../types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 type Props = {
   detail: HistoryDetail;
@@ -46,7 +46,7 @@ export function PublicRunPreview({
           value={`/runs/${draft.source_slug}`}
         />
       )}
-      <div className="grid gap-[9px] border-t border-border pt-4">
+      <div className="grid gap-[9px] border-t border-tc-hairline pt-4">
         <span className="mb-1.5 block tc-eyebrow">
           OBSERVED EVIDENCE
         </span>
@@ -55,16 +55,14 @@ export function PublicRunPreview({
         ))}
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onEdit}
           disabled={working}
         >
           Edit draft
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={onPublish}
           disabled={working}
@@ -74,7 +72,7 @@ export function PublicRunPreview({
             : detail.publication
               ? "Update page"
               : "Publish page"}
-        </Button>
+        </ButtonPrimary>
       </div>
     </div>
   );
@@ -82,7 +80,7 @@ export function PublicRunPreview({
 
 function PreviewField({ label, value }: { label: string; value: string }) {
   return (
-    <div className="grid gap-[5px] border-t border-border pt-3">
+    <div className="grid gap-[5px] border-t border-tc-hairline pt-3">
       <span className="mb-1.5 block tc-eyebrow">
         {label}
       </span>

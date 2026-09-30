@@ -1,4 +1,3 @@
-import { Button } from "@/components/ui/button";
 import { CenteredNotice } from "../../../components/centered-notice";
 import {
   useRedactionSummary,
@@ -10,6 +9,7 @@ import type {
 } from "../../../lib/tauri/contributor-copy-api";
 import type { OutcomeVerdict, WaitingPreview } from "../types";
 import { WaitingOutcomeFields } from "./waiting-outcome-fields";
+import { ButtonPrimary, GlassButton, TertiaryLink } from "@/design-system";
 
 type WaitingReviewProps = {
   preview: WaitingPreview | null;
@@ -107,15 +107,15 @@ export function WaitingReview({
           <h3>What would leave this computer</h3>
         </div>
         <span
-          className={`tc-chip tc-chip--glass self-start ${preview.enrolled ? "" : "bg-muted text-muted-foreground"}`}
+          className={`tc-chip tc-chip--glass self-start ${preview.enrolled ? "" : "bg-tc-tint text-tc-secondary"}`}
         >
           {preview.enrolled ? "Enrolled" : "Not enrolled"}
         </span>
       </div>
-      <p className="tc-card tc-card--quiet my-[18px] mb-3.5 text-[13px] leading-[1.55] text-foreground">
+      <p className="tc-card tc-card--quiet my-[18px] mb-3.5 text-[13px] leading-[1.55] text-tc-primary">
         {preview.opening_prompt || "No opening prompt"}
       </p>
-      <div className="flex flex-wrap gap-x-[18px] gap-y-2 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap gap-x-[18px] gap-y-2 text-[11px] text-tc-secondary">
         <span>
           <b>{formatBytes(preview.would_send_bytes)}</b> redacted payload
         </span>
@@ -124,7 +124,7 @@ export function WaitingReview({
         </span>
       </div>
       {redactionSummary.isPending && (
-        <p className="my-3.5 text-[11px] text-muted-foreground">
+        <p className="my-3.5 text-[11px] text-tc-secondary">
           Preparing redaction summary…
         </p>
       )}
@@ -138,12 +138,12 @@ export function WaitingReview({
           <div className="grid gap-1">
             <strong>Removed</strong>
             {redactionSummary.data.removed.length === 0 ? (
-              <p className="m-0 text-muted-foreground">
+              <p className="m-0 text-tc-secondary">
                 Nothing matched for removal.
               </p>
             ) : (
               redactionSummary.data.removed.map((item) => (
-                <p className="m-0 text-muted-foreground" key={item.family}>
+                <p className="m-0 text-tc-secondary" key={item.family}>
                   <strong className="text-[var(--tc-text-primary)]">
                     {item.occurrences} {item.display}
                     {item.distinct > 0 && item.distinct < item.occurrences
@@ -157,12 +157,12 @@ export function WaitingReview({
             )}
           </div>
           {redactionSummary.data.still_present.length > 0 && (
-            <div className="tc-card tc-card--quiet grid gap-1 border-destructive/40">
-              <strong className="text-destructive">
+            <div className="tc-card tc-card--quiet grid gap-1 border-tc-outside/40">
+              <strong className="text-tc-outside">
                 Found, and still in what would be sent
               </strong>
               {redactionSummary.data.still_present.map((item) => (
-                <p className="m-0 text-muted-foreground" key={item.family}>
+                <p className="m-0 text-tc-secondary" key={item.family}>
                   <strong className="text-[var(--tc-text-primary)]">
                     {item.occurrences} {item.display}
                   </strong>
@@ -175,7 +175,7 @@ export function WaitingReview({
         </div>
       )}
       {residualRequired && (
-        <p className="tc-card tc-card--quiet my-3.5 border-destructive/40 text-[11px] leading-[1.5] text-destructive">
+        <p className="tc-card tc-card--quiet my-3.5 border-tc-outside/40 text-[11px] leading-[1.5] text-tc-outside">
           {residualCopy.data ??
             (residualCopy.isError
               ? "Residual secret warning unavailable. Contribution is disabled."
@@ -194,7 +194,7 @@ export function WaitingReview({
         </p>
       )}
       {eligibilityRequired && (
-        <div className="my-3.5 grid gap-1 text-[11px] leading-[1.5] text-muted-foreground">
+        <div className="my-3.5 grid gap-1 text-[11px] leading-[1.5] text-tc-secondary">
           {eligibilityCopy ? (
             <>
               <p className="m-0">{eligibilityCopy.state_line}</p>
@@ -203,7 +203,7 @@ export function WaitingReview({
               )}
             </>
           ) : eligibilityError ? (
-            <p className="m-0 text-destructive">
+            <p className="m-0 text-tc-outside">
               Contribution eligibility could not be checked. Approval is disabled.
             </p>
           ) : eligibilityPending ? (
@@ -230,11 +230,11 @@ export function WaitingReview({
         </p>
       )}
       {credentialRefusal && outcomeCopy && (
-        <div className="tc-card tc-card--quiet my-3.5 border-destructive/40 text-[11px] leading-[1.5]">
-          <strong className="text-destructive">
+        <div className="tc-card tc-card--quiet my-3.5 border-tc-outside/40 text-[11px] leading-[1.5]">
+          <strong className="text-tc-outside">
             {outcomeCopy.correction_credential_headline}
           </strong>
-          <p className="m-0 mt-1 text-muted-foreground">
+          <p className="m-0 mt-1 text-tc-secondary">
             {outcomeCopy.correction_credential_body}
           </p>
         </div>
@@ -243,24 +243,21 @@ export function WaitingReview({
         <p className="my-2 tc-caption tc-text-outside">{error}</p>
       )}
       <div className="mt-3 flex justify-end gap-2">
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={onInspect}
           disabled={state === "acting"}
         >
           Look inside
-        </Button>
-        <Button
-          className="tc-btn tc-btn--glass"
+        </TertiaryLink>
+        <GlassButton
           type="button"
           onClick={onDismiss}
           disabled={state === "acting"}
         >
           Dismiss
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={onApprove}
           disabled={
@@ -280,7 +277,7 @@ export function WaitingReview({
               : eligibilityRequired && !eligibilityReady
                 ? "Checking eligibility…"
                 : "Contribute"}
-        </Button>
+        </ButtonPrimary>
       </div>
     </div>
   );

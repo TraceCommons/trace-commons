@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import { useProjectIgnoreCopy } from "../../../lib/tauri/use-contributor-copy";
+import { GlassButton } from "@/design-system";
 
 export function IgnoreProjectControl({
   projectId,
@@ -44,15 +44,14 @@ export function IgnoreProjectControl({
   return (
     <>
       {hideTrigger ? null : (
-        <Button
+        <GlassButton
           type="button"
-          variant="outline"
           title={copy.data?.tooltip}
           onClick={() => setOpen(true)}
           disabled={disabled || !copy.data}
         >
           {copy.data?.button ?? "Ignore project"}
-        </Button>
+        </GlassButton>
       )}
       <ResponsiveOverlay
         open={open}
@@ -61,22 +60,20 @@ export function IgnoreProjectControl({
         description={copy.data?.tooltip}
         footer={
           <div className="flex justify-end gap-2">
-            <Button
+            <GlassButton
               type="button"
-              variant="outline"
               onClick={() => setOpen(false)}
               disabled={busy}
             >
               Keep project
-            </Button>
-            <Button
+            </GlassButton>
+            <GlassButton className="tc-text-outside"
               type="button"
-              variant="destructive"
               onClick={() => void confirm()}
               disabled={busy || !copy.data}
             >
               {busy ? "Ignoring…" : (copy.data?.button ?? "Ignore project")}
-            </Button>
+            </GlassButton>
           </div>
         }
       >

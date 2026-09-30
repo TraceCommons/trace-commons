@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { usePrivateAi } from "../hooks/use-private-ai";
+import { TertiaryLink } from "@/design-system";
 
 type PrivateAiController = ReturnType<typeof usePrivateAi>;
 
@@ -18,17 +18,16 @@ export function PrivateAiBalancePanel({
           </span>
           <h2>NEAR AI usage</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void privateAi.refreshBalance()}
           disabled={privateAi.busy}
         >
           Refresh balance
-        </Button>
+        </TertiaryLink>
       </div>
       {balance ? (
-        <div className="mt-5 grid gap-[7px] text-[12px] text-muted-foreground">
+        <div className="mt-5 grid gap-[7px] text-[12px] text-tc-secondary">
           <strong>{balance.state_line || "Balance read"}</strong>
           {balance.remaining_line && <span>{balance.remaining_line}</span>}
           {balance.limit_line && <span>{balance.limit_line}</span>}

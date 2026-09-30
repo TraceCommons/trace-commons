@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { AuditEntry } from "../api/audit-api";
+import { TertiaryLink } from "@/design-system";
 
 const actionLabels: Record<string, string> = {
   "armed-auto-upload": "Automatic contributing turned on for",
@@ -44,14 +44,13 @@ export function AuditPanel({
           </span>
           <h2>Recent changes</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={state === "loading"}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
         Visibility record only. It does not authorize, block, or undo changes.
@@ -77,10 +76,10 @@ export function AuditPanel({
         </p>
       )}
       {state === "ready" && entries.length > 0 && (
-        <div className="mt-[18px] grid gap-px border-t border-border">
+        <div className="mt-[18px] grid gap-px border-t border-tc-hairline">
           {entries.map((entry) => (
             <div
-              className="grid grid-cols-[170px_minmax(0,1fr)] gap-4 border-b border-border py-[13px] text-[11px] leading-[1.45] text-muted-foreground"
+              className="grid grid-cols-[170px_minmax(0,1fr)] gap-4 border-b border-tc-hairline py-[13px] text-[11px] leading-[1.45] text-tc-secondary"
               key={`${entry.at}-${entry.action}-${entry.project_label ?? "global"}-${entry.detail ?? ""}`}
             >
               <time dateTime={entry.at}>{formatInstant(entry.at)}</time>

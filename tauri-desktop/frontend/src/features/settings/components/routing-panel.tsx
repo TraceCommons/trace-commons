@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button";
 import type { CoreStatus } from "../../../lib/tauri/types";
 import type { RoutingDiscovery, RoutingEvidence } from "../api/routing-api";
 import { RoutingControls } from "./routing-controls";
+import { TertiaryLink } from "@/design-system";
 
 function stateLabel(state: string) {
   return (
@@ -62,14 +62,13 @@ export function RoutingPanel({
           </span>
           <h2>Local proxy boundary</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
         >
           Discover
-        </Button>
+        </TertiaryLink>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
         Routing is opt-in. The daemon reads only a declared local proxy and
@@ -92,7 +91,7 @@ export function RoutingPanel({
         </span>
       </div>
       {discovery?.found && (
-        <p className="mt-3.5 text-[11px] leading-[1.45] text-muted-foreground">
+        <p className="mt-3.5 text-[11px] leading-[1.45] text-tc-secondary">
           Proxy discovery found port {discovery.port ?? "unknown"}
           {discovery.token_path
             ? ` · token directory ${discovery.token_path}`

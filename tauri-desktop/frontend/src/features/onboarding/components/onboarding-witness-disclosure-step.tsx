@@ -1,9 +1,9 @@
-import { Button } from "@/components/ui/button";
 import { RouteDisclosureBody } from "../../../components/route-disclosure";
 import { useRouteDisclosure } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { useWitness } from "../../settings/public";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 // K11, second screen: whether a session leaves this machine unredacted, for
 // whom (both enclaves), and where the witness came from. Every fact is the
@@ -47,7 +47,7 @@ export function OnboardingWitnessDisclosureStep({
         </div>
       ) : (
         <p
-          className={`m-0 text-[12px] ${failed ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${failed ? "text-tc-outside" : "text-tc-secondary"}`}
           role={failed ? "alert" : "status"}
         >
           {failed
@@ -56,16 +56,14 @@ export function OnboardingWitnessDisclosureStep({
         </p>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy}
         >
           Back
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={() =>
             onboarding.acknowledgeWitnessDisclosure(
@@ -75,7 +73,7 @@ export function OnboardingWitnessDisclosureStep({
           disabled={busy || !ready}
         >
           Continue
-        </Button>
+        </ButtonPrimary>
       </div>
     </section>
   );

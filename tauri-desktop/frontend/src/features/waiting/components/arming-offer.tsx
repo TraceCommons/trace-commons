@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import { useArmingOfferCopy } from "../../../lib/tauri/use-contributor-copy";
 import type { ArmingOffer as ArmingOfferData } from "../api/arming-api";
+import { GlassButton } from "@/design-system";
 
 export function ArmingOffer({
   offer,
@@ -36,34 +36,32 @@ export function ArmingOffer({
                 {copy.data.evidence}
               </p>
               <h2>{copy.data.question}</h2>
-              <p className="whitespace-pre-line text-[12px] leading-[1.55] text-muted-foreground">
+              <p className="whitespace-pre-line text-[12px] leading-[1.55] text-tc-secondary">
                 {copy.data.body}
               </p>
             </>
           ) : (
-            <p className="text-[12px] text-destructive">
+            <p className="text-[12px] text-tc-outside">
               {copy.isError
                 ? "Shared arming copy unavailable. Automation is disabled."
                 : "Loading automatic contribution disclosure…"}
             </p>
           )}
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={onDecline}
               disabled={busy || !copy.data}
             >
               {copy.data?.decline ?? "Loading…"}
-            </Button>
-            <Button
-              className="tc-btn tc-btn--glass"
+            </GlassButton>
+            <GlassButton
               type="button"
               onClick={() => setConfirming(true)}
               disabled={busy || !copy.data}
             >
               {copy.data?.confirm ?? "Loading…"}
-            </Button>
+            </GlassButton>
           </div>
         </>
       )}
@@ -80,17 +78,15 @@ export function ArmingOffer({
           description={copy.data.body}
           footer={
             <div className="flex justify-end gap-2">
-              <Button
+              <GlassButton
                 type="button"
-                variant="outline"
                 onClick={() => setConfirming(false)}
                 disabled={busy}
               >
                 {copy.data.decline}
-              </Button>
-              <Button
+              </GlassButton>
+              <GlassButton
                 type="button"
-                variant="outline"
                 onClick={() => {
                   setConfirming(false);
                   onAccept();
@@ -98,7 +94,7 @@ export function ArmingOffer({
                 disabled={busy}
               >
                 {copy.data.confirm}
-              </Button>
+              </GlassButton>
             </div>
           }
         >

@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import { useState } from "react";
 import type { TokenStorage } from "../api/privacy-api";
+import { ButtonPrimary, GlassButton, TertiaryLink } from "@/design-system";
 
 type PrivacyAction = "inference" | "token" | "capture" | "discard";
 
@@ -49,14 +49,13 @@ export function PrivacyControlsPanel({
           </span>
           <h2>Optional local evidence</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
         Each option is separate from contribution consent. Enabling requires
@@ -122,27 +121,26 @@ export function PrivacyControlsPanel({
         )}
       </div>
       {storage && (
-        <div className="mt-5 grid gap-[6px] border-t border-border pt-5">
+        <div className="mt-5 grid gap-[6px] border-t border-tc-hairline pt-5">
           <strong>Local token-review storage</strong>
           <span>{storage.state_line}</span>
           <span>{storage.scope_note}</span>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={() => void onCleanup(false, false)}
               disabled={busy}
             >
               {storage.cleanup_label}
-            </Button>
-            <Button
-              className="tc-btn tc-btn--glass tc-text-outside"
+            </GlassButton>
+            <GlassButton
+              className="tc-text-outside"
               type="button"
               onClick={() => setConfirming("discard")}
               disabled={busy}
             >
               {storage.discard_label}
-            </Button>
+            </GlassButton>
           </div>
         </div>
       )}
@@ -171,19 +169,24 @@ function PrivacyToggle({
   onChange: (enabled: boolean) => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-[18px] border-b border-border py-[15px]">
+    <div className="flex items-center justify-between gap-[18px] border-b border-tc-hairline py-[15px]">
       <div>
         <strong>{label}</strong>
         <span>{detail}</span>
       </div>
-      <Button
-        variant={enabled ? "secondary" : "default"}
-        type="button"
-        onClick={() => onChange(!enabled)}
-        disabled={disabled}
-      >
-        {enabled ? "Disable" : "Enable"}
-      </Button>
+      {enabled ? (
+        <GlassButton onClick={() => onChange(!enabled)} disabled={disabled}>
+          Disable
+        </GlassButton>
+      ) : (
+        <ButtonPrimary
+          size="sm"
+          onClick={() => onChange(!enabled)}
+          disabled={disabled}
+        >
+          Enable
+        </ButtonPrimary>
+      )}
     </div>
   );
 }
@@ -207,16 +210,16 @@ function Disclosure({
       description="Changing local privacy behavior requires explicit confirmation."
       footer={
         <>
-          <Button type="button" variant="outline" onClick={onCancel}>
+          <GlassButton type="button" onClick={onCancel}>
             Cancel
-          </Button>
-          <Button type="button" onClick={onConfirm}>
+          </GlassButton>
+          <ButtonPrimary size="sm" type="button" onClick={onConfirm}>
             I understand — enable
-          </Button>
+          </ButtonPrimary>
         </>
       }
     >
-      <p className="text-sm leading-6 text-muted-foreground">{text}</p>
+      <p className="text-sm leading-6 text-tc-secondary">{text}</p>
     </ResponsiveOverlay>
   );
 }

@@ -1,12 +1,6 @@
-import { Button } from "@/components/ui/button";
-import {
-  Field,
-  FieldGroup,
-  FieldLabel,
-} from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import type { useOnboardingWallet } from "../hooks/use-onboarding-wallet";
+import { ButtonPrimary, GlassButton, Input } from "@/design-system";
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This component renders the Rust-owned wallet lifecycle states and controls.
 export function OnboardingWalletConnect({
@@ -21,7 +15,7 @@ export function OnboardingWalletConnect({
   if (!flow || flow.state === "Unsupported") return null;
 
   return (
-    <section className="grid gap-4 border-t border-border pt-5">
+    <section className="grid gap-4 border-t border-tc-hairline pt-5">
       <div>
         <span className="mb-1.5 block tc-eyebrow">
           NEAR WALLET
@@ -32,11 +26,11 @@ export function OnboardingWalletConnect({
             "Loading wallet connection disclosure…"}
         </p>
       </div>
-      <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor="wallet-commons">
+      <div className="flex flex-col gap-4">
+        <div className="tc-field">
+          <label className="tc-label" htmlFor="wallet-commons">
             {disclosure?.commons ?? "Commons URL"}
-          </FieldLabel>
+          </label>
           <Input
             id="wallet-commons"
             value={wallet.commons}
@@ -44,12 +38,12 @@ export function OnboardingWalletConnect({
             placeholder="https://commons.example"
             disabled={wallet.pending || blocked || !flow.can_edit}
           />
-        </Field>
+        </div>
         {flow.can_start && (
-          <Field>
-            <FieldLabel htmlFor="wallet-account">
+          <div className="tc-field">
+            <label className="tc-label" htmlFor="wallet-account">
               {disclosure?.account ?? "NEAR account"}
-            </FieldLabel>
+            </label>
             <Input
               id="wallet-account"
               value={wallet.account}
@@ -57,24 +51,23 @@ export function OnboardingWalletConnect({
               placeholder="you.near"
               disabled={wallet.pending || blocked}
             />
-          </Field>
+          </div>
         )}
-      </FieldGroup>
+      </div>
       <div className="flex flex-wrap gap-2.5">
         {flow.can_check && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => void wallet.run("check")}
             disabled={
               wallet.pending || blocked || !wallet.commons.trim() || !disclosure
             }
           >
             Check wallet support
-          </Button>
+          </GlassButton>
         )}
         {flow.can_start && (
-          <Button
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => void wallet.run("start")}
             disabled={
@@ -86,17 +79,16 @@ export function OnboardingWalletConnect({
             }
           >
             {wallet.pending ? "Opening…" : "Start signup"}
-          </Button>
+          </ButtonPrimary>
         )}
         {flow.can_cancel && (
-          <Button
+          <GlassButton
             type="button"
-            variant="ghost"
             onClick={() => void wallet.run("cancel")}
             disabled={wallet.pending || blocked}
           >
             Cancel
-          </Button>
+          </GlassButton>
         )}
       </div>
       {wallet.pending && (
