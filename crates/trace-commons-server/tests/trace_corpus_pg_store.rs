@@ -310,32 +310,19 @@ async fn export_mirror_counts(
     tenant_id: &str,
     export_manifest_id: Uuid,
 ) -> ExportMirrorCounts {
-    let mut client = backend
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .expect("get count connection");
-    let tx = client.transaction().await.expect("start count transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_id],
-    )
-    .await
-    .expect("set count tenant context");
-    let row = tx
-        .query_one(
-            "SELECT
+    let row = tenant_query_one(
+        backend,
+        tenant_id,
+        "SELECT
                 (SELECT COUNT(*) FROM trace_export_manifests
                  WHERE tenant_id = $1 AND export_manifest_id = $2) AS manifests,
                 (SELECT COUNT(*) FROM trace_object_refs
                  WHERE tenant_id = $1 AND created_by_job_id = $2) AS object_refs,
                 (SELECT COUNT(*) FROM trace_export_manifest_items
                  WHERE tenant_id = $1 AND export_manifest_id = $2) AS items",
-            &[&tenant_id, &export_manifest_id],
-        )
-        .await
-        .expect("count export mirror rows");
-    tx.commit().await.expect("commit count transaction");
+        &[&tenant_id, &export_manifest_id],
+    )
+    .await;
 
     ExportMirrorCounts {
         manifests: row.get("manifests"),
@@ -379,6 +366,59 @@ async fn cleanup_tenant(backend: &PgBackend, tenant_id: &str) {
     tx.commit().await.expect("commit cleanup transaction");
 }
 
+fn derived_record_fixture() -> TraceDerivedRecordWrite {
+    TraceDerivedRecordWrite {
+        tenant_id: Default::default(),
+        derived_id: Default::default(),
+        submission_id: Default::default(),
+        trace_id: Default::default(),
+        status: TraceDerivedStatus::Current,
+        worker_kind: TraceWorkerKind::Summary,
+        worker_version: "summary-worker-v1".to_string(),
+        input_object_ref: None,
+        input_hash: "sha256:input".to_string(),
+        output_object_ref: None,
+        canonical_summary: Some("Tenant alpha summary.".to_string()),
+        canonical_summary_hash: Some("sha256:alpha-summary".to_string()),
+        summary_model: "summary-model-v1".to_string(),
+        task_success: Some("success".to_string()),
+        privacy_risk: Some("low".to_string()),
+        event_count: Some(2),
+        tool_sequence: vec!["memory_search".to_string()],
+        tool_categories: vec!["memory".to_string()],
+        coverage_tags: vec!["tool:memory_search".to_string()],
+        duplicate_score: Some(0.1),
+        novelty_score: Some(0.4),
+        cluster_id: Some("cluster:alpha".to_string()),
+    }
+}
+
+async fn tenant_query_one(
+    backend: &PgBackend,
+    tenant_id: &str,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> tokio_postgres::Row {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("readback connection");
+    let tx = client.transaction().await.expect("readback transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set readback tenant context");
+    let row = tx
+        .query_one(sql, params)
+        .await
+        .expect("read back tenant row");
+    tx.commit().await.expect("commit readback transaction");
+    row
+}
+
 #[tokio::test]
 async fn pg_store_rolls_back_export_manifest_mirror_when_item_ref_is_invalid() {
     let Some(backend) = postgres_backend().await else {
@@ -406,24 +446,7 @@ async fn pg_store_rolls_back_export_manifest_mirror_when_item_ref_is_invalid() {
             derived_id,
             submission_id,
             trace_id,
-            status: TraceDerivedStatus::Current,
-            worker_kind: TraceWorkerKind::Summary,
-            worker_version: "summary-worker-v1".to_string(),
-            input_object_ref: None,
-            input_hash: "sha256:input".to_string(),
-            output_object_ref: None,
-            canonical_summary: Some("Tenant alpha summary.".to_string()),
-            canonical_summary_hash: Some("sha256:alpha-summary".to_string()),
-            summary_model: "summary-model-v1".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
-            event_count: Some(2),
-            tool_sequence: vec!["memory_search".to_string()],
-            tool_categories: vec!["memory".to_string()],
-            coverage_tags: vec!["tool:memory_search".to_string()],
-            duplicate_score: Some(0.1),
-            novelty_score: Some(0.4),
-            cluster_id: Some("cluster:alpha".to_string()),
+            ..derived_record_fixture()
         })
         .await
         .expect("insert valid derived record");
@@ -556,17 +579,9 @@ async fn pg_store_export_manifest_mirror_is_tenant_scoped_with_overlapping_ids()
                 derived_id,
                 submission_id,
                 trace_id,
-                status: TraceDerivedStatus::Current,
-                worker_kind: TraceWorkerKind::Summary,
-                worker_version: "summary-worker-v1".to_string(),
-                input_object_ref: None,
                 input_hash: format!("sha256:{label}-input"),
-                output_object_ref: None,
                 canonical_summary: Some(format!("{label} export summary")),
                 canonical_summary_hash: Some(format!("sha256:{label}-summary")),
-                summary_model: "summary-model-v1".to_string(),
-                task_success: Some("success".to_string()),
-                privacy_risk: Some("low".to_string()),
                 event_count: Some(3),
                 tool_sequence: vec!["terminal".to_string()],
                 tool_categories: vec!["shell".to_string()],
@@ -574,6 +589,7 @@ async fn pg_store_export_manifest_mirror_is_tenant_scoped_with_overlapping_ids()
                 duplicate_score: Some(0.01),
                 novelty_score: Some(0.9),
                 cluster_id: Some(format!("cluster:{label}")),
+                ..derived_record_fixture()
             })
             .await
             .expect("insert tenant export derived record");
@@ -1065,24 +1081,12 @@ async fn pg_store_invalidates_exact_vector_entry_with_tenant_submission_scope() 
                     derived_id,
                     submission_id,
                     trace_id,
-                    status: TraceDerivedStatus::Current,
                     worker_kind: TraceWorkerKind::DuplicatePrecheck,
                     worker_version: "duplicate-precheck-v1".to_string(),
-                    input_object_ref: None,
                     input_hash: summary_hash.to_string(),
-                    output_object_ref: None,
                     canonical_summary: Some(format!("{tenant_id} {summary_hash}")),
                     canonical_summary_hash: Some(summary_hash.to_string()),
-                    summary_model: "summary-model-v1".to_string(),
-                    task_success: Some("success".to_string()),
-                    privacy_risk: Some("low".to_string()),
-                    event_count: Some(2),
-                    tool_sequence: vec!["memory_search".to_string()],
-                    tool_categories: vec!["memory".to_string()],
-                    coverage_tags: vec!["tool:memory_search".to_string()],
-                    duplicate_score: Some(0.1),
-                    novelty_score: Some(0.4),
-                    cluster_id: Some("cluster:alpha".to_string()),
+                    ..derived_record_fixture()
                 })
                 .await
                 .expect("insert scoped derived record");
@@ -3927,30 +3931,14 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
     // Read back the row for tenant_alpha and assert vector_entry_id
     // round-trips (migration V24 nullable column).
     {
-        let mut client = backend
-            .raw_pool_for_tests_and_diagnostics()
-            .get()
-            .await
-            .expect("get readback connection");
-        let tx = client
-            .transaction()
-            .await
-            .expect("start readback transaction");
-        tx.execute(
-            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-            &[&tenant_alpha],
-        )
-        .await
-        .expect("set tenant context for readback");
-        let row = tx
-            .query_one(
-                "SELECT vector_entry_id FROM trace_gate_decisions \
+        let row = tenant_query_one(
+            &backend,
+            &tenant_alpha,
+            "SELECT vector_entry_id FROM trace_gate_decisions \
                  WHERE tenant_id = $1 AND decision_id = $2",
-                &[&tenant_alpha, &decision_id],
-            )
-            .await
-            .expect("read back gate decision row");
-        tx.commit().await.expect("commit readback transaction");
+            &[&tenant_alpha, &decision_id],
+        )
+        .await;
         let stored: Option<Uuid> = row.get("vector_entry_id");
         assert_eq!(
             stored, expected_vector_entry_id,
@@ -3969,30 +3957,14 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
         .await
         .expect("insert gate decision with null vector_entry_id");
     {
-        let mut client = backend
-            .raw_pool_for_tests_and_diagnostics()
-            .get()
-            .await
-            .expect("get null readback connection");
-        let tx = client
-            .transaction()
-            .await
-            .expect("start null readback transaction");
-        tx.execute(
-            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-            &[&tenant_alpha],
-        )
-        .await
-        .expect("set tenant context for null readback");
-        let row = tx
-            .query_one(
-                "SELECT vector_entry_id FROM trace_gate_decisions \
+        let row = tenant_query_one(
+            &backend,
+            &tenant_alpha,
+            "SELECT vector_entry_id FROM trace_gate_decisions \
                  WHERE tenant_id = $1 AND decision_id = $2",
-                &[&tenant_alpha, &null_decision_id],
-            )
-            .await
-            .expect("read back null gate decision row");
-        tx.commit().await.expect("commit null readback transaction");
+            &[&tenant_alpha, &null_decision_id],
+        )
+        .await;
         let stored: Option<Uuid> = row.get("vector_entry_id");
         assert!(
             stored.is_none(),
@@ -4014,32 +3986,14 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
         .await
         .expect("insert decision row with credit_withheld_reason");
     {
-        let mut client = backend
-            .raw_pool_for_tests_and_diagnostics()
-            .get()
-            .await
-            .expect("get withheld readback connection");
-        let tx = client
-            .transaction()
-            .await
-            .expect("start withheld readback transaction");
-        tx.execute(
-            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-            &[&tenant_alpha],
-        )
-        .await
-        .expect("set tenant context for withheld readback");
-        let row = tx
-            .query_one(
-                "SELECT credit_withheld_reason FROM trace_gate_decisions \
+        let row = tenant_query_one(
+            &backend,
+            &tenant_alpha,
+            "SELECT credit_withheld_reason FROM trace_gate_decisions \
                  WHERE tenant_id = $1 AND decision_id = $2",
-                &[&tenant_alpha, &withheld_decision_id],
-            )
-            .await
-            .expect("read back gate decision with credit_withheld_reason");
-        tx.commit()
-            .await
-            .expect("commit withheld readback transaction");
+            &[&tenant_alpha, &withheld_decision_id],
+        )
+        .await;
         let stored: Option<String> = row.get("credit_withheld_reason");
         assert_eq!(
             stored,
@@ -4050,32 +4004,14 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
     // Re-assert that the earlier rows (with credit_withheld_reason = None)
     // surface NULL on readback so the column is genuinely nullable.
     {
-        let mut client = backend
-            .raw_pool_for_tests_and_diagnostics()
-            .get()
-            .await
-            .expect("get withheld none readback connection");
-        let tx = client
-            .transaction()
-            .await
-            .expect("start withheld none readback transaction");
-        tx.execute(
-            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-            &[&tenant_alpha],
-        )
-        .await
-        .expect("set tenant context for withheld none readback");
-        let row = tx
-            .query_one(
-                "SELECT credit_withheld_reason FROM trace_gate_decisions \
+        let row = tenant_query_one(
+            &backend,
+            &tenant_alpha,
+            "SELECT credit_withheld_reason FROM trace_gate_decisions \
                  WHERE tenant_id = $1 AND decision_id = $2",
-                &[&tenant_alpha, &decision_id],
-            )
-            .await
-            .expect("read back baseline gate decision row");
-        tx.commit()
-            .await
-            .expect("commit withheld none readback transaction");
+            &[&tenant_alpha, &decision_id],
+        )
+        .await;
         let stored: Option<String> = row.get("credit_withheld_reason");
         assert!(
             stored.is_none(),
@@ -4122,30 +4058,14 @@ async fn pg_store_patches_trace_gate_decision_credit_withheld_reason() {
     let read_withheld = |tenant_id: String, decision_id: Uuid| {
         let backend = &backend;
         async move {
-            let mut client = backend
-                .raw_pool_for_tests_and_diagnostics()
-                .get()
-                .await
-                .expect("get readback connection");
-            let tx = client
-                .transaction()
-                .await
-                .expect("start readback transaction");
-            tx.execute(
-                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-                &[&tenant_id],
-            )
-            .await
-            .expect("set tenant context for readback");
-            let row = tx
-                .query_one(
-                    "SELECT credit_withheld_reason FROM trace_gate_decisions \
+            let row = tenant_query_one(
+                backend,
+                &tenant_id,
+                "SELECT credit_withheld_reason FROM trace_gate_decisions \
                      WHERE tenant_id = $1 AND decision_id = $2",
-                    &[&tenant_id, &decision_id],
-                )
-                .await
-                .expect("read back gate decision row");
-            tx.commit().await.expect("commit readback transaction");
+                &[&tenant_id, &decision_id],
+            )
+            .await;
             let stored: Option<String> = row.get("credit_withheld_reason");
             stored
         }
@@ -4252,31 +4172,15 @@ async fn pg_store_update_trace_gate_decision_perplexity_scopes_to_latest_decisio
         let backend = &backend;
         let tenant_id = tenant_id.clone();
         async move {
-            let mut client = backend
-                .raw_pool_for_tests_and_diagnostics()
-                .get()
-                .await
-                .expect("get readback connection");
-            let tx = client
-                .transaction()
-                .await
-                .expect("start readback transaction");
-            tx.execute(
-                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-                &[&tenant_id],
-            )
-            .await
-            .expect("set tenant context for readback");
-            let row = tx
-                .query_one(
-                    "SELECT perplexity_micros, peak_perplexity_micros, perplexity_passed, \
+            let row = tenant_query_one(
+                backend,
+                &tenant_id,
+                "SELECT perplexity_micros, peak_perplexity_micros, perplexity_passed, \
                             gate_policy_version, gate_version_hash \
                      FROM trace_gate_decisions WHERE tenant_id = $1 AND decision_id = $2",
-                    &[&tenant_id, &decision_id],
-                )
-                .await
-                .expect("read back gate decision row");
-            tx.commit().await.expect("commit readback transaction");
+                &[&tenant_id, &decision_id],
+            )
+            .await;
             (
                 row.get::<_, i64>("perplexity_micros"),
                 row.get::<_, Option<i64>>("peak_perplexity_micros"),
@@ -4367,34 +4271,18 @@ async fn pg_store_update_trace_gate_decision_credit_quality_touches_only_credit_
         .await
         .expect("credit-quality update succeeds");
 
-    let mut client = backend
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .expect("get readback connection");
-    let tx = client
-        .transaction()
-        .await
-        .expect("start readback transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_id],
-    )
-    .await
-    .expect("set tenant context for readback");
-    let row = tx
-        .query_one(
-            "SELECT credit_quality_micros, credit_quality_anomaly_ratio_micros, \
+    let row = tenant_query_one(
+        &backend,
+        &tenant_id,
+        "SELECT credit_quality_micros, credit_quality_anomaly_ratio_micros, \
                     credit_quality_calibration_version, \
                     perplexity_micros, peak_perplexity_micros, perplexity_passed, \
                     novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
                     gate_policy_version, gate_version_hash, credit_withheld_reason \
              FROM trace_gate_decisions WHERE tenant_id = $1 AND decision_id = $2",
-            &[&tenant_id, &decision_id],
-        )
-        .await
-        .expect("read back gate decision row");
-    tx.commit().await.expect("commit readback transaction");
+        &[&tenant_id, &decision_id],
+    )
+    .await;
 
     assert_eq!(
         row.get::<_, Option<i64>>("credit_quality_micros"),
@@ -4505,24 +4393,10 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
         .await
         .expect("dedup update succeeds");
 
-    let mut client = backend
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .expect("get readback connection");
-    let tx = client
-        .transaction()
-        .await
-        .expect("start readback transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_id],
-    )
-    .await
-    .expect("set tenant context for readback");
-    let row = tx
-        .query_one(
-            "SELECT dedup_simhash, dedup_cluster_id, dedup_cluster_size, \
+    let row = tenant_query_one(
+        &backend,
+        &tenant_id,
+        "SELECT dedup_simhash, dedup_cluster_id, dedup_cluster_size, \
                     dedup_signal_version, \
                     perplexity_micros, peak_perplexity_micros, perplexity_passed, \
                     novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
@@ -4530,11 +4404,9 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
                     credit_quality_micros, credit_quality_anomaly_ratio_micros, \
                     credit_quality_calibration_version \
              FROM trace_gate_decisions WHERE tenant_id = $1 AND decision_id = $2",
-            &[&tenant_id, &decision_id],
-        )
-        .await
-        .expect("read back gate decision row");
-    tx.commit().await.expect("commit readback transaction");
+        &[&tenant_id, &decision_id],
+    )
+    .await;
 
     assert_eq!(
         row.get::<_, Option<i64>>("dedup_simhash"),
