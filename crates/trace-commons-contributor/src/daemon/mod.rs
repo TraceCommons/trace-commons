@@ -696,17 +696,17 @@ async fn drain_approved(
         let mut returned = Vec::new();
         for e in candidates.iter().filter(|e| e.approved_unattended) {
             match policy.resolve(&e.project_key) {
-                // Armed from now (K5), and this session was on disk at the
-                // arming: it waits for the contributor, as it would in an
-                // ask-first folder. The watcher never approves one of these
-                // unattended; this covers an approval made before the
-                // project was re-armed from now that was in flight when it
-                // was, and came back `Approved`.
+                // A session that must wait for a person although its
+                // project is armed -- on disk at the automatic grant in a
+                // project the grant armed, or on disk when the project was
+                // armed from now (K5) -- waits for the contributor, as it
+                // would in an ask-first folder. The watcher never approves
+                // one of these unattended; this covers an approval made
+                // before the hold applied that was in flight when it began,
+                // and came back `Approved`.
                 policy::ProjectMode::AutoUpload
-                    if policy.holds_back_from_arming_at_send(
-                        &e.project_key,
-                        &e.path.to_string_lossy(),
-                    ) =>
+                    if policy
+                        .waits_for_a_person_at_send(&e.project_key, &e.path.to_string_lossy()) =>
                 {
                     returned.push(e.entry_id)
                 }

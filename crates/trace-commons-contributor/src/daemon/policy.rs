@@ -427,6 +427,77 @@ impl ProjectPolicy {
         );
     }
 
+    /// Put back an arming-from-now record that [`Self::set_mode`] just
+    /// cleared: a re-arm from now over an arming from now keeps the hold it
+    /// had, rather than starting a new one.
+    pub fn restore_arming_from_now(&mut self, project_key: &str, prior: ArmedFromNow) {
+        self.armed_from_now.insert(project_key.to_string(), prior);
+    }
+
+    /// When `project_key` was armed from now, if it was.
+    pub fn armed_from_now_at(&self, project_key: &str) -> Option<DateTime<Utc>> {
+        self.armed_from_now.get(project_key).map(|a| a.armed_at)
+    }
+
+    /// Defence in depth for "on disk at the arming", which the record reads
+    /// by path: content older than the arming that turns up at a **new**
+    /// path -- a resumed conversation written to a fresh file, a restore, a
+    /// sync -- was never listed by the record. The watcher calls this when a
+    /// session's first event, or its file's birth time, predates the arming;
+    /// the path is then recorded as on disk for that arming (the earliest
+    /// record wins), so it is held like the rest of the backlog. Returns
+    /// whether anything changed. A source not yet recorded holds everything
+    /// already, and its record will list this path.
+    pub fn hold_for_arming(
+        &mut self,
+        project_key: &str,
+        session_path: &str,
+        source_key: &str,
+    ) -> bool {
+        let Some(seq) = self
+            .armed_from_now
+            .get(project_key)
+            .and_then(|a| a.recorded_sources.get(source_key).copied())
+        else {
+            return false;
+        };
+        match self.sessions_on_disk_at_arming.get_mut(session_path) {
+            Some(first) if *first <= seq => false,
+            Some(first) => {
+                *first = seq;
+                true
+            }
+            None => {
+                self.sessions_on_disk_at_arming
+                    .insert(session_path.to_string(), seq);
+                true
+            }
+        }
+    }
+
+    /// Drop recorded paths no arming in force can still hold: one first seen
+    /// by a record later than every arming's own records holds nothing, and
+    /// with no arming from now left the record is empty. Returns whether
+    /// anything was dropped.
+    pub fn prune_arming_record(&mut self) -> bool {
+        let before = self.sessions_on_disk_at_arming.len();
+        match self
+            .armed_from_now
+            .values()
+            .flat_map(|a| a.recorded_sources.values().copied())
+            .max()
+        {
+            Some(latest) => self
+                .sessions_on_disk_at_arming
+                .retain(|_, first| *first <= latest),
+            None if self.armed_from_now.is_empty() => self.sessions_on_disk_at_arming.clear(),
+            // Armed from now, nothing recorded yet: everything is held
+            // anyway, and the coming record decides what stays.
+            None => {}
+        }
+        self.sessions_on_disk_at_arming.len() != before
+    }
+
     /// Whether `project_key` is armed from now rather than with its backlog.
     pub fn is_armed_from_now(&self, project_key: &str) -> bool {
         self.armed_from_now.contains_key(project_key)
@@ -522,6 +593,14 @@ impl ProjectPolicy {
         self.sessions_on_disk_at_arming
             .get(session_path)
             .is_some_and(|first| arming.recorded_sources.values().any(|r| first <= r))
+    }
+
+    /// The send-time form of [`Self::waits_for_a_person`], for the upload
+    /// pass, which holds a queue entry and not its source key: the grant's
+    /// hold, and [`Self::holds_back_from_arming_at_send`].
+    pub fn waits_for_a_person_at_send(&self, project_key: &str, session_path: &str) -> bool {
+        self.holds_back_unattended(project_key, session_path)
+            || self.holds_back_from_arming_at_send(project_key, session_path)
     }
 
     /// The one question both unattended approval sites ask: must this
@@ -1911,6 +1990,31 @@ mod tests {
         p.arm_from_now("/w/a", again);
         assert!(!p.record_source_for_armings(&stale, SRC, set_of(&["/s/x.jsonl"])));
         assert!(p.holds_back_from_arming("/w/a", "/s/y.jsonl", SRC));
+    }
+
+    /// The record is pruned to what an arming in force can still hold, and
+    /// emptied with the last arming from now.
+    #[test]
+    fn the_arming_record_is_pruned_to_what_can_still_hold() {
+        let mut p = ProjectPolicy::new();
+        let a = t("2026-09-28T00:00:00Z");
+        p.set_mode("/w/a", ProjectMode::AutoUpload, a).unwrap();
+        p.arm_from_now("/w/a", a);
+        p.record_source_for_armings(&p.armings_from_now(), SRC, set_of(&["/s/one.jsonl"]));
+        let b = t("2026-09-28T01:00:00Z");
+        p.set_mode("/w/b", ProjectMode::AutoUpload, b).unwrap();
+        p.arm_from_now("/w/b", b);
+        p.record_source_for_armings(&p.armings_from_now(), SRC, set_of(&["/s/two.jsonl"]));
+        assert!(!p.prune_arming_record(), "both armings can hold");
+
+        p.set_mode("/w/b", ProjectMode::NotifyOnly, b).unwrap();
+        assert!(p.prune_arming_record());
+        assert!(p.holds_back_from_arming("/w/a", "/s/one.jsonl", SRC));
+        assert!(!p.sessions_on_disk_at_arming.contains_key("/s/two.jsonl"));
+
+        p.set_mode("/w/a", ProjectMode::NotifyOnly, b).unwrap();
+        assert!(p.prune_arming_record());
+        assert!(p.sessions_on_disk_at_arming.is_empty());
     }
 
     /// The fields are additive: a policy file written before them loads, with

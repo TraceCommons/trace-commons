@@ -2738,8 +2738,25 @@ fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
         Ok(id) => id,
         Err(response) => return *response,
     };
+    let max_entries = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .max_queue_entries;
+    // Lock order is policy before queue, as everywhere else.
+    let policy = shared.policy.lock().expect("policy lock");
     let mut queue = shared.queue.lock().expect("queue lock");
-    if let Err(e) = queue.undo_keep(id, Utc::now()) {
+    // A session in a folder now set to Never is not brought back as a
+    // waiting card: the folder rule says not to offer it. The keep stays,
+    // and the undo can be asked for again once the rule changes.
+    if queue
+        .get(id)
+        .is_some_and(|e| e.is_kept() && policy.resolve(&e.project_key) == ProjectMode::Ignore)
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, "project-ignored");
+    }
+    drop(policy);
+    if let Err(e) = queue.undo_keep(id, Utc::now(), max_entries) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
     if queue.save(&shared.store).is_err() {
@@ -3192,21 +3209,29 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         Some(Ok(m)) => m,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
     };
-    // K5: `from_now: true` arms the project for sessions that appear from
-    // here on only; see `policy::ArmedFromNow`. Absent is `false`, which is
-    // `auto_upload` exactly as it has always behaved -- the backlog included
-    // -- so no existing caller changes meaning. Only a boolean is accepted,
-    // and only with `auto_upload`: "from now" means nothing for ask-first or
-    // Never, and silently ignoring it there would let a shell believe it had
-    // set a rule it had not.
-    let from_now = match req.params.get("from_now") {
+    // K5: arming is **from now** by default. `auto_upload` arms the project
+    // for sessions that appear from here on, and what is already on disk
+    // waits for the contributor -- the spec's rule that automatic
+    // contribution arms nothing already on disk, applied to every shell at
+    // once. See `policy::ArmedFromNow`. Only an explicit
+    // `include_backlog: true` sends the backlog too, which is what
+    // `auto_upload` meant before. Only a boolean is accepted, and only with
+    // `auto_upload`: a backlog means nothing for ask-first or Never, and
+    // silently ignoring it there would let a shell believe it had set a rule
+    // it had not.
+    let include_backlog = match req.params.get("include_backlog") {
         None | Some(serde_json::Value::Null) => false,
         Some(serde_json::Value::Bool(b)) => *b,
-        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "from-now-invalid"),
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "include-backlog-invalid"),
     };
-    if from_now && mode != ProjectMode::AutoUpload {
-        return Response::err(req.id, ERR_BAD_PARAMS, "from-now-requires-auto-upload");
+    if include_backlog && mode != ProjectMode::AutoUpload {
+        return Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            "include-backlog-requires-auto-upload",
+        );
     }
+    let from_now = mode == ProjectMode::AutoUpload && !include_backlog;
     // A `label` param is accepted on the wire for compatibility with
     // older clients and then IGNORED. It used to be stored verbatim
     // and echoed back by `list_projects` and written into
@@ -3315,14 +3340,25 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     }
 
     let now = Utc::now();
+    // A re-arm from now over an arming from now keeps the record it had:
+    // the hold covers what was on disk at the FIRST arming, and a shell
+    // re-sending the same setting must neither release that backlog nor
+    // start holding sessions that arrived since.
+    let prior_arming = policy.armed_from_now.get(&key).cloned();
+    let rearm_from_now = from_now && prior_arming.is_some();
     if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
     // Under the same policy lock as the mode, so no pass can see the project
     // armed without the arming's hold.
     if from_now {
-        policy.arm_from_now(&key, now);
+        match prior_arming {
+            Some(prior) => policy.restore_arming_from_now(&key, prior),
+            None => policy.arm_from_now(&key, now),
+        }
     }
+    // Whatever this change left no arming able to hold.
+    policy.prune_arming_record();
     if let Some(claim) = arming_claim {
         policy.record_arming_claim(&key, claim);
     }
@@ -3401,8 +3437,10 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             // Arming from now over an earlier plain arming: whatever that
             // arming approved unattended and has not sent yet was on disk
             // now, so it is backlog, and it goes back to waiting for the
-            // contributor exactly as turning automatic off would put it.
-            ProjectMode::AutoUpload if from_now => {
+            // contributor exactly as turning automatic off would put it. Not
+            // over an arming from now: what that approved arrived after it,
+            // and is not backlog.
+            ProjectMode::AutoUpload if from_now && !rearm_from_now => {
                 queue.return_unattended_to_waiting_for_project(&key, Utc::now())
             }
             ProjectMode::AutoUpload => 0,

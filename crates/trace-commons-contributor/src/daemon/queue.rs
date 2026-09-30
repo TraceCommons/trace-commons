@@ -409,6 +409,13 @@ pub struct QueueEntry {
     pub attestation: Option<String>,
     #[serde(default)]
     pub attestation_reason: Option<String>,
+    /// The reason label a kept entry carried when it was kept, so
+    /// `undo_keep` can put back a hold that needs a person
+    /// ([`REASONS_NEEDING_A_PERSON`]) rather than replace it with a weaker
+    /// one. `None` on every entry that is not kept, and on one kept with no
+    /// label. A fixed label only, like `reason_label`.
+    #[serde(default)]
+    pub kept_from_reason: Option<String>,
 }
 
 impl QueueEntry {
@@ -910,21 +917,40 @@ impl Queue {
         self.entries.iter().filter(|e| e.is_kept()).collect()
     }
 
-    /// Keep a waiting session on this Mac: `Pending` to `Refused` with
-    /// [`REASON_KEPT`]. Only a `Pending` entry can be kept; an approved one
-    /// is a decision already made, which `cancel` undoes first, and one past
-    /// that is in flight or finished. Any preview pin goes, so the stored
-    /// envelope is swept like a dismissed one's -- an undo rebuilds.
+    /// Keep a session on this Mac: to `Refused` with [`REASON_KEPT`].
+    ///
+    /// A `Pending` entry can be kept, and so can one `Approved` **unattended**
+    /// -- the keep revokes that approval in the same step, so a keep pressed
+    /// while the watcher re-approves the card on the folder's behalf cannot
+    /// lose the race and answer `not-pending`. An approval a person made is
+    /// a decision already taken, which `cancel` undoes first; anything past
+    /// `Approved` is in flight or finished.
+    ///
+    /// The label the entry carried is remembered in `kept_from_reason`, so an
+    /// undo restores a hold that needs a person. Any preview pin goes, so the
+    /// stored envelope is swept like a dismissed one's -- an undo rebuilds.
     pub fn keep(&mut self, entry_id: Uuid) -> Result<()> {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             bail!("unknown-entry-id");
         };
-        if e.state != QueueState::Pending {
+        let unattended = e.state == QueueState::Approved && e.approved_unattended;
+        if e.state != QueueState::Pending && !unattended {
             bail!("not-pending");
         }
+        e.kept_from_reason = if unattended {
+            None
+        } else {
+            e.reason_label.clone()
+        };
         e.state = QueueState::Refused;
         e.reason_label = Some(REASON_KEPT.to_string());
         e.retry_after = None;
+        e.approved_scopes = None;
+        e.approved_verdict = None;
+        e.approved_correction = None;
+        e.approved_inputs = None;
+        e.approved_at = None;
+        e.approved_unattended = false;
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
         Ok(())
@@ -936,15 +962,41 @@ impl Queue {
     /// month must not expire on the pass after the contributor asked for it
     /// back. Refuses anything that is not kept, a dismissal included: a
     /// dismissal stays permanent.
-    pub fn undo_keep(&mut self, entry_id: Uuid, now: DateTime<Utc>) -> Result<()> {
+    ///
+    /// A hold that needs a person ([`REASONS_NEEDING_A_PERSON`]: a witness
+    /// risk review, a token-distribution review, and any added later) is put
+    /// back as it was, not replaced: `returned-from-keep` is weaker, since a
+    /// group `approve` includes it, and a keep and an undo must never be a
+    /// way to clear a hold. Any other label becomes `returned-from-keep`.
+    ///
+    /// The queue cap applies, as it does to every new offer: an undo into a
+    /// full queue is refused `queue-full` and the entry stays kept.
+    pub fn undo_keep(
+        &mut self,
+        entry_id: Uuid,
+        now: DateTime<Utc>,
+        max_entries: usize,
+    ) -> Result<()> {
+        let live = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.state, QueueState::Pending | QueueState::Approved))
+            .count();
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             bail!("unknown-entry-id");
         };
         if !e.is_kept() {
             bail!("not-kept");
         }
+        if live >= max_entries {
+            bail!("queue-full");
+        }
+        let restored = e
+            .kept_from_reason
+            .take()
+            .filter(|r| REASONS_NEEDING_A_PERSON.contains(&r.as_str()));
         e.state = QueueState::Pending;
-        e.reason_label = Some(REASON_RETURNED_FROM_KEEP.to_string());
+        e.reason_label = Some(restored.unwrap_or_else(|| REASON_RETURNED_FROM_KEEP.to_string()));
         e.discovered_at = now;
         e.retry_after = None;
         e.approved_scopes = None;
@@ -3620,7 +3672,7 @@ mod tests {
         );
         assert!(q.get(id).unwrap().is_kept());
 
-        q.undo_keep(id, at("2027-01-01T00:00:00Z")).unwrap();
+        q.undo_keep(id, at("2027-01-01T00:00:00Z"), 5000).unwrap();
         let e = q.get(id).unwrap();
         assert_eq!(e.state, QueueState::Pending);
         assert!(e.returned_from_keep());
@@ -3638,6 +3690,26 @@ mod tests {
         assert_eq!(q.get(id).unwrap().reason_label, None);
     }
 
+    /// A keep and an undo are never a way to clear a hold that needs a
+    /// person: every such hold comes back exactly as it was, still out of
+    /// unattended and group approval.
+    #[test]
+    fn a_hold_that_needs_a_person_survives_a_keep_and_its_undo() {
+        for hold in REASONS_NEEDING_A_PERSON {
+            let mut q = queue_of(vec![entry("sha256:h", "2026-08-01T00:00:00Z")]);
+            let id = entry_id_for("sha256:h");
+            q.set_state(id, QueueState::Pending, Some(hold.to_string()));
+            assert!(q.get(id).unwrap().held_for_review());
+            q.keep(id).unwrap();
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000).unwrap();
+            let e = q.get(id).unwrap();
+            assert_eq!(e.reason_label.as_deref(), Some(*hold));
+            assert!(e.held_for_review(), "{hold}: the hold is back");
+            assert_eq!(e.kept_from_reason, None);
+            assert!(!q.approve_unattended(id, &[], None), "{hold}");
+        }
+    }
+
     /// Only a waiting session can be kept, and only a kept one un-kept -- so a
     /// dismissal can never be undone through the keep route.
     #[test]
@@ -3645,7 +3717,7 @@ mod tests {
         let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
         let id = entry_id_for("sha256:k");
         assert_eq!(
-            q.undo_keep(id, at("2026-08-02T00:00:00Z"))
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000)
                 .unwrap_err()
                 .to_string(),
             "not-kept"
@@ -3653,7 +3725,7 @@ mod tests {
         q.set_state(id, QueueState::Refused, Some(REASON_DISMISSED.to_string()));
         assert_eq!(q.keep(id).unwrap_err().to_string(), "not-pending");
         assert_eq!(
-            q.undo_keep(id, at("2026-08-02T00:00:00Z"))
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000)
                 .unwrap_err()
                 .to_string(),
             "not-kept",

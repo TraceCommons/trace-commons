@@ -175,6 +175,12 @@ impl Harness {
     }
 
     fn write_session(&self, project: &str, id: &str) {
+        self.write_session_started(project, id, "2026-08-08T10:00:00Z");
+    }
+
+    /// `write_session`, stamped `timestamp`: a session that began after an
+    /// arming from now has to say so.
+    fn write_session_started(&self, project: &str, id: &str, timestamp: &str) {
         let project_dir = self
             .claude_root
             .join(format!("-Users-testuser-code-{project}"));
@@ -184,7 +190,7 @@ impl Harness {
             format!(
                 "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"fix the parser\"}},\
                  \"cwd\":\"/Users/testuser/code/{project}\",\
-                 \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                 \"timestamp\":\"{timestamp}\",\"version\":\"2.0.1\",\
                  \"sessionId\":\"{id}\",\"uuid\":\"a1\"}}\n"
             ),
         )
@@ -1079,13 +1085,13 @@ impl Harness {
         resp.result.unwrap()
     }
 
-    fn arm(&self, project: &str, from_now: bool) -> serde_json::Value {
+    fn arm(&self, project: &str, include_backlog: bool) -> serde_json::Value {
         self.ipc_ok(
             "set_project_mode",
             serde_json::json!({
                 "project_key": Self::key(project),
                 "mode": "auto_upload",
-                "from_now": from_now,
+                "include_backlog": include_backlog,
             }),
         )
     }
@@ -1100,13 +1106,17 @@ async fn arming_from_now_uploads_new_sessions_and_never_the_backlog() {
     h.discover().await;
     assert_eq!(h.states(), vec![QueueState::Pending]);
 
-    h.arm("myproj", true);
+    h.arm("myproj", false);
     h.discover().await;
     h.upload_pass().await.unwrap();
     assert_eq!(h.received.lock().unwrap().len(), 0, "the backlog waits");
     assert_eq!(h.states(), vec![QueueState::Pending]);
 
-    h.write_session("myproj", "22222222-2222-2222-2222-222222222222");
+    h.write_session_started(
+        "myproj",
+        "22222222-2222-2222-2222-222222222222",
+        &Utc::now().to_rfc3339(),
+    );
     h.discover().await;
     h.upload_pass().await.unwrap();
     assert_eq!(h.received.lock().unwrap().len(), 1, "the new session goes");
@@ -1146,6 +1156,27 @@ async fn the_send_path_holds_back_an_on_disk_session_once_armed_from_now() {
     assert_eq!(h.states(), vec![QueueState::Pending]);
 }
 
+/// The send path re-checks the automatic grant's hold as well: an unattended
+/// approval of a session on disk at the grant, in a project the grant armed,
+/// that is `Approved` when the pass reaches it goes back to waiting.
+#[tokio::test]
+async fn the_send_path_holds_back_a_session_on_disk_at_the_grant() {
+    let h = Harness::new().await;
+    h.write_session("myproj", "11111111-1111-1111-1111-111111111111");
+    h.opt_in("myproj");
+    h.discover().await;
+    assert_eq!(h.states(), vec![QueueState::Approved]);
+    let path = h.only_entry().path.to_string_lossy().to_string();
+    {
+        let mut policy = h.shared.policy.lock().unwrap();
+        policy.armed_by_grant.insert(Harness::key("myproj"));
+        policy.sessions_on_disk_at_grant.insert(path);
+    }
+    h.upload_pass().await.unwrap();
+    assert_eq!(h.received.lock().unwrap().len(), 0);
+    assert_eq!(h.states(), vec![QueueState::Pending]);
+}
+
 /// A kept session is never uploaded, even once its folder is armed, and the
 /// undo waits for a person rather than going out under the folder's rule.
 #[tokio::test]
@@ -1159,7 +1190,7 @@ async fn a_kept_session_is_never_uploaded_after_its_folder_is_armed() {
         serde_json::json!({ "entry_id": entry_id.to_string() }),
     );
 
-    h.arm("myproj", false);
+    h.arm("myproj", true);
     h.discover().await;
     h.upload_pass().await.unwrap();
     assert_eq!(h.received.lock().unwrap().len(), 0);

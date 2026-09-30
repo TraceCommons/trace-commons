@@ -3695,8 +3695,17 @@ fn resolve_project_key(path: &Path) -> Result<String> {
     Ok(resolved.to_string_lossy().to_string())
 }
 
-pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bool) -> Result<()> {
+pub fn daemon_set_project(
+    store: &ConfigStore,
+    path: &Path,
+    mode: &str,
+    include_backlog: bool,
+    json: bool,
+) -> Result<()> {
     let mode = parse_project_mode(mode)?;
+    if include_backlog && mode != ProjectMode::AutoUpload {
+        anyhow::bail!("--include-backlog applies only to --mode auto");
+    }
     let key = resolve_project_key(path)?;
     // No `label` is sent. The daemon derives it from the key -- it ignores
     // any label a client supplies, because a caller-chosen string reaching
@@ -3709,7 +3718,13 @@ pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bo
     let resp = daemon_call(
         store,
         "set_project_mode",
-        serde_json::json!({ "project_key": key, "mode": mode }),
+        // Only when asked: arming applies to new sessions by default, and
+        // the backlog waits for the contributor (K5).
+        if include_backlog {
+            serde_json::json!({ "project_key": key, "mode": mode, "include_backlog": true })
+        } else {
+            serde_json::json!({ "project_key": key, "mode": mode })
+        },
     )?;
     // Ask the same daemon that just applied the edit what it now knows, so
     // the label shown is disambiguated against the authoritative known-key
@@ -3757,6 +3772,13 @@ pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bo
             "{display_label}: {}",
             serde_json::to_string(&mode).unwrap_or_default()
         );
+        if mode == ProjectMode::AutoUpload && !include_backlog {
+            println!(
+                "note: new sessions from this project are sent automatically; \
+                 sessions already on disk wait for you (`daemon pending`). Pass \
+                 --include-backlog to send them too."
+            );
+        }
         if matches_nothing {
             println!(
                 "note: no session the daemon currently knows about comes from this \
@@ -4053,6 +4075,7 @@ mod daemon_command_tests {
             std::path::Path::new(crate::daemon::policy::UNKNOWN_PROJECT_KEY),
             "auto",
             false,
+            false,
         )
         .unwrap_err();
         assert!(err.to_string().contains("unknown-project"), "{err}");
@@ -4080,7 +4103,7 @@ mod daemon_command_tests {
         // Arming records the terms in force, so it needs a config.
         store.save_config(&unenrolled_preview_config()).unwrap();
         let project = tempfile::tempdir().unwrap();
-        daemon_set_project(&store, project.path(), "auto", false).unwrap();
+        daemon_set_project(&store, project.path(), "auto", false, false).unwrap();
         let key = std::fs::canonicalize(project.path())
             .unwrap()
             .to_string_lossy()

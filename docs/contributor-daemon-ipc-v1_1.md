@@ -467,14 +467,14 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
 | `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
-| `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending` (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
-| `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included. See "`keep`: Keep on this Mac" below |
+| `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
+| `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
 | `list_kept` | — | `kept[]` of queue entries | every kept entry, in the `list_pending` shape, so a shell can show them and offer the undo |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `from_now` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -1053,7 +1053,11 @@ reversible answer, built beside `dismiss`, which is unchanged.
 A kept session, exactly:
 
 - **Stays on this Mac, and is not sent.** The entry moves `pending` to
-  `refused` with `reason_label: "kept-on-this-mac"`. Nothing uploads a
+  `refused` with `reason_label: "kept-on-this-mac"`. An entry the watcher
+  approved **unattended** can be kept too: the keep revokes that approval in
+  the same step, so a keep pressed while the folder's rule re-approves the
+  card does not lose the race. A person's own approval is `cancel`led first.
+  Nothing uploads a
   `refused` entry, and `approve` -- by `entry_id`, `project_id` or `all` --
   acts only on `pending`, so an `approve` naming a kept entry sends nothing
   and answers `not-pending` until the keep is undone. Any preview pin goes with the keep; an
@@ -1079,6 +1083,28 @@ A kept session, exactly:
   the session grew while it was kept, the next pass re-offers the grown
   content as a fresh `pending` entry that carries the same label, and waits
   in the same way.
+- **Cannot clear a hold.** An entry held for a person when it was kept --
+  a witness risk review, a token-distribution review, any reason that keeps
+  a session out of unattended and group approval -- comes back from the undo
+  with that same label, not `returned-from-keep`. The label is remembered on
+  the entry while it is kept. Its preview pin is not: the undone entry is
+  reviewed afresh.
+- **Comes back only where it can be offered.** `undo_keep` is refused with
+  `queue-full` when the queue is at its cap, like any new offer, and with
+  `project-ignored` when the session's folder is now Never; either way the
+  session stays kept, and the undo can be asked for again.
+
+**Expiry after an undo, and of the backlog.** A `returned-from-keep` entry,
+and a backlog entry an arming from now leaves waiting, are ordinary waiting
+cards: they expire on the normal 14-day clock, which for the first starts at
+the undo and for the second is the clock the card already had (an unattended
+approval returned by an arming is re-dated to the arming). They are not
+exempt, on purpose. The cap counts waiting cards, so exempting a whole disk's
+history would fill the queue for good and stop new sessions being offered;
+and a card the contributor has not decided in 14 days is the case expiry
+exists for, in an Ask-me folder or not. An expired entry is not re-offered
+while its file is unchanged, as for every expired card. A contributor who
+wants a session kept past that uses `keep`, which never expires.
 
 What it is not:
 
@@ -1155,12 +1181,12 @@ the entries reappearing within any particular time.
 
 ### Arming from now
 
-Customize's "Share automatically" for a folder arms it for **new** sessions
-only; its backlog goes when the contributor picks it in the past-session
-picker. That is `set_project_mode` with `mode: "auto_upload"` and
-`from_now: true`, and it applies the Flow 1 grant's rule ("it arms nothing
-already on disk", `grant_automatic` below) to one folder the contributor armed
-themselves:
+**Arming is from now by default.** `set_project_mode` with
+`mode: "auto_upload"` arms a folder for **new** sessions; what is already on
+disk waits for the contributor, who sends it by picking it in the
+past-session picker. That applies the Flow 1 grant's rule ("it arms nothing
+already on disk", `grant_automatic` below) to every folder a contributor arms,
+whatever shell arms it. Only `include_backlog: true` sends the backlog too:
 
 - **A session already on disk when the folder was armed -- queued as
   `pending` or not yet seen -- is never approved unattended in it**, whichever
@@ -1173,37 +1199,45 @@ themselves:
   is approved unattended in the folder, so a harness connected or re-rooted
   after the arming has its history recorded before it can send anything. A
   session created between the arming and that pass waits too: fail closed.
-- Re-arming from now over a plain arming returns what the plain arming had
-  approved unattended and not yet sent to `pending`, counted in `retracted`.
-  It was on disk, so it is backlog. An `approved` entry a **person** approved
-  is untouched, as for every mode change.
+- **Defence in depth for content at a new path.** The record is by path, so a
+  conversation older than the arming that turns up in a new file -- a resume
+  into a fresh file, a restore, a sync -- is also held when its first event,
+  or its file's birth time, is earlier than the arming. Where the filesystem
+  reports no birth time and the session no first-event time, the path record
+  alone applies.
+- **A re-arm keeps the hold.** `auto_upload` without `include_backlog` over a
+  folder already armed from now keeps the record of the first arming: the
+  backlog still waits, and a session that arrived in between is still new.
+- Arming from now over an arming **with** the backlog returns what that
+  arming approved unattended and has not sent yet to `pending`, counted in
+  `retracted`. It was on disk, so it is backlog. An `approved` entry a
+  **person** approved is untouched, as for every mode change.
 - The send path re-checks too: an unattended approval that comes back from
-  `uploading` to `approved` after the folder was armed from now, and whose
-  session was on disk at the arming, returns to `pending` rather than being
-  sent.
-- The arming writes the same `armed-auto-upload` audit row as a plain arming,
-  with `detail: "from-now"`. Labels only, as every audit row.
-- `list_projects` reports `from_now: true` on an armed row armed this way and
+  `uploading` to `approved`, whose session must wait for a person -- on disk
+  when its folder was armed from now, or on disk at the automatic grant in a
+  folder the grant armed -- returns to `pending` rather than being sent.
+- The arming writes the `armed-auto-upload` audit row with
+  `detail: "from-now"`; an arming with the backlog writes it with no detail.
+  Labels only, as every audit row. The result's `from_now` says which it was.
+- `list_projects` reports `from_now: true` on an armed row armed from now and
   `from_now: false` on any other armed row; the key is absent on rows that
   are not armed, like `automatic_disclosure`.
-- Setting the folder's mode again by any route ends the from-now record. Set
-  to plain `auto_upload`, the backlog is then approved unattended -- that is
-  what plain `auto_upload` means.
+- Setting the folder to ask-first or Never ends the from-now record, and
+  `include_backlog: true` replaces it: the backlog is then approved
+  unattended. Recorded paths no arming can still hold are pruned.
 
-**Plain `auto_upload` is unchanged**, `from_now` absent or `false`: it still
-approves the folder's settled backlog unattended. That is deliberate. Every
-shipped shell and the CLI send `set_project_mode` without the parameter, their
-confirmation copy describes that behaviour, and an existing call silently
-changing meaning would break the contract the other way -- sessions a
-contributor expected to go would sit waiting. A shell that draws the
-Customize rule sends `from_now: true`; one that means the old "arm this
-folder" keeps sending what it sends.
+**Folders armed before this default are left as they are.** A folder armed
+with the old meaning has no from-now record, so it keeps sending what it
+did; nothing is migrated. Setting its mode again -- `auto_upload` included --
+applies the rule in force at that call.
 
-`from_now` is a boolean. Any other type is refused with `from-now-invalid`,
-and `from_now: true` with a mode other than `auto_upload` with
-`from-now-requires-auto-upload`: "from now" means nothing for ask-first or
-Never, and ignoring it would let a shell believe it had set a rule it had not.
-Both are `bad_params`, and a refusal records and changes nothing.
+`include_backlog` is a boolean. Any other type is refused with
+`include-backlog-invalid`, and `include_backlog: true` with a mode other than
+`auto_upload` with `include-backlog-requires-auto-upload`: a backlog means
+nothing for ask-first or Never, and ignoring it would let a shell believe it
+had set a rule it had not. Both are `bad_params`, and a refusal records and
+changes nothing. The CLI's `daemon project --mode auto` arms from now and
+says the backlog waits; `--include-backlog` sends it.
 
 #### The past-session picker
 
@@ -1448,9 +1482,10 @@ Every project the daemon knows about, in two kinds:
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
 
-An armed row also carries `from_now`: `true` when it was armed with
-`set_project_mode`'s `from_now: true`, so its backlog waits for the
-contributor, and `false` otherwise. Absent on rows that are not armed. See
+An armed row also carries `from_now`: `true` when it was armed from now,
+the `set_project_mode` default, so its backlog waits for the contributor,
+and `false` when it was armed with `include_backlog: true` or before that
+default existed. Absent on rows that are not armed. See
 "Arming from now" above.
 
 #### `is_unresolved_bucket`
