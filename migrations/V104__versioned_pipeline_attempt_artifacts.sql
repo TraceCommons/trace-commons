@@ -33,6 +33,45 @@ CREATE TABLE pipeline_attempt_artifacts (
 CREATE INDEX pipeline_attempt_artifacts_due
     ON pipeline_attempt_artifacts (tenant_id, state, cleanup_after);
 
+-- A row moves once, from `staged` to `committed` with `committed_at` set,
+-- and never changes after that. The sweep deletes the object of a `staged`
+-- row, so a `committed` row moved back to `staged` would hand the sweep an
+-- object the submission's refs name; this trigger makes "the sweep never
+-- touches a committed object" hold by construction, not only by what the
+-- code does today. Every other UPDATE -- any change to a committed row,
+-- and any change to a staged row but its commit -- is refused, whoever
+-- issues it. DELETE is not guarded: the sweep deletes due `staged` rows,
+-- and the run's cascade removes the rest. The same shape as V101's
+-- `reject_pipeline_review_assessment_mutation`: an ordinary invoker-rights
+-- function with no settings of its own, so a non-superuser migration owner
+-- can apply it.
+CREATE FUNCTION guard_pipeline_attempt_artifact_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.state = 'staged'
+        AND NEW.state = 'committed'
+        AND NEW.committed_at IS NOT NULL
+        AND NEW.tenant_id = OLD.tenant_id
+        AND NEW.run_id = OLD.run_id
+        AND NEW.lease_token = OLD.lease_token
+        AND NEW.artifact = OLD.artifact
+        AND NEW.object_key = OLD.object_key
+        AND NEW.ciphertext_sha256 = OLD.ciphertext_sha256
+        AND NEW.cleanup_after = OLD.cleanup_after
+        AND NEW.staged_at = OLD.staged_at
+    THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'pipeline attempt artifacts move only from staged to committed';
+END;
+$$;
+
+CREATE TRIGGER pipeline_attempt_artifacts_guard_update
+    BEFORE UPDATE ON pipeline_attempt_artifacts
+    FOR EACH ROW EXECUTE FUNCTION guard_pipeline_attempt_artifact_update();
+
 ALTER TABLE pipeline_attempt_artifacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_attempt_artifacts FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_attempt_artifacts;
@@ -55,6 +94,6 @@ END $$;
 -- `staged` row outright once it has handled that row's object (DELETE).
 -- Nothing changes a `committed` row after its commit, and nothing updates a
 -- row's tenant, run, lease token, artifact kind, object key, ciphertext
--- hash, or cleanup_after.
+-- hash, or cleanup_after (the guard trigger above refuses both).
 GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;
 GRANT UPDATE (state, committed_at) ON pipeline_attempt_artifacts TO trace_ingest_runtime;

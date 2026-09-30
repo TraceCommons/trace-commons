@@ -3537,6 +3537,95 @@ async fn the_operator_route_requeues_the_tenants_failed_invalidations() {
     assert!(!metadata.to_string().contains(&run.run_id.to_string()));
 }
 
+/// Final review M4 (ruling FR-7): `POST /v1/workers/pipeline/index-rebuild`
+/// rebuilds the caller's tenant's index from its sealed commands and appends
+/// one hash-only, label-only index maintenance audit row: `main`'s
+/// `vector_index` action, the fixed purpose `pipeline_index_rebuild` as a
+/// hash, and the report's counts, with no run or submission id. A
+/// contributor is refused and appends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_index_rebuild_route_appends_an_audit_row() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let uri = "/v1/workers/pipeline/index-rebuild";
+
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.base.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a contributor is refused");
+
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["command_count"], 1, "{body}");
+    assert_eq!(body["skipped_run_count"], 0, "{body}");
+    let entry_count = body["entry_count"].as_u64().expect("an entry count");
+    assert!(entry_count > 0, "{body}");
+    assert_eq!(
+        body["unchanged_entry_count"].as_u64(),
+        Some(entry_count),
+        "the live index already holds every entry Settle wrote"
+    );
+
+    let mut client = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query(
+            "SELECT action, metadata_json FROM trace_audit_events
+              WHERE tenant_id = $1
+                AND metadata_json->'action_counts' ? 'pipeline_index_commands_replayed'
+              ORDER BY audit_sequence",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(rows.len(), 1, "one row for the one admitted call");
+    assert_eq!(rows[0].get::<_, String>("action"), "vector_index");
+    let metadata: serde_json::Value = rows[0].get("metadata_json");
+    let counts = &metadata["action_counts"];
+    assert_eq!(counts["pipeline_index_commands_replayed"], 1, "{metadata}");
+    assert_eq!(
+        counts["pipeline_index_entries_written"], entry_count,
+        "{metadata}"
+    );
+    assert_eq!(
+        counts["pipeline_index_entries_unchanged"], entry_count,
+        "{metadata}"
+    );
+    assert_eq!(counts["pipeline_index_runs_skipped"], 0, "{metadata}");
+    assert_eq!(
+        metadata["purpose_hash"],
+        sha256_prefixed("pipeline_index_rebuild"),
+        "{metadata}"
+    );
+    let text = metadata.to_string();
+    assert!(!text.contains(&run.run_id.to_string()));
+    assert!(!text.contains(&run.submission_id.to_string()));
+}
+
 /// `POST /v1/pipeline/exports` for `use`, with `limit`, keyed by `key`.
 async fn create_pipeline_export(
     state: &Arc<AppState>,

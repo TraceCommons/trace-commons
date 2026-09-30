@@ -2767,12 +2767,11 @@ async fn qualification_fails_closed_for_a_substituted_or_missing_dependency() {
     );
 }
 
-/// Task 5: the NEAR payout adapter is a bundle-scoped dependency exactly
-/// like a settlement adapter -- it counts toward qualification only when
-/// payout is enabled *and* the package being qualified actually pins the
-/// Trace Credit instrument. `dependency_qualification` (the whole-service
-/// check `novelty_utility_withheld_reason` still reads) makes no such
-/// distinction; `bundle_qualification` does.
+/// Task 5, amended by final review M5: the NEAR payout adapter is a
+/// service-wide dependency, like the index writer -- payout pays the
+/// complete runs of every bundle -- so it counts toward a bundle's
+/// qualification whenever payout is enabled, whether or not the package
+/// pins the Trace Credit instrument, and never while payout is disabled.
 #[tokio::test]
 async fn qualification_reports_payout_only_when_it_applies() {
     let Some(backend) = runtime_backend(4).await else {
@@ -2855,10 +2854,20 @@ async fn qualification_reports_payout_only_when_it_applies() {
         Some(unqualified_near.production_qualified())
     );
 
+    // Final review M5 (ruling FR-6, reversing the payout part of P4-D7):
+    // payout pays the complete runs of every bundle, so an enabled payout's
+    // adapter counts for a package that does not pin trace_credit too, and
+    // startup (`pipeline_runtime_is_production_qualified`, which reads this
+    // qualification for the default package) refuses it unqualified.
     let unpinned_qualification = enabled_service
         .bundle_qualification(&default_package)
         .expect("qualify a package that does not pin trace_credit");
-    assert_eq!(unpinned_qualification.payout, None);
+    assert_eq!(unpinned_qualification.payout, Some(false));
+    assert!(
+        unpinned_qualification
+            .blockers()
+            .contains(&"runtime_payout_not_production")
+    );
 }
 
 /// P5: an embedder that fails its first 7 `embed` calls and then delegates
@@ -8830,6 +8839,57 @@ fn score_object_ref_write(
     }
 }
 
+/// Moves `cleanup_after` one second into the past for `run_id`'s attempt
+/// artifact rows -- those of `lease_token`, or every `staged` row of the run
+/// when `None` -- so the sweep finds them due: a test-only time shortcut,
+/// never something production code does. `cleanup_after` is not a column
+/// the runtime role may UPDATE (V104's grant is `state, committed_at`
+/// only), and V104's guard trigger refuses every change but `staged` to
+/// `committed`, whoever makes it. So this runs as the database owner, with
+/// that trigger disabled inside the owner's own transaction: `ALTER TABLE`
+/// is transactional, and the lock it takes keeps every other session off
+/// the table until the commit, by which point the trigger is enabled again.
+async fn backdate_attempt_artifacts(
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+    lease_token: Option<uuid::Uuid>,
+) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    tx.batch_execute(
+        "ALTER TABLE pipeline_attempt_artifacts
+            DISABLE TRIGGER pipeline_attempt_artifacts_guard_update",
+    )
+    .await
+    .unwrap();
+    let updated = match lease_token {
+        Some(lease_token) => tx
+            .execute(
+                "UPDATE pipeline_attempt_artifacts SET cleanup_after = NOW() - INTERVAL '1 second'
+                  WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3",
+                &[&tenant_id, &run_id, &lease_token],
+            )
+            .await
+            .unwrap(),
+        None => tx
+            .execute(
+                "UPDATE pipeline_attempt_artifacts SET cleanup_after = NOW() - INTERVAL '1 second'
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'staged'",
+                &[&tenant_id, &run_id],
+            )
+            .await
+            .unwrap(),
+    };
+    assert!(updated > 0, "the backdate matched no attempt artifact row");
+    tx.batch_execute(
+        "ALTER TABLE pipeline_attempt_artifacts
+            ENABLE TRIGGER pipeline_attempt_artifacts_guard_update",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
 /// The count and states of `pipeline_attempt_artifacts` rows for one run, as
 /// `(artifact, state)` pairs ordered by artifact and then state -- two rows
 /// can share an `artifact` (a stale attempt and the claim that superseded
@@ -8989,19 +9049,8 @@ async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
         "the sweep left both rows untouched"
     );
 
-    // Move cleanup_after into the past. `cleanup_after` is not a column the
-    // runtime role may UPDATE (V104's grant is `state, committed_at` only),
-    // so this test-only backdate runs as the database owner.
-    let mut owner = owner_client().await;
-    let tx = owner_tenant_tx(&mut owner, &tenant).await;
-    tx.execute(
-        "UPDATE pipeline_attempt_artifacts SET cleanup_after = NOW() - INTERVAL '1 second'
-          WHERE tenant_id = $1 AND run_id = $2 AND state = 'staged'",
-        &[&tenant, &created.run_id],
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    // Move cleanup_after into the past (`backdate_attempt_artifacts`).
+    backdate_attempt_artifacts(&tenant, created.run_id, None).await;
 
     let removed_after = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
     assert_eq!(
@@ -9221,23 +9270,9 @@ async fn the_sweep_deletes_the_objects_a_refused_score_commit_left_stored() {
         Some(true)
     );
 
-    // Move cleanup_after into the past: a direct SQL update, the same time
-    // shortcut `force_due` uses for `pipeline_runs.next_attempt_at`.
-    // `cleanup_after` is not a column the runtime role may UPDATE (V104's
-    // grant is `state, committed_at` only), so this backdate --
-    // a test-only time shortcut, not something production code ever does --
-    // runs as the database owner, the same way `owner_client` backdates
-    // other columns the runtime role cannot touch elsewhere in this file.
-    let mut owner = owner_client().await;
-    let tx = owner_tenant_tx(&mut owner, &tenant).await;
-    tx.execute(
-        "UPDATE pipeline_attempt_artifacts SET cleanup_after = NOW() - INTERVAL '1 second'
-          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3",
-        &[&tenant, &claimed_score.run_id, &score_lease],
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    // Move cleanup_after into the past: the same time shortcut `force_due`
+    // uses for `pipeline_runs.next_attempt_at` (`backdate_attempt_artifacts`).
+    backdate_attempt_artifacts(&tenant, claimed_score.run_id, Some(score_lease)).await;
 
     let removed_after = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
     assert_eq!(removed_after, 2, "both due staged rows are removed");
@@ -9427,20 +9462,9 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
         "worker B's row committed; worker A's stayed staged"
     );
 
-    // Move the stale attempt's row into the past; worker B's stays alone.
-    // `cleanup_after` is not runtime-role-writable (V104 grants only
-    // `state, committed_at`), so this test-only backdate runs as
-    // the database owner.
-    let mut owner = owner_client().await;
-    let tx = owner_tenant_tx(&mut owner, &tenant).await;
-    tx.execute(
-        "UPDATE pipeline_attempt_artifacts SET cleanup_after = NOW() - INTERVAL '1 second'
-          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3",
-        &[&tenant, &seeded.run_id, &lease_a],
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    // Move the stale attempt's row into the past; worker B's stays alone
+    // (`backdate_attempt_artifacts`).
+    backdate_attempt_artifacts(&tenant, seeded.run_id, Some(lease_a)).await;
 
     let removed = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
     assert_eq!(removed, 1, "only the stale attempt's row is due");
@@ -25864,6 +25888,7 @@ async fn index_rebuild_skips_withdrawn_and_invalidated_runs() {
         .await
         .expect("rebuild succeeds");
     assert_eq!(report.command_count, 1);
+    assert_eq!(report.skipped_run_count, 0);
 }
 
 /// Task 8: a tampered `index_command_hash` -- the run's own committed
@@ -25967,5 +25992,222 @@ async fn index_rebuild_is_tenant_scoped() {
         rebuilt_b.entry_count(&tenant_ref_a, MINIMAL_INDEX_ID),
         0,
         "tenant B's rebuild must never write tenant A's entries"
+    );
+}
+
+/// Final review I1 (ruling FR-1): a rebuild holds each run's row and its
+/// submission's guard through that run's index writes, as Settle's index
+/// dispatch does (P3-D9), and re-checks both after it listed the run. Two
+/// runs, A then B, are settled and included; the rebuild into a fresh index
+/// is held at its first upsert, which is one of A's entries. While it is
+/// held:
+///
+/// - B's submission is withdrawn. The rebuild listed B before this
+///   withdrawal, but it re-checks B under B's own lock, finds its
+///   invalidation queued and its submission withdrawn, and skips it: none
+///   of B's entries reach the index.
+/// - A withdrawal of A's submission waits: the rebuild holds A's run row
+///   until A's writes commit, so the withdrawal (and the invalidation it
+///   queues) comes after them, and the invalidation pass removes them.
+///
+/// Neither the rebuild nor the two withdrawals writes an outcome, a
+/// settlement row, or a credit ledger row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_rebuild_holds_the_guard_and_skips_a_run_withdrawn_after_listing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("index-rebuild-race-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+
+    // A is created first, so the rebuild lists (and writes) it first.
+    let (ready_a, evidence_a) = run_to_settle_ready(&service, &tenant).await;
+    let settled_a = settle_included(&service, &tenant, &ready_a).await;
+    let (ready_b, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled_b = settle_included(&service, &tenant, &ready_b).await;
+
+    // The index a rebuild that writes A's entries and none of B's produces.
+    let command_a = service
+        .load_index_command(&settled_a, &evidence_a)
+        .await
+        .unwrap()
+        .expect("Score proposed a command for A");
+    let expected = IsolatedPipelineIndex::new();
+    for (key, entry) in command_a.keyed_entries(&tenant_ref) {
+        expected
+            .upsert(&key, &entry.embedding, &entry.content_hash)
+            .unwrap();
+    }
+    assert!(expected.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+
+    let outcomes_before = count_tenant_rows(&tenant, "phase_outcomes").await;
+    let settlements_before = count_tenant_rows(&tenant, "pipeline_run_settlements").await;
+    let ledger_before = count_tenant_rows(&tenant, "trace_credit_ledger").await;
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let (hold, mut held) = CallHold::new();
+    let writer: Arc<dyn IdentifiedIndexWriter> = Arc::new(BlockingIndexWriter {
+        inner: rebuilt.clone(),
+        hold,
+    });
+    let rebuild = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        async move {
+            service
+                .rebuild_index_from_authoritative_commands(&tenant, writer)
+                .await
+        }
+    });
+    held.wait_until_entered().await;
+
+    // B was listed before this withdrawal, and none of its entries is
+    // written yet. Nothing the rebuild holds is B's, so it does not wait.
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        withdraw(&service, &tenant, settled_b.submission_id),
+    )
+    .await
+    .expect("B's withdrawal does not wait for A's writes");
+
+    // A's writes are in progress: a withdrawal of A waits for them.
+    let withdrawal_a = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let submission_id = settled_a.submission_id;
+        async move {
+            withdraw(&service, &tenant, submission_id).await;
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let withdrawal_a_waited = !withdrawal_a.is_finished();
+
+    held.release();
+    let report = tokio::time::timeout(HELD_CALL_BOUND, rebuild)
+        .await
+        .expect("the rebuild finishes once released")
+        .expect("the rebuild task did not panic")
+        .expect("the rebuild succeeds");
+    tokio::time::timeout(HELD_CALL_BOUND, withdrawal_a)
+        .await
+        .expect("A's withdrawal finishes once A's writes commit")
+        .expect("A's withdrawal task did not panic");
+
+    assert_eq!(
+        rebuilt.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID),
+        expected.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID),
+        "the rebuilt index holds exactly A's entries and none of B's"
+    );
+    assert_eq!(report.command_count, 1, "only A's command is replayed");
+    assert_eq!(
+        report.skipped_run_count, 1,
+        "B, listed and then withdrawn, is skipped"
+    );
+    assert!(
+        withdrawal_a_waited,
+        "the withdrawal of A must wait while A's writes are in progress"
+    );
+    let (_, run_a_invalidation_state) =
+        index_invalidation_rows(&backend, &tenant, settled_a.run_id).await;
+    assert_eq!(
+        run_a_invalidation_state, "pending",
+        "A's withdrawal queued the invalidation that removes what the rebuild wrote"
+    );
+
+    assert_eq!(
+        count_tenant_rows(&tenant, "phase_outcomes").await,
+        outcomes_before,
+        "neither the rebuild nor a withdrawal writes an outcome"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_run_settlements").await,
+        settlements_before,
+        "neither the rebuild nor a withdrawal writes a settlement row"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_credit_ledger").await,
+        ledger_before,
+        "neither the rebuild nor a withdrawal writes a credit ledger row"
+    );
+}
+
+/// Final review M6: V104's guard trigger lets an attempt artifact row move
+/// once, from `staged` to `committed` with `committed_at` set, and refuses
+/// every other change. A committed row cannot go back to `staged`, where
+/// the sweep would delete an object the submission's refs name, and its
+/// `committed_at` cannot move either. The runtime role's column grant
+/// (`state, committed_at`) lets it issue both statements; the trigger
+/// refuses them, and refuses the database owner too.
+#[tokio::test]
+async fn a_committed_attempt_artifact_cannot_return_to_staged() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("attempt-artifact-guard-{}", uuid::Uuid::new_v4());
+    let (ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let rows_before = attempt_artifact_rows(&backend, &tenant, ready.run_id).await;
+    assert!(
+        !rows_before.is_empty() && rows_before.iter().all(|(_, state)| state == "committed"),
+        "Review and Score committed their attempt artifacts: {rows_before:?}"
+    );
+
+    const REFUSAL: &str = "pipeline attempt artifacts move only from staged to committed";
+    for (label, statement) in [
+        (
+            "back to staged",
+            "UPDATE pipeline_attempt_artifacts SET state = 'staged', committed_at = NULL
+              WHERE tenant_id = $1 AND run_id = $2",
+        ),
+        (
+            "a new committed_at",
+            "UPDATE pipeline_attempt_artifacts SET committed_at = NOW() + INTERVAL '1 hour'
+              WHERE tenant_id = $1 AND run_id = $2",
+        ),
+    ] {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let error = tx
+            .execute(statement, &[&tenant, &ready.run_id])
+            .await
+            .expect_err("the runtime role's update is refused");
+        let message = error
+            .as_db_error()
+            .map(|db| db.message().to_string())
+            .unwrap_or_default();
+        assert_eq!(message, REFUSAL, "{label}: {error:?}");
+        drop(tx);
+
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let error = tx
+            .execute(statement, &[&tenant, &ready.run_id])
+            .await
+            .expect_err("the owner's update is refused too");
+        let message = error
+            .as_db_error()
+            .map(|db| db.message().to_string())
+            .unwrap_or_default();
+        assert_eq!(message, REFUSAL, "{label} (owner): {error:?}");
+    }
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, ready.run_id).await,
+        rows_before,
+        "every row is still committed"
     );
 }

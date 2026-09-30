@@ -359,6 +359,12 @@ pub struct PromotionDecision {
     pub safe_blockers: Vec<String>,
 }
 
+/// Whether `evidence` supports production promotion: exactly one current
+/// result for each of [`PROMOTION_REQUIRED_CHECKS`], each passing and
+/// carrying no safe blocker. Every blocker found is listed as
+/// `<label>:<check_id>`: missing, failed (or blocked), stale evidence, and
+/// each safe blocker a result carries, including a passing one. Binding the
+/// evidence to one code revision and the candidate package is PR 5's work.
 pub fn evaluate_promotion(
     evidence: &[DrillEvidence],
     now: DateTime<Utc>,
@@ -390,6 +396,16 @@ pub fn evaluate_promotion(
         if item.check.status != PipelineCheckStatus::Pass {
             blockers.push(format!("{QUALIFICATION_EVIDENCE_FAILED_LABEL}:{check_id}"));
         }
+        // A result's own safe blockers block promotion whatever its status:
+        // a pass can carry one (the restore drill passes with
+        // `filesystem_restore_local_only`), and it names what that pass does
+        // not prove (final review I4, ruling FR-4).
+        blockers.extend(
+            item.check
+                .safe_blockers
+                .iter()
+                .map(|label| format!("{label}:{check_id}")),
+        );
         let maximum_age = i64::try_from(item.maximum_age_seconds)
             .map_err(|_| "qualification_evidence_invalid".to_string())?;
         if item.check.observed_at > now
@@ -1369,6 +1385,27 @@ mod tests {
         assert!(
             blocked_decision.safe_blockers.iter().any(|label| *label
                 == format!("{QUALIFICATION_EVIDENCE_FAILED_LABEL}:{blocked_check_id}"))
+        );
+
+        // Final review I4 (ruling FR-4): a passing result's safe blockers
+        // are promotion blockers, each as `<label>:<check_id>`. The restore
+        // drill passes carrying `filesystem_restore_local_only`.
+        let mut restore_blocked = evidence.clone();
+        let restore = restore_blocked
+            .iter_mut()
+            .find(|item| item.check.check_id == "pipeline_restore_drill")
+            .expect("the restore drill is a promotion check");
+        restore.check.safe_blockers = vec!["filesystem_restore_local_only".to_string()];
+        let restore_decision = evaluate_promotion(&restore_blocked, now).unwrap();
+        assert!(!restore_decision.ready);
+        assert_eq!(
+            restore_decision.safe_blockers,
+            vec!["filesystem_restore_local_only:pipeline_restore_drill".to_string()]
+        );
+        assert_ne!(
+            restore_decision.evidence_hash,
+            evaluate_promotion(&evidence, now).unwrap().evidence_hash,
+            "the blocker is part of the hashed decision"
         );
 
         let mut duplicate = evidence.clone();

@@ -374,6 +374,47 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         assert!(present, "{table}.{column} must exist after the upgrade");
     }
 
+    // The pipeline's row-guard triggers, as the upgrade leaves them: present,
+    // on their tables, and enabled. V104's guard is what keeps a committed
+    // attempt artifact from going back to `staged` (final review M6).
+    for (table, trigger) in [
+        ("phase_outcomes", "phase_outcomes_reject_update"),
+        ("phase_outcomes", "phase_outcomes_reject_delete"),
+        (
+            "pipeline_review_assessments",
+            "pipeline_review_assessments_reject_update",
+        ),
+        (
+            "pipeline_review_assessments",
+            "pipeline_review_assessments_reject_delete",
+        ),
+        (
+            "pipeline_bundle_qualifications",
+            "pipeline_bundle_qualifications_reject_update",
+        ),
+        (
+            "pipeline_bundle_qualifications",
+            "pipeline_bundle_qualifications_reject_delete",
+        ),
+        (
+            "pipeline_attempt_artifacts",
+            "pipeline_attempt_artifacts_guard_update",
+        ),
+    ] {
+        let enabled: bool = admin
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                     WHERE c.relname = $1 AND t.tgname = $2
+                       AND NOT t.tgisinternal AND t.tgenabled <> 'D')",
+                &[&table, &trigger],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(enabled, "{table} must carry the enabled trigger {trigger}");
+    }
+
     let claim_function: bool = admin
         .query_one(
             "SELECT to_regprocedure('claim_pipeline_run(uuid,integer)') IS NOT NULL",

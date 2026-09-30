@@ -388,11 +388,16 @@ fn is_external_receipt_reuse_error(error: &anyhow::Error) -> bool {
 /// the first worker's own stale write runs, `record_lease_expired`'s
 /// token-only fence finds no row under the first worker's now-superseded
 /// token and changes nothing -- that attempt is silently lost, recorded
-/// neither as `lease_expired` nor as a charge reversed. `PipelineLeaseRenewal`
-/// closes both gaps, by extending a live lease before it expires rather than
-/// discovering the expiry after the fact; the gap only reopens once a lease
-/// that was never renewed at all (a crashed worker, or one held past
-/// `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` phase leases) is reclaimed.
+/// neither as `lease_expired` nor as a charge reversed.
+///
+/// `PipelineLeaseRenewal` closes only the second gap, and only for a live
+/// worker: it extends the lease before it expires, so no other worker can
+/// reclaim a phase that is merely slow. The first gap stays: a crashed
+/// worker still records nothing, and its run is reclaimed as a charged
+/// attempt once its last lease expires. The second gap reopens when a live
+/// worker's lease expires anyway: its phase runs past
+/// `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` phase leases (renewal stops at the
+/// cap), or its renewal does not get to run before the lease expires.
 pub const PIPELINE_LEASE_EXPIRED_LABEL: &str = "lease_expired";
 /// Safe label `PipelineLeaseConfig::new` refuses with when a phase's
 /// configured lease falls outside [1 second, 2 hours].
@@ -965,6 +970,25 @@ enum ReceiptCommit {
     /// is due (a sweep that failed may have deleted its object), so it
     /// cannot commit.
     StagingMissing,
+}
+
+/// The run-row half of index-rebuild eligibility, over `pipeline_runs p`:
+/// complete, included in the index, with a completed index write that no
+/// invalidation has touched since, and a stored command reference and hash
+/// to rebuild from. `PgPipelineStore::list_rebuildable_index_runs` lists by
+/// it and `PgPipelineStore::lock_rebuildable_index_run_on_tx` re-checks it
+/// under the run's lock, so the two cannot drift. The submission half is
+/// `PgPipelineStore::submission_guard_on_tx` itself, read per run under
+/// that lock (final review I1 and M8).
+macro_rules! rebuildable_index_run_predicate {
+    () => {
+        "p.state = 'complete'
+         AND p.index_membership = 'included'
+         AND p.index_write_state = 'complete'
+         AND p.index_invalidation_state = 'none'
+         AND p.index_command_ref IS NOT NULL
+         AND p.index_command_hash IS NOT NULL"
+    };
 }
 
 /// Cheap to clone: the pool it wraps is already an `Arc`.
@@ -3769,17 +3793,21 @@ impl PgPipelineStore {
         rows.iter().map(pipeline_settlement_from_row).collect()
     }
 
-    /// Runs eligible for an index rebuild from their own sealed commands
-    /// (port `ef97a459` lines 618 to 655, adapted): complete, included in
-    /// the index, with a completed index write that no invalidation has
-    /// touched since, and a stored command reference and hash to rebuild
-    /// from. Joined against the same operable-submission predicate
-    /// `submission_guard_on_tx` reads (accepted, not revoked, not purged,
-    /// not expired, no `trace_withdrawals` row) rather than the port's
-    /// `trace_derived_records` join, which PR 2 replaced with the
-    /// `approved_*` columns on `pipeline_runs` itself. Ordered by
-    /// `created_at, run_id` so a rebuild applies commands in the same order
-    /// Settle originally committed them.
+    /// The runs an index rebuild considers, from their own sealed commands
+    /// (port `ef97a459` lines 618 to 655, adapted): every run that meets
+    /// `rebuildable_index_run_predicate!` -- complete, included in the
+    /// index, with a completed index write that no invalidation has touched
+    /// since, and a stored command reference and hash to rebuild from.
+    /// Ordered by `created_at, run_id` so a rebuild applies commands in the
+    /// same order Settle originally committed them.
+    ///
+    /// A listing only. Whether the run's submission is still operable is not
+    /// decided here: the rebuild reads `submission_guard_on_tx` for each run
+    /// under that run's lock, immediately before it writes the run's
+    /// entries (`lock_rebuildable_index_run_on_tx`), since a withdrawal can
+    /// commit at any point after this read (final review I1). Reading the
+    /// guard itself, rather than a copy of its predicate, keeps the two from
+    /// drifting (M8).
     pub async fn list_rebuildable_index_runs(
         &self,
         tenant_id: &str,
@@ -3788,30 +3816,59 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
-                "SELECT p.*
-                   FROM pipeline_runs p
-                   JOIN trace_submissions s
-                     ON s.tenant_id = p.tenant_id
-                    AND s.submission_id = p.submission_id
-                  WHERE p.tenant_id = $1
-                    AND p.state = 'complete'
-                    AND p.index_membership = 'included'
-                    AND p.index_write_state = 'complete'
-                    AND p.index_invalidation_state = 'none'
-                    AND p.index_command_ref IS NOT NULL
-                    AND p.index_command_hash IS NOT NULL
-                    AND s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                    AND NOT EXISTS (
-                        SELECT 1 FROM trace_withdrawals w
-                         WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
-                    )
-                  ORDER BY p.created_at, p.run_id",
+                concat!(
+                    "SELECT p.* FROM pipeline_runs p WHERE p.tenant_id = $1 AND ",
+                    rebuildable_index_run_predicate!(),
+                    " ORDER BY p.created_at, p.run_id"
+                ),
                 &[&tenant_id],
             )
             .await?;
         tx.commit().await?;
         rows.iter().map(pipeline_run_from_row).collect()
+    }
+
+    /// Locks `run`'s row on the caller's transaction and re-checks, under
+    /// that lock, everything an index rebuild needs before it writes the
+    /// run's entries: the run still meets `rebuildable_index_run_predicate!`
+    /// with the same `index_command_hash` the rebuild listed and loaded, and
+    /// its submission is still operable (`submission_guard_on_tx`, which
+    /// holds the submission row `FOR SHARE`). `false` when either no longer
+    /// holds; the caller writes nothing for the run then.
+    ///
+    /// Lock order: the run row, then the submission row -- the order a
+    /// withdrawal also takes (`withdraw_submission`) and Settle's index
+    /// dispatch holds. Both locks last until the caller's transaction ends,
+    /// so a withdrawal of the submission waits for the rebuild's writes to
+    /// commit, and the invalidation it then queues covers them. The run row
+    /// is locked `FOR SHARE`: two rebuilds of one run may overlap (their
+    /// writes are idempotent), and a withdrawal's `FOR UPDATE` waits for
+    /// both. A withdrawal that committed while this statement waited for
+    /// the lock is seen: PostgreSQL re-evaluates the run predicate on the
+    /// row version the withdrawal left, and the guard reads with a snapshot
+    /// taken after its own lock is held.
+    pub async fn lock_rebuildable_index_run_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+    ) -> Result<bool, DatabaseError> {
+        let Some(command_hash) = run.index_command_hash.as_deref() else {
+            return Ok(false);
+        };
+        let locked = tx
+            .query_opt(
+                concat!(
+                    "SELECT 1 FROM pipeline_runs p
+                      WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.index_command_hash = $3 AND ",
+                    rebuildable_index_run_predicate!(),
+                    " FOR SHARE"
+                ),
+                &[&run.tenant_id, &run.run_id, &command_hash],
+            )
+            .await?;
+        if locked.is_none() {
+            return Ok(false);
+        }
+        Ok(Self::submission_guard_on_tx(tx, run).await?.operable)
     }
 
     /// The payout pass's work list (P3-D11): up to `limit` complete runs of
@@ -5643,9 +5700,10 @@ pub struct PipelineDependencyCheck {
 /// instrument the package pins (an instrument with no registered adapter
 /// reports identity `settlement_adapter_missing`, unqualified); `authority`
 /// and `privacy` (unconditional -- every bundle needs both); and `payout`,
-/// which is `None` unless payout is enabled *and* the package pins the Trace
-/// Credit instrument, in which case it is `Some` of the held NEAR adapter's
-/// own qualification.
+/// which is `None` while payout is disabled and otherwise `Some` of the held
+/// NEAR adapter's own qualification, for every package: payout pays the
+/// complete runs of every bundle, so it is service-wide like the index
+/// writer (final review M5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PipelineBundleQualification {
     pub bundle_id: String,
@@ -5769,15 +5827,34 @@ pub struct PipelineInspection {
 /// What one pass of [`PipelineService::rebuild_index_from_authoritative_commands`]
 /// did: how many sealed commands it replayed, how many entries it upserted
 /// across all of them, how many of those the writer already held
-/// (`IndexUpsertResult::Unchanged`), and a hash of the exact set of command
-/// hashes it rebuilt from -- so a caller can tell two rebuilds apart, or
-/// confirm a repeat rebuilt from the same authoritative set.
+/// (`IndexUpsertResult::Unchanged`), how many listed runs it skipped
+/// because, re-checked under their own lock, they were no longer operable
+/// (a withdrawal or an invalidation that committed after the listing), and
+/// a hash of the exact set of command hashes it rebuilt from -- so a caller
+/// can tell two rebuilds apart, or confirm a repeat rebuilt from the same
+/// authoritative set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineIndexRebuildReport {
     pub command_count: usize,
     pub entry_count: usize,
     pub unchanged_entry_count: usize,
+    pub skipped_run_count: usize,
     pub command_set_hash: String,
+}
+
+/// What [`PipelineService::rebuild_index_run`] did for one listed run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineIndexRebuildRun {
+    /// The run's sealed command was replayed: its hash, the entries upserted,
+    /// and how many of them the writer already held.
+    Rebuilt {
+        command_hash: String,
+        entry_count: usize,
+        unchanged_entry_count: usize,
+    },
+    /// Re-checked under its lock, the run was no longer operable; nothing was
+    /// written for it.
+    Skipped,
 }
 
 /// Builds a [`PipelineService`]. Scorers and embedders are registered by
@@ -6676,10 +6753,12 @@ impl PipelineService {
     /// Whether every dependency the package `package` actually uses is
     /// production-qualified (decision P4-D7): the scorer and embedder it
     /// names, the held index reader and writer, one settlement-adapter check
-    /// per instrument it pins, `authority` and `privacy`, and `payout` when
-    /// it applies to this bundle. `pipeline_runtime_is_production_qualified`
-    /// calls this with `default_package()` at startup, so an unqualified
-    /// dependency the default bundle never touches no longer blocks boot.
+    /// per instrument it pins, `authority` and `privacy`, and `payout`
+    /// whenever payout is enabled (service-wide, final review M5).
+    /// `pipeline_runtime_is_production_qualified` calls this with
+    /// `default_package()` at startup, so an unqualified scorer, embedder,
+    /// or settlement adapter the default bundle never touches no longer
+    /// blocks boot.
     ///
     /// `Err("bundle_package_invalid")` when `package` itself does not
     /// validate (`package_digests`); `Err("bundle_dependency_missing")` when
@@ -6709,11 +6788,12 @@ impl PipelineService {
                 (instrument_id.as_str().to_string(), check)
             })
             .collect();
-        let pins_trace_credit = package
-            .manifest
-            .instruments
-            .contains_key(&InstrumentId::trace_credit());
-        let payout = (self.payout_enabled() && pins_trace_credit).then(|| {
+        // Payout is service-wide, like the index writer: `process_payouts`
+        // pays the complete runs of every bundle, including runs bound to
+        // an earlier default package. So an enabled payout's adapter counts
+        // for every package, not only one that pins `trace_credit` (final
+        // review M5, reversing the payout part of P4-D7).
+        let payout = self.payout_enabled().then(|| {
             self.payout
                 .as_ref()
                 .is_some_and(|(adapter, _)| adapter.production_qualified())
@@ -7904,56 +7984,117 @@ impl PipelineService {
     /// what the pipeline actually settled, bit for bit.
     ///
     /// Reads `PgPipelineStore::list_rebuildable_index_runs` for the run
-    /// list -- already scoped to a complete run, included in the index, with
-    /// a completed index write no invalidation has touched, of an operable
-    /// submission -- in `created_at, run_id` order, the same order Settle
-    /// committed them in. A run whose stored command fails validation (a
-    /// tampered `index_command_hash`, or a mismatched revision, index, or
-    /// model) fails the whole rebuild closed with `index_command_invalid`
-    /// before writing anything from that run; entries an earlier run in the
-    /// same pass already wrote are not rolled back, since a fail-closed
-    /// rebuild is meant to be re-run after the operator resolves the
-    /// tampered row, and every entry write is idempotent
-    /// (`writer.upsert`'s `Unchanged` result) so a re-run never double-counts
-    /// what an earlier attempt already applied.
+    /// list -- complete runs, included in the index, with a completed index
+    /// write no invalidation has touched -- in `created_at, run_id` order,
+    /// the same order Settle committed them in, then rebuilds each run with
+    /// `rebuild_index_run`, which re-checks the run and its submission under
+    /// the run's lock and holds both through that run's writes. A run
+    /// withdrawn or invalidated after the listing is skipped
+    /// (`skipped_run_count`), never written (final review I1).
+    ///
+    /// A run whose stored command fails validation (a tampered
+    /// `index_command_hash`, or a mismatched revision, index, or model)
+    /// fails the whole rebuild closed with `index_command_invalid` before
+    /// writing anything from that run; entries an earlier run in the same
+    /// pass already wrote are not rolled back, since a fail-closed rebuild
+    /// is meant to be re-run after the operator resolves the tampered row,
+    /// and every entry write is idempotent (`writer.upsert`'s `Unchanged`
+    /// result) so a re-run never double-counts what an earlier attempt
+    /// already applied.
     pub async fn rebuild_index_from_authoritative_commands(
         &self,
         tenant_id: &str,
         writer: Arc<dyn IdentifiedIndexWriter>,
     ) -> anyhow::Result<PipelineIndexRebuildReport> {
-        let tenant = pipeline_tenant_storage_ref(tenant_id);
         let runs = self.store.list_rebuildable_index_runs(tenant_id).await?;
         let mut command_hashes = Vec::with_capacity(runs.len());
         let mut entry_count = 0usize;
         let mut unchanged_entry_count = 0usize;
+        let mut skipped_run_count = 0usize;
         for run in runs {
-            let evidence = self
-                .committed_evidence::<ScoreEvidence>(&run, Phase::Score)
-                .await?;
-            let command = self
-                .load_index_command(&run, &evidence)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
-            let command_hash = run
-                .index_command_hash
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
-            for (key, entry) in command.keyed_entries(&tenant) {
-                match writer.upsert(&key, &entry.embedding, &entry.content_hash) {
-                    Ok(IndexUpsertResult::Inserted) => {}
-                    Ok(IndexUpsertResult::Unchanged) => unchanged_entry_count += 1,
-                    Err(error) => return Err(anyhow::anyhow!("index rebuild failed: {error}")),
+            match self.rebuild_index_run(&run, writer.as_ref()).await? {
+                PipelineIndexRebuildRun::Rebuilt {
+                    command_hash,
+                    entry_count: run_entries,
+                    unchanged_entry_count: run_unchanged,
+                } => {
+                    entry_count += run_entries;
+                    unchanged_entry_count += run_unchanged;
+                    command_hashes.push(command_hash);
                 }
-                entry_count += 1;
+                PipelineIndexRebuildRun::Skipped => skipped_run_count += 1,
             }
-            command_hashes.push(command_hash);
         }
-        let command_set_hash = sha256_prefixed(serde_json::to_vec(&command_hashes)?.as_slice());
+        let command_set_hash = sha256_prefixed(
+            trace_commons_protocol::canonical_json::to_canonical_vec(&serde_json::json!(
+                command_hashes
+            ))?
+            .as_slice(),
+        );
         Ok(PipelineIndexRebuildReport {
             command_count: command_hashes.len(),
             entry_count,
             unchanged_entry_count,
+            skipped_run_count,
             command_set_hash,
+        })
+    }
+
+    /// Rebuilds one listed run's entries into `writer`, under the guard
+    /// (final review I1, the shape of Settle's index dispatch under P3-D9):
+    /// one tenant transaction locks the run row, re-checks that the run is
+    /// still rebuildable with the command hash it was listed with and that
+    /// its submission is still operable
+    /// (`PgPipelineStore::lock_rebuildable_index_run_on_tx`), and holds both
+    /// locks through every upsert, then commits. A withdrawal locks the run
+    /// row `FOR UPDATE` first, so it either committed before the re-check
+    /// (the run is `Skipped`) or waits until these writes are done, and the
+    /// invalidation it queues then removes them.
+    ///
+    /// The committed Score evidence and the sealed command are read before
+    /// the transaction opens, so it never holds two pooled connections at
+    /// once. The command's error is raised only once the re-check lets the
+    /// write go ahead: a skipped run does not need its command, which the
+    /// withdrawal's own object deletion may already have removed.
+    pub async fn rebuild_index_run(
+        &self,
+        run: &PipelineRunRecord,
+        writer: &dyn IdentifiedIndexWriter,
+    ) -> anyhow::Result<PipelineIndexRebuildRun> {
+        let command = match self
+            .committed_evidence::<ScoreEvidence>(run, Phase::Score)
+            .await
+        {
+            Ok(evidence) => self.load_index_command(run, &evidence).await,
+            Err(error) => Err(error),
+        };
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        if !PgPipelineStore::lock_rebuildable_index_run_on_tx(&tx, run).await? {
+            tx.commit().await?;
+            return Ok(PipelineIndexRebuildRun::Skipped);
+        }
+        let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+        let command_hash = run
+            .index_command_hash
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let mut entry_count = 0usize;
+        let mut unchanged_entry_count = 0usize;
+        for (key, entry) in command.keyed_entries(&tenant) {
+            match writer.upsert(&key, &entry.embedding, &entry.content_hash) {
+                Ok(IndexUpsertResult::Inserted) => {}
+                Ok(IndexUpsertResult::Unchanged) => unchanged_entry_count += 1,
+                Err(error) => return Err(anyhow::anyhow!("index rebuild failed: {error}")),
+            }
+            entry_count += 1;
+        }
+        tx.commit().await?;
+        Ok(PipelineIndexRebuildRun::Rebuilt {
+            command_hash,
+            entry_count,
+            unchanged_entry_count,
         })
     }
 

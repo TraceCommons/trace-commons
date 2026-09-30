@@ -42312,8 +42312,10 @@ fn pipeline_reviewer_principal_ref(principal_ref: &str) -> String {
     )
 }
 
-/// 404 when no pipeline runtime was injected -- the shared refusal for all
-/// three pipeline review routes.
+/// 404 when no pipeline runtime was injected -- the shared refusal for every
+/// route that needs one: the three pipeline review routes, the pipeline
+/// withdrawal route, the admin index-invalidation requeue route, and the
+/// worker index-rebuild route.
 fn require_pipeline_service(state: &AppState) -> ApiResult<&Arc<PipelineService>> {
     state
         .pipeline_service

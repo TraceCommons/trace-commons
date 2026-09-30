@@ -246,11 +246,12 @@ pub(crate) fn validate_pipeline_privacy_filter_requirement(
 /// bundle never touches no longer blocks startup. What the default bundle
 /// does use -- its named scorer and embedder, the held index reader and
 /// writer, one settlement adapter per instrument it pins, authority, privacy
-/// (Ruling T2-2), and payout when it applies -- still fails closed the same
-/// way, whenever tenants are routed; an invalid or unresolvable default
-/// package (`bundle_package_invalid`, `bundle_dependency_missing`) fails
-/// closed the same as an unqualified one. A compatibility bundle's
-/// configuration must also be qualifiable
+/// (Ruling T2-2) -- and the payout adapter whenever payout is enabled
+/// (service-wide: payout pays every bundle's runs, final review M5) still
+/// fail closed the same way, whenever tenants are routed; an invalid or
+/// unresolvable default package (`bundle_package_invalid`,
+/// `bundle_dependency_missing`) fails closed the same as an unqualified one.
+/// A compatibility bundle's configuration must also be qualifiable
 /// (`PipelineDependencyQualification::bundle`, Zaki review 1, round 2,
 /// finding 11), so the all-zero local reference never binds for real
 /// tenants.
@@ -336,6 +337,14 @@ pub(crate) async fn pipeline_readiness_handler(
 /// field -- the same tenant-scoping rule every other pipeline route follows
 /// (Envelope tenant fields are attribution only; auth derives the tenant
 /// that is actually read and written).
+///
+/// A rebuild that completes appends one index maintenance audit row, as the
+/// vector index worker route does (final review M4, ruling FR-7): `main`'s
+/// `vector_index` event with the fixed purpose `pipeline_index_rebuild`
+/// (hashed) and the report's counts under their own labels. Hash-only and
+/// label-only: no run, submission, or command id. It needs no migration:
+/// the event, its action, and its metadata shape are `main`'s, as the
+/// pipeline's invalidation requeue route already uses them.
 pub(crate) async fn pipeline_index_rebuild_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -348,6 +357,47 @@ pub(crate) async fn pipeline_index_rebuild_handler(
         .rebuild_index_from_authoritative_commands(&tenant.tenant_id, writer)
         .await
         .map_err(pipeline_index_rebuild_error)?;
+    let purpose = "pipeline_index_rebuild";
+    let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+    let action_counts = BTreeMap::from([
+        (
+            "pipeline_index_commands_replayed".to_string(),
+            count(report.command_count),
+        ),
+        (
+            "pipeline_index_entries_written".to_string(),
+            count(report.entry_count),
+        ),
+        (
+            "pipeline_index_entries_unchanged".to_string(),
+            count(report.unchanged_entry_count),
+        ),
+        (
+            "pipeline_index_runs_skipped".to_string(),
+            count(report.skipped_run_count),
+        ),
+    ]);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::vector_index(&tenant, false, Some(purpose), action_counts.clone()),
+        StorageTraceAuditAction::VectorIndex,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("vector_index".to_string()),
+            purpose_hash: Some(sha256_prefixed(purpose)),
+            dry_run: false,
+            action_counts,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        command_count = report.command_count,
+        entry_count = report.entry_count,
+        skipped_run_count = report.skipped_run_count,
+        "pipeline index rebuilt from sealed commands"
+    );
     Ok(Json(report))
 }
 

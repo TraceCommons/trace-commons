@@ -8049,6 +8049,12 @@ mod tests {
             "UNIQUE (tenant_id, object_key)",
             "ON DELETE CASCADE",
             "CREATE INDEX pipeline_attempt_artifacts_due",
+            // Final review M6: a row moves only from `staged` to
+            // `committed`, so a committed object never reaches the sweep.
+            "guard_pipeline_attempt_artifact_update",
+            "CREATE TRIGGER pipeline_attempt_artifacts_guard_update",
+            "BEFORE UPDATE ON pipeline_attempt_artifacts",
+            "IF OLD.state = 'staged'\n        AND NEW.state = 'committed'\n        AND NEW.committed_at IS NOT NULL",
             "ALTER TABLE pipeline_attempt_artifacts FORCE ROW LEVEL SECURITY;",
             "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_attempt_artifacts",
             "GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
