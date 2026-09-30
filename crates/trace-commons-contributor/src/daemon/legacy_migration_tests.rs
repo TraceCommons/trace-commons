@@ -862,6 +862,25 @@ async fn only_a_legacy_invite_identity_is_offered_the_move() {
     assert!(offered_for(&f.cfg));
 }
 
+/// The daemon offers the move by the server's rule: any casing of a
+/// reserved account namespace is not a legacy invite identity, so the
+/// daemon never offers a move the server would refuse.
+#[test]
+fn a_reserved_namespace_in_any_case_is_not_a_legacy_tenant() {
+    for tenant in [
+        "NEAR-foo",
+        "Near-foo",
+        "NearAI-foo",
+        "NEARAI-foo",
+        "near-foo",
+    ] {
+        assert!(!is_legacy_tenant(tenant), "{tenant}");
+    }
+    assert!(is_legacy_tenant("tenant-deepak-jangir"));
+    assert!(is_legacy_tenant("nearish-foo"));
+    assert!(!is_legacy_tenant(""));
+}
+
 #[test]
 fn a_pasted_invite_must_be_this_commons_s() {
     let cfg = legacy_config("https://ingest.example", "sha256:aa");
