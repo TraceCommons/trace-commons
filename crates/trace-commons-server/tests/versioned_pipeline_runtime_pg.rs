@@ -17033,6 +17033,145 @@ async fn an_invalidation_whose_index_cannot_be_read_fails_after_its_attempts() {
     );
 }
 
+/// Ends `run_id`'s index invalidation `failed`, its attempts spent, as
+/// `an_invalidation_whose_index_cannot_be_read_fails_after_its_attempts`
+/// drives it there: a time shortcut, through an owner connection.
+async fn fail_invalidation_as_owner(tenant_id: &str, run_id: uuid::Uuid) {
+    let owner = owner_client().await;
+    owner
+        .execute(
+            "UPDATE pipeline_index_invalidations
+                SET state = 'failed', attempt_count = max_attempts,
+                    last_error_label = 'index_invalidation_failed'
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("fail the invalidation");
+    owner
+        .execute(
+            "UPDATE pipeline_runs SET index_invalidation_state = 'failed'
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("mark the run's invalidation failed");
+}
+
+/// Zaki review 1, item 6: a `failed` invalidation is not terminal. Queuing
+/// the revision's invalidation again (here, a second withdrawal) resets it
+/// to `pending`, with no attempt charged and due at once, and the run's
+/// `index_invalidation_state` with it; the next pass removes the revision.
+#[tokio::test]
+async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-requeue-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    fail_invalidation_as_owner(&tenant, run.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "a failed invalidation is not claimed"
+    );
+
+    withdraw(&service, &tenant, run.submission_id).await;
+    let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(detail.state, "pending");
+    assert_eq!(detail.attempt_count, 0);
+    assert_eq!(detail.last_error_label, None);
+    assert_eq!(detail.run_state, "pending");
+    assert!(detail.next_attempt_at <= chrono::Utc::now(), "due at once");
+
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "complete"
+    );
+    assert!(
+        visible_revision_entries(&index, &tenant_ref, &entries).is_empty(),
+        "the revision left the index"
+    );
+}
+
+/// Zaki review 1, item 6: the operator's re-enqueue resets every `failed`
+/// invalidation of the caller's tenant to `pending` and answers how many,
+/// and touches no other tenant's. A second call finds none.
+#[tokio::test]
+async fn requeue_failed_index_invalidations_resets_the_tenants_failed_ones() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant_a = format!("requeue-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("requeue-b-{}", uuid::Uuid::new_v4());
+    let mut runs = Vec::new();
+    for tenant in [&tenant_a, &tenant_b] {
+        let (run, _) = complete_indexed_run(&service, tenant).await;
+        withdraw(&service, tenant, run.submission_id).await;
+        fail_invalidation_as_owner(tenant, run.run_id).await;
+        runs.push(run);
+    }
+
+    assert_eq!(
+        service
+            .store()
+            .requeue_failed_index_invalidations(&tenant_a)
+            .await
+            .unwrap(),
+        1
+    );
+    let a = invalidation_detail(&backend, &tenant_a, runs[0].run_id).await;
+    assert_eq!(
+        (a.state.as_str(), a.attempt_count, a.run_state.as_str()),
+        ("pending", 0, "pending")
+    );
+    let b = invalidation_detail(&backend, &tenant_b, runs[1].run_id).await;
+    assert_eq!(
+        (b.state.as_str(), b.run_state.as_str()),
+        ("failed", "failed"),
+        "another tenant's invalidation is untouched"
+    );
+    assert_eq!(
+        service
+            .store()
+            .requeue_failed_index_invalidations(&tenant_a)
+            .await
+            .unwrap(),
+        0,
+        "nothing more to re-enqueue"
+    );
+}
+
 /// A pending invalidation of tenant A is not processed by tenant B's pass:
 /// B's pass returns 0 and A's row, and A's entries, are unchanged. A's own
 /// pass then processes it, so the row was due all along.

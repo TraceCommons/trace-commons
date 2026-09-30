@@ -381,7 +381,13 @@ pending invalidations. Only a failure that waiting cannot fix is charged: the
 run's Score evidence names no index, or the index answers with a content
 conflict. When those attempts run out, the invalidation is `failed` with
 `index_invalidation_failed`, and the revision's entries can still be in the
-index. Remove them by hand.
+index. A `failed` invalidation is not final. Once the fault is fixed,
+`POST /v1/admin/pipeline/index-invalidations/requeue-failed` (an admin
+credential; the tenant is the credential's) moves every `failed`
+invalidation of the tenant back to `pending`, with no attempt charged and
+due at once, and answers `{"requeued": <count>}`; the worker's next pass
+tries each again. Queuing the same revision's invalidation again (a repeated
+withdrawal, for example) resets it in the same way.
 
 ## NEAR payout
 

@@ -8046,6 +8046,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(pipeline_forensic_trace_handler),
         )
         .route(
+            "/v1/admin/pipeline/index-invalidations/requeue-failed",
+            post(pipeline_requeue_failed_index_invalidations_handler),
+        )
+        .route(
             "/.well-known/trace-commons-attestation-keyset.json",
             get(attestation_keyset_handler),
         )
@@ -16783,6 +16787,42 @@ async fn pipeline_forensic_trace_handler(
         .await
         .map_err(internal_error)?;
     Ok(Json(trace))
+}
+
+/// Response body of
+/// `POST /v1/admin/pipeline/index-invalidations/requeue-failed`: how many
+/// invalidations went back to `pending`. A count only.
+#[derive(Debug, Serialize)]
+struct PipelineInvalidationRequeueResponse {
+    requeued: u64,
+}
+
+/// `POST /v1/admin/pipeline/index-invalidations/requeue-failed`: re-enqueues
+/// every `failed` index invalidation of the caller's tenant
+/// (`PgPipelineStore::requeue_failed_index_invalidations`), for an operator
+/// who has fixed the fault that failed them, and answers how many. It needs
+/// `main`'s admin credential, as the other pipeline admin routes do; the
+/// tenant is the credential's. Without a pipeline runtime it is `404`. The
+/// worker's next pass takes the re-enqueued invalidations up (Zaki review 1,
+/// item 6).
+async fn pipeline_requeue_failed_index_invalidations_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PipelineInvalidationRequeueResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let pipeline = require_pipeline_service(state.as_ref())?;
+    let requeued = pipeline
+        .store()
+        .requeue_failed_index_invalidations(tenant.tenant_id())
+        .await
+        .map_err(internal_error)?;
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(tenant.tenant_id()),
+        requeued,
+        "pipeline failed index invalidations re-enqueued"
+    );
+    Ok(Json(PipelineInvalidationRequeueResponse { requeued }))
 }
 
 /// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the

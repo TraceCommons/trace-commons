@@ -2232,6 +2232,9 @@ impl PgPipelineStore {
             ],
         )
         .await?;
+        // Zaki review 1, item 6: queuing a revision whose invalidation
+        // `failed` runs it again, from the start.
+        reset_failed_index_invalidations_on_tx(tx, &run.tenant_id, Some(run.run_id)).await?;
         tx.execute(
             "UPDATE pipeline_runs
                 SET index_invalidation_state = 'pending', updated_at = NOW()
@@ -2241,6 +2244,24 @@ impl PgPipelineStore {
         )
         .await?;
         Ok(())
+    }
+
+    /// Re-enqueues every `failed` index invalidation of `tenant_id`, in one
+    /// tenant transaction: each goes back to `pending`, with no attempt
+    /// charged and due at once, and its run's `index_invalidation_state`
+    /// with it, so the worker's next pass tries it again from the start.
+    /// Returns how many it re-enqueued. The operator route behind `main`'s
+    /// admin credential calls this once the fault that failed them is fixed
+    /// (Zaki review 1, item 6).
+    pub async fn requeue_failed_index_invalidations(
+        &self,
+        tenant_id: &str,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let requeued = reset_failed_index_invalidations_on_tx(&tx, tenant_id, None).await?;
+        tx.commit().await?;
+        Ok(requeued)
     }
 
     /// Up to `limit` (clamped to 1..=500) of `tenant_id`'s index
@@ -4297,6 +4318,42 @@ async fn withdraw_pipeline_content_on_tx(
         .await?;
     }
     Ok(())
+}
+
+/// Moves `tenant_id`'s `failed` index invalidations -- only `run_id`'s, when
+/// given -- back to `pending`: no attempt charged, no label, due now, not
+/// complete; and each one's run `index_invalidation_state` from `failed` to
+/// `pending`. Returns how many invalidations it moved.
+async fn reset_failed_index_invalidations_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    run_id: Option<Uuid>,
+) -> Result<u64, DatabaseError> {
+    let reset = tx
+        .query(
+            "UPDATE pipeline_index_invalidations
+                SET state = 'pending', attempt_count = 0, last_error_label = NULL,
+                    completed_at = NULL, next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND state = 'failed'
+                AND ($2::UUID IS NULL OR run_id = $2)
+              RETURNING run_id",
+            &[&tenant_id, &run_id],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, Uuid>(0))
+        .collect::<Vec<_>>();
+    if !reset.is_empty() {
+        tx.execute(
+            "UPDATE pipeline_runs
+                SET index_invalidation_state = 'pending', updated_at = NOW()
+              WHERE tenant_id = $1 AND run_id = ANY($2)
+                AND index_invalidation_state = 'failed'",
+            &[&tenant_id, &reset],
+        )
+        .await?;
+    }
+    Ok(u64::try_from(reset.len()).unwrap_or(u64::MAX))
 }
 
 fn stale_lease_error() -> DatabaseError {

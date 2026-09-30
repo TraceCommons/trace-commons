@@ -2916,6 +2916,126 @@ async fn product_fixture() -> Option<ProductFixture> {
     })
 }
 
+/// `(state, attempt_count, the run's index_invalidation_state)` of the run's
+/// index invalidation.
+async fn invalidation_state(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: Uuid,
+) -> (String, i32, String) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT i.state, i.attempt_count, r.index_invalidation_state
+               FROM pipeline_index_invalidations i
+               JOIN pipeline_runs r ON r.tenant_id = i.tenant_id AND r.run_id = i.run_id
+              WHERE i.tenant_id = $1 AND i.run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1), row.get(2))
+}
+
+/// Zaki review 1, item 6: `POST /v1/admin/pipeline/index-invalidations/requeue-failed`
+/// re-enqueues every `failed` index invalidation of the caller's tenant and
+/// answers how many (a count, nothing else). It needs `main`'s admin
+/// credential: a contributor is refused and nothing changes. Another
+/// tenant's admin re-enqueues none of this tenant's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_operator_route_requeues_the_tenants_failed_invalidations() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    fixture
+        .base
+        .service
+        .withdraw_submission(tenant, run.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    let mut owner = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut owner, tenant).await;
+    tx.execute(
+        "UPDATE pipeline_index_invalidations
+            SET state = 'failed', attempt_count = max_attempts,
+                last_error_label = 'index_invalidation_failed'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "UPDATE pipeline_runs SET index_invalidation_state = 'failed'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let uri = "/v1/admin/pipeline/index-invalidations/requeue-failed";
+
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.base.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a contributor is refused");
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.other_tenant_admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!({"requeued": 0}));
+    assert_eq!(
+        invalidation_state(&fixture.base.runtime, tenant, run.run_id).await,
+        ("failed".to_string(), 5, "failed".to_string()),
+        "no refused or other-tenant request changed it"
+    );
+
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!({"requeued": 1}));
+    assert_eq!(
+        invalidation_state(&fixture.base.runtime, tenant, run.run_id).await,
+        ("pending".to_string(), 0, "pending".to_string())
+    );
+    let (_, again) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(again, serde_json::json!({"requeued": 0}));
+}
+
 /// `POST /v1/pipeline/exports` for `use`, with `limit`, keyed by `key`.
 async fn create_pipeline_export(
     state: &Arc<AppState>,
