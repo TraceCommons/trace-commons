@@ -349,7 +349,9 @@ public static class DigestText
             }
         }
 
-        string from = named.Count == 1 ? $" from {named[0]}" : string.Empty;
+        // One project: the same from-clause the waiting half builds.
+        // More than one: no clause at all.
+        string from = named.Count == 1 ? JoinProjects(named) : string.Empty;
         string line = $"{contributedCount} {noun} contributed{from}.";
 
         // Only when there is some: "0 credit pending" reads as a failure
