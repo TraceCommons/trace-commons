@@ -90,6 +90,25 @@ pub enum UploadDecision {
         pin: String,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
     },
+    /// Approved on the contributor's behalf and held for a person by the
+    /// Scrub check (K4 of #1118): under Manual, before anything was built;
+    /// under Automatic, because the envelope just built is worth a second
+    /// look. Nothing was sent to the commons. `reasons` are that envelope's
+    /// `second_look` labels, empty when nothing was built (Manual); labels
+    /// only, for the log.
+    ///
+    /// `pin` is the digest of the built envelope, already saved under the
+    /// entry through the same `approved_envelope::save` a preview pins with,
+    /// and its counts. The queue pins that digest and records the counts
+    /// beside it, so the held entry reads `scrubbed` with its real
+    /// `second_look` and a person's review shows those bytes. `None` when
+    /// nothing was built (Manual), on the witness path, or when the save
+    /// failed: the entry is held all the same, and reads not yet scrubbed.
+    HeldForSecondLook {
+        reason_label: String,
+        reasons: Vec<&'static str>,
+        pin: Option<(String, super::second_look::ScrubCounts)>,
+    },
     /// Network, auth, or transient classifier failure.
     Failed { reason_label: String },
     /// The witness is at capacity (`503 witness_saturated`) and judged
@@ -256,6 +275,24 @@ fn hold_for_review(
     }
 }
 
+/// Save the envelope the Scrub check held, so the entry can pin it (K4 of
+/// #1118). The same `approved_envelope::save` and `preview::envelope_digest`
+/// a preview pins with, so the held bytes are kept exactly like previewed
+/// ones: swept when the entry resolves, released after the preview age limit
+/// like any pinned `Pending` preview.
+///
+/// `None` when it cannot be saved. The entry is still held, only without
+/// the pin, so it reads not yet scrubbed and a person's review builds again.
+fn pin_second_look(
+    store: &ConfigStore,
+    entry_id: Uuid,
+    envelope: &TraceContributionEnvelope,
+) -> Option<String> {
+    let digest = super::preview::envelope_digest(envelope).ok()?;
+    super::approved_envelope::save(store, entry_id, envelope).ok()?;
+    Some(digest)
+}
+
 /// Map a pipeline outcome onto a daemon decision, so the queue records a
 /// fixed label rather than pipeline internals.
 fn decision_for(
@@ -299,6 +336,17 @@ fn decision_for(
         SubmitOutcome::HeldForReview { reason_label, .. } => {
             UploadDecision::ApprovalStale { reason_label }
         }
+        // Turned into a decision by `pin_second_look`, which has the entry
+        // the envelope is saved under; never reaches here.
+        SubmitOutcome::HeldForSecondLook {
+            reason_label,
+            reasons,
+            ..
+        } => UploadDecision::HeldForSecondLook {
+            reason_label,
+            reasons,
+            pin: None,
+        },
     }
 }
 
@@ -453,6 +501,19 @@ impl Uploader<'_, '_> {
         entry: &QueueEntry,
         now: DateTime<Utc>,
     ) -> Result<UploadDecision> {
+        // The Manual Scrub check (K4 of #1118): nothing goes without a
+        // person. The watcher approves nothing on anyone's behalf while it
+        // is set; this catches an approval made before the switch, and
+        // holds it before anything is read, built or sent.
+        if entry.approved_unattended
+            && self.settings.scrub_check == Some(super::settings::ScrubCheck::Manual)
+        {
+            return Ok(UploadDecision::HeldForSecondLook {
+                reason_label: super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string(),
+                reasons: Vec::new(),
+                pin: None,
+            });
+        }
         if !enrollment_is_live(self.store) {
             self.health.fail(LABEL_NOT_LOGGED_IN, now);
             return Ok(UploadDecision::Refused {
@@ -622,6 +683,20 @@ impl Uploader<'_, '_> {
         // appended to between the two reads passed the guard and shipped
         // content the guard had never seen.
         //
+        // The Automatic Scrub check (K4 of #1118), armed last so no early
+        // return above can leave the one-shot flag behind for an unrelated
+        // session. The watcher approved this without building anything, so
+        // its marks were not known then; `submit_loaded` decides the hold on
+        // the envelope it builds, before the send. A person's approval is
+        // never held here: they are the second look.
+        //
+        // Only when Automatic was chosen. Never chosen (`None`, the default)
+        // is the behaviour from before the setting existed: no hold.
+        if entry.approved_unattended
+            && self.settings.scrub_check == Some(super::settings::ScrubCheck::Automatic)
+        {
+            self.ctx.hold_unless_scrub_is_clear(entry.subagents_dropped);
+        }
         // K7: the entry's own provenance -- whether a person approved it or
         // an armed folder sent it without asking, and the verdict if any --
         // travels onto the receipt this call produces, and from there onto
@@ -650,6 +725,18 @@ impl Uploader<'_, '_> {
                 *witnessed,
                 *attested_inference,
             ),
+            SubmitOutcome::HeldForSecondLook {
+                reason_label,
+                reasons,
+                counts,
+                envelope,
+            } => UploadDecision::HeldForSecondLook {
+                reason_label,
+                reasons,
+                pin: envelope
+                    .and_then(|envelope| pin_second_look(self.store, entry.entry_id, &envelope))
+                    .map(|digest| (digest, counts)),
+            },
             outcome => decision_for(
                 outcome,
                 self.ctx.last_receipt_shipped(),
@@ -1241,6 +1328,379 @@ mod tests {
         );
         assert_eq!(state.uploads_today, 1);
         assert!(health.ok());
+    }
+
+    // --- the Scrub check (K4 of #1118) ------------------------------------
+
+    /// A one-turn session whose only text is `text`, so a test decides how
+    /// many marks the scrubber will make.
+    fn session_saying(text: &str) -> GrowingSession {
+        let session = GrowingSession::new();
+        std::fs::write(
+            &session.path,
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{text}\"}},\
+                 \"cwd\":\"/Users/testuser/code/myproj\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
+                 \"version\":\"2.0.1\",\"sessionId\":\"33333333-3333-3333-3333-333333333333\",\
+                 \"uuid\":\"a1\"}}\n"
+            ),
+        )
+        .unwrap();
+        session
+    }
+
+    /// Text the scrubber finds nothing in, and text it takes an email out of.
+    const NOTHING_TO_MARK: &str = "first question";
+    const ONE_EMAIL: &str = "please write to alice.smith@example.org about it";
+
+    /// Upload `entry` of `session` under `settings`, through the uploader,
+    /// against a store holding `fixture_cfg`.
+    async fn upload_under(
+        session: &GrowingSession,
+        entry_of: impl FnOnce(&GrowingSession, &crate::config::ContributorConfig) -> QueueEntry,
+        settings: DaemonSettings,
+    ) -> (UploadDecision, DaemonState) {
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        upload_in(&store, &cfg, session, entry_of(session, &cfg), settings).await
+    }
+
+    /// [`upload_under`] against a store and config the caller keeps, for a
+    /// test that needs what the upload saved.
+    async fn upload_in(
+        store: &ConfigStore,
+        cfg: &crate::config::ContributorConfig,
+        session: &GrowingSession,
+        entry: QueueEntry,
+        settings: DaemonSettings,
+    ) -> (UploadDecision, DaemonState) {
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(store, cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(
+            &session.source(),
+            &session.session_ref(),
+            &entry,
+            at("2026-08-08T16:00:00Z"),
+        )
+        .await
+        .unwrap();
+        (decision, state)
+    }
+
+    /// Approved on the contributor's behalf, as the watcher does in an
+    /// armed folder: nothing built, so no marks recorded.
+    fn armed(session: &GrowingSession, cfg: &crate::config::ContributorConfig) -> QueueEntry {
+        QueueEntry {
+            approved_unattended: true,
+            ..session.entry_for(&session.current_hash(), cfg)
+        }
+    }
+
+    fn manual() -> DaemonSettings {
+        DaemonSettings {
+            scrub_check: Some(crate::daemon::settings::ScrubCheck::Manual),
+            ..DaemonSettings::default()
+        }
+    }
+
+    /// Automatic, chosen explicitly: the hold is opt-in.
+    fn automatic() -> DaemonSettings {
+        DaemonSettings {
+            scrub_check: Some(crate::daemon::settings::ScrubCheck::Automatic),
+            ..DaemonSettings::default()
+        }
+    }
+
+    /// Never chosen, the default: an armed session the scrubber removed
+    /// nothing from is sent, exactly as before the setting existed.
+    #[tokio::test]
+    async fn an_unchosen_scrub_check_sends_as_before_with_no_hold() {
+        let session = session_saying(NOTHING_TO_MARK);
+        let (decision, state) = upload_under(&session, armed, DaemonSettings::default()).await;
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "{decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+    }
+
+    /// A hold under `reason`, decided on `expected` second-look labels.
+    /// Returns the pin, which only the envelope-building holds carry.
+    fn assert_held(
+        decision: &UploadDecision,
+        reason: &str,
+        expected: &[&'static str],
+    ) -> Option<(String, crate::daemon::second_look::ScrubCounts)> {
+        let UploadDecision::HeldForSecondLook {
+            reason_label,
+            reasons,
+            pin,
+        } = decision
+        else {
+            panic!("expected a hold, got {decision:?}");
+        };
+        assert_eq!(reason_label, reason);
+        assert_eq!(reasons.as_slice(), expected);
+        pin.clone()
+    }
+
+    use crate::daemon::second_look::{
+        REASON_LOOKS_UNSURE, REASON_NOTHING_MATCHED, REASON_SECOND_LOOK_REVIEW_REQUIRED,
+        REASON_TRIMMED_TO_FIT,
+    };
+
+    /// An address the scrubber takes out, and an obfuscated one it leaves
+    /// and the unsure-span detector flags.
+    const ONE_EMAIL_ONE_UNSURE: &str =
+        "please write to alice.smith@example.org or ops [at] acme [dot] io";
+
+    /// Manual: an armed session with plenty of marks still waits, before
+    /// anything is built.
+    #[tokio::test]
+    async fn manual_holds_an_armed_session_however_clean_its_scrub() {
+        let session = session_saying(ONE_EMAIL);
+        let (decision, state) = upload_under(&session, armed, manual()).await;
+        assert_held(
+            &decision,
+            crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL,
+            &[],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Manual holds approvals made on anyone's behalf, never a person's own.
+    #[tokio::test]
+    async fn manual_sends_what_a_person_approved() {
+        let session = session_saying(NOTHING_TO_MARK);
+        let (decision, state) = upload_under(
+            &session,
+            |s, cfg| s.entry_for(&s.current_hash(), cfg),
+            manual(),
+        )
+        .await;
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "{decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+    }
+
+    /// Automatic: nothing matched, so it waits.
+    #[tokio::test]
+    async fn automatic_holds_an_armed_session_where_nothing_matched() {
+        let session = session_saying(NOTHING_TO_MARK);
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Automatic: something was removed, but the redacted body still holds a
+    /// span that looks like personal data, so it waits.
+    #[tokio::test]
+    async fn automatic_holds_an_armed_session_that_looks_unsure() {
+        let session = session_saying(ONE_EMAIL_ONE_UNSURE);
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_LOOKS_UNSURE],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Reviewed on #1139: path removals alone are not a match. Nearly every
+    /// real session carries absolute paths; a hold that counted them would
+    /// almost never fire. This one was uploaded before the counts came from
+    /// `ScrubCounts::of`.
+    #[tokio::test]
+    async fn automatic_holds_a_session_whose_only_marks_are_paths() {
+        let session =
+            session_saying("open /Users/alice/code/orchard-api/src/main.rs and fix the parser");
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        let pin = assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
+        );
+        let (_, counts) = pin.expect("the built envelope is pinned");
+        assert!(counts.marks > 0, "the path was removed: {counts:?}");
+        assert_eq!(counts.content_marks, 0, "and only the path: {counts:?}");
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Reviewed on #1139: a survivor the unsure-span detector flags holds,
+    /// with no content marks as well. This one was uploaded before the body
+    /// was counted.
+    #[tokio::test]
+    async fn automatic_holds_a_session_with_an_unsure_survivor() {
+        let session = session_saying("key from ops [at] acme [dot] io, rotate it tonight");
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED, REASON_LOOKS_UNSURE],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Automatic: trimmed to fit waits even with a clean scrub.
+    #[tokio::test]
+    async fn automatic_holds_an_armed_session_trimmed_to_fit() {
+        let session = session_saying(ONE_EMAIL);
+        let (decision, state) = upload_under(
+            &session,
+            |s, cfg| QueueEntry {
+                subagents_dropped: 2,
+                ..armed(s, cfg)
+            },
+            automatic(),
+        )
+        .await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_TRIMMED_TO_FIT],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Automatic: a scrubbed session with marks and nothing trimmed goes.
+    #[tokio::test]
+    async fn automatic_sends_an_armed_session_with_a_clean_scrub() {
+        let session = session_saying(ONE_EMAIL);
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "{decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+    }
+
+    /// The hold is decided on the envelope actually built, never on the
+    /// entry's own record. The watcher approved this without a preview: the
+    /// entry carries no record, or a stale one claiming a clean scrub of
+    /// some other build. Either way the built envelope has nothing in it, and
+    /// it waits.
+    #[tokio::test]
+    async fn automatic_decides_on_the_built_envelope_not_the_entrys_record() {
+        let clean_elsewhere = crate::daemon::second_look::ScrubRecord {
+            envelope_digest: "sha256:another-build".into(),
+            counts: crate::daemon::second_look::ScrubCounts {
+                marks: 5,
+                content_marks: 5,
+                unsure_spans: 0,
+                unsure_unreadable: false,
+            },
+        };
+        for recorded in [None, Some(clean_elsewhere)] {
+            let session = session_saying(NOTHING_TO_MARK);
+            let (decision, state) = upload_under(
+                &session,
+                |s, cfg| QueueEntry {
+                    scrub: recorded.clone(),
+                    ..armed(s, cfg)
+                },
+                automatic(),
+            )
+            .await;
+            assert_held(
+                &decision,
+                REASON_SECOND_LOOK_REVIEW_REQUIRED,
+                &[REASON_NOTHING_MATCHED],
+            );
+            assert_eq!(
+                state.uploads_today, 0,
+                "recorded {recorded:?}: nothing sent"
+            );
+        }
+    }
+
+    /// The whole round: held, kept held by the queue against unattended
+    /// approval, and sent by a person's approve.
+    #[tokio::test]
+    async fn a_held_session_waits_for_a_person_and_their_approve_sends_it() {
+        let session = session_saying(NOTHING_TO_MARK);
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        let entry = armed(&session, &cfg);
+        let (decision, _) = upload_in(&store, &cfg, &session, entry.clone(), automatic()).await;
+        let pin = assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
+        );
+        let (digest, counts) = pin.expect("the built envelope is pinned");
+        let saved = crate::daemon::approved_envelope::load(&store, entry.entry_id)
+            .unwrap()
+            .expect("the held bytes are saved under the entry");
+        assert_eq!(
+            crate::daemon::preview::envelope_digest(&saved).unwrap(),
+            digest,
+            "the pin names exactly the saved bytes"
+        );
+
+        // What `drain_approved` does with it.
+        let mut q = crate::daemon::queue::Queue::default();
+        q.upsert(entry.clone(), 10).unwrap();
+        assert!(q.hold_with_scrub_pin(
+            entry.entry_id,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            Some((digest.as_str(), counts))
+        ));
+        let held = q.get(entry.entry_id).unwrap().clone();
+        assert!(held.held_for_review());
+        assert_eq!(
+            held.previewed_envelope_digest.as_deref(),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            held.scrub(),
+            crate::daemon::second_look::Scrub::Scrubbed(counts),
+            "the scrub record is kept beside the pin"
+        );
+        assert_eq!(held.second_look_reasons(), vec![REASON_NOTHING_MATCHED]);
+        assert!(
+            !q.approve_unattended(entry.entry_id, &cfg.consent_scopes, None),
+            "nobody approves it on the contributor's behalf"
+        );
+
+        // A person.
+        assert!(q.approve(
+            entry.entry_id,
+            &cfg.consent_scopes,
+            entry.approved_inputs.as_deref(),
+            None,
+            None,
+            None
+        ));
+        let approved = q.get(entry.entry_id).unwrap().clone();
+        assert!(!approved.approved_unattended);
+        assert_eq!(
+            approved.previewed_envelope_digest.as_deref(),
+            Some(digest.as_str()),
+            "the person approves the held bytes"
+        );
+        let (decision, state) = upload_in(&store, &cfg, &session, approved, automatic()).await;
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "{decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
     }
 
     async fn spawn_stub(router: axum::Router) -> String {

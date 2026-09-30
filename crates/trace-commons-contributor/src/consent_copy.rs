@@ -591,6 +591,43 @@ pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects th
 /// witness or the privacy scan sends a session somewhere before approval.
 pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is contributed until you approve it, and you can set a project to contribute automatically later.";
 
+// ---------------------------------------------------------------------------
+// The Scrub check (K4 of #1118)
+// ---------------------------------------------------------------------------
+//
+// Every constant in this section is DRAFT, NEEDS APPROVAL. Written for the
+// Settings row and the held-session row so that no shell writes its own.
+//
+// "Trust relaxes what may be sent, never what may be said" (the spec's R1):
+// the Automatic check counts what the scrubber removed and notices a trimmed
+// session. It is not a quality check, and it never says a model looked at
+// anything, because on most routes nothing confirms one did.
+// `the_scrub_check_copy_claims_no_model_or_quality_check` holds that.
+
+/// **DRAFT, NEEDS APPROVAL.** The Settings row's heading.
+pub const SCRUB_CHECK_TITLE: &str = "Scrub check";
+
+/// **DRAFT, NEEDS APPROVAL.** The Automatic choice (`scrub_check:
+/// "automatic"`). Opt-in: a daemon where nothing was chosen reports `null`
+/// and holds nothing, so a shell must not render that state as this one.
+pub const SCRUB_CHECK_AUTOMATIC_LABEL: &str = "Automatic";
+
+/// **DRAFT, NEEDS APPROVAL.** What Automatic does. Names both second-look
+/// reasons and says what the check is not.
+pub const SCRUB_CHECK_AUTOMATIC_HELP: &str = "In folders set to share automatically, a session is sent on its own once it has been scrubbed, unless nothing personal was removed from it, something left in it still looks like personal data, or it was trimmed to fit. Those wait for you. This only counts and looks for patterns; it does not check that the scrubbing was right.";
+
+/// **DRAFT, NEEDS APPROVAL.** The Manual choice (`scrub_check: "manual"`).
+pub const SCRUB_CHECK_MANUAL_LABEL: &str = "Manual";
+
+/// **DRAFT, NEEDS APPROVAL.** What Manual does.
+pub const SCRUB_CHECK_MANUAL_HELP: &str = "Every session waits for you, including in folders set to share automatically. Nothing is sent until you approve it.";
+
+/// **DRAFT, NEEDS APPROVAL.** On a session held under
+/// `second-look-review-required`. The particular reason is the row's own
+/// `second_look` sentence; this says only that it did not move and will not.
+pub const SCRUB_CHECK_HELD: &str =
+    "This session was not sent on its own. It waits until you decide.";
+
 /// What the fixed patterns remove and where they stop, for one disclosure.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct ScrubCopy {
@@ -1688,6 +1725,353 @@ pub fn inference_connection_copy() -> InferenceConnectionCopy {
 }
 
 // ---------------------------------------------------------------------------
+// "Leaves this Mac" (Flow 2 review sheet, #1118 K3)
+//
+// The sheet in the design says, under "Leaves this Mac", "19 KB · 12 turns ·
+// tool, project label, timing, outcome. Never the path." That is a claim
+// about what the envelope carries, made at the instant of consent, so it is
+// derived here from the envelope's own serialized keys rather than written
+// by each shell -- and derived, it does NOT say "project label": the
+// envelope has carried no project name, in the clear or hashed, since #207.
+//
+// The list is COMPLETE by construction: [`leaves_this_mac_fields`] walks every
+// key of the serialized envelope and classifies it, and a key it has no
+// label for is reported as [`LEAVES_OTHER`] rather than dropped, so a field
+// added to the protocol later is shown as "other metadata" until somebody
+// names it. `every_envelope_key_has_a_named_label` fails the build of that
+// field instead.
+//
+// Every sentence in this section is DRAFT, NEEDS APPROVAL.
+
+/// Wire labels for [`leaves_this_mac_fields`]. Closed: each has exactly one
+/// phrase in [`leaves_this_mac_phrase`], and [`LEAVES_FIELDS`] is the order
+/// they are listed in.
+pub const LEAVES_CONVERSATION: &str = "conversation";
+pub const LEAVES_TOOL: &str = "tool";
+pub const LEAVES_TOOL_VERSION: &str = "tool-version";
+pub const LEAVES_MODEL: &str = "model";
+pub const LEAVES_TIMING: &str = "timing";
+pub const LEAVES_USAGE_AND_COST: &str = "usage-and-cost";
+pub const LEAVES_ROUTING: &str = "routing";
+pub const LEAVES_OUTCOME: &str = "outcome";
+pub const LEAVES_CORRECTION: &str = "correction";
+pub const LEAVES_USES: &str = "uses";
+pub const LEAVES_REDACTION_SUMMARY: &str = "redaction-summary";
+pub const LEAVES_SESSION_ID: &str = "session-id";
+pub const LEAVES_TRACE_IDS: &str = "trace-ids";
+pub const LEAVES_CONTRIBUTOR_ID: &str = "contributor-id";
+pub const LEAVES_TENANT: &str = "tenant";
+pub const LEAVES_CREDIT_ACCOUNT: &str = "credit-account";
+pub const LEAVES_REVOCATION_HANDLE: &str = "revocation-handle";
+pub const LEAVES_FOLDER_FINGERPRINT: &str = "folder-fingerprint";
+pub const LEAVES_REPLAY: &str = "replay";
+pub const LEAVES_SCORES: &str = "scores";
+pub const LEAVES_FORMAT_VERSION: &str = "format-version";
+/// A key this build has no name for. Reported, never dropped.
+pub const LEAVES_OTHER: &str = "other";
+
+/// Every label [`leaves_this_mac_fields`] can return, in list order.
+pub const LEAVES_FIELDS: &[&str] = &[
+    LEAVES_CONVERSATION,
+    LEAVES_TOOL,
+    LEAVES_TOOL_VERSION,
+    LEAVES_MODEL,
+    LEAVES_TIMING,
+    LEAVES_USAGE_AND_COST,
+    LEAVES_ROUTING,
+    LEAVES_OUTCOME,
+    LEAVES_CORRECTION,
+    LEAVES_USES,
+    LEAVES_REDACTION_SUMMARY,
+    LEAVES_SESSION_ID,
+    LEAVES_TRACE_IDS,
+    LEAVES_CONTRIBUTOR_ID,
+    LEAVES_TENANT,
+    LEAVES_CREDIT_ACCOUNT,
+    LEAVES_REVOCATION_HANDLE,
+    LEAVES_FOLDER_FINGERPRINT,
+    LEAVES_REPLAY,
+    LEAVES_SCORES,
+    LEAVES_FORMAT_VERSION,
+    LEAVES_OTHER,
+];
+
+/// **DRAFT, NEEDS APPROVAL.** What the metadata never carries. Scoped to
+/// the metadata on purpose: only absolute paths are scrubbed out of the
+/// conversation, so a relative path or a sentence can still name the folder
+/// there -- see [`LEAVES_FOLDER_IN_CONVERSATION`].
+pub const LEAVES_METADATA_NEVER: &str = "The metadata never carries the path or the folder name.";
+
+/// **DRAFT, NEEDS APPROVAL.** Added when the conversation itself names the
+/// folder, for instance through `../myproj/src/main.rs`.
+pub const LEAVES_FOLDER_IN_CONVERSATION: &str = "The conversation itself names the folder.";
+
+/// **DRAFT, NEEDS APPROVAL.** Replaces [`LEAVES_METADATA_NEVER`] in the
+/// (not expected) case that the folder's name is found outside the
+/// conversation too: the sentence is only ever said when it is true.
+pub const LEAVES_FOLDER_IN_METADATA: &str = "The folder's name appears in what would be sent.";
+
+/// Where a key sits in the envelope: a label that covers everything under
+/// it, a node to look inside, or a key with no name.
+enum Class {
+    Label(&'static str),
+    Descend,
+    Unknown,
+}
+
+/// The label for one serialized key path (array indices are not part of a
+/// path). One table, read by both the live list and the completeness test.
+fn classify(path: &[&str]) -> Class {
+    use Class::*;
+    match path {
+        [] => Descend,
+        ["schema_version"] => Label(LEAVES_FORMAT_VERSION),
+        ["trace_id"] | ["submission_id"] => Label(LEAVES_TRACE_IDS),
+        ["created_at"] => Label(LEAVES_TIMING),
+        ["ironclaw"] | ["ironclaw", "feature_flags"] => Descend,
+        ["ironclaw", "version"] | ["ironclaw", "engine_version"] => Label(LEAVES_TOOL_VERSION),
+        ["ironclaw", "channel"] => Label(LEAVES_TOOL),
+        ["ironclaw", "model_name"] => Label(LEAVES_MODEL),
+        ["ironclaw", "feature_flags", "agent"] => Label(LEAVES_TOOL),
+        ["ironclaw", "feature_flags", "agent_version"] => Label(LEAVES_TOOL_VERSION),
+        ["ironclaw", "feature_flags", "cwd_hash"] => Label(LEAVES_FOLDER_FINGERPRINT),
+        ["consent", ..] | ["trace_card", ..] => Label(LEAVES_USES),
+        ["contributor"] => Descend,
+        ["contributor", "pseudonymous_contributor_id"] => Label(LEAVES_CONTRIBUTOR_ID),
+        ["contributor", "tenant_scope_ref"] => Label(LEAVES_TENANT),
+        ["contributor", "credit_account_ref"] => Label(LEAVES_CREDIT_ACCOUNT),
+        ["contributor", "revocation_handle"] => Label(LEAVES_REVOCATION_HANDLE),
+        ["privacy", ..] => Label(LEAVES_REDACTION_SUMMARY),
+        ["events"] => Descend,
+        ["events", "timestamp"] | ["events", "latency_ms"] => Label(LEAVES_TIMING),
+        ["events", "token_counts"] | ["events", "cost_usd"] => Label(LEAVES_USAGE_AND_COST),
+        ["events", "tool_name"] | ["events", "tool_category"] => Label(LEAVES_TOOL),
+        [
+            "events",
+            "event_id" | "parent_event_id" | "event_type" | "redacted_content"
+            | "structured_payload" | "tool_call_id" | "success" | "failure_modes" | "side_effect",
+        ] => Label(LEAVES_CONVERSATION),
+        ["outcome"] => Descend,
+        ["outcome", "human_correction"] => Label(LEAVES_CORRECTION),
+        [
+            "outcome",
+            "user_feedback" | "task_success" | "error_taxonomy" | "failure_modes",
+        ] => Label(LEAVES_OUTCOME),
+        ["replay", ..] => Label(LEAVES_REPLAY),
+        ["conversation_id"] | ["source_session", ..] => Label(LEAVES_SESSION_ID),
+        ["value", ..]
+        | ["value_card", ..]
+        | ["embedding_analysis", ..]
+        | ["hindsight", ..]
+        | ["training_dynamics", ..]
+        | ["process_evaluation", ..] => Label(LEAVES_SCORES),
+        _ => Unknown,
+    }
+}
+
+fn walk(
+    value: &serde_json::Value,
+    path: &mut Vec<String>,
+    found: &mut std::collections::BTreeSet<&'static str>,
+    unknown: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                walk(item, path, found, unknown);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // A routing row is an event like any other, and it is also the
+            // one place routing leaves: name it.
+            if path.len() == 1
+                && path[0] == "events"
+                && map.get("event_type").and_then(|t| t.as_str()) == Some("routing_decision")
+            {
+                found.insert(LEAVES_ROUTING);
+            }
+            for (key, child) in map {
+                if child.is_null() {
+                    continue;
+                }
+                path.push(key.clone());
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                match classify(&refs) {
+                    Class::Label(label) => {
+                        found.insert(label);
+                    }
+                    Class::Descend => walk(child, path, found, unknown),
+                    Class::Unknown => {
+                        found.insert(LEAVES_OTHER);
+                        unknown.push(refs.join("."));
+                    }
+                }
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every labelled key path of `envelope`'s serialized form, plus the paths
+/// no label covers. The second list is empty for every envelope this build
+/// produces; `every_envelope_key_has_a_named_label` holds it to that.
+fn classify_envelope(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+) -> (Vec<&'static str>, Vec<String>) {
+    let value = serde_json::to_value(envelope).unwrap_or(serde_json::Value::Null);
+    let mut found = std::collections::BTreeSet::new();
+    let mut unknown = Vec::new();
+    walk(&value, &mut Vec::new(), &mut found, &mut unknown);
+    // A serialization failure must not read as "nothing leaves".
+    if value.is_null() {
+        found.insert(LEAVES_OTHER);
+    }
+    let ordered = LEAVES_FIELDS
+        .iter()
+        .copied()
+        .filter(|label| found.contains(label))
+        .collect();
+    (ordered, unknown)
+}
+
+/// What leaves this machine in `envelope`, as labels from [`LEAVES_FIELDS`],
+/// in that order: every serialized key, classified. A key with no name is
+/// [`LEAVES_OTHER`], so the list can over-describe but never omit.
+pub fn leaves_this_mac_fields(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+) -> Vec<&'static str> {
+    classify_envelope(envelope).0
+}
+
+/// Whether `text` names `folder`: a case-insensitive match that stands alone
+/// (not glued to a letter or digit on either side), so `api` is found in
+/// `../api/src` but not in `rapid`. An empty folder name names nothing.
+pub fn names_folder(text: &str, folder: &str) -> bool {
+    let folder = folder.trim().to_lowercase();
+    if folder.is_empty() {
+        return false;
+    }
+    let text = text.to_lowercase();
+    let bytes = text.as_bytes();
+    let glued = |c: Option<&u8>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    text.match_indices(&folder).any(|(at, m)| {
+        !glued(at.checked_sub(1).and_then(|i| bytes.get(i))) && !glued(bytes.get(at + m.len()))
+    })
+}
+
+/// Where the folder's name appears in `envelope`, for any of `folders`
+/// (the project's basenames): `(in_metadata, in_conversation)`, where the
+/// conversation is `events` and the metadata is everything else.
+pub fn folder_named_in(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+    folders: &[&str],
+) -> (bool, bool) {
+    let conversation = serde_json::to_string(&envelope.events).unwrap_or_default();
+    let mut metadata_only = envelope.clone();
+    metadata_only.events.clear();
+    let metadata = serde_json::to_string(&metadata_only).unwrap_or_default();
+    let any = |text: &str| folders.iter().any(|f| names_folder(text, f));
+    (any(&metadata), any(&conversation))
+}
+
+/// **DRAFT, NEEDS APPROVAL.** The phrase for one [`LEAVES_FIELDS`] label,
+/// or `None` for a label this build does not know.
+pub fn leaves_this_mac_phrase(label: &str) -> Option<&'static str> {
+    Some(match label {
+        LEAVES_CONVERSATION => "the scrubbed conversation",
+        LEAVES_TOOL => "tool",
+        LEAVES_TOOL_VERSION => "tool version",
+        LEAVES_MODEL => "model",
+        LEAVES_TIMING => "timing",
+        LEAVES_USAGE_AND_COST => "token counts and cost",
+        LEAVES_ROUTING => "which route each call took",
+        LEAVES_OUTCOME => "outcome",
+        LEAVES_CORRECTION => "your correction",
+        LEAVES_USES => "the uses you allowed",
+        LEAVES_REDACTION_SUMMARY => "what scrubbing removed, as counts",
+        LEAVES_SESSION_ID => "the tool's own session id",
+        LEAVES_TRACE_IDS => "random ids for this trace",
+        LEAVES_CONTRIBUTOR_ID => "a pseudonymous contributor id",
+        LEAVES_TENANT => "the commons you joined",
+        LEAVES_CREDIT_ACCOUNT => "your credit account reference",
+        LEAVES_REVOCATION_HANDLE => "a handle for taking it back",
+        LEAVES_FOLDER_FINGERPRINT => "a one-way fingerprint of the folder",
+        LEAVES_REPLAY => "the tools a replay would need",
+        LEAVES_SCORES => "a value estimate",
+        LEAVES_FORMAT_VERSION => "the format version",
+        LEAVES_OTHER => "other metadata this version has no name for",
+        _ => return None,
+    })
+}
+
+/// A byte count as the sheet prints it: `812 bytes`, `19 KB`, `1.5 MB`.
+pub fn leaves_this_mac_size(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = KB * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", (bytes + KB / 2) / KB)
+    } else if bytes == 1 {
+        "1 byte".to_string()
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// **DRAFT, NEEDS APPROVAL.** The whole "Leaves this Mac" line, for
+/// example `19 KB · 12 turns · tool, model, timing, …. The metadata never
+/// carries the path or the folder name.`
+///
+/// `would_send_bytes` is the envelope's size (`preview`'s figure, the one
+/// that governs consent), `turn_count` is `preview_turns`' count, `fields`
+/// is [`leaves_this_mac_fields`], and `folder_named` is [`folder_named_in`].
+/// The conversation label is carried by the turn count rather than repeated,
+/// and an unknown label is skipped rather than printed raw.
+pub fn leaves_this_mac_line(
+    would_send_bytes: usize,
+    turn_count: usize,
+    fields: &[&str],
+    folder_named: (bool, bool),
+) -> String {
+    let turns = if turn_count == 1 {
+        "1 turn".to_string()
+    } else {
+        format!("{turn_count} turns")
+    };
+    let phrases: Vec<&str> = fields
+        .iter()
+        .filter(|f| **f != LEAVES_CONVERSATION)
+        .filter_map(|f| leaves_this_mac_phrase(f))
+        .collect();
+    let (in_metadata, in_conversation) = folder_named;
+    let mut close = vec![if in_metadata {
+        LEAVES_FOLDER_IN_METADATA
+    } else {
+        LEAVES_METADATA_NEVER
+    }];
+    if in_conversation && !in_metadata {
+        close.push(LEAVES_FOLDER_IN_CONVERSATION);
+    }
+    format!(
+        "{} \u{00b7} {turns} \u{00b7} {}. {}",
+        leaves_this_mac_size(would_send_bytes),
+        phrases.join(", "),
+        close.join(" ")
+    )
+}
+
+/// Test access to the unknown-key list, for the completeness test that lives
+/// beside a real envelope build.
+#[cfg(test)]
+pub(crate) fn unlabelled_envelope_keys(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+) -> Vec<String> {
+    classify_envelope(envelope).1
+}
+
+// ---------------------------------------------------------------------------
 // The submit toast (K9, #1118): "Sent. N left to decide - upload limit X of Y"
 // ---------------------------------------------------------------------------
 //
@@ -1759,6 +2143,50 @@ pub fn session_notification_copy() -> SessionNotificationCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_leaves_this_mac_line_is_assembled_from_labels() {
+        let line = leaves_this_mac_line(
+            19 * 1024,
+            12,
+            &[
+                LEAVES_CONVERSATION,
+                LEAVES_TOOL,
+                LEAVES_TIMING,
+                LEAVES_OUTCOME,
+                "not-a-field",
+            ],
+            (false, false),
+        );
+        assert_eq!(
+            line,
+            "19 KB \u{00b7} 12 turns \u{00b7} tool, timing, outcome. The metadata never carries the path or the folder name."
+        );
+        assert_eq!(leaves_this_mac_size(812), "812 bytes");
+        assert_eq!(leaves_this_mac_size(3 * 1024 * 1024 / 2), "1.5 MB");
+        assert!(leaves_this_mac_line(10, 1, &[], (false, false)).contains("1 turn \u{00b7}"));
+        for label in LEAVES_FIELDS {
+            assert!(leaves_this_mac_phrase(label).is_some(), "{label}");
+        }
+    }
+
+    #[test]
+    fn a_folder_named_in_the_conversation_is_said_and_never_denied() {
+        let named = leaves_this_mac_line(10, 1, &[LEAVES_TOOL], (false, true));
+        assert!(named.ends_with(LEAVES_FOLDER_IN_CONVERSATION), "{named}");
+        let leaked = leaves_this_mac_line(10, 1, &[LEAVES_TOOL], (true, true));
+        assert!(!leaked.contains(LEAVES_METADATA_NEVER), "{leaked}");
+        assert!(leaked.ends_with(LEAVES_FOLDER_IN_METADATA), "{leaked}");
+    }
+
+    #[test]
+    fn a_folder_name_is_matched_standing_alone_and_case_insensitively() {
+        assert!(names_folder("cat ../myproj/src/main.rs", "myproj"));
+        assert!(names_folder("cd MyProj && ls", "myproj"));
+        assert!(names_folder("in api/", "api"));
+        assert!(!names_folder("rapid progress", "api"));
+        assert!(!names_folder("anything", ""));
+    }
 
     /// K5: the rewording notice says the folder is still armed and then
     /// says exactly what a patterns-only folder is told, with no model-scrub
@@ -2764,6 +3192,33 @@ mod tests {
             WitnessOrigin::ConnectedInference,
         ));
         assert!(line.contains("connected inference"));
+    }
+
+    /// R1: the Scrub check's words never claim a model looked at a session
+    /// or that anything was quality checked. The Automatic check is a count
+    /// of what the scrubber removed, and must read as one.
+    #[test]
+    fn the_scrub_check_copy_claims_no_model_or_quality_check() {
+        for sentence in [
+            SCRUB_CHECK_TITLE,
+            SCRUB_CHECK_AUTOMATIC_LABEL,
+            SCRUB_CHECK_AUTOMATIC_HELP,
+            SCRUB_CHECK_MANUAL_LABEL,
+            SCRUB_CHECK_MANUAL_HELP,
+            SCRUB_CHECK_HELD,
+        ] {
+            let lower = sentence.to_lowercase();
+            for claim in ["model", "quality", "verified", "certified", "safe"] {
+                assert!(
+                    !lower.contains(claim),
+                    "{claim:?} in Scrub check copy: {sentence}"
+                );
+            }
+        }
+        assert!(
+            SCRUB_CHECK_AUTOMATIC_HELP.contains("does not check that the scrubbing was right"),
+            "Automatic says what it is not"
+        );
     }
 
     /// The design's own worked example (Flow 2), verbatim.

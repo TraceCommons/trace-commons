@@ -492,9 +492,56 @@ pub struct QueueEntry {
     pub attestation: Option<String>,
     #[serde(default)]
     pub attestation_reason: Option<String>,
+    /// The reason label a kept entry carried when it was kept, so
+    /// `undo_keep` can put back a hold that needs a person
+    /// ([`REASONS_NEEDING_A_PERSON`]) rather than replace it with a weaker
+    /// one. `None` on every entry that is not kept, and on one kept with no
+    /// label. A fixed label only, like `reason_label`.
+    #[serde(default)]
+    pub kept_from_reason: Option<String>,
+    /// What the scrubber found in the bytes this entry is pinned to, bound
+    /// to their digest, or `None` when nothing has counted them.
+    ///
+    /// **`None` is "not yet scrubbed", never zero.** A session nobody has
+    /// counted and a session the scrubber read and found nothing personal in
+    /// are different facts, and only the second is "nothing matched" -- see
+    /// `second_look::Scrub`.
+    ///
+    /// Written only by the pinning build (`Queue::record_scrub`, from
+    /// `ipc::pin_previewed_envelope` and the witnessed review), never by a
+    /// card, an unenrolled build, or any build that pins nothing. Read back
+    /// only while `previewed_envelope_digest` names the same digest
+    /// ([`QueueEntry::scrub`]), so a released, replaced or revoked pin --
+    /// after an enrolment, a filter change, a revoked approval -- reads as
+    /// not yet scrubbed with nothing to clear by hand.
+    ///
+    /// Counts and a digest, never content.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; such an entry reads as not yet
+    /// scrubbed until it is previewed again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrub: Option<super::second_look::ScrubRecord>,
 }
 
 impl QueueEntry {
+    /// Whether the scrubber has run on this entry, and how many marks it
+    /// made. See `second_look::Scrub`.
+    pub fn scrub(&self) -> super::second_look::Scrub {
+        match (&self.scrub, self.previewed_envelope_digest.as_deref()) {
+            (Some(record), Some(pinned)) if record.envelope_digest == pinned => {
+                super::second_look::Scrub::Scrubbed(record.counts)
+            }
+            _ => super::second_look::Scrub::NotYetScrubbed,
+        }
+    }
+
+    /// [`super::second_look::second_look_reasons`] for this entry: the
+    /// recorded scrub and the discovery-time trim.
+    pub fn second_look_reasons(&self) -> Vec<&'static str> {
+        super::second_look::second_look_reasons(self.scrub(), self.subagents_dropped)
+    }
+
     /// Whether this entry is waiting on a person and must not be approved on
     /// anyone's behalf. See [`REASONS_NEEDING_A_PERSON`].
     pub fn held_for_review(&self) -> bool {
@@ -503,6 +550,20 @@ impl QueueEntry {
                 .reason_label
                 .as_deref()
                 .is_some_and(|reason| REASONS_NEEDING_A_PERSON.contains(&reason))
+    }
+
+    /// Whether the contributor kept this session on this Mac. See
+    /// [`REASON_KEPT`].
+    pub fn is_kept(&self) -> bool {
+        self.state == QueueState::Refused && self.reason_label.as_deref() == Some(REASON_KEPT)
+    }
+
+    /// Whether this entry is waiting because the contributor undid a "Keep on
+    /// this Mac", and so must not be approved on anyone's behalf. See
+    /// [`REASON_RETURNED_FROM_KEEP`].
+    pub fn returned_from_keep(&self) -> bool {
+        self.state == QueueState::Pending
+            && self.reason_label.as_deref() == Some(REASON_RETURNED_FROM_KEEP)
     }
 
     /// A paced retry -- a transient classifier outage, or a witness at
@@ -609,6 +670,37 @@ pub const REASON_CHANGED: &str = "session-changed-after-offer";
 /// silently start re-offering declined sessions again.
 pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
 
+/// The reason label `keep` records: the contributor chose "Keep on this Mac"
+/// for this session (K5, open decision #4 in #1118).
+///
+/// **Reversible, unlike `REASON_DISMISSED`.** A kept entry is `Refused` with
+/// this label, which is what keeps it out of every path that sends: it is
+/// not `Pending`, so it is out of `list_pending`, `status.queue_depth` (the
+/// badge), every group `approve`, `approve_unattended` and `expire`; it is not
+/// `Approved`, so nothing uploads it; and only `Superseded` is ever
+/// compacted, so the record does not decay. `Queue::kept_at_path` makes it a
+/// decision about the *conversation*, the way `dismissed_at_path` does: while
+/// kept, the watcher skips that session at its path -- no new card, no
+/// unattended approval in an armed project, and no re-read -- however much it
+/// grows. `undo_keep` is the only way out, and it returns the entry to
+/// waiting marked `REASON_RETURNED_FROM_KEEP`.
+///
+/// It is a distinct string so that none of the path-level rules keyed on
+/// `REASON_DISMISSED` apply to it, and so no reader can mistake a keep for a
+/// permanent decline.
+pub const REASON_KEPT: &str = "kept-on-this-mac";
+
+/// The reason label `undo_keep` leaves on the entry it returns to waiting.
+///
+/// A person ruled on this conversation, so undoing the keep asks them again
+/// rather than handing it to a folder's standing yes: `approve_unattended`
+/// refuses it and the watcher does not approve it on anyone's behalf, in an
+/// armed folder included. A person's own `approve` clears it like any other
+/// label. Not in `REASONS_NEEDING_A_PERSON`, deliberately: those are also
+/// left out of a group `approve`, and a contributor who undid a keep and then
+/// pressed "Submit all" for the folder did decide about it.
+pub const REASON_RETURNED_FROM_KEEP: &str = "returned-from-keep";
+
 /// The reason label an approve records when the envelope it built is past
 /// `envelope::MAX_ENVELOPE_BYTES`.
 ///
@@ -666,6 +758,9 @@ pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     // Re-approving it unattended would restart the retry budget the cap
     // just spent, and the classifier would get the session every hour again.
     crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
+    // The Automatic Scrub check's hold (K4 of #1118): the scrubber was
+    // unsure about the session, and an unsure session never moves on its own.
+    super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
 ];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
@@ -926,6 +1021,119 @@ impl Queue {
         self.at_path(path).any(|e| {
             e.state == QueueState::Refused && e.reason_label.as_deref() == Some(REASON_DISMISSED)
         })
+    }
+
+    /// Has the contributor kept the session living at `path` on this Mac?
+    /// The reversible sibling of [`Self::dismissed_at_path`]: answered the
+    /// same way, from the path, for the same reason. See [`REASON_KEPT`].
+    pub fn kept_at_path(&self, path: &Path) -> bool {
+        self.at_path(path).any(QueueEntry::is_kept)
+    }
+
+    /// Whether a live entry at `path` is one a contributor returned from a
+    /// keep. The watcher asks before it supersedes that entry with newer
+    /// content, so the mark follows the conversation rather than the bytes:
+    /// a session that grew while kept is still asked about after the undo.
+    pub fn returned_from_keep_at_path(&self, path: &Path) -> bool {
+        self.at_path(path).any(QueueEntry::returned_from_keep)
+    }
+
+    /// Every entry kept on this Mac, in queue order.
+    pub fn kept(&self) -> Vec<&QueueEntry> {
+        self.entries.iter().filter(|e| e.is_kept()).collect()
+    }
+
+    /// Keep a session on this Mac: to `Refused` with [`REASON_KEPT`].
+    ///
+    /// A `Pending` entry can be kept, and so can one `Approved` **unattended**
+    /// -- the keep revokes that approval in the same step, so a keep pressed
+    /// while the watcher re-approves the card on the folder's behalf cannot
+    /// lose the race and answer `not-pending`. An approval a person made is
+    /// a decision already taken, which `cancel` undoes first; anything past
+    /// `Approved` is in flight or finished.
+    ///
+    /// The label the entry carried is remembered in `kept_from_reason`, so an
+    /// undo restores a hold that needs a person. Any preview pin goes, so the
+    /// stored envelope is swept like a dismissed one's -- an undo rebuilds.
+    pub fn keep(&mut self, entry_id: Uuid) -> Result<()> {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            bail!("unknown-entry-id");
+        };
+        let unattended = e.state == QueueState::Approved && e.approved_unattended;
+        if e.state != QueueState::Pending && !unattended {
+            bail!("not-pending");
+        }
+        e.kept_from_reason = if unattended {
+            None
+        } else {
+            e.reason_label.clone()
+        };
+        e.state = QueueState::Refused;
+        e.reason_label = Some(REASON_KEPT.to_string());
+        e.retry_after = None;
+        e.approved_scopes = None;
+        e.approved_verdict = None;
+        e.approved_correction = None;
+        e.approved_inputs = None;
+        e.approved_at = None;
+        e.approved_unattended = false;
+        e.previewed_envelope_digest = None;
+        e.attested_inference = None;
+        Ok(())
+    }
+
+    /// Undo a keep: the kept entry returns to `Pending`, marked
+    /// [`REASON_RETURNED_FROM_KEEP`] so it waits for a person, and dated
+    /// `now` -- expiry counts from `discovered_at`, and a session kept for a
+    /// month must not expire on the pass after the contributor asked for it
+    /// back. Refuses anything that is not kept, a dismissal included: a
+    /// dismissal stays permanent.
+    ///
+    /// A hold that needs a person ([`REASONS_NEEDING_A_PERSON`]: a witness
+    /// risk review, a token-distribution review, and any added later) is put
+    /// back as it was, not replaced: `returned-from-keep` is weaker, since a
+    /// group `approve` includes it, and a keep and an undo must never be a
+    /// way to clear a hold. Any other label becomes `returned-from-keep`.
+    ///
+    /// The queue cap applies, as it does to every new offer: an undo into a
+    /// full queue is refused `queue-full` and the entry stays kept.
+    pub fn undo_keep(
+        &mut self,
+        entry_id: Uuid,
+        now: DateTime<Utc>,
+        max_entries: usize,
+    ) -> Result<()> {
+        let live = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.state, QueueState::Pending | QueueState::Approved))
+            .count();
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            bail!("unknown-entry-id");
+        };
+        if !e.is_kept() {
+            bail!("not-kept");
+        }
+        if live >= max_entries {
+            bail!("queue-full");
+        }
+        let restored = e
+            .kept_from_reason
+            .take()
+            .filter(|r| REASONS_NEEDING_A_PERSON.contains(&r.as_str()));
+        e.state = QueueState::Pending;
+        e.reason_label = Some(restored.unwrap_or_else(|| REASON_RETURNED_FROM_KEEP.to_string()));
+        e.discovered_at = now;
+        e.retry_after = None;
+        e.approved_scopes = None;
+        e.approved_verdict = None;
+        e.approved_correction = None;
+        e.approved_inputs = None;
+        e.approved_at = None;
+        e.approved_unattended = false;
+        e.previewed_envelope_digest = None;
+        e.attested_inference = None;
+        Ok(())
     }
 
     pub fn pending(&self) -> Vec<&QueueEntry> {
@@ -1315,7 +1523,7 @@ impl Queue {
         if self
             .entries
             .iter()
-            .any(|e| e.entry_id == entry_id && e.held_for_review())
+            .any(|e| e.entry_id == entry_id && (e.held_for_review() || e.returned_from_keep()))
         {
             return false;
         }
@@ -1378,6 +1586,38 @@ impl Queue {
         // being pinned, and a local preview (no record) pinned over an
         // earlier witnessed one must not keep the earlier answer.
         e.attested_inference = attested_inference;
+        true
+    }
+
+    /// Record what the scrubber found in the envelope `entry_id` is pinned
+    /// to. Returns whether anything changed, so a caller saves the queue
+    /// only when it has to.
+    ///
+    /// Refused unless the entry is `Pending` and its pin names exactly
+    /// `envelope_digest`: a count is only ever stored beside the bytes it
+    /// describes, which are the bytes an approval would send.
+    pub fn record_scrub(
+        &mut self,
+        entry_id: Uuid,
+        envelope_digest: &str,
+        counts: super::second_look::ScrubCounts,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Pending
+            || e.previewed_envelope_digest.as_deref() != Some(envelope_digest)
+        {
+            return false;
+        }
+        let record = super::second_look::ScrubRecord {
+            envelope_digest: envelope_digest.to_string(),
+            counts,
+        };
+        if e.scrub.as_ref() == Some(&record) {
+            return false;
+        }
+        e.scrub = Some(record);
         true
     }
 
@@ -1470,6 +1710,51 @@ impl Queue {
             return false;
         }
         self.record_previewed_envelope(entry_id, pin, attested_inference)
+    }
+
+    /// Return every unsent approval made on the contributor's behalf to
+    /// waiting, under `second_look::REASON_SCRUB_CHECK_MANUAL`, and say how
+    /// many moved. For the switch to the Manual Scrub check (K4 of #1118):
+    /// such an entry would be held by the uploader anyway, and until then a
+    /// row still reading approved would be telling the contributor something
+    /// Manual no longer allows. A person's own approval is never touched, and
+    /// an entry already `Uploading` is left to its pass.
+    pub fn return_unattended_to_waiting(&mut self) -> usize {
+        let ids: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|e| e.state == QueueState::Approved && e.approved_unattended)
+            .map(|e| e.entry_id)
+            .collect();
+        for id in &ids {
+            self.revoke_approval(*id, super::second_look::REASON_SCRUB_CHECK_MANUAL);
+        }
+        ids.len()
+    }
+
+    /// Revoke an unattended approval the Scrub check holds for a person (K4
+    /// of #1118), and pin the envelope the hold was decided on, with its
+    /// counts beside the digest, so the entry reads `scrubbed` with the
+    /// `second_look` that held it and a person's review shows those bytes.
+    ///
+    /// `pin` is the digest the uploader saved the envelope under
+    /// (`approved_envelope::save`) and its counts, or `None` when nothing was
+    /// saved: the entry is held all the same and reads not yet scrubbed.
+    pub fn hold_with_scrub_pin(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        pin: Option<(&str, super::second_look::ScrubCounts)>,
+    ) -> bool {
+        if !self.revoke_approval(entry_id, reason_label) {
+            return false;
+        }
+        if let Some((digest, counts)) = pin {
+            if self.record_previewed_envelope(entry_id, digest, None) {
+                self.record_scrub(entry_id, digest, counts);
+            }
+        }
+        true
     }
 
     /// Revoke an approval and put the entry back in front of the
@@ -3127,6 +3412,41 @@ mod tests {
     }
 
     #[test]
+    fn a_scrub_count_is_bound_to_the_pinned_bytes() {
+        use crate::daemon::second_look::{Scrub, ScrubCounts};
+        let counts = ScrubCounts {
+            marks: 7,
+            content_marks: 2,
+            unsure_spans: 0,
+            unsure_unreadable: false,
+        };
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+
+        // Nothing pinned: a count has nothing to describe.
+        assert!(!q.record_scrub(id, "sha256:envelope", counts));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        // A count for other bytes than the pin is refused.
+        assert!(!q.record_scrub(id, "sha256:other", counts));
+        assert!(q.record_scrub(id, "sha256:envelope", counts));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::Scrubbed(counts));
+
+        // Re-pinned to a new build (a filter change, a re-enrolment): the
+        // old count no longer describes what would be sent.
+        assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+
+        // Released: likewise.
+        assert!(q.record_scrub(id, "sha256:rebuilt", counts));
+        assert!(q.release_preview_pin(id));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+    }
+
+    #[test]
     fn cancel_clears_the_pin_so_the_next_approval_rebuilds() {
         // Undo withdraws the approval, and the pin is the approval's
         // binding to the exact bytes it covered. Left behind, it makes a
@@ -3749,6 +4069,100 @@ mod tests {
         value.as_object_mut().unwrap().remove("session_cwd");
         let loaded: QueueEntry = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.session_cwd, None);
+    }
+
+    /// K5: "Keep on this Mac" takes a waiting session out of everything that
+    /// sends or counts it as owed, without expiring it, and the undo puts it
+    /// back as waiting for a person.
+    #[test]
+    fn a_kept_session_is_out_of_pending_never_expires_and_can_be_undone() {
+        let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:k");
+        q.keep(id).unwrap();
+
+        assert!(
+            q.pending().is_empty(),
+            "out of the Ask-me list and the badge"
+        );
+        assert!(q.kept_at_path(&the_path()));
+        assert!(!q.dismissed_at_path(&the_path()), "not a dismissal");
+        assert_eq!(q.kept().len(), 1);
+        assert!(!q.approve_unattended(id, &[], None), "nothing sends it");
+        assert!(
+            !q.approve(id, &[], None, None, None, None),
+            "not even by hand"
+        );
+        assert_eq!(
+            q.expire(at("2027-01-01T00:00:00Z"), 14, false),
+            0,
+            "a kept session does not age out"
+        );
+        assert!(q.get(id).unwrap().is_kept());
+
+        q.undo_keep(id, at("2027-01-01T00:00:00Z"), 5000).unwrap();
+        let e = q.get(id).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert!(e.returned_from_keep());
+        assert!(!q.kept_at_path(&the_path()));
+        assert_eq!(
+            q.expire(at("2027-01-02T00:00:00Z"), 14, false),
+            0,
+            "the undo restarts the clock"
+        );
+        assert!(
+            !q.approve_unattended(id, &[], None),
+            "an undone keep waits for a person"
+        );
+        assert!(q.approve(id, &[], None, None, None, None), "a person may");
+        assert_eq!(q.get(id).unwrap().reason_label, None);
+    }
+
+    /// A keep and an undo are never a way to clear a hold that needs a
+    /// person: every such hold comes back exactly as it was, still out of
+    /// unattended and group approval.
+    #[test]
+    fn a_hold_that_needs_a_person_survives_a_keep_and_its_undo() {
+        for hold in REASONS_NEEDING_A_PERSON {
+            let mut q = queue_of(vec![entry("sha256:h", "2026-08-01T00:00:00Z")]);
+            let id = entry_id_for("sha256:h");
+            q.set_state(id, QueueState::Pending, Some(hold.to_string()));
+            assert!(q.get(id).unwrap().held_for_review());
+            q.keep(id).unwrap();
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000).unwrap();
+            let e = q.get(id).unwrap();
+            assert_eq!(e.reason_label.as_deref(), Some(*hold));
+            assert!(e.held_for_review(), "{hold}: the hold is back");
+            assert_eq!(e.kept_from_reason, None);
+            assert!(!q.approve_unattended(id, &[], None), "{hold}");
+        }
+    }
+
+    /// Only a waiting session can be kept, and only a kept one un-kept -- so a
+    /// dismissal can never be undone through the keep route.
+    #[test]
+    fn keep_and_its_undo_refuse_every_other_state() {
+        let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:k");
+        assert_eq!(
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000)
+                .unwrap_err()
+                .to_string(),
+            "not-kept"
+        );
+        q.set_state(id, QueueState::Refused, Some(REASON_DISMISSED.to_string()));
+        assert_eq!(q.keep(id).unwrap_err().to_string(), "not-pending");
+        assert_eq!(
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000)
+                .unwrap_err()
+                .to_string(),
+            "not-kept",
+            "a dismissal stays permanent"
+        );
+        assert!(q.dismissed_at_path(&the_path()));
+        assert_eq!(
+            q.keep(entry_id_for("sha256:none")).unwrap_err().to_string(),
+            "unknown-entry-id"
+        );
     }
 
     // -- `decisions_owed` (K6): the badge's exact count -----------------

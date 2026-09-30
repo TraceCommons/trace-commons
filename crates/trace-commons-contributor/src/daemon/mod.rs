@@ -46,6 +46,7 @@ pub mod harness;
 pub mod health;
 pub mod history;
 pub mod inference_connection;
+pub mod inference_map;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
@@ -68,6 +69,7 @@ pub mod profile;
 pub mod project_key;
 pub mod public_run;
 pub mod queue;
+pub mod second_look;
 pub mod settings;
 pub mod skill_loop;
 pub mod state;
@@ -78,6 +80,7 @@ pub(crate) mod test_paths;
 pub(crate) mod test_support;
 pub(crate) mod token_capture;
 mod token_cleanup;
+pub mod unsure_spans;
 pub mod uploader;
 pub mod watcher;
 #[cfg(windows)]
@@ -697,6 +700,20 @@ async fn drain_approved(
         let mut returned = Vec::new();
         for e in candidates.iter().filter(|e| e.approved_unattended) {
             match policy.resolve(&e.project_key) {
+                // A session that must wait for a person although its
+                // project is armed -- on disk at the automatic grant in a
+                // project the grant armed, or on disk when the project was
+                // armed from now (K5) -- waits for the contributor, as it
+                // would in an ask-first folder. The watcher never approves
+                // one of these unattended; this covers an approval made
+                // before the hold applied that was in flight when it began,
+                // and came back `Approved`.
+                policy::ProjectMode::AutoUpload
+                    if policy
+                        .waits_for_a_person_at_send(&e.project_key, &e.path.to_string_lossy()) =>
+                {
+                    returned.push(e.entry_id)
+                }
                 policy::ProjectMode::AutoUpload => {}
                 policy::ProjectMode::Ignore => ignored.push(e.entry_id),
                 policy::ProjectMode::NotifyOnly => returned.push(e.entry_id),
@@ -1066,6 +1083,28 @@ async fn drain_approved(
                 // re-approves it: the reason is one of
                 // `REASONS_NEEDING_A_PERSON`.
                 q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference);
+            }
+            uploader::UploadDecision::HeldForSecondLook {
+                reason_label,
+                reasons,
+                pin,
+            } => {
+                // The Scrub check (K4 of #1118). Under Automatic the reason
+                // is one of `REASONS_NEEDING_A_PERSON`, so nothing
+                // re-approves it. The envelope the hold was decided on is
+                // pinned with its counts beside the digest
+                // (`QueueEntry::scrub`), like a preview's. Labels only.
+                tracing::info!(
+                    reason = reason_label.as_str(),
+                    second_look = ?reasons,
+                    "held a session approved on the contributor's behalf for a person"
+                );
+                q.hold_with_scrub_pin(
+                    entry.entry_id,
+                    &reason_label,
+                    pin.as_ref()
+                        .map(|(digest, counts)| (digest.as_str(), *counts)),
+                );
             }
             uploader::UploadDecision::Failed { reason_label } => {
                 // Same rule on the failure side: `submit_one` can report an
@@ -2663,6 +2702,66 @@ mod tests {
         assert_eq!(h.entry().session_hash, original.session_hash);
         assert_eq!(std::fs::read(&h.session_path).unwrap(), original_bytes);
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    /// The opt-in Automatic Scrub check (K4 of #1118), through a real upload
+    /// pass. This harness's own session reads "fix the parser please", which
+    /// the scrubber removes nothing from. Under the default (never chosen)
+    /// it is sent, as the other tests here show. Once Automatic is chosen,
+    /// the same session is held for a person with `nothing-matched` and
+    /// nothing is uploaded for it, while a session the scrubber did remove
+    /// something from still goes.
+    #[tokio::test]
+    async fn once_automatic_is_chosen_an_armed_session_where_nothing_matched_is_held() {
+        let h = TransientRetryHarness::new().await;
+        let unmarked = h.entry();
+        assert_eq!(unmarked.state, queue::QueueState::Approved, "armed");
+        assert!(unmarked.approved_unattended);
+        assert_eq!(
+            h.shared.settings.lock().unwrap().scrub_check,
+            None,
+            "the default is never chosen"
+        );
+        h.shared.settings.lock().unwrap().scrub_check = Some(settings::ScrubCheck::Automatic);
+        h.add_session(
+            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
+            "tidy the lexer, then mail alice.smith@example.org",
+        )
+        .await;
+        let marked = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id != unmarked.entry_id)
+            .expect("the session with an address in it")
+            .entry_id;
+
+        h.pass(TransientRetryHarness::now()).await;
+
+        let held = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id == unmarked.entry_id)
+            .unwrap();
+        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+        assert!(held.held_for_review());
+        assert!(
+            matches!(held.scrub(), second_look::Scrub::Scrubbed(_)),
+            "the held envelope is pinned with its counts: {held:?}"
+        );
+        assert_eq!(
+            held.second_look_reasons(),
+            vec![second_look::REASON_NOTHING_MATCHED]
+        );
+        assert_eq!(
+            h.shared.queue.lock().unwrap().get(marked).unwrap().state,
+            queue::QueueState::Uploaded,
+            "the session with a mark still goes"
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "only that one");
     }
 
     /// Z5, end to end through a real witness exchange: a witness at capacity
