@@ -240,6 +240,11 @@ async fn insert_native_session(
 /// `closed` with `bound_at` NULL, every session and credential is revoked,
 /// `trace_accounts.closed_at` is set, and a label-only audit row is written.
 /// Every timestamp S3 stamps with now() is backdated by `closed_days_ago`.
+///
+/// This is a copy, kept because this suite runs without the ingest harness.
+/// `pg_a_refused_bind_closes_an_account_the_reaper_reclaims_after_thirty_days`
+/// (the ingest bin's near_ai_bind_tests) closes an account through the real
+/// refuse branch and reaps it, so drift between the two shows up there.
 async fn close_like_s3(fx: &Fixture, s: &Seeded, closed_days_ago: i64) {
     fx.admin
         .execute(
