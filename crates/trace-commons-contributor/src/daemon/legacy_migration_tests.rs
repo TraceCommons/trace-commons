@@ -40,10 +40,10 @@ enum LinkMode {
     FirstDeviceRecord,
     /// The same, on a V91 server: this device's own attestation under the
     /// existing link, with an attestation id of its own, countersigned as an
-    /// attestation rather than a link (V92).
+    /// attestation rather than a link (V104).
     SecondDeviceAttestation,
     /// The tenant is already linked to this account, but under another of
-    /// its invites: 409 `legacy_link_invite_not_linked` (V92).
+    /// its invites: 409 `legacy_link_invite_not_linked` (V104).
     SecondDeviceOtherInvite,
 }
 
@@ -177,7 +177,7 @@ async fn link_route(
     };
     match ingest.mode {
         LinkMode::OtherAccount => record.statement.account_id = Uuid::new_v4(),
-        // What V92 returns: this device's own statement, under an id of the
+        // What V104 returns: this device's own statement, under an id of the
         // attestation's own, countersigned under the attestation domain.
         LinkMode::SecondDeviceAttestation => {
             record.kind = LegacyInviteLinkRecordKind::DeviceAttestation;
@@ -1051,7 +1051,7 @@ async fn a_second_device_of_a_linked_tenant_moves_on_its_own_attestation() {
 }
 
 /// A second device that joined the linked tenant under a different invite is
-/// refused by name (V92), and nothing changes: the invite identity keeps
+/// refused by name (V104), and nothing changes: the invite identity keeps
 /// working and the move is still offered.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_device_under_another_invite_is_refused_by_name() {

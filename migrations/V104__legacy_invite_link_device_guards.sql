@@ -48,7 +48,7 @@
 -- record. `countersign_domain` says which domain a stored row's
 -- countersignature is under. A row V91 recorded before this migration is
 -- under the link domain; it is superseded in place by the device's next
--- attestation, which is the only way that device can get a record a V92-era
+-- attestation, which is the only way that device can get a record a V104-era
 -- client accepts.
 --
 -- V91's own advisory lock is dropped: on the path ingest takes, V81 has

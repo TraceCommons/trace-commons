@@ -1,7 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Legacy invite link storage (V81, V91, V92). Every statement runs in the NEAR
+//! Legacy invite link storage (V81, V91, V104). Every statement runs in the NEAR
 //! account's tenant context; the only cross-tenant read is inside
 //! `trace_link_legacy_invite`, owned by a NOLOGIN, NOBYPASSRLS guard.
 
@@ -95,11 +95,11 @@ impl PgBackend {
             )
             .await?;
         let outcome: String = row.get(0);
-        // V91/V92: the same account, from another of the tenant's devices.
+        // V91/V104: the same account, from another of the tenant's devices.
         // The link function answered with the first device's record, which
         // this device cannot verify; record and return its own attestation
         // instead, countersigned under the attestation domain, in the same
-        // transaction that spent its challenge (V92 checks that it did).
+        // transaction that spent its challenge (V104 checks that it did).
         if outcome == "already_linked"
             && row.get::<_, Option<String>>(2).as_deref() != Some(statement.device_key_id.as_str())
         {

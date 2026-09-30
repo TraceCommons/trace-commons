@@ -1107,11 +1107,11 @@ async fn direct(
     .await
 }
 
-/// V92: `trace_attest_legacy_invite_device` holds every refusal on its own,
+/// V104: `trace_attest_legacy_invite_device` holds every refusal on its own,
 /// called directly as the runtime login, rather than relying on the link
 /// function having run first. Each case is set up so that the link function
 /// alone would let the attestation through, or would lead it to a different
-/// label: deleting the matching V92 guard turns that case red.
+/// label: deleting the matching V104 guard turns that case red.
 ///
 /// Runs alongside `legacy_invite_link_and_coexistence_readiness` against the
 /// same database, so it creates nothing that affects readiness (no conflict

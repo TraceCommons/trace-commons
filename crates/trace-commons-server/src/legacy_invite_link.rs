@@ -57,7 +57,7 @@ pub enum LinkRefusal {
     /// The account already holds this legacy tenant's link, but under a
     /// different invite than the one this device joined with. That invite
     /// was never granted to the account, so this device cannot attest under
-    /// the link (V92).
+    /// the link (V104).
     #[error("legacy_link_invite_not_linked")]
     InviteNotLinked,
     #[error("legacy_link_unavailable")]
@@ -212,7 +212,7 @@ pub struct LinkDbAttempt {
     /// Countersignature over the same record as a `DeviceAttestation`,
     /// under the attestation domain. Used only when the link already exists
     /// for this account from another device, and the database records an
-    /// attestation instead (V91/V92). Both are computed before the call so
+    /// attestation instead (V91/V104). Both are computed before the call so
     /// either can be stored in the transaction that decides.
     pub attestation_server_signature: String,
 }

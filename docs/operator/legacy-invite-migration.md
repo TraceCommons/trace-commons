@@ -6,7 +6,7 @@ procedure; the design is in the consent spec
 (`docs/superpowers/specs/2026-09-23-connect-and-forget-consent-design.md`,
 "The invite-to-account migration") and the schema in
 `migrations/V81__legacy_invite_link.sql`, `V91__legacy_invite_link_devices.sql`
-and `V92__legacy_invite_link_device_guards.sql`.
+and `V104__legacy_invite_link_device_guards.sql`.
 
 The client half -- the daemon performing the migration, unreachable over IPC,
 ordered against the void sweep, re-baselining armed folders -- is described
@@ -90,17 +90,17 @@ trust or its invite grant, and is audited hash-only as
 (`legacy_link_tenant_claimed`). A challenge is single-use, expires after five
 minutes, and an account may hold five open at once.
 
-An attestation is not a link, and says so. Since V92 it is countersigned
+An attestation is not a link, and says so. Since V104 it is countersigned
 under its own domain, `trace-commons.legacy-invite-device-attestation-record.v1`,
 and returned with `"kind": "device_attestation"` in the record; its
 `link_id` field is the attestation's own id (`trace_legacy_invite_link_devices.attestation_id`),
 not a row of `trace_legacy_invite_links`. A link record carries no `kind`,
 exactly as before. `countersign_domain` on each attestation row says which
 domain its countersignature is under; the only rows under the link domain are
-ones V91 wrote before V92, and each is superseded in place by that device's
+ones V91 wrote before V104, and each is superseded in place by that device's
 next attestation.
 
-Since V92 the attestation function checks everything the link function does
+Since V104 the attestation function checks everything the link function does
 on its own, rather than relying on having run second: the account is open and
 NEAR-anchored; the statement's challenge was spent by the link function in
 the same transaction, is still unexpired, and has not backed another
@@ -323,7 +323,7 @@ nothing is lost. The steps, in order:
   `trace_attest_legacy_invite_device` directly as that login for each of its
   refusals, including rule 5, a challenge spent in another transaction, one
   spend shared by two devices, and a challenge that expired between the two
-  calls; removing any one of the V92 checks listed above turns it red.
+  calls; removing any one of the V104 checks listed above turns it red.
 - `account_trust_pg`: the shared multi-use account invite.
 - `admission_pg_tests` (ingest bin): a legacy invite identity still
   contributes with account admission on.

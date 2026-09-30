@@ -816,7 +816,7 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_tenant_claimed" => {
             "This invite has already been moved to a different account. Nothing changed here."
         }
-        // Copy for Zaki's approval (V92): another of this person's devices
+        // Copy for Zaki's approval (V104): another of this person's devices
         // moved the same invite tenant onto this account under a different
         // invite code, which was never granted to the account.
         "legacy_migration_invite_not_linked" => {
