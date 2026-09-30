@@ -1,10 +1,23 @@
 [package]
 name = "trace-commons-contributor"
-version = "0.11.0"
+version = "0.12.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[features]
+# TEST-ONLY. Routes both OS credential stores (device key, account session,
+# Cloud credentials) to a plaintext file store inside the config directory,
+# and makes `OsSecretBackend::new` refuse. Integration tests link this crate
+# without `cfg(test)`, so without it every test that generated a device
+# identity wrote a real login-keychain item and left it there.
+#
+# Enabled ONLY by the self dev-dependency below, which cargo activates for
+# `cargo test` and never for `cargo build`/`--release` of a shipped binary.
+# Never enable it anywhere else. `tests/credential_store_isolation.rs` fails
+# if the wiring is lost.
+test-credential-store = []
 
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
@@ -34,6 +47,8 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 hex = "0.4"
+# OS credential stores approved by the operator on 2026-09-09.
+keyring-core = "=1.0.0"
 # IronWire's proxy, run in-process behind the private_inference switch.
 #
 # Measured normal-dependency cost (deduplicated package names): 220 before,
@@ -334,7 +349,220 @@ hex = "0.4"
 # it. This update did not need that command -- re-resolving the changed rev
 # through `cargo metadata` alone was enough -- and the changed lines of both
 # lock diffs were grepped for non-ironwire movement, of which there were zero.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "6c5d62897a9018b75bb306de9074548899e9642c" }
+#
+# ---------------------------------------------------------------------------
+# 06118ebd (upstream #49, #53, #54), reviewed 2026-09-08.
+#
+# Three commits in the range, verified with
+# `git log --oneline 6c5d6289..06118ebd`. All three are ours, and two of them
+# fix defects this repository is the only thing that could have found. Unlike
+# the last two advances this one is NOT dormant: it changes what
+# `embed_options` passes, and the reason is the substance of the update.
+#
+# The previous section closed by saying #49 "is still the unmerged branch
+# `read-jsonc-tolerantly` upstream -- so it is not in this advance and a later
+# one will have to review it". This is that later one; it is reviewed below.
+#
+# COST. Zero, measured on both workspaces before and after rather than assumed.
+# `cargo metadata --locked`: 577 root packages and 930 root lock entries before
+# and after, 535 GTK packages and 535 GTK lock entries before and after, and
+# this crate's `cargo tree -e normal` still 303 deduplicated names. Upstream
+# changed no `Cargo.toml` and no `Cargo.lock` in the range --
+# `git diff --stat 6c5d6289..06118ebd -- Cargo.toml Cargo.lock '*/Cargo.toml'`
+# is empty -- so no package entered either graph and no license entered the
+# audit. `cargo deny check licenses` passes on all four configurations
+# (default, near-ai-scorer, local-gpu-models, --all-features).
+#
+# SURFACE. Each of this crate's three imports diffed rev-to-rev:
+#   * `ironwire_catalog::schema` -- not one byte moved;
+#     `git diff --stat 6c5d6289..06118ebd -- crates/ironwire_catalog` is empty.
+#   * `ironwire_agents` -- #49 rewrites 164 lines of `src/catalog.rs` and
+#     changes NO public item: `git diff 6c5d6289..06118ebd --
+#     crates/ironwire_agents/src/catalog.rs` has zero `pub` lines on either
+#     side. `Error` is unchanged, so the matches in `daemon::harness` are not
+#     at risk. The change is internal: `is_wired` reads through a new
+#     `json_parse_tolerant`, while `json_connect` and `json_disconnect` keep
+#     the strict `json_parse`. See BEHAVIOUR for why that asymmetry is right.
+#   * `ironwire_proxy::embed` -- `EmbedOptions` GAINS a public
+#     `credential_files: CredentialFiles` field and a `with_credential_files`
+#     builder; the new `CredentialFiles` enum is `#[non_exhaustive]` and
+#     derives `Clone, Copy, Debug, Default, PartialEq, Eq`. Everything else we
+#     name -- `EmbedError`, `EmbeddedProxy`, `ExitError`, `HostSecret`,
+#     `StartupProbes`, `UpdateChecks`, `start`, `start_with_options` -- is
+#     unchanged. The new field is additive, and it does not break us for a
+#     reason that is checked and not remembered: we never write an
+#     `EmbedOptions` struct literal, only `default()` plus builders, and the
+#     previous advance already established that nothing here compares or
+#     copies an `EmbedOptions` whole. `embed::lock` is #54's only other target
+#     and is private (`mod lock;`, not `pub mod`), so it has no surface here.
+#
+# WHAT THIS ADVANCE ACTUALLY CHANGES ON A CONTRIBUTOR'S MACHINE. The section
+# above closed with "HOST-OWNED CREDENTIALS ARE DORMANT HERE BY CHOICE" and
+# said adopting them "would silently drop the Claude and Codex subscription
+# backends for every contributor who has one". That is no longer a hypothetical
+# we are declining: the NEAR AI credential slice landed since, and
+# `ipc.rs::reconcile_private_inference` now hands `set_credential` a real
+# `HostSecret` whenever the contributor has obtained a key. On the previous pin
+# that contributor WAS losing their subscription backends, silently, exactly as
+# that comment predicted -- and losing them in the worst way, because the NEAR
+# AI backend is registered unconditionally so the registry is never empty,
+# `StartupReport::no_backends` never fires, and the daemon goes on reporting
+# `running` while answering from fewer backends than the contributor has.
+#
+# #53 is the fix and was written for this case. `Credentials::discovers_files`
+# was derived from the enum that decides credential lookup, so one bit answered
+# two questions; it is now a struct with a separate `files`. The key arm of
+# `embed_options` therefore also selects `CredentialFiles::Discover`, and the
+# no-key arm stays on the `FollowCredentialOwner` default, which for no source
+# means the files are read as they always were. Both halves are pinned by
+# `no_key_of_ours_leaves_every_other_destination_alone`. Note what did NOT
+# move with it: under `Discover` the process environment is still not
+# consulted, so a stray `ANTHROPIC_API_KEY` in this daemon's environment still
+# registers nothing. Only the files on disk are read.
+#
+# Selecting `Discover` is an acceptance and is recorded as one. A request can
+# now go to a backend registered from a login this daemon never named. That is
+# the right trade here because those destinations are ones the contributor set
+# up deliberately and had before this switch existed -- taking them away is
+# what would need consent, not leaving them. A host that must be able to state
+# every possible destination should not select it; we are not that host.
+#
+# BEHAVIOUR, not just types. Two further changes alter what happens with no
+# signature change to catch them:
+#   * #49 makes `is_wired` tolerant of JSONC while the writers stay strict.
+#     A tool a contributor had already wired BY HAND read back as not wired
+#     for the whole class of tools whose documented format allows comments,
+#     and the onboarding banner offers only tools that are not wired -- so the
+#     user's own correct configuration triggered an offer to connect something
+#     already connected. The asymmetry is deliberate and load-bearing: reading
+#     has no round trip and cannot delete a comment, writing does. This is
+#     dormant here for the same reason the previous advance's catalog changes
+#     were -- our compiled-in catalog is empty (`owned_agents()` is
+#     `Vec::new()`), and the Claude and Codex arms use `claude_settings::
+#     is_wired` and `codex_config::is_wired`, neither of which #49 touches --
+#     but it is reachable the moment an entry is added, so it is reviewed
+#     rather than waved past.
+#   * #54 releases the home lock with `flock(LOCK_UN)` in `impl Drop for
+#     Guard` instead of only closing the descriptor. `flock` ownership belongs
+#     to the open file description, so a descriptor a concurrent `fork` copied
+#     kept the home held after the guard dropped, and the next `acquire` saw
+#     `WouldBlock` with no owner at all. An embedder is multi-threaded and
+#     spawns children, which is why this reached us and not upstream's CLI.
+#
+# PR #755'S RETRY STAYS, and this is the one thing about this advance most
+# likely to be got wrong later. #755 carries a bounded 10s retry on
+# `EmbedError::Lock` as a downstream workaround for exactly the defect #54
+# fixes, and this pin does satisfy the expiry condition its comment names.
+# It is deliberately NOT removed here: #755 is not merged, so touching that
+# code would couple this to its merge order, and deleting a workaround as a
+# side effect of a dependency bump is how a removal lands unreviewed. The
+# removal is scheduled as its own change once both are in.
+#
+# FLATPAK. `cargo-sources.json` was REGENERATED with flatpak-cargo-generator.py
+# against the new GTK lock, not hand-edited, and the diff has the same shape
+# the last one warned about. Thirteen entries move of 1073; TWO contain the
+# 40-character revision (the git source's `commit`, and the vendored-sources
+# `contents` string) and the other ELEVEN key on the SHORT hash -- twelve
+# occurrences in all, one `dest` and eleven `cp --reflink` vendor lines,
+# `flatpak-cargo/git/ironwire-6c5d628` -> `-06118eb`. Editing the occurrences
+# of the full rev would leave twelve vendor paths pointing at a directory the
+# build no longer creates, and nothing in PR CI would catch it: the first
+# failure would be the `linux-flatpak` job on an `app-v*` tag. The remaining
+# 1060 entries are byte-identical, no moved entry mentions anything but
+# ironwire, and `grep -c 6c5d628` on the regenerated file is 0.
+#
+# This advance was retargeted mid-review: it was prepared against 49186acc
+# (#49 and #53) and moved forward one commit when #54 merged. The 49186acc
+# measurements are not reported above -- every figure here was re-measured
+# against 06118ebd rather than carried over.
+#
+# The IronClaw note above still applies and was re-checked rather than assumed:
+# both locks still name 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9, upstream's
+# root `Cargo.toml` still names `branch = "main"` for `ironclaw_llm`,
+# `ironclaw_common` and `ironclaw_safety`, and `cargo update -p ironwire_proxy`
+# would advance it. This update did not need that command -- re-resolving the
+# changed rev through `cargo metadata` alone was enough -- and the changed
+# lines of both lock diffs were grepped for non-ironwire movement, of which
+# there were zero (22 changed lines each, all of them the rev).
+#
+# ADVANCE TO 74cd49c1. Two commits in the range, verified with
+# `git log --oneline 06118ebd..74cd49c1`: #56 installs upstream's packaging
+# tools from the Ubuntu archive alone and touches no library code at all, and
+# #55 records the model NEAR AI actually served. Both are upstream's own.
+#
+# COST. Zero, measured on both workspaces rather than assumed. Lock entries are
+# 930 root and 535 GTK before and after; `cargo metadata --locked` resolves 577
+# root packages and 535 GTK packages; this crate's `cargo tree -e normal` is
+# still 303 deduplicated names. Upstream changed no manifest and no lock in the
+# range -- `git diff --stat 06118ebd..74cd49c1 -- Cargo.toml Cargo.lock
+# '*/Cargo.toml'` is empty -- so no package entered either graph and no license
+# entered the audit. `cargo deny check licenses` passes on all four
+# configurations (default, near-ai-scorer, local-gpu-models, --all-features).
+#
+# MSRV. Unmoved, and checked rather than remembered: every `rust-version` in
+# the tree reads `1.96` (or inherits it) at BOTH revs. This advance does not
+# disturb the toolchain literals in the release workflows.
+#
+# SURFACE. Two of this crate's three imports did not move one byte --
+# `git diff --stat 06118ebd..74cd49c1 -- crates/ironwire_catalog` and the same
+# for `crates/ironwire_agents` are both EMPTY, so `ironwire_catalog::schema`
+# and the `ironwire_agents::tools` matches in `daemon::harness` are not at
+# risk. `ironwire_proxy` is the only crate that moved, and `embed.rs` is the
+# only file in it we compile against:
+#   * `EmbedOptions` GAINS a public `refuse_model_aliases: bool` and a
+#     `refusing_model_aliases` builder. Additive, and it does not break us for
+#     a reason that is checked and not inherited from the section above: this
+#     crate never writes an `EmbedOptions` struct literal. Both construction
+#     sites -- `embed_options` and the test at private_inference.rs:1178 --
+#     go through `EmbedOptions::default()` plus builders.
+#   * The rest of #55's new surface is `MODEL_ALIAS_RESOLVED_HEADER`,
+#     `NO_ALIASING_HEADER`, `model_alias_resolved()` and the ledger's
+#     `model_alias_resolved: Option<String>`. We name none of them: grep for
+#     all four across `crates/**/*.rs` returns zero.
+# Everything else we import -- `EmbedError`, `EmbeddedProxy`, `ExitError`,
+# `HostSecret`, `CredentialFiles`, `StartupProbes`, `UpdateChecks`, `start`,
+# `start_with_options` -- is unchanged.
+#
+# BEHAVIOUR, not just types. Nothing changes on a contributor's machine, and
+# the two reasons are separate:
+#   * `refuse_model_aliases` is opt-in and defaults false. `embed_options`
+#     does not set it, so the proxy keeps accepting a substituted model
+#     exactly as it did. Recording the substitution is unconditional;
+#     REFUSING it is not, and we have not asked for the refusal.
+#   * The ledger gains a nullable column through upstream's existing
+#     `ADDED_COLUMNS` path, and `add_missing_columns` runs inside
+#     `Ledger::init` on every open. An existing contributor's ledger file is
+#     migrated in place the first time the new binary opens it, and upstream's
+#     `a_row_written_before_the_alias_column_reads_back_through_the_new_reader`
+#     pins that a new reader opens an old file. NO LEDGER MIGRATION IS NEEDED
+#     ON OUR SIDE, and none is added here.
+#
+# PR #755'S RETRY STILL STAYS, for the reason the section above gives and not
+# because this advance re-examined it: #54 is already in the previous pin, so
+# this bump changes nothing about that removal's schedule.
+#
+# FLATPAK. `cargo-sources.json` was REGENERATED with flatpak-cargo-generator.py
+# against the new GTK lock -- surface 3 before surface 4, because the generator
+# reads the lock and a stale one yields a file that looks right and vendors the
+# old revision -- and the diff has exactly the shape the sections above warn
+# about. Thirteen entries move of 1073, fourteen lines in all: TWO carry the
+# 40-character revision (the git source's `commit` and the vendored-sources
+# `contents`) and TWELVE key on the SHORT hash, one `dest` and eleven
+# `cp --reflink` vendor lines, `flatpak-cargo/git/ironwire-06118eb` ->
+# `-74cd49c`. The remaining 1060 entries are byte-identical, no moved entry
+# mentions anything but ironwire, and `grep -c 06118eb` on the regenerated
+# file is 0.
+#
+# The IronClaw note above still applies and was re-checked rather than assumed:
+# both locks still name 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9. As with the
+# last advance, re-resolving the changed rev through `cargo metadata` alone was
+# enough, and the changed lines of both lock diffs were grepped for
+# non-ironwire movement, of which there were zero (22 changed lines each, all
+# of them the rev).
+# Token capture integration: nearai/ironwire#57 (draft), exact reviewed candidate.
+# Adds bounded private capture leases and opt-in Chat probability fields.
+# No new packages; re-run downstream platform and license gates before landing.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -348,8 +576,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "6c5d62897a
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "6c5d62897a9018b75bb306de9074548899e9642c" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "6c5d62897a9018b75bb306de9074548899e9642c" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
@@ -383,6 +611,7 @@ url = "2"
 # this). Building that descriptor requires Win32 directly: tokio exposes only
 # `create_with_security_attributes_raw`, which takes a raw pointer.
 [target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = "=1.1.0"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -391,7 +620,20 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
+# Pinned to the exact version `apple-native-keyring-store` resolves, because
+# `storage_error` downcasts to this crate's `base::Error` to recover the
+# OSStatus. A different version is a different type and the downcast would
+# silently never match.
+security-framework = "=3.7.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
+
 [dev-dependencies]
+# Itself, for the test-only feature: see `test-credential-store` above.
+trace-commons-contributor = { path = ".", features = ["test-credential-store"] }
 axum = "0.8"
 # Signing test certificates, so the certificate-verification tests exercise
 # real secp256k1/EIP-191 rather than a fixture nobody can regenerate. Both are

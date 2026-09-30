@@ -1,0 +1,86 @@
+
+## Local Insights
+
+The default launch window opens Insights before resolving contributor state or
+starting a worker. The Contributions action enters the existing roots and
+onboarding flow; those gates remain required for contribution. An initialized
+contribution window also includes an Insights destination.
+
+Choose one Codex rollout or trajectory file to analyze it without saving.
+**Re-read and save** explicitly reads that file again and saves derived
+observations to the same owner-only Insights store used by the CLI. Refresh
+saved insights lists dated snapshots; **Show evidence** displays source digests,
+coverage, analyzer/rubric attribution, and unknown values. It does not re-read
+sources. Saved snapshots support user-reported task assessments and deletion;
+original files are never deleted. Neither operation enrolls or uploads.
+
+IO runs serially off the GTK thread. Cancel suppresses a pending result but
+keeps controls disabled until that request finishes, so repeated cancellation
+cannot enqueue unbounded work. Closing the window or application suppresses
+late UI updates. Already-started saves/deletions may finish; refresh history to
+check. No automatic source watching or model ranking is provided.
+
+Linux display qualification (run each test in its own process under Weston):
+
+```sh
+RUSTFLAGS='-D warnings' cargo test --locked --lib \
+  ui::insights::tests::account_free_view_analyzes_saves_explains_deletes_and_ignores_closed_results \
+  -- --exact --ignored --test-threads=1
+RUSTFLAGS='-D warnings' cargo test --locked --bin trace-commons-shell \
+  insights_startup_tests::first_run_local_window_does_not_create_contributor_state \
+  -- --exact --ignored --test-threads=1
+cargo run --locked --bin trace-commons-shell -- \
+  --start-page insights --exit-after-realize --realize-seconds 3
+```
+
+The separate-workspace unit suite does not replace the Linux Weston UI smoke.
+On macOS, GTK requires initialization on the OS main thread, so its display
+scenarios cannot run inside the Rust test harness; the actual application smoke
+command above runs on the main thread. Dates use GLib local time and locale
+formatting; metric counts retain exact ungrouped decimal values.
+
+### Saved-history summary
+
+Entering Insights reads the saved-history summary without initializing an
+absent store. Saving, reimporting, deleting, and changing an assessment refresh
+that summary. Unsaved previews stay outside its population. The shared service
+supplies every total, coverage denominator, unit, limitation, and contributor ID;
+GTK performs no independent metric calculation.
+
+The summary distinguishes unassessed snapshots from explicit Unknown assessments
+and shows observed totals beside available/missing snapshots and record coverage.
+Its dates describe analysis time. Category, outcome, and metric evidence buttons
+show only their contributing saved snapshots; open a row to inspect its evidence.
+The summary collapses and the scroll position returns to the evidence area when
+a filter or snapshot is selected. Explicit snapshot lookup clears earlier detail
+before reading, so a missing snapshot cannot retain an unrelated successful preview.
+Refresh returns to the complete saved population. A failed operation clears the
+summary and its evidence rows instead of retaining stale totals as current.
+
+The summary defines the population used for the rows. Opening a detail performs
+a later independent read, which can observe a newer assessment or deletion.
+Closing, hiding, cancellation, and re-entry retain the same bounded worker rules
+as individual snapshots. The Linux display lifecycle test above also covers
+summary refresh, evidence navigation, failure clearing, and empty-store entry.
+
+### Model declarations and linked artifacts
+
+Each snapshot has a collapsible Evidence section showing the shared typed model
+declarations, missing/invalid/omitted counts, source digest, and declaration
+coordinates. Legacy snapshots explicitly show model information as unavailable.
+A single retained model name does not establish exclusive use or attribute
+tokens, work, or outcomes to that model.
+
+Saved snapshots can link an exact commit from a selected local repository or
+import a selected structured test report. The controls explain the report's JSON
+format. Git object inspection and producer-reported test counts remain separate
+from verified outcomes and user assessments. Each link can be removed without
+deleting its original artifact. Linking and unlinking refresh the snapshot and
+saved-history summary through the shared local service off the GTK thread.
+
+Choosers retain the original snapshot ID and a view generation; switching
+snapshots, starting another operation, cancelling, hiding, or closing invalidates
+their pending responses. Commit text is captured before opening the directory
+chooser. An external replacement of the original saved snapshot fails the link
+instead of applying it to the replacement. The display lifecycle regression
+covers report link/unlink, refresh, stale choosers, and external replacement.

@@ -501,7 +501,7 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
         }
 
         _withdrawals[id] = WithdrawalAttempt.Done(
-            response.ResultAs<WithdrawResult>()?.DistributionReach);
+            response.ResultAs<WithdrawResult>()?.DistributionReach, response.ResultAs<WithdrawResult>()?.TokenDeletionNote);
 
         await RefreshAsync().ConfigureAwait(true);
     }
@@ -630,9 +630,7 @@ public sealed class OutcomeCountViewModel
 {
     public OutcomeCountViewModel(string label, int count)
     {
-        Label = string.IsNullOrWhiteSpace(label)
-            ? "—"
-            : label.Replace('-', ' ').Replace('_', ' ');
+        Label = QueueOutcomeSurface.Line(label);
         CountText = count.ToString(CultureInfo.CurrentCulture);
     }
 

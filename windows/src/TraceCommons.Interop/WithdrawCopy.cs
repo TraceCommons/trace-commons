@@ -31,8 +31,8 @@ namespace TraceCommons.Interop;
 /// <item>Never claim more erasure than the tier achieved -- which is why
 /// <see cref="Confirmation"/> shows an <c>accepted</c> trace BOTH commons
 /// bodies rather than picking the gentler one.</item>
-/// <item>Withdrawal does not reverse settled credit -- <see cref="CreditNote"/>,
-/// and nothing here implies otherwise.</item>
+/// <item>Withdrawal does not reverse settled credit and forfeits pending
+/// credit -- <see cref="CreditNote"/>, and nothing here implies otherwise.</item>
 /// <item><c>not_found</c> must not disclose which -- <see cref="NotFound"/>.</item>
 /// <item>Bulk withdrawal spans tiers -- <see cref="NoBulk"/> says why this
 /// shell does not offer it.</item>
@@ -85,10 +85,11 @@ public static class WithdrawCopy
         + "that have already been distributed cannot be recalled. Withdrawing does not undo that.";
 
     /// <summary>
-    /// Credit is not clawed back, and this says only that -- nothing about
-    /// how much, when it settles, or what it is worth.
+    /// Settled credit is not clawed back; credit still pending never settles
+    /// once the trace is withdrawn. This says only that -- nothing about how
+    /// much, when it would have settled, or what it is worth.
     /// </summary>
-    public const string CreditNote = "Credit already recorded stays.";
+    public const string CreditNote = "Credit that has already settled stays. Credit still pending is forfeited.";
 
     public const string Question = "Withdraw this trace?";
 
@@ -119,8 +120,7 @@ public static class WithdrawCopy
         + "these two applies:";
 
     public const string AmbiguityUnknown =
-        "This window does not recognise what stage this trace reached, so it cannot rule out "
-        + "the furthest one:";
+        "This session may already have been distributed. Withdrawal cannot recall distributed copies.";
 
     /// <summary>
     /// Withdrawal is authenticated by an account session, which this build
@@ -169,11 +169,7 @@ public static class WithdrawCopy
     /// cannot be honoured at all.
     /// </remarks>
     public const string NoBulk =
-        "There is no button here that withdraws all of them at once. The bulk call reports only "
-        + "how many succeeded, never what happened to any one trace, and it chooses what to "
-        + "withdraw from this machine's copy of your history, which can be out of date -- so it "
-        + "could not tell you afterwards which of these had already been distributed. Withdraw "
-        + "them one at a time below and each one tells you what it actually did.";
+        "Withdraw sessions individually to see the result for each one.";
 
     /// <summary>
     /// The daemon labels that mean not-found.

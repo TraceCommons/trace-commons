@@ -57,7 +57,8 @@ public sealed class WithdrawalAttempt
 
     public static WithdrawalAttempt InFlight() => new(WithdrawalState.InFlight, null, null);
 
-    public static WithdrawalAttempt Done(string? reach) => new(WithdrawalState.Done, reach, null);
+    public string? TokenDeletionNote { get; private set; }
+    public static WithdrawalAttempt Done(string? reach, string? note = null) => new(WithdrawalState.Done, reach, null) { TokenDeletionNote = note };
 
     public static WithdrawalAttempt Failed(string? label) => new(WithdrawalState.Failed, null, label);
 }
@@ -206,7 +207,7 @@ public sealed class HistoryRecordViewModel
     /// </remarks>
     public string WithdrawOutcomeText => _attempt?.State switch
     {
-        WithdrawalState.Done => WithdrawCopy.ResultSentence(_attempt.Reach),
+        WithdrawalState.Done => WithdrawCopy.ResultSentence(_attempt.Reach) + (string.IsNullOrEmpty(_attempt.TokenDeletionNote) ? "" : "\n" + _attempt.TokenDeletionNote),
         WithdrawalState.Failed => WithdrawCopy.FailureSentence(_attempt.Label),
         _ => string.Empty,
     };
@@ -215,8 +216,9 @@ public sealed class HistoryRecordViewModel
 
     /// <summary>
     /// Shown only beside a successful withdrawal, and only ever says that
-    /// credit already recorded stays. Rule 3: withdrawal does not reverse
-    /// settled credit, and nothing here may imply it does.
+    /// settled credit stays and pending credit is forfeited. Rule 3:
+    /// withdrawal does not reverse settled credit, and nothing here may imply
+    /// it does.
     /// </summary>
     public bool ShowsWithdrawCreditNote => _attempt?.State == WithdrawalState.Done;
 

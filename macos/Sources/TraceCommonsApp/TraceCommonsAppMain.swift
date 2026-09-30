@@ -13,14 +13,17 @@ import TCShellCore
 /// door.
 @main
 struct TraceCommonsShell: App {
+    private let insightsStoreSelection: InsightsStoreSelection
     @StateObject private var model = AppModel()
     @State private var compute = ComputeModel()
     @State private var navigation = MainWindowNavigation()
+    @State private var missionDrafts = MissionDraftsModel()
     /// Quit confirmation, Dock reopen and invite links all arrive outside
     /// SwiftUI's reach. See `AppDelegate`.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
+        insightsStoreSelection = .parse(arguments: CommandLine.arguments)
         // Earlier builds wrote the preview sheet's recent-search list to
         // UserDefaults. That list is the contributor's own record of what
         // they were checking for -- client names, employers, unreleased
@@ -37,11 +40,13 @@ struct TraceCommonsShell: App {
                 .environmentObject(model)
                 .tint(TC.green)
         } label: {
-            Launcher(model: model, compute: compute, navigation: navigation, appDelegate: appDelegate)
+            Launcher(model: model, compute: compute, navigation: navigation,
+                     appDelegate: appDelegate, missionDrafts: missionDrafts)
         }
 
         Window("Trace Commons", id: WindowID.main) {
-            MainWindowView(navigation: navigation)
+            MainWindowView(navigation: navigation, missionDrafts: missionDrafts,
+                           insightsStoreSelection: insightsStoreSelection)
                 .environmentObject(model)
                 .environment(compute)
                 .frame(minWidth: 760, minHeight: 520)
@@ -56,11 +61,12 @@ struct TraceCommonsShell: App {
                 .tint(TC.green)
         }
         .defaultSize(width: 940, height: 660)
-        // Cmd-1..5 for the five destinations, and Cmd-Shift-M for the one
+        // Cmd-1..7 for the seven destinations, and Cmd-Shift-M for the one
         // switch worth reaching without the window. Menu items, so they are
         // in-app only; see `MainWindowCommands`.
         .commands {
-            MainWindowCommands(model: model, compute: compute, navigation: navigation)
+            MainWindowCommands(model: model, compute: compute, navigation: navigation,
+                               missionDrafts: missionDrafts)
         }
     }
 }
@@ -73,15 +79,34 @@ private struct Launcher: View {
     let compute: ComputeModel
     let navigation: MainWindowNavigation
     let appDelegate: AppDelegate
+    let missionDrafts: MissionDraftsModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         MenuBarLabel(model: model)
             .task { launch() }
+            .onChange(of: navigation.section) { activateServices() }
+    }
+
+    @MainActor
+    private func activateServices() {
+        navigation.activateServicesIfNeeded {
+            model.start()
+            Task {
+                await compute.start()
+                compute.startMonitoring()
+            }
+            // Update checks begin here and nowhere else. UpdateController itself
+            // decides whether Sparkle runs at all: under a Homebrew install this
+            // call constructs no updater and schedules nothing.
+            UpdateController.shared.start()
+            Notifier.shared.configure()
+        }
     }
 
     @MainActor
     private func launch() {
+        missionDrafts.loadCopy()
         OpenMainWindow.handler = {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: WindowID.main)
@@ -89,16 +114,7 @@ private struct Launcher: View {
         appDelegate.compute = compute
         appDelegate.navigation = navigation
         appDelegate.model = model
-        model.start()
-        Task {
-            await compute.start()
-            compute.startMonitoring()
-        }
-        // Update checks begin here and nowhere else. UpdateController itself
-        // decides whether Sparkle runs at all: under a Homebrew install this
-        // call constructs no updater and schedules nothing.
-        UpdateController.shared.start()
-        Notifier.shared.configure()
+        activateServices()
         // The only thing a notification action may do is open this window.
         Notifier.shared.onReview = { OpenMainWindow.request() }
 

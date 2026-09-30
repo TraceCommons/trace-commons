@@ -190,6 +190,90 @@ pub enum Unattestable {
     DigestMismatch,
 }
 
+/// Whose identifier a recorded `upstream_id` is, and therefore whether a
+/// receipt can exist for the call it names.
+///
+/// NEAR AI issues a receipt (`GET /v1/signature/{chat_id}`) only for a call
+/// it served from its own enclave, and it names such a call by an identifier
+/// of its own minting: bare hex. A **Chat Completions** call it passed on to
+/// Anthropic or OpenAI comes back under **that** provider's identifier --
+/// `msg_…`, `chatcmpl-…` -- and the receipt endpoint answers 404 for it,
+/// permanently, because NEAR AI never ran the enclave that would have signed
+/// it. (The Responses API is different: a brokered call there DOES get a
+/// `gateway` receipt, one that binds no model -- see [`Self::Hosted`].)
+///
+/// Decided from the identifier's shape rather than from a list of model
+/// names, because the list moves -- models are added, retired and re-homed
+/// upstream without notice -- while the shape is a property of who minted the
+/// identifier, which is the fact that decides whether a receipt exists.
+///
+/// This is an attestation question, not a body-carrying one. A brokered
+/// call's bodies are as faithful as any other's and [`attested_final_call`]
+/// carries them; what they lack is a receipt. So the classification lives in
+/// [`crate::daemon::attestation_mark::evaluate`] and the receipt fetch, not
+/// in [`ledger_only_final_call`] -- the overlay still attaches the bodies,
+/// and the mark is what says nothing can attest them.
+///
+/// **Fails toward not claiming.** Only a shape known to be the provider's own
+/// reads as [`Self::Hosted`]; a shape known to be another provider's reads as
+/// [`Self::Foreign`]; anything else is [`Self::Unrecognised`], which is never
+/// promoted to attested by anything that reads it. A missed credit on an
+/// attestable call is recoverable; a promise of attestation on a call that
+/// cannot carry one is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderIdentifier {
+    /// The provider's own Chat Completions identifier: bare lowercase hex,
+    /// 16 to 64 digits. A `provider_tee` receipt may exist for this call.
+    ///
+    /// **A Responses-API identifier is never Hosted**, and this was learned
+    /// the hard way. NEAR AI mints `resp_` plus 32 lowercase hex for a
+    /// Responses call whether it served the model itself or brokered it --
+    /// verified live 2026-09-09: hosted `Qwen/Qwen3.8-27B` answered
+    /// `resp_32464c3bb3064e1ba888d5e5f7073fb3`, brokered `openai/gpt-5-nano`
+    /// answered `resp_43c46c526bdf4ffa8a4f936934f6d54c`, brokered
+    /// `anthropic/claude-haiku-4-5` answered
+    /// `resp_41a400ee0cd24d8ea9b7997251bf5708`. The API normalises the id on
+    /// both paths, so the mixed-case tell that separates brokered Chat
+    /// Completions ids does not survive it, and shape cannot discriminate a
+    /// Responses call on any evidence available at discovery. An arm that
+    /// read `resp_` + 32 hex as Hosted marked a brokered Claude or GPT call
+    /// attested -- the lie this classification exists to remove. So every
+    /// `resp_` id is [`Self::Unrecognised`], and the receipt fetch after
+    /// upload -- the only discriminator there is -- settles the mark.
+    Hosted,
+    /// Another provider's identifier. No receipt exists and none will.
+    Foreign,
+    /// A shape this build does not know. Not claimed either way.
+    Unrecognised,
+}
+
+/// Prefixes that name another provider's identifier. Anthropic's Messages
+/// API mints `msg_…`; OpenAI's Chat Completions API mints `chatcmpl-…`.
+const FOREIGN_IDENTIFIER_PREFIXES: [&str; 2] = ["msg_", "chatcmpl-"];
+
+/// Classify one recorded provider identifier. See [`ProviderIdentifier`].
+#[must_use]
+pub fn classify_upstream_id(upstream_id: &str) -> ProviderIdentifier {
+    if FOREIGN_IDENTIFIER_PREFIXES
+        .iter()
+        .any(|prefix| upstream_id.starts_with(prefix))
+    {
+        return ProviderIdentifier::Foreign;
+    }
+    // Deliberately no `resp_` arm. See the `Hosted` docs: a Responses-API
+    // identifier is the same shape whether NEAR AI served the call or
+    // brokered it, so it is Unrecognised and the receipt fetch decides.
+    let hosted = (16..=64).contains(&upstream_id.len())
+        && upstream_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if hosted {
+        ProviderIdentifier::Hosted
+    } else {
+        ProviderIdentifier::Unrecognised
+    }
+}
+
 /// The final call's verbatim bodies, ready to become an event.
 ///
 /// Deliberately no `Debug`, `Serialize` or `Clone` derive that would print or
@@ -263,6 +347,56 @@ impl AttestedCall {
     }
 }
 
+/// The half of [`attested_final_call`] that costs nothing: which hop is the
+/// final call, and whether its ledger row alone already refuses.
+///
+/// **The cost split this exists for.** [`Unattestable`] has nine variants and
+/// they fall either side of a line: [`Unattestable::NoCall`],
+/// [`Unattestable::CaptureOff`], [`Unattestable::DigestAbsent`] and
+/// [`Unattestable::UpstreamIdAbsent`] are all answerable from four `Option`
+/// fields on a row already in memory, while the rest need every captured body
+/// read off disk and hashed. A list of pending sessions may run the first
+/// group and may not run the second: hashing every body of every session on
+/// every list is a cost the daemon may not put on a contributor's machine.
+///
+/// So this is the prefix, lifted out verbatim rather than reimplemented.
+/// A second copy of "which row is final, and is it usable" would be a copy
+/// that disagrees eventually, and what it would disagree about is whether a
+/// contributor is told their session can be sent.
+/// `the_cheap_prefix_agrees_with_the_full_check` pins the agreement on every
+/// refusal in the first group.
+///
+/// Returns the final call's row when none of the cheap refusals apply. That
+/// is **not** a claim the call is attestable -- the expensive group has not
+/// run.
+///
+/// # Errors
+///
+/// Only the four ledger-answerable variants. Never the five that need bytes.
+pub fn ledger_only_final_call(rows: &[RoutedExchange]) -> Result<&RoutedExchange, Unattestable> {
+    let final_call = rows
+        .iter()
+        // `max_by_key` on a tie keeps the last element, which is what we
+        // want: the ledger's own insertion order breaks a timestamp tie, and
+        // `exchanges_since` yields oldest first.
+        .max_by_key(|row| (row.started_at, row.id))
+        .ok_or(Unattestable::NoCall)?;
+
+    if final_call.body_ref.is_none() {
+        return Err(Unattestable::CaptureOff);
+    }
+    // A missing response digest is the restarted/truncated-stream case.
+    // Named as an absent digest rather than as a restart, because that is
+    // what was actually observed: the proxy records no marker.
+    if final_call.request_sha256.is_none() || final_call.response_sha256.is_none() {
+        return Err(Unattestable::DigestAbsent);
+    }
+    if final_call.upstream_id.is_none() {
+        return Err(Unattestable::UpstreamIdAbsent);
+    }
+    Ok(final_call)
+}
+
 /// Read the final inference call's verbatim bodies out of the proxy's body
 /// store.
 ///
@@ -279,14 +413,11 @@ pub fn attested_final_call(
     rows: &[RoutedExchange],
     bodies_dir: &Path,
 ) -> Result<AttestedCall, Unattestable> {
-    let final_call = rows
-        .iter()
-        // `max_by_key` on a tie keeps the last element, which is what we
-        // want: the ledger's own insertion order breaks a timestamp tie, and
-        // `exchanges_since` yields oldest first.
-        .max_by_key(|row| (row.started_at, row.id))
-        .ok_or(Unattestable::NoCall)?;
-
+    let final_call = ledger_only_final_call(rows)?;
+    // Re-borrowed rather than returned by `ledger_only_final_call`: that
+    // function answers a question about the row, and handing back the three
+    // fields it proved present would make its signature about this caller.
+    // Every one of these is `Some` because the check above passed.
     let body_ref = final_call
         .body_ref
         .as_deref()
@@ -296,9 +427,6 @@ pub fn attested_final_call(
         final_call.response_sha256.as_deref(),
     ) {
         (Some(request), Some(response)) => (request, response),
-        // A missing response digest is the restarted/truncated-stream case.
-        // Named as an absent digest rather than as a restart, because that is
-        // what was actually observed: the proxy records no marker.
         _ => return Err(Unattestable::DigestAbsent),
     };
     let upstream_id = final_call
@@ -686,6 +814,129 @@ mod tests {
         );
     }
 
+    /// The prefix and the full check agree on every refusal the prefix can
+    /// reach, and the prefix names the same final row.
+    ///
+    /// This is the load-bearing test of the split. A list surface reports what
+    /// `ledger_only_final_call` says; a submission is decided by
+    /// `attested_final_call`. If they can disagree about a cheap refusal, the
+    /// list tells a contributor something the submit path will contradict --
+    /// which is the exact defect the eligibility surface exists to remove,
+    /// reproduced inside the client.
+    ///
+    /// Every case here has real bodies on disk hashing to the recorded
+    /// digests, so nothing in the expensive group can fire and shadow a
+    /// disagreement in the cheap one.
+    #[test]
+    fn the_cheap_prefix_agrees_with_the_full_check() {
+        let base = row();
+        let dir = store_with(
+            AWKWARD_REQUEST.as_bytes(),
+            AWKWARD_RESPONSE.as_bytes(),
+            base.body_ref.as_deref().unwrap(),
+        );
+
+        // Every way a row can trip a ledger-answerable refusal, plus the
+        // empty session and the row that trips none.
+        let mut no_body = row();
+        no_body.body_ref = None;
+        let mut no_request_digest = row();
+        no_request_digest.request_sha256 = None;
+        let mut no_response_digest = row();
+        no_response_digest.response_sha256 = None;
+        let mut no_digests = row();
+        no_digests.request_sha256 = None;
+        no_digests.response_sha256 = None;
+        let mut no_upstream = row();
+        no_upstream.upstream_id = None;
+
+        let cases: Vec<(&str, Vec<RoutedExchange>, Option<Unattestable>)> = vec![
+            ("no hops", vec![], Some(Unattestable::NoCall)),
+            ("no body ref", vec![no_body], Some(Unattestable::CaptureOff)),
+            (
+                "no request digest",
+                vec![no_request_digest],
+                Some(Unattestable::DigestAbsent),
+            ),
+            (
+                "no response digest",
+                vec![no_response_digest],
+                Some(Unattestable::DigestAbsent),
+            ),
+            (
+                "neither digest",
+                vec![no_digests],
+                Some(Unattestable::DigestAbsent),
+            ),
+            (
+                "no provider identifier",
+                vec![no_upstream],
+                Some(Unattestable::UpstreamIdAbsent),
+            ),
+            ("a usable row", vec![row()], None),
+        ];
+
+        for (name, rows, expected) in cases {
+            let cheap = ledger_only_final_call(&rows).err();
+            assert_eq!(cheap, expected, "{name}: the prefix's own answer moved");
+            let full = attested_final_call(&rows, dir.path()).err();
+            assert_eq!(
+                cheap, full,
+                "{name}: the prefix and the full check disagree"
+            );
+        }
+    }
+
+    /// The prefix picks the same hop the full check attests: the last one by
+    /// `(started_at, id)`, not the first and not the one the vector happens
+    /// to end with.
+    #[test]
+    fn the_prefix_names_the_same_final_hop() {
+        let mut earlier = row();
+        earlier.id = Some(1);
+        earlier.started_at = chrono::Utc.with_ymd_and_hms(2026, 9, 3, 11, 0, 0).unwrap();
+        earlier.upstream_id = Some("chatcmpl-earlier".to_string());
+        let later = row();
+        // Deliberately out of order, so a prefix that took `rows.last()`
+        // would fail here.
+        let rows = vec![later.clone(), earlier];
+        let dir = store_with(
+            AWKWARD_REQUEST.as_bytes(),
+            AWKWARD_RESPONSE.as_bytes(),
+            later.body_ref.as_deref().unwrap(),
+        );
+
+        assert_eq!(
+            ledger_only_final_call(&rows)
+                .expect("a usable final row")
+                .upstream_id
+                .as_deref(),
+            Some("chatcmpl-abc123")
+        );
+        assert_eq!(
+            attested_final_call(&rows, dir.path())
+                .expect("attestable")
+                .upstream_id(),
+            "chatcmpl-abc123"
+        );
+    }
+
+    /// The prefix never reports a refusal it cannot have run the work for.
+    /// Bodies that are absent from disk are the full check's
+    /// `BodiesUnreadable`; the prefix must still say the row is usable,
+    /// because it did not look.
+    #[test]
+    fn the_prefix_refuses_nothing_from_the_expensive_group() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let rows = vec![row()];
+
+        assert!(ledger_only_final_call(&rows).is_ok());
+        assert_eq!(
+            attested_final_call(&rows, empty.path()).unwrap_err(),
+            Unattestable::BodiesUnreadable
+        );
+    }
+
     /// The tool name selects the redactor profile that would remove the
     /// request body if this event ever did reach the local redaction path.
     /// It is a backstop rather than the primary control -- see the constant's
@@ -703,5 +954,47 @@ mod tests {
 
         assert_eq!(event.tool_name.as_deref(), Some("http"));
         assert_eq!(event.event_type, TraceContributionEventType::HttpExchange);
+    }
+
+    /// The identifiers a live gateway handed back on 2026-09-09, by
+    /// (provider, API), plus the near-misses the bare-hex rule must refuse.
+    ///
+    /// Chat Completions discriminates: NEAR AI's own id is bare lowercase
+    /// hex and a brokered call carries the upstream provider's mixed-case
+    /// format. The Responses API does NOT: hosted and brokered calls alike
+    /// come back as `resp_` plus 32 lowercase hex -- three live ids below,
+    /// two brokered and one hosted, byte-for-byte the same shape. So every
+    /// `resp_` id is Unrecognised, whatever follows the prefix, and the
+    /// receipt fetch after upload is what decides it.
+    #[test]
+    fn provider_identifiers_are_classified_by_who_minted_them() {
+        use ProviderIdentifier::{Foreign, Hosted, Unrecognised};
+        let cases = [
+            // NEAR AI hosted, Chat Completions: bare hex, provider_tee receipt.
+            ("e795f9d441164d92aa0473ce333650be", Hosted),
+            // OpenAI brokered, Chat Completions.
+            ("chatcmpl-EM5nnYHpITuK3xv9EGfs2mEMXlVep", Foreign),
+            // Anthropic brokered, Chat Completions.
+            ("msg_011CesNLMGDZvYJFKoYt6EP1", Foreign),
+            // Responses API, all three the same shape: hosted Qwen/Qwen3.8-27B,
+            // brokered openai/gpt-5-nano and brokered anthropic/claude-haiku-4-5.
+            // Every one of them answers 200 with a `gateway` receipt -- brokered
+            // included, signed by the pinned gateway key -- and a gateway
+            // receipt binds no model, so the receipt cannot tell them apart
+            // either; the model behind it is only the body-asserted name.
+            // Shape cannot discriminate, so none is claimed at discovery.
+            ("resp_32464c3bb3064e1ba888d5e5f7073fb3", Unrecognised),
+            ("resp_43c46c526bdf4ffa8a4f936934f6d54c", Unrecognised),
+            ("resp_41a400ee0cd24d8ea9b7997251bf5708", Unrecognised),
+            ("resp_EM5nnYHpITuK3xv9EGfs2mEMXlVep", Unrecognised),
+            ("resp_", Unrecognised),
+            // Bare near-misses.
+            ("E795F9D441164D92AA0473CE333650BE", Unrecognised),
+            ("e795f9d4", Unrecognised),
+            ("", Unrecognised),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(classify_upstream_id(id), expected, "{id:?}");
+        }
     }
 }

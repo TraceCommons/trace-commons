@@ -87,7 +87,7 @@ impl PreparedImport {
             session_hash: self.session_hash.clone(),
             ..Default::default()
         };
-        let mut raw = crate::envelope::build_preview_raw_contribution(
+        let raw = crate::envelope::build_preview_raw_contribution(
             &transcript,
             cfg,
             self.document
@@ -96,9 +96,7 @@ impl PreparedImport {
                 .expect("call requires inference")
                 .timestamp,
         );
-        raw.replay.replay_notes = vec![
-            "Final-call evidence only; session history and tool execution are not covered.".into(),
-        ];
+        let raw = crate::envelope::final_call_witness_input(raw, cfg);
         debug_assert!(raw.events.is_empty());
         Ok(raw)
     }
@@ -186,7 +184,7 @@ pub fn read_import(path: &std::path::Path) -> Result<PreparedImport> {
     PreparedImport::parse(&bytes)
 }
 
-fn open_import_file(path: &std::path::Path) -> Result<std::fs::File> {
+pub(crate) fn open_import_file(path: &std::path::Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -448,6 +446,7 @@ mod tests {
                     rewritten = rewritten.replace(value, "[REDACTED:unknown]");
                 }
                 Ok(Some(SafePrivacyFilterRedaction {
+                    private_edits: None,
                     redacted_text: rewritten,
                     summary: SafePrivacyFilterSummary {
                         schema_version: 1,

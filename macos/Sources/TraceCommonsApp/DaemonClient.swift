@@ -12,6 +12,27 @@ final class DaemonClient {
     struct Failure: Error, CustomStringConvertible {
         let code: String
         let message: String
+        /// The sentence the daemon chose for this refusal, when it sent one.
+        ///
+        /// A refusal response carries `error` **and** a `result.view`: the
+        /// daemon classifies the cause and picks the words once, so the three
+        /// shells do not each keep a mapping that drifts. This bridge used to
+        /// throw on `error` without looking at `result`, so that sentence was
+        /// discarded before any view could read it and every refusal on such a
+        /// path fell back to one generic line.
+        ///
+        /// `nil` for a response with no view -- a transport failure, or a
+        /// daemon older than this shell -- and the caller keeps its own
+        /// fallback for that case.
+        var viewMessage: String? = nil
+        /// The daemon's `view.state`, when it sent a view. `"Busy"` is a
+        /// review a person asked for that met a busy witness: nothing was
+        /// judged, and it may be tried again after `retryAt`.
+        var viewState: String? = nil
+        /// When a busy witness asked to be tried again, from `view.retry_at`.
+        var retryAt: Date? = nil
+        /// The label the daemon sent to show beside `retryAt`.
+        var retryLabel: String? = nil
         var description: String { "\(code): \(message)" }
     }
 
@@ -51,6 +72,17 @@ final class DaemonClient {
 
     func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) throws -> NativeWalletView {
         try call("native_wallet_flow", params: ["action": action, "flow_id": flowID, "ingest_url": commons, "account_id": account], as: NativeWalletView.self)
+    }
+
+    /// Join a commons with the NEAR AI login this daemon already holds.
+    ///
+    /// Takes no account id and no token, deliberately: the account is
+    /// whatever the commons resolves the daemon's own short-lived JWT to, and
+    /// a client-asserted id would be worthless -- an attacker running a
+    /// modified client would assert a fresh one per submission. There is no
+    /// parameter for either and this shell must never invent one.
+    func nearAiAccountEnroll(commons: String) throws -> NearAiEnrollment {
+        try call("near_ai_account_enroll", params: ["ingest_url": commons], as: NearAiEnrollment.self)
     }
 
     func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
@@ -97,6 +129,45 @@ final class DaemonClient {
         }
     }
 
+    /// The daemon's sentence for a refused review, or `nil` if it sent none.
+    ///
+    /// Separate from [`requestWitnessReview`] rather than folded into it: that
+    /// call's `Bool` answer is what several callers want, and widening it
+    /// would make every one of them handle a sentence they do not render.
+    static func refusalSentence(from error: Error) -> String? {
+        (error as? Failure)?.viewMessage
+    }
+
+    /// "<label>: <local time>" for a review that met a busy witness, or
+    /// `nil` for any other outcome, or a time or label the daemon did not
+    /// send -- never a guessed time.
+    static func busyRetryLine(
+        from error: Error,
+        format: (Date) -> String = {
+            DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short)
+        }
+    ) -> String? {
+        guard let failure = error as? Failure, failure.viewState == "Busy",
+              let at = failure.retryAt,
+              let label = failure.retryLabel, !label.isEmpty
+        else { return nil }
+        return "\(label): \(format(at))"
+    }
+
+    /// The daemon's review `view`, read into a `Failure`'s fields.
+    static func failure(code: String, message: String, view: [String: Any]?) -> Failure {
+        let sentence = view?["message"] as? String
+        let retryAt = (view?["retry_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
+        return Failure(
+            code: code,
+            message: message,
+            viewMessage: sentence.flatMap { $0.isEmpty ? nil : $0 },
+            viewState: view?["state"] as? String,
+            retryAt: retryAt,
+            retryLabel: view?["retry_label"] as? String
+        )
+    }
+
     func requestPreview(entryID: String) throws -> PreviewRequestResult {
         let raw = try rawResult("preview_request", params: ["entry_id": entryID])
         return try DaemonDecoding.decoder().decode(PreviewRequestResult.self, from: raw)
@@ -128,6 +199,47 @@ final class DaemonClient {
 
     func refreshHistory() throws {
         _ = try rawResult("refresh_history")
+    }
+
+    func sessionDetail(submissionID: String) throws -> SessionDetail {
+        try call(
+            "history_detail",
+            params: ["submission_id": submissionID],
+            as: SessionDetail.self
+        )
+    }
+
+    func publishPublicRun(
+        submissionID: String,
+        draft: PublicRunDraftInput,
+        taskSuccess: String,
+        contributedVersion: String,
+        expectedPublicationVersion: Int
+    ) throws -> PublicRunPage {
+        let encoded = try JSONEncoder().encode(draft)
+        guard let draftObject = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        else {
+            throw Failure(code: "bad_params", message: "public-run-invalid")
+        }
+        return try call(
+            "publish_public_run",
+            params: [
+                "submission_id": submissionID,
+                "draft": draftObject,
+                "task_success": taskSuccess,
+                "contributed_version": contributedVersion,
+                "expected_publication_version": expectedPublicationVersion,
+            ],
+            as: PublicRunPage.self
+        )
+    }
+
+    func unpublishPublicRun(submissionID: String) throws -> PublicRunUnpublishResult {
+        try call(
+            "unpublish_public_run",
+            params: ["submission_id": submissionID],
+            as: PublicRunUnpublishResult.self
+        )
     }
 
     /// The local change log, newest first. `limit` defaults to 20 here
@@ -243,6 +355,19 @@ final class DaemonClient {
         return settings
     }
 
+    func tokenStorageAction(discard: Bool) throws -> TokenStorageView {
+        try call(discard ? "discard_token_reviews" : "remove_token_local_copies", params: ["confirmed": discard], as: TokenStorageView.self)
+    }
+
+    func setTokenContribution(_ enabled: Bool, disclosureConfirmed: Bool) throws -> DaemonSettingsView {
+        guard !enabled || disclosureConfirmed else { throw InferenceEvidenceRefusal.disclosureRequired }
+        let settings = try setSettings(["token_distributions_contribution": enabled])
+        guard settings.tokenDistributionsContribution == enabled else {
+            throw InferenceEvidenceRefusal.unconfirmedWrite
+        }
+        return settings
+    }
+
     enum InferenceEvidenceRefusal: Error {
         case disclosureRequired
         case unconfirmedWrite
@@ -287,6 +412,20 @@ final class DaemonClient {
         case unconfirmedWrite
     }
 
+    // MARK: - What leaves this machine (K11)
+
+    /// The daemon's `route_disclosure` facts, as raw JSON for
+    /// `TCConsentCopy.routeDisclosureJSON`, which words them.
+    func routeDisclosureFactsJSON() throws -> String {
+        try rawResultJSON("route_disclosure")
+    }
+
+    /// The held certificate's claims for one pending entry. The daemon
+    /// refuses an entry without one; that refusal is thrown.
+    func certificateDetailJSON(entryID: String) throws -> String {
+        try rawResultJSON("certificate_detail", params: ["entry_id": entryID])
+    }
+
     // MARK: - The tools on this computer
 
     /// Every tool this machine knows about, and its state.
@@ -318,6 +457,79 @@ final class DaemonClient {
         HarnessSurface.commit(
             fromJSON: try rawResultJSON(
                 "harness_commit", params: HarnessSurface.commitParams(planID: planID)))
+    }
+
+    // MARK: - The key this destination answers with
+
+    /// What this machine holds, and -- when this shell can name the attempt
+    /// -- how that attempt is going.
+    ///
+    /// Always ok by contract, so an unreadable answer degrades to the
+    /// unreported state rather than throwing: a shell that turned a failed
+    /// poll into a refusal would have to say something about what is kept
+    /// here, and it does not know.
+    func nearAiCredentialStatus(attemptID: String?) throws -> CredentialStatus {
+        CredentialStatus.parse(
+            fromJSON: try rawResultJSON(
+                CredentialSurface.statusMethod,
+                params: CredentialSurface.statusParams(attemptID: attemptID)))
+    }
+
+    /// What is left in the account behind that key.
+    ///
+    /// Always ok by contract for `nearAiCredentialStatus`'s reason, and more
+    /// strongly here: the four ways a balance can fail to be read are four
+    /// different sentences, and collapsing them into a thrown error would
+    /// make all four read as the same shrug. An unreadable answer degrades to
+    /// the unreported state, which says the question was not answered and
+    /// claims nothing about the money.
+    func nearAiBalance() throws -> BalanceStatus {
+        BalanceStatus.parse(fromJSON: try rawResultJSON(BalanceSurface.statusMethod))
+    }
+
+    func nearAiFunding(expected: FundingDestination?) throws -> FundingStatus {
+        let params: [String: Any] = expected.map {
+            ["expected_organization_id": $0.organizationID,
+             "expected_connection_revision": $0.connectionRevision]
+        } ?? [:]
+        return try call("near_ai_funding", params: params, as: FundingStatus.self)
+    }
+
+    /// Begins the ceremony and hands back where to open the browser.
+    ///
+    /// The URL is served ONCE, here. Nothing re-serves it, so a caller that
+    /// drops the returned attempt has to begin again -- which is why this
+    /// returns the whole thing rather than just the id.
+    func nearAiCredentialStart(provider: String? = nil) throws -> CredentialAttempt? {
+        let params: [String: Any] = provider.map { ["provider": $0] } ?? [:]
+        return CredentialAttempt.parse(
+            fromJSON: try rawResultJSON(CredentialSurface.startMethod, params: params))
+    }
+
+    /// Stops waiting on the browser. The attempt id is optional: the daemon
+    /// accepts an unnamed cancel and stops whatever it is running.
+    func nearAiCredentialCancel(attemptID: String?) throws {
+        _ = try rawResultJSON(
+            CredentialSurface.cancelMethod,
+            params: CredentialSurface.cancelParams(attemptID: attemptID))
+    }
+
+    /// Removes the stored key from this machine.
+    ///
+    /// The answer's `revoked` is always `false` and is deliberately not
+    /// surfaced as a flag: forgetting is local, the key stays valid at the
+    /// service, and that fact is a SENTENCE beside the button rather than
+    /// something a view could forget to draw.
+    func nearAiCredentialForget() throws {
+        _ = try rawResultJSON(CredentialSurface.forgetMethod)
+    }
+
+    /// Copies the sign-in an earlier build kept in the login keychain into
+    /// the store this build uses. The daemon's one read of the login
+    /// keychain, so macOS may ask for the login password here -- which is why
+    /// only a contributor's press of the button ever sends it.
+    func nearAiCredentialMigrate() throws {
+        _ = try rawResultJSON(CredentialSurface.migrateMethod)
     }
 
     /// Shape-checks a settings object, refusing rather than returning one
@@ -422,6 +634,28 @@ final class DaemonClient {
     /// the contract: it is audited on the caller's unverified word.
     func acknowledgeNearAINotice() throws {
         _ = try rawResult("acknowledge_near_ai_notice")
+    }
+
+    /// Records that the notice after a legacy invite identity moved to a
+    /// NEAR AI account was shown. Callers call it only once that notice has
+    /// been drawn and the person pressed its button.
+    func acknowledgeLegacyInviteMigration() throws {
+        _ = try rawResult("acknowledge_legacy_invite_migration", params: [:])
+    }
+
+    /// Records that the void notices with these ids were shown -- see "Void
+    /// notices" in the contract. Only the ids actually drawn: there is no
+    /// "all", so a void raised after the shell drew is never cleared unseen.
+    /// Re-arms nothing.
+    func acknowledgeGrantVoids(ids: [UInt64]) throws {
+        _ = try rawResult("acknowledge_grant_voids", params: ["ids": ids])
+    }
+
+    /// Records that the rewording notices with these ids were shown (K5).
+    /// Only the ids actually drawn, with no "all". Changes nothing about the
+    /// folders.
+    func acknowledgeArmingRewordings(ids: [UInt64]) throws {
+        _ = try rawResult("acknowledge_arming_rewordings", params: ["ids": ids])
     }
 
     /// Replaces the enrolled device's consent scopes. Local config write
@@ -709,7 +943,9 @@ final class DaemonClient {
 
     // MARK: - Plumbing
 
-    private func call<T: Decodable>(
+    /// Shared by focused protocol extensions while raw daemon framing stays
+    /// centralized in this type.
+    func call<T: Decodable>(
         _ method: String,
         params: [String: Any] = [:],
         as type: T.Type
@@ -756,9 +992,11 @@ final class DaemonClient {
             throw Failure(code: "unavailable", message: "unparseable-response")
         }
         if let error = object["error"] as? [String: Any] {
-            throw Failure(
+            let view = (object["result"] as? [String: Any])?["view"] as? [String: Any]
+            throw Self.failure(
                 code: error["code"] as? String ?? "unavailable",
-                message: error["message"] as? String ?? "unknown"
+                message: error["message"] as? String ?? "unknown",
+                view: view
             )
         }
         guard let result = object["result"] else {

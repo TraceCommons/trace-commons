@@ -24,6 +24,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:interop="using:TraceCommons.Interop"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -473,6 +474,47 @@
                 </Border>
 
                 <!--
+                    K11: where sessions go. The raw send, both enclaves, and
+                    where the witness came from, above the witness card they
+                    name. Every row is RouteDisclosureSurface's, which is the
+                    Rust's words for the daemon's route_disclosure; there is
+                    not one string literal here. Machine values (address,
+                    signing key, each pinned measurement) are shown verbatim
+                    and selectable.
+                -->
+                <TextBlock Text="{x:Bind Settings.DisclosureTitle, Mode=OneWay}"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12">
+                    <ItemsControl ItemsSource="{x:Bind Settings.DisclosureRows}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="interop:DisclosureRow">
+                                <StackPanel Spacing="2" Margin="0,3">
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsHeading}"
+                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsText}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsValue}"
+                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                    <TextBlock Text="{x:Bind Value}"
+                                               Visibility="{x:Bind IsValue}"
+                                               Style="{StaticResource TcMonoChipTextStyle}"
+                                               IsTextSelectionEnabled="True"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Border>
+
+                <!--
                     The redaction witness.
 
                     Every word on this card arrives from the Rust through
@@ -521,6 +563,27 @@
                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
                             <TextBlock Grid.Column="0" Text="{x:Bind Settings.InferenceEvidenceNoticeGlyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
                             <TextBlock Grid.Column="1" Text="{x:Bind Settings.InferenceEvidenceNotice, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
+                        </Grid>
+                        <TextBlock Text="{x:Bind Settings.TokenContributionHeading}" Style="{StaticResource TcEyebrowTextStyle}" />
+                        <TextBlock Text="{x:Bind Settings.TokenContributionDisclosure}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.TokenContributionCaptureNote}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.TokenContributionScopeNote}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.ProbabilityStorage.CaptureNotice, Mode=OneWay}" TextWrapping="Wrap" />
+            <Button Content="{x:Bind Settings.ProbabilityStorage.CaptureLabel, Mode=OneWay}" Click="OnLocalProbabilityCapture" />
+            <TextBlock Text="{x:Bind Settings.ProbabilityStorage.StateLine, Mode=OneWay}" TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind Settings.ProbabilityStorage.ScopeNote, Mode=OneWay}" TextWrapping="Wrap" />
+            <Button Content="{x:Bind Settings.ProbabilityStorage.CleanupLabel, Mode=OneWay}" Click="OnCleanProbabilityStorage" />
+            <Button Content="{x:Bind Settings.ProbabilityStorage.DiscardLabel, Mode=OneWay}" Click="OnDiscardProbabilityStorage" />
+            <TextBlock Text="{x:Bind Settings.TokenContributionState, Mode=OneWay}" TextWrapping="Wrap" />
+                        <Button Content="{x:Bind Settings.TokenContributionEnable, Mode=OneWay}"
+                                IsEnabled="{x:Bind Settings.TokenContributionControlsEnabled, Mode=OneWay}"
+                                Click="OnTokenContribution" />
+                        <Button Content="{x:Bind Settings.TokenContributionDisable}"
+                                IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}"
+                                Click="OnDisableTokenContribution" />
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                            <TextBlock Grid.Column="0" Text="{x:Bind Settings.TokenContributionNoticeGlyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind Settings.TokenContributionNotice, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
                         </Grid>
                         <TextBlock Text="{x:Bind Settings.WitnessCertificateMeans, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"

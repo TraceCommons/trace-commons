@@ -17,9 +17,15 @@
 //!   and this application is an optional client over its socket. It can also
 //!   host the loop for someone who wants only the app. See `backend`.
 
+pub mod attestation;
 pub mod autostart;
 pub mod backend;
+pub mod balance;
+pub mod certificate;
 pub mod copy;
+mod dbus;
+pub mod disclosure;
+pub mod eligibility;
 pub mod model;
 pub mod notify;
 pub mod original_search;

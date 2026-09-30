@@ -9,28 +9,40 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
-    TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE, TC_HARNESS_PLAN_NO_CONFIG_PATH,
-    TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED, TC_HARNESS_PLAN_UNKNOWN,
-    TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED, TC_HARNESS_STATE_ANSWERING,
-    TC_HARNESS_STATE_CONNECTED_NO_CALLS, TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN,
-    TC_PRIVATE_INFERENCE_TONE_ATTENTION, TC_PRIVATE_INFERENCE_TONE_CLEAR,
-    TC_PRIVATE_INFERENCE_TONE_HELD, TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
-    TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT, TC_WITNESS_STATE_NOT_ENROLLED,
-    TC_WITNESS_STATE_PINNED, TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING,
-    TC_WITNESS_STATE_REFUSING_PIN_MALFORMED, TC_WITNESS_STATE_REFUSING_UNPINNED,
-    TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION, TC_WITNESS_TONE_CLEAR,
-    TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
-    tc_consent_copy, tc_consent_gate_help, tc_daemon_start, tc_daemon_start_with_settings,
-    tc_daemon_stop, tc_discover_sources, tc_handle, tc_handle_free, tc_invite_issuer_host,
-    tc_last_error, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
-    tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
-    tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
-    tc_private_inference_should_offer, tc_private_inference_state_line,
-    tc_private_inference_state_tone, tc_routing_copy, tc_routing_discovery_line,
-    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
-    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_source_check_line, tc_string_free,
-    tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
+    TC_CONTRIBUTION_CONTROL_CONTRIBUTE, TC_CONTRIBUTION_CONTROL_NONE, TC_CREDENTIAL_ACTION_CANCEL,
+    TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_MIGRATE, TC_CREDENTIAL_ACTION_NONE,
+    TC_CREDENTIAL_ACTION_OBTAIN, TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE,
+    TC_HARNESS_PLAN_NO_CONFIG_PATH, TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED,
+    TC_HARNESS_PLAN_UNKNOWN, TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED,
+    TC_HARNESS_STATE_ANSWERING, TC_HARNESS_STATE_CONNECTED_NO_CALLS,
+    TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN, TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+    TC_PRIVATE_INFERENCE_TONE_CLEAR, TC_PRIVATE_INFERENCE_TONE_HELD,
+    TC_PRIVATE_INFERENCE_TONE_NEUTRAL, TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT,
+    TC_WITNESS_STATE_NOT_ENROLLED, TC_WITNESS_STATE_PINNED,
+    TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
+    TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
+    TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
+    tc_call, tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy,
+    tc_consent_gate_help, tc_contribution_attestation_line,
+    tc_contribution_attestation_reason_line, tc_contribution_attestation_tone,
+    tc_contribution_eligibility_control, tc_contribution_eligibility_line,
+    tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
+    tc_contribution_group_control, tc_contribution_withheld_line, tc_daemon_start,
+    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_grant_void_notice,
+    tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_legacy_migration_notice,
+    tc_near_ai_credential_action, tc_near_ai_credential_state_line,
+    tc_near_ai_credential_state_tone, tc_near_ai_enroll_line, tc_near_ai_enroll_tone, tc_preview,
+    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
+    tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
+    tc_private_inference_serving_line, tc_private_inference_should_offer,
+    tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
+    tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
+    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
+    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
+    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
+    tc_session_detail_error_line, tc_skill_draft_validate, tc_skill_learning_copy,
+    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
+    tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
     tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
     tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
@@ -38,6 +50,11 @@ use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
     tc_harness_plan_outcome_code, tc_harness_spend_line, tc_harness_state_code,
     tc_harness_state_line,
+};
+use trace_commons_contributor_ffi::{
+    tc_near_ai_balance_action, tc_near_ai_balance_amount, tc_near_ai_balance_limit_line,
+    tc_near_ai_balance_observed_line, tc_near_ai_balance_remaining_line,
+    tc_near_ai_balance_spent_line, tc_near_ai_balance_state_line, tc_near_ai_balance_state_tone,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -2235,6 +2252,8 @@ fn write_enrolled_config(
     let store = trace_commons_contributor::config::ConfigStore::open(dir.to_path_buf()).unwrap();
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
             .to_string(),
@@ -2468,6 +2487,19 @@ fn configuring_a_witness_round_trips_and_clearing_removes_it() {
     assert_eq!(json["url"], serde_json::json!("https://witness.example"));
     assert_eq!(json["signing_address"], serde_json::json!("0xfeed"));
     assert_eq!(json["pinned_measurement_count"], serde_json::json!(1));
+    // K11: a witness configured through the ABI is one typed into a shell's
+    // Settings, and the config says so for the disclosure screens.
+    let store =
+        trace_commons_contributor::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+    let cfg = store.load_config().unwrap().unwrap();
+    assert_eq!(
+        cfg.witness_origin_view(),
+        Some(
+            trace_commons_contributor::config::WitnessOriginView::Recorded(
+                trace_commons_contributor::config::WitnessOrigin::Settings
+            )
+        )
+    );
 
     // Clearing is 1 the first time and 0 the second: idempotent, and the
     // return distinguishes "removed one" from "there was none".
@@ -2479,6 +2511,8 @@ fn configuring_a_witness_round_trips_and_clearing_removes_it() {
         unsafe { tc_witness_trust_state(path.as_ptr()) },
         TC_WITNESS_STATE_ABSENT
     );
+    let cfg = store.load_config().unwrap().unwrap();
+    assert!(cfg.witness_origin.is_none(), "cleared with its witness");
 }
 
 /// The ABI refuses to create the refusing state it can report.
@@ -3120,6 +3154,202 @@ fn the_private_inference_payload_crosses_whole_and_finished() {
     assert!(exposure.contains("accounts"), "{exposure}");
 }
 
+#[test]
+fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
+    let json = take_owned(tc_public_run_copy());
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected = serde_json::to_value(trace_commons_contributor::public_run::public_run_copy())
+        .expect("the Rust payload serialises");
+    assert_eq!(value, expected, "the export is not the shared payload");
+
+    let fields = value.as_object().expect("an object");
+    for (field, value) in fields {
+        let expected_choice_count = match field.as_str() {
+            "task_outcome_choices" => Some(4),
+            "feedback_choices" => Some(3),
+            "evidence_kind_choices" => Some(9),
+            "contribution_status_choices" => Some(10),
+            "permitted_use_choices" => Some(6),
+            "reuse_permissions" => Some(2),
+            _ => None,
+        };
+        if let Some(expected_choice_count) = expected_choice_count {
+            let choices = value.as_array().expect("copy choices are a list");
+            assert_eq!(choices.len(), expected_choice_count, "{field} is complete");
+            for choice in choices {
+                let choice = choice.as_object().expect("each copy choice is an object");
+                for (choice_field, choice_value) in choice {
+                    let text = choice_value
+                        .as_str()
+                        .expect("each copy choice field is a string");
+                    assert!(
+                        !text.trim().is_empty(),
+                        "{field}.{choice_field} arrived empty"
+                    );
+                    for marker in ["{}", "%@", "%s", "%d"] {
+                        assert!(
+                            !text.contains(marker),
+                            "{field}.{choice_field} crossed as a template: {text}"
+                        );
+                    }
+                }
+            }
+        } else {
+            let text = value.as_str().expect("every copy field is a string");
+            assert!(!text.trim().is_empty(), "{field} arrived empty");
+            for marker in ["{}", "%@", "%s", "%d"] {
+                assert!(
+                    !text.contains(marker),
+                    "{field} crossed as a template: {text}"
+                );
+            }
+        }
+    }
+
+    let session_label = CString::new("session-detail-not-found").expect("c string");
+    let publication_label = CString::new("public-run-conflict").expect("c string");
+    assert_eq!(
+        take_owned(unsafe { tc_session_detail_error_line(session_label.as_ptr()) }),
+        trace_commons_contributor::public_run::session_detail_error_line(
+            "session-detail-not-found"
+        )
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_public_run_error_line(publication_label.as_ptr()) }),
+        trace_commons_contributor::public_run::publication_error_line("public-run-conflict")
+    );
+
+    let editor = CString::new(
+        serde_json::json!({
+            "title": "  Repair a stalled upload  ",
+            "outcome_summary": "The upload completed.",
+            "correction_excerpt": null,
+            "workflow": "Renew the session, then retry once.",
+            "reuse_permission": "cc_by_4_0",
+            "evidence": [{"event_id": "00000000-0000-0000-0000-000000000000", "excerpt": "The retry succeeded."}],
+            "source": "https://tracecommons.ai/runs/run-source-workflow"
+        })
+        .to_string(),
+    )
+    .expect("editor input");
+    let validation = take_owned(unsafe { tc_public_run_validate_editor(editor.as_ptr()) });
+    let validation: serde_json::Value = serde_json::from_str(&validation).expect("validation JSON");
+    assert!(validation.get("error").is_none());
+    assert_eq!(validation["draft"]["title"], "Repair a stalled upload");
+    assert_eq!(validation["draft"]["source_slug"], "run-source-workflow");
+}
+
+#[test]
+fn the_skill_learning_payload_and_error_table_cross_the_abi() {
+    let json = take_owned(tc_skill_learning_copy());
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(trace_commons_contributor::skill_loop::skill_learning_copy())
+            .expect("the Rust payload serialises");
+    assert_eq!(value, expected, "the export is not the shared payload");
+
+    let fields = value.as_object().expect("an object");
+    assert!(fields.len() >= 50, "the complete surface must cross once");
+    for (field, value) in fields {
+        let text = value.as_str().expect("every copy field is a string");
+        assert!(!text.trim().is_empty(), "{field} arrived empty");
+    }
+
+    let label = CString::new("skill-install-modified").expect("c string");
+    assert_eq!(
+        take_owned(unsafe { tc_skill_learning_error_line(label.as_ptr()) }),
+        trace_commons_contributor::skill_loop::skill_learning_error_line("skill-install-modified")
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_skill_learning_error_line(std::ptr::null()) }),
+        trace_commons_contributor::skill_loop::skill_learning_copy().unavailable
+    );
+}
+
+#[test]
+fn skill_draft_validation_crosses_the_abi_without_echoing_draft_text() {
+    fn validate(value: serde_json::Value) -> serde_json::Value {
+        let input = CString::new(value.to_string()).expect("skill draft input");
+        let output = take_owned(unsafe { tc_skill_draft_validate(input.as_ptr()) });
+        serde_json::from_str(&output).expect("skill draft validation JSON")
+    }
+
+    let valid = validate(serde_json::json!({
+        "name": "repair-generated-sources",
+        "description": "Use when generated output has an authoritative source.",
+        "procedure": "# Procedure\n\nEdit the source, regenerate, and verify."
+    }));
+    assert_eq!(valid["valid"], true);
+    assert!(valid["error"].is_null());
+    assert_eq!(valid["name_max_chars"], 64);
+    assert_eq!(valid["description_max_chars"], 1_024);
+    assert_eq!(valid["procedure_max_chars"], 12_000);
+    assert!(!valid.to_string().contains("authoritative source"));
+
+    for (field, value, expected) in [
+        ("name", "Uppercase-Name", "skill-name-invalid"),
+        ("description", " trailing ", "skill-description-required"),
+        ("procedure", "recovery phrase", "skill-sensitive-text"),
+    ] {
+        let mut draft = serde_json::json!({
+            "name": "repair-generated-sources",
+            "description": "Use when generated output has an authoritative source.",
+            "procedure": "Edit the source, regenerate, and verify."
+        });
+        draft[field] = serde_json::Value::String(value.to_string());
+        let result = validate(draft);
+        assert_eq!(result["valid"], false);
+        assert_eq!(result["error"], expected);
+    }
+
+    let null = take_owned(unsafe { tc_skill_draft_validate(std::ptr::null()) });
+    let null: serde_json::Value = serde_json::from_str(&null).expect("null validation JSON");
+    assert_eq!(null["valid"], false);
+    assert_eq!(null["error"], "skill-draft-invalid");
+}
+
+#[test]
+fn the_public_run_validator_rejects_null_malformed_and_oversized_inputs() {
+    let parse = |value: String| {
+        serde_json::from_str::<serde_json::Value>(&value).expect("validator response is JSON")
+    };
+
+    let null_result = parse(take_owned(unsafe {
+        tc_public_run_validate_editor(std::ptr::null())
+    }));
+    assert!(null_result.get("draft").is_none());
+    assert!(null_result["error"].as_str().is_some());
+
+    for bytes in [b"{bad".as_slice(), [0xff_u8].as_slice()] {
+        let input = CString::new(bytes).expect("synthetic invalid input");
+        let result = parse(take_owned(unsafe {
+            tc_public_run_validate_editor(input.as_ptr())
+        }));
+        assert!(result.get("draft").is_none());
+        assert!(result["error"].as_str().is_some());
+    }
+
+    let oversized_title = "t".repeat(101);
+    let input = CString::new(
+        serde_json::json!({
+            "title": oversized_title,
+            "outcome_summary": "The synthetic task completed.",
+            "correction_excerpt": null,
+            "workflow": "Apply the bounded synthetic steps.",
+            "reuse_permission": "cc_by_4_0",
+            "evidence": [{"event_id": "00000000-0000-0000-0000-000000000000", "excerpt": "The synthetic result was observed."}],
+            "source": ""
+        })
+        .to_string(),
+    )
+    .expect("oversized editor input");
+    let raw_result = take_owned(unsafe { tc_public_run_validate_editor(input.as_ptr()) });
+    let result = parse(raw_result.clone());
+    assert!(result.get("draft").is_none());
+    assert!(result["error"].as_str().is_some());
+    assert!(!raw_result.contains(&oversized_title));
+}
+
 /// The state sentence and its tone are one decision, and they cross as one.
 ///
 /// Asserted against the Rust's own two functions, so this proves the exports
@@ -3191,6 +3421,389 @@ fn the_private_inference_branch_tables_cross_the_abi() {
         take_owned(unsafe { tc_private_inference_state_line(std::ptr::null()) }),
         copy::STATE_UNREPORTED
     );
+}
+
+/// The credential row crosses whole: the sentence, the tone and the button.
+///
+/// Pinned against the Rust tables rather than against literals, so this
+/// cannot become a second place any of the three is decided.
+#[test]
+fn the_credential_state_crosses_with_its_tone_and_its_action() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let line = |state: &str| {
+        let state = cstr_str(state);
+        take_owned(unsafe { tc_near_ai_credential_state_line(state.as_ptr()) })
+    };
+    let action = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_near_ai_credential_action(state.as_ptr()) }
+    };
+    let tone = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_near_ai_credential_state_tone(state.as_ptr()) }
+    };
+
+    for state in [
+        "absent",
+        "obtaining",
+        "failed",
+        "cancelled",
+        "present",
+        "storage_unavailable",
+        "storage_unentitled",
+        "migration_available",
+        "",
+        "PRESENT",
+        "a_state_from_a_later_daemon",
+    ] {
+        assert_eq!(line(state), copy::credential_state_line(state), "{state:?}");
+        let expected = match copy::credential_action(state) {
+            copy::CredentialAction::None => TC_CREDENTIAL_ACTION_NONE,
+            copy::CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
+            copy::CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
+            copy::CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+            copy::CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
+        };
+        assert_eq!(action(state), expected, "{state:?}");
+    }
+
+    // A key that is here is the only settled state, and the only one whose
+    // button removes rather than mints.
+    assert_eq!(tone("present"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
+    assert_eq!(action("present"), TC_CREDENTIAL_ACTION_FORGET);
+    assert_eq!(tone("obtaining"), TC_PRIVATE_INFERENCE_TONE_HELD);
+
+    // An upgraded macOS contributor is offered the move, and a build that
+    // cannot reach the store is offered nothing.
+    assert_eq!(action("migration_available"), TC_CREDENTIAL_ACTION_MIGRATE);
+    assert_eq!(action("storage_unentitled"), TC_CREDENTIAL_ACTION_NONE);
+
+    // Nothing read offers the button that opens a browser, and no pointer at
+    // all is the same answer.
+    for unread in ["", "a_state_from_a_later_daemon"] {
+        assert_eq!(action(unread), TC_CREDENTIAL_ACTION_NONE, "{unread:?}");
+        assert_ne!(line(unread), copy::CREDENTIAL_ABSENT, "{unread:?}");
+        assert_ne!(line(unread), copy::CREDENTIAL_PRESENT, "{unread:?}");
+        assert_ne!(tone(unread), TC_PRIVATE_INFERENCE_TONE_CLEAR, "{unread:?}");
+    }
+    assert_eq!(
+        unsafe { tc_near_ai_credential_action(std::ptr::null()) },
+        TC_CREDENTIAL_ACTION_NONE
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_near_ai_credential_state_line(std::ptr::null()) }),
+        copy::CREDENTIAL_UNREPORTED
+    );
+    assert_eq!(
+        unsafe { tc_near_ai_credential_state_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
+    );
+}
+
+/// The eligibility row crosses whole: the sentence, the tone, the control and
+/// the reason.
+///
+/// Pinned against the Rust tables rather than against literals, so this
+/// cannot become a second place any of the four is decided.
+#[test]
+fn the_eligibility_state_crosses_with_its_tone_its_control_and_its_reason() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let line = |state: &str| {
+        let state = cstr_str(state);
+        take_owned(unsafe { tc_contribution_eligibility_line(state.as_ptr()) })
+    };
+    let control = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_contribution_eligibility_control(state.as_ptr()) }
+    };
+    let tone = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_contribution_eligibility_tone(state.as_ptr()) }
+    };
+    let reason = |label: &str| {
+        let label = cstr_str(label);
+        take_owned(unsafe { tc_contribution_eligibility_reason_line(label.as_ptr()) })
+    };
+
+    for state in [
+        "eligible",
+        "ineligible_permanent",
+        "ineligible_configuration",
+        "unknown",
+        "",
+        "ELIGIBLE",
+        "a_state_from_a_later_daemon",
+    ] {
+        assert_eq!(
+            line(state),
+            copy::eligibility_state_line(state),
+            "{state:?}"
+        );
+        let expected = match copy::eligibility_control(state) {
+            copy::ContributionControl::None => TC_CONTRIBUTION_CONTROL_NONE,
+            copy::ContributionControl::Contribute => TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+        };
+        assert_eq!(control(state), expected, "{state:?}");
+    }
+
+    // Only an eligible session is offered, and only the one state with
+    // something to do about it reads as actionable.
+    assert_eq!(control("eligible"), TC_CONTRIBUTION_CONTROL_CONTRIBUTE);
+    assert_eq!(tone("eligible"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
+    assert_eq!(
+        tone("ineligible_configuration"),
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION
+    );
+    assert_eq!(
+        tone("ineligible_permanent"),
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
+    );
+
+    // Nothing read is offered, borrows no ineligibility, and a null pointer
+    // is the same answer.
+    for unread in ["", "a_state_from_a_later_daemon"] {
+        assert_eq!(control(unread), TC_CONTRIBUTION_CONTROL_NONE, "{unread:?}");
+        assert_eq!(line(unread), copy::ELIGIBILITY_UNKNOWN, "{unread:?}");
+        assert_ne!(
+            line(unread),
+            copy::ELIGIBILITY_INELIGIBLE_PERMANENT,
+            "{unread:?}"
+        );
+        assert_ne!(tone(unread), TC_PRIVATE_INFERENCE_TONE_CLEAR, "{unread:?}");
+    }
+    assert_eq!(
+        unsafe { tc_contribution_eligibility_control(std::ptr::null()) },
+        TC_CONTRIBUTION_CONTROL_NONE
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_contribution_eligibility_line(std::ptr::null()) }),
+        copy::ELIGIBILITY_UNKNOWN
+    );
+    assert_eq!(
+        unsafe { tc_contribution_eligibility_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
+    );
+
+    // Every reason the daemon can produce crosses; anything else, including
+    // a null pointer, is the empty string a shell renders nothing for.
+    for label in trace_commons_contributor::daemon::contribution_eligibility::ALL_REASONS {
+        assert_eq!(
+            reason(label),
+            copy::eligibility_reason_line(label),
+            "{label}"
+        );
+        assert!(!reason(label).is_empty(), "{label}");
+    }
+    for unknown in ["", "a_reason_from_a_later_daemon"] {
+        assert_eq!(reason(unknown), "", "{unknown:?}");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_contribution_eligibility_reason_line(std::ptr::null()) }),
+        ""
+    );
+}
+
+/// The attestation mark crosses whole: the sentence, the tone and the reason.
+///
+/// Pinned against the Rust tables rather than against literals, so this
+/// cannot become a second place any of the three is decided. **There is no
+/// control accessor**, and that is the contract: the mark describes the trace
+/// and offers nothing to press. A shell that drew a button from it would be
+/// inventing an action out of a description.
+#[test]
+fn the_attestation_mark_crosses_with_its_tone_and_its_reason() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let line = |mark: &str| {
+        let mark = cstr_str(mark);
+        take_owned(unsafe { tc_contribution_attestation_line(mark.as_ptr()) })
+    };
+    let tone = |mark: &str| {
+        let mark = cstr_str(mark);
+        unsafe { tc_contribution_attestation_tone(mark.as_ptr()) }
+    };
+    let reason = |label: &str| {
+        let label = cstr_str(label);
+        take_owned(unsafe { tc_contribution_attestation_reason_line(label.as_ptr()) })
+    };
+
+    for mark in [
+        "attested",
+        "unattested_permanent",
+        "unattested_configuration",
+        "unknown",
+        "",
+        "ATTESTED",
+        "a_mark_from_a_later_daemon",
+    ] {
+        assert_eq!(line(mark), copy::attestation_state_line(mark), "{mark:?}");
+    }
+
+    // The positive case reads as good news, the configuration mark as the one
+    // with something to do, and a permanently unattested session is NOT
+    // painted as a failure.
+    assert_eq!(tone("attested"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
+    assert_eq!(
+        tone("unattested_configuration"),
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION
+    );
+    for neutral in ["unattested_permanent", "unknown"] {
+        assert_eq!(
+            tone(neutral),
+            TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+            "{neutral:?}"
+        );
+        assert_ne!(
+            tone(neutral),
+            TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            "{neutral:?}"
+        );
+    }
+
+    // Nothing read borrows another mark's sentence, and a null pointer is the
+    // same answer.
+    for unread in ["", "a_mark_from_a_later_daemon"] {
+        assert_eq!(line(unread), copy::ATTESTATION_UNKNOWN, "{unread:?}");
+        assert_ne!(
+            line(unread),
+            copy::ATTESTATION_UNATTESTED_PERMANENT,
+            "{unread:?}"
+        );
+        assert_ne!(line(unread), copy::ATTESTATION_ATTESTED, "{unread:?}");
+        assert_ne!(tone(unread), TC_PRIVATE_INFERENCE_TONE_CLEAR, "{unread:?}");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_contribution_attestation_line(std::ptr::null()) }),
+        copy::ATTESTATION_UNKNOWN
+    );
+    assert_eq!(
+        unsafe { tc_contribution_attestation_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
+    );
+
+    // Every reason the daemon can produce crosses, and none of them arrives
+    // as the eligibility surface's wording -- a shell calling the wrong
+    // accessor would tell an invited contributor their session cannot be
+    // sent.
+    for label in trace_commons_contributor::daemon::attestation_mark::ALL_REASONS {
+        assert_eq!(
+            reason(label),
+            copy::attestation_reason_line(label),
+            "{label}"
+        );
+        assert!(!reason(label).is_empty(), "{label}");
+        assert!(
+            !reason(label).to_lowercase().contains("be sent"),
+            "{label} speaks about sending"
+        );
+    }
+    for unknown in ["", "a_reason_from_a_later_daemon"] {
+        assert_eq!(reason(unknown), "", "{unknown:?}");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_contribution_attestation_reason_line(std::ptr::null()) }),
+        ""
+    );
+}
+
+/// The group control crosses, and an absent count is not a zero.
+///
+/// The trap this pins: a shell passing `0` for an absent `contributable_count`
+/// would refuse a submit control to an invited contributor whose sessions are
+/// all perfectly sendable.
+#[test]
+fn a_group_control_tells_an_absent_count_from_a_zero() {
+    let control = tc_contribution_group_control;
+
+    // The question applies.
+    assert_eq!(control(5, 0), TC_CONTRIBUTION_CONTROL_NONE);
+    assert_eq!(control(5, 1), TC_CONTRIBUTION_CONTROL_CONTRIBUTE);
+    assert_eq!(control(5, 5), TC_CONTRIBUTION_CONTROL_CONTRIBUTE);
+    // Absent, spelled as any negative value.
+    for absent in [-1i64, -7, i64::MIN] {
+        assert_eq!(
+            control(5, absent),
+            TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+            "absent must not read as zero ({absent})"
+        );
+        assert_eq!(control(0, absent), TC_CONTRIBUTION_CONTROL_NONE);
+    }
+}
+
+/// The withheld-count line crosses, counts, and stays silent at zero.
+#[test]
+fn the_withheld_line_crosses_and_says_nothing_at_zero() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let line = |n: i64| take_owned(tc_contribution_withheld_line(n));
+
+    for n in [0i64, 1, 2, 13, 114] {
+        assert_eq!(line(n), copy::group_withheld_line(n as u64), "{n}");
+    }
+    assert_eq!(line(0), "", "zero explains no gap");
+    // A negative count is nobody's honest answer, and it must not become a
+    // huge one through a wrapping conversion.
+    assert_eq!(line(-1), "", "a negative count says nothing");
+    assert!(line(4).contains('4'));
+    assert!(!line(4).is_empty());
+}
+
+/// The contribution control numbering shares no number with a credential
+/// action or a tone. Both blocks have a "nothing" member, and one collision
+/// draws a sign-in button on a queue row.
+#[test]
+fn the_contribution_controls_share_no_number_with_an_action_or_a_tone() {
+    for control in [
+        TC_CONTRIBUTION_CONTROL_NONE,
+        TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+    ] {
+        for other in [
+            TC_CREDENTIAL_ACTION_NONE,
+            TC_CREDENTIAL_ACTION_OBTAIN,
+            TC_CREDENTIAL_ACTION_CANCEL,
+            TC_CREDENTIAL_ACTION_FORGET,
+            TC_CREDENTIAL_ACTION_MIGRATE,
+            TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+            TC_PRIVATE_INFERENCE_TONE_HELD,
+            TC_PRIVATE_INFERENCE_TONE_CLEAR,
+            TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+            TC_PRIVATE_INFERENCE_TONE_REFUSED,
+        ] {
+            assert_ne!(control, other);
+        }
+    }
+}
+
+/// The action numbering shares no number with any tone that crosses this ABI.
+#[test]
+fn the_credential_actions_share_no_number_with_a_tone() {
+    for action in [
+        TC_CREDENTIAL_ACTION_NONE,
+        TC_CREDENTIAL_ACTION_OBTAIN,
+        TC_CREDENTIAL_ACTION_CANCEL,
+        TC_CREDENTIAL_ACTION_FORGET,
+        TC_CREDENTIAL_ACTION_MIGRATE,
+    ] {
+        for tone in [
+            TONE_NEUTRAL,
+            TONE_HELD,
+            TONE_CLEAR,
+            TONE_ATTENTION,
+            TC_WITNESS_TONE_NEUTRAL,
+            TC_WITNESS_TONE_HELD,
+            TC_WITNESS_TONE_CLEAR,
+            TC_WITNESS_TONE_ATTENTION,
+            TC_WITNESS_TONE_REFUSED,
+            TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+            TC_PRIVATE_INFERENCE_TONE_HELD,
+            TC_PRIVATE_INFERENCE_TONE_CLEAR,
+            TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+            TC_PRIVATE_INFERENCE_TONE_REFUSED,
+        ] {
+            assert_ne!(
+                action, tone,
+                "an action and a tone sharing a number is a button drawn from a colour"
+            );
+        }
+    }
 }
 
 /// The tone numbering is disjoint from the two that already cross this ABI.
@@ -3608,4 +4221,605 @@ fn the_harness_codes_do_not_collide_with_the_other_ranges() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), harness.len(), "two harness codes share a value");
+}
+
+/// The scale crosses the ABI and is READ, not assumed.
+///
+/// The trap this pins: three shells dividing by a constant of their own.
+/// `scale` is on the wire because a daemon may change it, and the same
+/// integer at three scales has to give three answers on the far side of the
+/// ABI as well as on this one.
+#[test]
+fn the_balance_scale_crosses_the_abi_and_is_read() {
+    assert_eq!(
+        take_owned(tc_near_ai_balance_amount(1, 8_500_000_000, 9)),
+        "$8.50"
+    );
+    assert_eq!(
+        take_owned(tc_near_ai_balance_amount(1, 8_500_000_000, 6)),
+        "$8500.00"
+    );
+    assert_eq!(take_owned(tc_near_ai_balance_amount(1, 850, 2)), "$8.50");
+    // Rounding is down, so a figure crossing the ABI is never larger than
+    // the figure that arrived.
+    assert_eq!(
+        take_owned(tc_near_ai_balance_amount(1, 9_996_000_000, 9)),
+        "$9.99"
+    );
+}
+
+/// A null remaining figure does not cross the ABI as `$0.00`.
+///
+/// `remaining_nanos` is nullable even in the `known` state -- the ordinary
+/// case for an account nobody capped -- and zero is a real balance meaning
+/// the money is gone. The two must never render alike.
+#[test]
+fn a_null_remaining_balance_never_crosses_as_zero() {
+    let absent = take_owned(tc_near_ai_balance_remaining_line(0, 0, 9));
+    assert!(
+        !absent.is_empty(),
+        "a null remaining figure needs a sentence"
+    );
+    assert!(!absent.contains('$'), "a null carried an amount: {absent}");
+    assert!(
+        !absent.contains("0.00"),
+        "a null rendered as zero: {absent}"
+    );
+
+    let zero = take_owned(tc_near_ai_balance_remaining_line(1, 0, 9));
+    assert!(
+        zero.contains("$0.00"),
+        "a real zero must still show: {zero}"
+    );
+    assert_ne!(absent, zero, "a null and a zero render the same");
+
+    // The bare amount accessor answers the empty string for a null, and an
+    // empty string is drawn as no figure -- never as zero.
+    let bare = take_owned(tc_near_ai_balance_amount(0, 0, 9));
+    assert_eq!(bare, "");
+    assert_ne!(bare, take_owned(tc_near_ai_balance_amount(1, 0, 9)));
+
+    // A negative figure is a real overdrawn balance, not an absence: the
+    // reason `present` is its own argument rather than an out-of-range
+    // integer.
+    let overdrawn = take_owned(tc_near_ai_balance_remaining_line(1, -1_000_000_000, 9));
+    assert!(
+        overdrawn.contains("-$1.00"),
+        "an overdrawn account was lost: {overdrawn}"
+    );
+
+    // The other two figures use the empty-string convention, and a zero is
+    // still not an absence there either.
+    assert_eq!(take_owned(tc_near_ai_balance_limit_line(0, 0, 9)), "");
+    assert_eq!(take_owned(tc_near_ai_balance_spent_line(0, 0, 9)), "");
+    assert!(take_owned(tc_near_ai_balance_spent_line(1, 0, 9)).contains("$0.00"));
+}
+
+/// A state this build has never heard of borrows nobody's sentence, and is
+/// offered no button.
+///
+/// The button is the one that opens a browser and mints a key. Offering it
+/// for a state nobody read is how a contributor ends up with a second key.
+#[test]
+fn an_unrecognised_balance_state_borrows_nothing_across_the_abi() {
+    let known: Vec<String> = [
+        "no_session",
+        "session_expired",
+        "no_organization",
+        "unavailable",
+    ]
+    .into_iter()
+    .map(|s| {
+        let c = cstr_str(s);
+        take_owned(unsafe { tc_near_ai_balance_state_line(c.as_ptr()) })
+    })
+    .collect();
+    let later = cstr_str("a_balance_state_from_a_later_daemon");
+    let unknown = take_owned(unsafe { tc_near_ai_balance_state_line(later.as_ptr()) });
+    assert!(!unknown.is_empty());
+    for sentence in &known {
+        assert_ne!(&unknown, sentence, "an unknown state borrowed: {unknown}");
+    }
+    // A NULL pointer is a missing state, and gets the "does not report"
+    // sentence rather than any of the above.
+    let missing = take_owned(unsafe { tc_near_ai_balance_state_line(std::ptr::null()) });
+    assert!(!missing.is_empty());
+    assert_ne!(missing, unknown);
+    for sentence in &known {
+        assert_ne!(&missing, sentence);
+    }
+
+    for state in [
+        "a_balance_state_from_a_later_daemon",
+        "known",
+        "unavailable",
+        "no_organization",
+    ] {
+        let c = cstr_str(state);
+        assert_eq!(
+            unsafe { tc_near_ai_balance_action(c.as_ptr()) },
+            TC_CREDENTIAL_ACTION_NONE,
+            "{state} was offered an action"
+        );
+    }
+    // `known` is the one state that reads as settled, and it means the READ
+    // succeeded -- nothing here judges the amount.
+    for state in [
+        "a_balance_state_from_a_later_daemon",
+        "unavailable",
+        "no_organization",
+        "no_session",
+    ] {
+        let c = cstr_str(state);
+        assert_ne!(
+            unsafe { tc_near_ai_balance_state_tone(c.as_ptr()) },
+            TC_PRIVATE_INFERENCE_TONE_CLEAR,
+            "{state} read as settled",
+        );
+    }
+    assert_eq!(
+        unsafe { tc_near_ai_balance_action(std::ptr::null()) },
+        TC_CREDENTIAL_ACTION_NONE
+    );
+    for state in ["no_session", "session_expired"] {
+        let c = cstr_str(state);
+        assert_eq!(
+            unsafe { tc_near_ai_balance_action(c.as_ptr()) },
+            TC_CREDENTIAL_ACTION_OBTAIN,
+            "{state} must offer the sign-in"
+        );
+    }
+    let known_state = cstr_str("known");
+    assert_eq!(
+        unsafe { tc_near_ai_balance_state_tone(known_state.as_ptr()) },
+        TC_PRIVATE_INFERENCE_TONE_CLEAR
+    );
+    // "known" is the state whose row is figures, so it carries no sentence.
+    assert_eq!(
+        take_owned(unsafe { tc_near_ai_balance_state_line(known_state.as_ptr()) }),
+        ""
+    );
+}
+
+/// The age says when THIS COMPUTER asked, and absence draws nothing.
+#[test]
+fn the_balance_age_crosses_the_abi() {
+    assert_eq!(
+        take_owned(tc_near_ai_balance_observed_line(0)),
+        "Asked for just now."
+    );
+    assert_eq!(
+        take_owned(tc_near_ai_balance_observed_line(120)),
+        "Asked for 2 minutes ago."
+    );
+    for absent in [-1, i64::MIN] {
+        assert_eq!(take_owned(tc_near_ai_balance_observed_line(absent)), "");
+    }
+}
+
+/// The certificate-held list's reading is chosen once, behind the ABI.
+///
+/// **The argument is `admission_evidence_required` verbatim, not its
+/// negation.** That flag is true for a contributor who signed up through NEAR
+/// -- who has NO invite -- and false for one enrolled on an invite. So the
+/// true arm is the CANDIDATE reading, which looks backwards until you know
+/// which way the flag points.
+///
+/// This exists so that no shell contains the choice. Three shells each
+/// writing `flag ? candidate : attested` is three chances to swap them, and a
+/// swapped reading tells a contributor with no invite that their session
+/// carries cryptographic proof when nothing has attested it.
+#[test]
+fn the_certificate_reading_is_chosen_behind_the_abi_and_never_by_a_shell() {
+    let uninvited = take_owned(tc_certificate_row_line(1));
+    let invited = take_owned(tc_certificate_row_line(0));
+
+    assert_ne!(
+        uninvited, invited,
+        "one sentence is answering for both readings"
+    );
+
+    // Stated as outcomes rather than as a mapping: an assertion that merely
+    // repeats the implementation would be equally happy with both arms
+    // written backwards.
+    assert!(
+        !uninvited.to_lowercase().contains("signed proof"),
+        "a contributor with no invite was promised signed proof: {uninvited}"
+    );
+    assert!(
+        uninvited.to_lowercase().contains("put forward"),
+        "a contributor with no invite was not told they can put it forward: {uninvited}"
+    );
+    assert!(
+        invited.to_lowercase().contains("signed proof"),
+        "an invited contributor was not told what the certificate carries: {invited}"
+    );
+
+    assert_ne!(
+        take_owned(tc_certificate_list_title(1)),
+        take_owned(tc_certificate_list_title(0))
+    );
+
+    // Anything that is not an explicit zero is the flag being set. A shell
+    // passing a native bool widened to some other non-zero value must not
+    // silently get the invited reading.
+    for set in [1, 2, i32::MAX] {
+        assert_eq!(take_owned(tc_certificate_row_line(set)), uninvited);
+    }
+    assert_eq!(take_owned(tc_certificate_row_line(0)), invited);
+
+    // A NEGATIVE VALUE IS A CALLER ERROR, and it resolves to the reading that
+    // CLAIMS LESS. Nothing should send one -- a widened bool is 0 or 1 -- but
+    // the two arms are not equally safe when something does. The candidate
+    // reading says a session can be put forward; the attested reading asserts
+    // a security property. A malformed argument must not be able to produce
+    // the claim, so this direction is pinned rather than left to whichever
+    // way the comparison happened to be written.
+    for malformed in [-1, i32::MIN] {
+        assert_eq!(
+            take_owned(tc_certificate_row_line(malformed)),
+            uninvited,
+            "a malformed argument produced the reading that asserts attestation"
+        );
+    }
+}
+
+/// The ten login-enrolment refusals reach ten sentences, and none is silent.
+///
+/// **Unlike an attestation reason, the empty string is never right here.** A
+/// reason this build cannot name has nothing honest to add to a mark that
+/// already said the true thing; a refusal this build cannot name is the whole
+/// of what the contributor is being told, and silence would leave a control
+/// that did nothing and said nothing.
+#[test]
+fn every_login_enrolment_refusal_reaches_its_own_sentence() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let labels = [
+        copy::NEAR_AI_ENROLL_ALREADY_ENROLLED,
+        copy::NEAR_AI_ENROLL_NO_SESSION,
+        copy::NEAR_AI_ENROLL_ENDPOINT_REFUSED,
+        copy::NEAR_AI_ENROLL_TOKEN_UNAVAILABLE,
+        copy::NEAR_AI_ENROLL_START_FAILED,
+        copy::NEAR_AI_ENROLL_COMMONS_UNREACHABLE,
+        copy::NEAR_AI_ENROLL_COMMONS_UNSUPPORTED,
+        copy::NEAR_AI_ENROLL_INVALID,
+        copy::NEAR_AI_ENROLL_VERIFICATION_FAILED,
+        copy::NEAR_AI_ENROLL_UNAVAILABLE,
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for label in labels {
+        let line = take_owned(unsafe {
+            std::ffi::CString::new(label)
+                .map(|c| tc_near_ai_enroll_line(c.as_ptr()))
+                .unwrap()
+        });
+        assert!(
+            !line.is_empty(),
+            "{label} reached no sentence across the ABI"
+        );
+        assert!(
+            seen.insert(line),
+            "{label} shares a sentence with another refusal"
+        );
+    }
+
+    // A NULL, an empty label and one this build has never seen all reach the
+    // generic sentence rather than nothing.
+    let generic = take_owned(unsafe {
+        std::ffi::CString::new(copy::NEAR_AI_ENROLL_UNAVAILABLE)
+            .map(|c| tc_near_ai_enroll_line(c.as_ptr()))
+            .unwrap()
+    });
+    assert_eq!(
+        take_owned(unsafe { tc_near_ai_enroll_line(std::ptr::null()) }),
+        generic
+    );
+    for unknown in ["", "near_ai_enroll_from_a_newer_daemon"] {
+        let c = std::ffi::CString::new(unknown).unwrap();
+        assert_eq!(
+            take_owned(unsafe { tc_near_ai_enroll_line(c.as_ptr()) }),
+            generic
+        );
+    }
+}
+
+/// The one refusal with a step to take reads as such, and the one that
+/// refused nothing does not read as a refusal.
+#[test]
+fn the_login_enrolment_tones_point_at_the_step_rather_than_the_wall() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let tone = |label: &str| {
+        let c = std::ffi::CString::new(label).unwrap();
+        unsafe { tc_near_ai_enroll_tone(c.as_ptr()) }
+    };
+
+    // Not signed in yet: something to do, so it must not be painted as a wall.
+    assert_eq!(
+        tone(copy::NEAR_AI_ENROLL_NO_SESSION),
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+        "a contributor who has simply not signed in was shown a refusal"
+    );
+    // Already joined: the outcome they wanted.
+    assert_eq!(
+        tone(copy::NEAR_AI_ENROLL_ALREADY_ENROLLED),
+        TC_PRIVATE_INFERENCE_TONE_CLEAR,
+        "being already joined was painted as a failure"
+    );
+    for refused in [
+        copy::NEAR_AI_ENROLL_COMMONS_UNREACHABLE,
+        copy::NEAR_AI_ENROLL_COMMONS_UNSUPPORTED,
+        copy::NEAR_AI_ENROLL_VERIFICATION_FAILED,
+    ] {
+        assert_eq!(
+            tone(refused),
+            TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            "{refused}"
+        );
+    }
+    // A NULL label claims nothing good.
+    assert_eq!(
+        unsafe { tc_near_ai_enroll_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_REFUSED
+    );
+}
+
+#[test]
+fn queue_outcome_abi_preserves_known_and_unknown_send_state() {
+    use std::ffi::{CStr, CString};
+    for label in [
+        "dismissed-by-contributor",
+        "expired-without-decision",
+        "admission_refused",
+        "unknown",
+    ] {
+        let input = CString::new(label).unwrap();
+        unsafe {
+            let output = trace_commons_contributor_ffi::tc_queue_outcome_line(input.as_ptr());
+            assert!(!output.is_null());
+            assert_eq!(
+                CStr::from_ptr(output).to_str().unwrap(),
+                trace_commons_contributor::private_inference_copy::queue_outcome_line(label)
+            );
+            trace_commons_contributor_ffi::tc_string_free(output);
+        }
+    }
+    unsafe {
+        let output = trace_commons_contributor_ffi::tc_queue_outcome_line(std::ptr::null());
+        assert_eq!(
+            CStr::from_ptr(output).to_str().unwrap(),
+            "Status unavailable"
+        );
+        trace_commons_contributor_ffi::tc_string_free(output);
+    }
+}
+
+#[test]
+fn a_void_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "id": 3, "kind": "project", "project_id": "abc", "project_label": "api",
+        "reasons": ["witness-measurement-admitted"], "voided_at": "2026-09-26T00:00:00Z",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe { tc_grant_void_notice(arg.as_ptr()) });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::void_notice_for_wire(&wire).expect("readable")).unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+}
+
+#[test]
+fn an_unreadable_void_gets_null_not_a_guess() {
+    use std::ffi::CString;
+    assert!(unsafe { tc_grant_void_notice(std::ptr::null()) }.is_null());
+    for text in ["not json", "\"project\"", "[]"] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_grant_void_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_witness_capacity_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "waiting_sessions": 2, "next_retry_at": "2030-01-01T00:01:00Z",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_witness_capacity_notice(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::witness_capacity_notice_for_wire(&wire).expect("readable"))
+            .unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+}
+
+/// K11: the daemon's `route_disclosure` answer goes in as sent, and the facts
+/// come back beside the core's words for them, byte for byte what the core
+/// builds.
+#[test]
+fn the_route_disclosure_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "route": "witness",
+        "witness": {
+            "state": "pinned",
+            "url": "https://witness.example",
+            "signing_address": "0xab",
+            "pinned_measurements": ["mrtd=aa"],
+            "origin": "published_at_join",
+        },
+        "local_filter": null,
+        "receipts": {"endpoint_configured": true, "check_attestation": false},
+        "attested_bodies": false,
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_route_disclosure_copy(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        copy::route_disclosure_for_wire(&wire).expect("readable")
+    );
+    assert_eq!(
+        parsed["copy"]["witness"]["origin"],
+        serde_json::json!(copy::DISCLOSURE_ORIGIN_PUBLISHED_AT_JOIN)
+    );
+}
+
+/// A shape this build cannot read is NULL, never the nearest route.
+#[test]
+fn an_unreadable_route_disclosure_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor_ffi::tc_route_disclosure_copy;
+    assert!(unsafe { tc_route_disclosure_copy(std::ptr::null()) }.is_null());
+    for text in ["not json", "[]", r#"{"route":"somewhere_new"}"#] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_route_disclosure_copy(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn the_unreadable_disclosure_lines_are_the_cores() {
+    let json = take_owned(trace_commons_contributor_ffi::tc_route_disclosure_unreadable_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        serde_json::to_value(trace_commons_contributor::consent_copy::disclosure_unreadable_copy())
+            .unwrap()
+    );
+}
+
+#[test]
+fn the_certificate_detail_labels_are_the_cores() {
+    let json = take_owned(trace_commons_contributor_ffi::tc_certificate_detail_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        serde_json::to_value(trace_commons_contributor::consent_copy::certificate_detail_copy())
+            .unwrap()
+    );
+}
+
+#[test]
+fn an_arming_rewording_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "id": 4, "project_id": "p-1", "project_label": "api",
+        "was": "model_scrubbed", "now": "patterns_only",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
+            .unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    for text in ["not json", "[]", "\"x\""] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr()) }
+                .is_null(),
+            "{text}"
+        );
+    }
+    assert!(
+        unsafe { trace_commons_contributor_ffi::tc_arming_reworded_notice(std::ptr::null()) }
+            .is_null()
+    );
+}
+
+#[test]
+fn a_gate_held_notice_crosses_the_abi_and_nothing_held_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "held_sessions": 2,
+        "reasons": ["admission-evidence-is-per-session"],
+        "projects": [{ "project_id": "p-1", "project_label": "api", "held_sessions": 2 }],
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json =
+        take_owned(unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(arg.as_ptr()) });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::gate_held_notice_for_wire(&wire).expect("readable")).unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    assert!(
+        unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(std::ptr::null()) }.is_null()
+    );
+    for text in [
+        "not json",
+        "[]",
+        r#"{"held_sessions":0,"reasons":[],"projects":[]}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn nothing_waiting_on_the_witness_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor_ffi::tc_witness_capacity_notice;
+    assert!(unsafe { tc_witness_capacity_notice(std::ptr::null()) }.is_null());
+    for text in [
+        "not json",
+        "[]",
+        r#"{"waiting_sessions":0,"next_retry_at":null}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_witness_capacity_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_legacy_migration_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    for wire in [
+        serde_json::json!({"folders_kept": 2, "automatic_grant_kept": false}),
+        serde_json::json!({"folders_kept": 0, "automatic_grant_kept": false}),
+    ] {
+        let arg = CString::new(wire.to_string()).unwrap();
+        let json = take_owned(unsafe { tc_legacy_migration_notice(arg.as_ptr()) });
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let expected =
+            serde_json::to_value(copy::legacy_migration_notice_for_wire(&wire).expect("readable"))
+                .unwrap();
+        assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    }
+}
+
+#[test]
+fn no_legacy_migration_notice_is_null_not_a_guess() {
+    use std::ffi::CString;
+    assert!(unsafe { tc_legacy_migration_notice(std::ptr::null()) }.is_null());
+    for text in ["not json", "null", "\"notice\"", "[]"] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_legacy_migration_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
 }

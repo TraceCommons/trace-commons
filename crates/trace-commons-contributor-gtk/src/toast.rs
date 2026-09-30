@@ -69,11 +69,11 @@ mod tests {
     fn the_spec_worked_examples_render_exactly() {
         assert_eq!(
             toast(1, 4, 1, &[]).line,
-            "Approved. Scrubbing removed 4. 1 flagged."
+            "Approved. 4 redactions applied. 1 flagged."
         );
         assert_eq!(
             toast(47, 213, 3, &[]).line,
-            "Approved 47. Scrubbing removed 213. 3 flagged."
+            "Approved 47. 213 redactions applied. 3 flagged."
         );
         assert_eq!(
             toast(
@@ -87,7 +87,7 @@ mod tests {
                 ]
             )
             .line,
-            "Approved 44. Scrubbing removed 213. 3 flagged, 3 not approved: too large to send."
+            "Approved 44. 213 redactions applied. 3 flagged, 3 not approved: too large to send."
         );
         assert_eq!(
             toast(0, 0, 0, &["not-pending", "not-pending"]).line,
@@ -181,7 +181,7 @@ mod tests {
             toast(1, 0, 0, &[]).line,
             "Approved. Scrubbing matched nothing."
         );
-        assert_eq!(toast(2, 1, 0, &[]).line, "Approved 2. Scrubbing removed 1.");
+        assert_eq!(toast(2, 1, 0, &[]).line, "Approved 2. 1 redaction applied.");
     }
 
     /// A zero redaction count is a fact the contributor is owed, not an
@@ -209,7 +209,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "Approved 44. Scrubbing removed 213. 3 flagged, 1 not approved: too large to send."
+            "Approved 44. 213 redactions applied. 3 flagged, 1 not approved: too large to send."
         );
     }
 }

@@ -116,6 +116,21 @@ internal static class NativeMethods
     internal static extern void tc_handle_free(IntPtr handle);
 
     /// <summary>
+    /// Account-free synchronous local Insights. Request is UTF-8 bytes without
+    /// a trailing NUL, at most 65536 bytes. Call off the UI thread and retain
+    /// the buffer until return. Returns owned JSON or NULL plus owned error;
+    /// both use tc_string_free. Closing a window does not cancel started IO.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_insights_call(
+        [In] byte[] request, UIntPtr requestLen, out IntPtr error);
+
+    /// <summary>Account-free bounded local mission draft inbox.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_mission_drafts_call(
+        [In] byte[] request, UIntPtr requestLen, out IntPtr error);
+
+    /// <summary>
     /// Calls a daemon method in-process. Returns an owned NUL-terminated JSON
     /// response -- never NULL, even for a bad handle or malformed params; a
     /// JSON error frame comes back instead.
@@ -266,6 +281,86 @@ internal static class NativeMethods
     internal static extern IntPtr tc_consent_gate_help(int pinned);
 
     /// <summary>
+    /// The notice for one element of <c>status.grant_voids</c>, passed
+    /// through as the daemon sent it, as an owned JSON object. The choice
+    /// between the project and the automatic-grant wording is made on the
+    /// Rust side. NULL for an argument that is not a JSON object, and on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_grant_void_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? voidJson);
+
+    /// <summary>
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// from <c>status.legacy_invite_migration.notice</c> passed through as
+    /// the daemon sent it, as an owned JSON object (title, body, folders,
+    /// acknowledge). The folders sentence is chosen on the Rust side. NULL
+    /// for JSON null, an argument that is not a JSON object, and on a caught
+    /// panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_legacy_migration_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? noticeJson);
+
+    /// <summary>
+    /// The notice for approved sessions held on a busy privacy witness, from
+    /// <c>status.witness_capacity</c>, as an owned JSON object (title, body,
+    /// next_check). Free it the way <see cref="TakeOwnedString"/> does. NULL
+    /// when nothing is waiting, for an unreadable argument, and on a caught
+    /// panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_witness_capacity_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string capacityJson);
+
+    /// <summary>
+    /// K11: the daemon's <c>route_disclosure</c> result in, as sent;
+    /// <c>{"facts", "copy"}</c> out -- the facts canonicalised and the words
+    /// for exactly those facts. Owned; release with
+    /// <see cref="tc_string_free"/>, which <see cref="TakeOwnedString"/>
+    /// does. NULL for anything unreadable, including a route or origin newer
+    /// than this build, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_route_disclosure_copy(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string factsJson);
+
+    /// <summary>
+    /// What a disclosure surface says when <see cref="tc_route_disclosure_copy"/>
+    /// answers NULL: <c>panel</c> and <c>session</c>. Owned. NULL only on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_route_disclosure_unreadable_copy();
+
+    /// <summary>
+    /// The labels for the daemon's <c>certificate_detail</c>. Owned. NULL
+    /// only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_certificate_detail_copy();
+
+    /// <summary>
+    /// The notice for one element of <c>status.arming_rewordings</c> (K5),
+    /// passed through as the daemon sent it, as an owned JSON object. NULL
+    /// for an argument that is not a JSON object, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_arming_reworded_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string rewordingJson);
+
+    /// <summary>
+    /// The notice for armed folders the automatic-contribution gate holds,
+    /// from <c>status.automatic_contribution_held</c>, as an owned JSON
+    /// object. NULL when nothing is held, for an unreadable argument, and on
+    /// a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_gate_held_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string heldJson);
+
+    /// <summary>
     /// Every fixed word on the private-inference offer and settings card, as
     /// an owned JSON object.
     ///
@@ -327,6 +422,361 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int tc_private_inference_quit_needs_notice(int requestedOn, [MarshalAs(UnmanagedType.LPUTF8Str)] string state);
+
+    /// <summary>
+    /// Why a connect control is not on offer, or the EMPTY STRING.
+    ///
+    /// <paramref name="credentialed"/> is <c>harness_list</c>'s
+    /// <c>destination_credentialed</c> as a tri-state: negative for an absent
+    /// field, 0 false, 1 true. AN ABSENT FIELD IS NOT A REFUSED CONNECT -- a
+    /// daemon that predates the gate answers the empty string, because telling
+    /// somebody to sign in before connecting a tool they can connect right now
+    /// would be false.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_harness_credential_notice(int credentialed);
+
+    /// <summary>
+    /// The sentence for one <c>near_ai_credential_status</c> state label.
+    ///
+    /// An empty, NULL or non-UTF-8 label reports that this daemon does not
+    /// answer the question; an unfamiliar one reports that the state could
+    /// not be read. NEITHER SAYS THAT NO KEY IS KEPT HERE -- that is a claim
+    /// about the machine, and a shell that made it up would invite a second
+    /// sign-in. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_near_ai_credential_state_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// How that sentence is painted, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value -- the same five the listener
+    /// row uses, deliberately, so this shell keeps one mapping onto colours
+    /// rather than two that must agree.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_credential_state_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The one action a shell may offer for a credential state, as a raw
+    /// <c>TC_CREDENTIAL_ACTION_*</c> value.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. The button in question
+    /// opens a browser and mints a key at a third party, and the safe
+    /// direction is NONE: drawing obtain beside a state nobody could read is
+    /// how a contributor ends up holding a second key.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_credential_action(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The sentence for one <c>near_ai_balance</c> state.
+    ///
+    /// An empty, NULL or non-UTF-8 state reports that this daemon does not
+    /// answer the question; a state this build has never heard of gets its
+    /// own sentence and BORROWS NOBODY'S. Neither may degrade to the one
+    /// saying no sign-in is kept here, which is a claim about this machine.
+    ///
+    /// <c>known</c> answers the EMPTY STRING, and the emptiness is the point:
+    /// that state's row is figures, and a sentence above them announcing that
+    /// the read succeeded is this app narrating itself. NULL only on a caught
+    /// panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_near_ai_balance_state_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// How firmly that sentence reads, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value.
+    ///
+    /// <c>known</c> is the only clear one, and it means THE READ SUCCEEDED,
+    /// not that the balance is healthy. Nothing across this ABI judges an
+    /// amount, so a shell painting a low figure red would be inventing a
+    /// threshold nobody set, on an account whose ceiling may not exist at
+    /// all.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_balance_state_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The one action a shell may offer beside a balance state, as a raw
+    /// <c>TC_CREDENTIAL_ACTION_*</c> value.
+    ///
+    /// The sign-in row's enum and not a second one, because the only action
+    /// this row has ever needed is that row's obtain. Two states answer it,
+    /// and a refused session gets it WITHOUT a forget first: the ceremony
+    /// overwrites both records, and forgetting would throw away a working key
+    /// to fix an unrelated sign-in.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_balance_action(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// One balance figure as money.
+    ///
+    /// <paramref name="present"/> IS A SEPARATE ARGUMENT, DELIBERATELY. Every
+    /// other money export here encodes absence as an out-of-range integer;
+    /// this one cannot, because these amounts are SIGNED, and folding "null"
+    /// onto "negative" would render a real debt as no figure at all. 0 is the
+    /// wire's null and gives the EMPTY STRING.
+    ///
+    /// AN EMPTY STRING IS NEVER <c>$0.00</c>. A null here means we know we do
+    /// not know; a zero is a real balance and means the money is gone.
+    ///
+    /// <paramref name="scale"/> IS THE WIRE'S OWN <c>scale</c> FIELD, not a
+    /// constant. It is on the wire because a daemon may change it, and a
+    /// shell dividing by a billion of its own would then be wrong by a factor
+    /// of a thousand.
+    ///
+    /// Returns an owned string; free it with <see cref="tc_string_free"/>,
+    /// which <see cref="TakeOwnedString"/> does.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_amount(int present, long nanos, byte scale);
+
+    /// <summary>
+    /// What is left, as a finished sentence.
+    ///
+    /// <c>present == 0</c> DOES NOT GIVE THE EMPTY STRING HERE. It gives the
+    /// sentence for an account with no spending limit set, which is the
+    /// ordinary case for an account nobody has capped -- and that contributor
+    /// must not be told they have $0.00 left.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_remaining_line(
+        int present, long nanos, byte scale);
+
+    /// <summary>
+    /// The configured ceiling, as a finished sentence, or the EMPTY STRING.
+    ///
+    /// <c>present == 0</c> is empty and not a sentence: the remaining line
+    /// has already said the part that matters about an uncapped account, and
+    /// saying it twice is once too many.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_limit_line(
+        int present, long nanos, byte scale);
+
+    /// <summary>
+    /// What the WHOLE ACCOUNT has spent, as a finished sentence, or the empty
+    /// string. A zero is not that: an account that has spent nothing renders
+    /// $0.00, which is true.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_spent_line(
+        int present, long nanos, byte scale);
+
+    /// <summary>
+    /// How long ago THIS COMPUTER asked, assembled.
+    ///
+    /// ABSENCE IS AN OUT-OF-RANGE INTEGER, the convention
+    /// <see cref="tc_harness_last_call_line"/> uses: any negative value gives
+    /// the empty string. The timestamp behind it is the daemon's own clock at
+    /// the moment the service answered, so the sentence says when the
+    /// question was put and never that anything was updated then.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_observed_line(long secondsAgo);
+
+    /// <summary>
+    /// The sentence for one queue entry's <c>eligibility</c> label.
+    ///
+    /// A ROW THAT CARRIED NO <c>eligibility</c> FIELD MUST NOT REACH HERE. An
+    /// absent field means the contributor was invited and has no eligibility
+    /// question, and answering one they do not have puts a caveat on work
+    /// that carries none. Absent is not "unknown".
+    ///
+    /// An empty, NULL or unfamiliar state reports that the answer has not
+    /// been worked out. IT NEVER REPORTS AN INELIGIBILITY: a state this build
+    /// cannot read is not evidence about a contributor's session. NULL only
+    /// on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_eligibility_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// How that sentence is painted, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value -- the same five the listener
+    /// row uses, so this shell keeps one mapping onto colours.
+    ///
+    /// A permanent ineligibility is deliberately NOT <c>_REFUSED</c>: nothing
+    /// was refused and nothing went wrong, and painting a contributor's
+    /// ordinary older work as a failure is a judgement this surface has no
+    /// business making.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_contribution_eligibility_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The one control a shell may offer for an eligibility state, as a raw
+    /// <c>TC_CONTRIBUTION_CONTROL_*</c> value.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each
+    /// deciding which rows get a send button is three chances to offer one
+    /// beside a session the server will refuse -- the defect this surface
+    /// exists to remove, and worse than an inert button: pressing it sends a
+    /// contributor's work and has it turned away.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_contribution_eligibility_control(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The sentence for one queue entry's <c>eligibility_reason</c> label, or
+    /// THE EMPTY STRING for an absent, NULL or unfamiliar reason -- for which
+    /// a shell renders nothing.
+    ///
+    /// Deliberately not the hedge the state line makes: the state sentence
+    /// has already said what is true, and a second sentence guessing at a
+    /// reason this build does not know would add a detail nobody
+    /// established. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_eligibility_reason_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? reason);
+
+    /// <summary>
+    /// The sentence for one queue entry's <c>attestation</c> mark: whether
+    /// that session carries proof of its last model call.
+    ///
+    /// EVERY ROW REACHES HERE, INCLUDING AN INVITED CONTRIBUTOR'S. That is
+    /// the opposite of the eligibility line's rule, and deliberately so: the
+    /// mark is a fact about the trace rather than an answer to a permission
+    /// question nobody asked.
+    ///
+    /// An empty, NULL or unfamiliar mark reports that the answer is not
+    /// known, which is also the honest reading of a daemon too old to send
+    /// the field. IT NEVER REPORTS AN UNATTESTED SESSION. NULL only on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_attestation_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? mark);
+
+    /// <summary>
+    /// The sentence for one row of the certificate-held list.
+    /// </summary>
+    /// <remarks>
+    /// <c>evidenceAdmitted</c> is the daemon's
+    /// <c>admission_evidence_required</c> VERBATIM, never its negation. That
+    /// flag is true for a contributor who signed up through NEAR and
+    /// therefore has NO invite, so a non-zero argument returns the candidate
+    /// reading. Passing the negation would swap both readings and compile.
+    /// </remarks>
+    /// <summary>
+    /// The sentence for one NEAR AI login-enrolment control name.
+    /// </summary>
+    /// <remarks>
+    /// Ten labels, ten sentences, and anything else reaching the generic one.
+    /// Never the empty string: a refusal this build cannot name is the whole
+    /// of what a contributor is being told.
+    /// </remarks>
+    /// <summary>
+    /// What the outcome list says about a refused contribution, or the empty
+    /// string when the label is not one of the five.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_outcome_refusal_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_queue_outcome_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_near_ai_enroll_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    /// <summary>How firmly that sentence reads.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_enroll_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_certificate_row_line(int evidenceAdmitted);
+
+    /// <summary>The heading over that list, on the same argument.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_certificate_list_title(int evidenceAdmitted);
+
+    /// <summary>
+    /// How that sentence is painted, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value.
+    ///
+    /// A permanently unattested session is deliberately NOT
+    /// <c>_REFUSED</c> and not even attention: nothing was refused and
+    /// nothing went wrong, the session simply has no attached call. Only the
+    /// configuration mark asks for attention, because a setting decides
+    /// whether the next session carries proof.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_contribution_attestation_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? mark);
+
+    /// <summary>
+    /// The sentence for one queue entry's <c>attestation_reason</c> label, or
+    /// THE EMPTY STRING for an absent, NULL or unfamiliar reason -- for which
+    /// a shell renders nothing.
+    ///
+    /// THE SAME THIRTEEN LABELS AS
+    /// <see cref="tc_contribution_eligibility_reason_line"/>, WITH DIFFERENT
+    /// SENTENCES. Never substitute one for the other: eligibility's read as
+    /// refusals of a request, and for an invited contributor nothing was
+    /// requested. NULL only on a caught panic.
+    /// </summary>
+    /// <remarks>
+    /// There is no <c>tc_contribution_attestation_control</c> to go with
+    /// these two, and that absence is the contract. The mark describes the
+    /// trace and offers nothing to press; whether a session may be sent stays
+    /// <see cref="tc_contribution_eligibility_control"/>'s question.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_attestation_reason_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? reason);
+
+    /// <summary>
+    /// How many sessions a group submit is leaving behind, as a sentence, or
+    /// THE EMPTY STRING for zero and for a negative.
+    /// </summary>
+    /// <remarks>
+    /// Says how many and NOT why. The reason a particular session cannot be
+    /// sent is that row's own sentence one level in; a summary here would
+    /// stand for up to thirteen different reasons and say nothing true about
+    /// any of them. NULL only on a caught panic.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_contribution_withheld_line(long withheld);
+
+    /// <summary>
+    /// Whether a group's submit control may be offered, as a raw
+    /// <c>TC_CONTRIBUTION_CONTROL_*</c> value.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="contributable"/> is the project row's
+    /// <c>contributable_count</c>, or <b>ANY NEGATIVE VALUE when that key was
+    /// ABSENT</b> -- an invited contributor, for whom every pending session is
+    /// sendable.
+    ///
+    /// <para>
+    /// ABSENT IS NOT ZERO, and it is the distinction most likely to be got
+    /// wrong: zero means the question applies and nothing here can be sent, so
+    /// nothing is offered; negative means the question does not apply and the
+    /// control is offered on <paramref name="pending"/> alone. Passing 0 for an
+    /// absent field would refuse a control to somebody whose sessions are all
+    /// perfectly sendable -- which is what a <c>?? 0</c> on a nullable count
+    /// does, so do not write one.
+    /// </para>
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int tc_contribution_group_control(long pending, long contributable);
 
     /// <summary>
     /// One <c>harness_list</c> row's state, as a TC_HARNESS_STATE_* code.

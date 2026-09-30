@@ -17,11 +17,11 @@ final class SubmitToastTests: XCTestCase {
     func testTheSpecWorkedExamplesRenderExactly() {
         XCTAssertEqual(
             SubmitToast.render(approved: 1, redactions: 4, flagged: 1, skipped: []).line,
-            "Approved. Scrubbing removed 4. 1 flagged."
+            "Approved. 4 redactions applied. 1 flagged."
         )
         XCTAssertEqual(
             SubmitToast.render(approved: 47, redactions: 213, flagged: 3, skipped: []).line,
-            "Approved 47. Scrubbing removed 213. 3 flagged."
+            "Approved 47. 213 redactions applied. 3 flagged."
         )
         XCTAssertEqual(
             SubmitToast.render(
@@ -30,7 +30,7 @@ final class SubmitToastTests: XCTestCase {
                 flagged: 3,
                 skipped: ["envelope-too-large", "envelope-too-large", "envelope-too-large"]
             ).line,
-            "Approved 44. Scrubbing removed 213. 3 flagged, 3 not approved: too large to send."
+            "Approved 44. 213 redactions applied. 3 flagged, 3 not approved: too large to send."
         )
         XCTAssertEqual(
             SubmitToast.render(
@@ -117,7 +117,7 @@ final class SubmitToastTests: XCTestCase {
         )
         XCTAssertEqual(
             SubmitToast.render(approved: 2, redactions: 1, flagged: 0, skipped: []).line,
-            "Approved 2. Scrubbing removed 1."
+            "Approved 2. 1 redaction applied."
         )
     }
 
@@ -140,7 +140,7 @@ final class SubmitToastTests: XCTestCase {
         ).line
         XCTAssertEqual(
             line,
-            "Approved 44. Scrubbing removed 213. 3 flagged, 1 not approved: too large to send."
+            "Approved 44. 213 redactions applied. 3 flagged, 1 not approved: too large to send."
         )
     }
 }

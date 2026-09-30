@@ -78,7 +78,29 @@ public sealed class QueueGroupViewModel
 
     /// <summary>"Submit all (3)" -- the header action's label, when shown.</summary>
     public string SubmitAllText =>
-        string.Format(CultureInfo.CurrentCulture, "Submit all ({0})", _group.Count);
+        string.Format(CultureInfo.CurrentCulture, "Submit all ({0})", _group.OfferedCount);
+
+    /// <summary>
+    /// How many this group's submit would leave behind, in the shared
+    /// sentence -- or empty where there is nothing to say.
+    /// </summary>
+    /// <remarks>
+    /// Drawn beside the action so the number is known BEFORE the press, which
+    /// is the whole point of the daemon publishing a count on the project row
+    /// rather than only reporting <c>excluded_ineligible</c> afterwards.
+    ///
+    /// <para>
+    /// Empty for an invited contributor, who has no eligibility question and
+    /// whose group offers everything it holds. The sentence says how many and
+    /// NOT why: the reason a particular session cannot be sent is that row's
+    /// own sentence, one level in.
+    /// </para>
+    /// </remarks>
+    public string WithheldText =>
+        ContributionEligibilitySurface.WithheldLine(_group.Withheld) ?? string.Empty;
+
+    /// <summary>Whether there is a withheld line worth drawing.</summary>
+    public bool HasWithheldText => WithheldText.Length > 0;
 
     /// <summary>
     /// "Submit all as..." and its tooltip: the opt-in verdict path beside

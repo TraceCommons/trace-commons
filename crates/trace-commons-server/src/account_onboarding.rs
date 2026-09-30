@@ -72,7 +72,6 @@ pub struct VerifiedNearProvisioning {
     network: String,
     wallet_public_key: String,
     device_public_key: [u8; 32],
-    anchor_hash: [u8; 32],
     ceremony_hash: [u8; 32],
     expires_at: i64,
 }
@@ -90,10 +89,6 @@ impl VerifiedNearProvisioning {
     pub fn device_public_key(&self) -> &[u8; 32] {
         &self.device_public_key
     }
-    /// Stable across key rotation/devices; not proof of a unique human.
-    pub fn anchor_hash(&self) -> &[u8; 32] {
-        &self.anchor_hash
-    }
     pub fn ceremony_hash(&self) -> &[u8; 32] {
         &self.ceremony_hash
     }
@@ -109,7 +104,19 @@ impl VerifiedNearProvisioning {
 pub struct StoredProvisioningCeremony {
     callback_hash: Option<[u8; 32]>,
     nonce: [u8; 32],
-    anchor_hash: [u8; 32],
+    /// Issue-time commitment binding this ceremony to the account name and
+    /// network presented at start, rechecked in [`PendingNearProvisioning::restore`]
+    /// so finish cannot switch accounts.
+    ///
+    /// This is deliberately NOT the durable anchor. Since the anchor became a
+    /// peppered blind index (`near_account_identity`), an unkeyed digest of
+    /// public inputs no longer belongs anywhere identity is stored -- but this
+    /// row lives for [`PROVISIONING_TTL_SECONDS`], is deleted when taken, and is
+    /// reachable only by possession of the ceremony handle, so keying it would
+    /// buy a five-minute window in exchange for threading a secret through the
+    /// pure issue/restore path. It keeps the unkeyed form and a name that says
+    /// what it is.
+    account_commitment: [u8; 32],
     device_hash: [u8; 32],
     browser_binding: [u8; 32],
     config_hash: [u8; 32],
@@ -121,6 +128,106 @@ pub struct StoredProvisioningCeremony {
 pub struct NativeProvisioningPending {
     pub ceremony: StoredProvisioningCeremony,
     pub code_challenge: String,
+}
+
+/// A NEAR AI login ceremony between `start` and `finish` (#836).
+///
+/// Everything the finish step must check against, and **nothing the client
+/// supplies at finish**: the nonce and expiry are server-chosen, the device key
+/// and PKCE challenge are what start committed to. A finish request that names
+/// a different device or a different challenge is checked against this rather
+/// than trusted, which is what makes the ceremony a binding rather than a
+/// formality.
+///
+/// No account identifier of any kind. The account is whatever the introspected
+/// token's subject resolves to, decided at finish and never asserted by the
+/// caller -- which is the client-asserted identity #836 exists to prevent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NearAiLoginPending {
+    /// Server-chosen, 32 bytes, hex. What makes the device proof unreplayable.
+    pub nonce_hex: String,
+    /// The S256 challenge from start; finish presents the verifier for it.
+    pub code_challenge: String,
+    /// The device public key this ceremony enrols, base64.
+    pub device_public_key: String,
+    /// Unix seconds. Enforced by the row's own expiry as well, so a stale
+    /// ceremony is unusable even if this field were ignored.
+    pub expires_at: i64,
+}
+
+/// What a stored bind ceremony is for. One value, and it must be present: a
+/// provisioning row has no `purpose` field, so it can never parse as a bind
+/// row, and a bind row's extra fields make it fail [`NearAiLoginPending`]'s
+/// `deny_unknown_fields`. The storage layer refuses to mix the two ceremonies
+/// before the preimage domains ever get the chance to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearAiBindPurpose {
+    Bind,
+}
+
+/// A NEAR AI bind ceremony between `bind/start` and `bind/finish` (Z2 native
+/// passkey identity, slice S3).
+///
+/// The provisioning ceremony's commitments plus the `(tenant_id, account_id)`
+/// of the authenticated session that started it. `bind/finish` refuses unless
+/// its own session names the same pair, so a ceremony started by account A can
+/// never be finished by account B. Both come from the session, never from a
+/// request body.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NearAiBindPending {
+    pub purpose: NearAiBindPurpose,
+    pub tenant_id: String,
+    pub account_id: uuid::Uuid,
+    pub nonce_hex: String,
+    pub code_challenge: String,
+    pub device_public_key: String,
+    pub expires_at: i64,
+}
+
+/// What `bind/finish` did with a verified NEAR AI login.
+#[derive(Debug, Clone)]
+pub enum NearAiBindOutcome {
+    /// The anchor was unclaimed. It, the device and the principal now belong
+    /// to the passkey account, which is `bound`; `provisioned` is that account
+    /// and its fresh native session's context.
+    Bound(ProvisionedNearAccount),
+    /// The anchor already belonged to account X in another tenant. X was
+    /// provisioned exactly as the unauthenticated NEAR AI provisioning would
+    /// have done it, and the passkey account was closed in its own tenant.
+    /// Nothing crossed between the two tenants.
+    ExistingAccount {
+        provisioned: ProvisionedNearAccount,
+        /// X's binding state label (`legacy` or `bound`), for the response.
+        binding_state: crate::account_binding::AccountBindingState,
+    },
+}
+
+/// The label-only reason recorded when bind takes the existing-account branch.
+/// `anchor_claimed_strong`: X holds at least one strong authenticator, so the
+/// passkey could never be moved to it. `anchor_claimed`: X holds none, the case
+/// the deferred S6 fold would serve; until then it is refused too.
+pub const BIND_REFUSED_ANCHOR_CLAIMED_STRONG: &str = "anchor_claimed_strong";
+pub const BIND_REFUSED_ANCHOR_CLAIMED: &str = "anchor_claimed";
+
+/// The device key is already registered under a different tenant.
+///
+/// `device_keys.device_key_id` is a global primary key, so provisioning (and
+/// bind, which enrols the same daemon key) cannot place the key under this
+/// tenant, and the key would go on authenticating into the tenant that holds
+/// it. Named, so it is not one more `near_provisioning_refused`; label-only,
+/// because which tenant holds the key is exactly what must not be disclosed.
+/// Carried as `DatabaseError::Pool(DEVICE_KEY_REGISTERED_ELSEWHERE)`; test it
+/// with [`is_device_key_registered_elsewhere`].
+pub const DEVICE_KEY_REGISTERED_ELSEWHERE: &str =
+    "near_provisioning_device_key_registered_elsewhere";
+
+/// Whether a provisioning or bind error is the named
+/// [`DEVICE_KEY_REGISTERED_ELSEWHERE`] refusal.
+pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -> bool {
+    matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REGISTERED_ELSEWHERE)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -139,7 +246,7 @@ impl PendingNearProvisioning {
                 .as_ref()
                 .map(|s| Sha256::digest(s.as_bytes()).into()),
             nonce: self.nonce,
-            anchor_hash: framed_hash(
+            account_commitment: framed_hash(
                 b"trace_commons.near_account_anchor.v1\n",
                 &[self.network.as_bytes(), self.account_id.as_bytes()],
             ),
@@ -167,13 +274,13 @@ impl PendingNearProvisioning {
             stored.browser_binding,
             stored.issued_at,
         )?;
-        let anchor = framed_hash(
+        let commitment = framed_hash(
             b"trace_commons.near_account_anchor.v1\n",
             &[cfg.network.as_bytes(), account_id.as_bytes()],
         );
         let device_hash: [u8; 32] = Sha256::digest(device_public_key).into();
         if stored.config_hash != pending.config_hash
-            || stored.anchor_hash != anchor
+            || stored.account_commitment != commitment
             || stored.device_hash != device_hash
             || stored.expires_at != pending.expires_at
         {
@@ -336,10 +443,6 @@ impl PendingNearProvisioning {
             network: self.network.clone(),
             wallet_public_key: assertion.wallet_public_key.into(),
             device_public_key: self.device_public_key,
-            anchor_hash: framed_hash(
-                b"trace_commons.near_account_anchor.v1\n",
-                &[self.network.as_bytes(), self.account_id.as_bytes()],
-            ),
             ceremony_hash: framed_hash(
                 b"trace_commons.near_provisioning_ceremony.v1\n",
                 &[&self.nonce],
@@ -452,9 +555,14 @@ mod tests {
             .encode(device.sign(&p.device_signing_bytes()).as_ref())
     }
 
+    /// The proof no longer carries an anchor -- the durable anchor is a peppered
+    /// blind index computed in `near_account_identity` from the fields asserted
+    /// here. What still has to hold at this layer is that those fields are the
+    /// ceremony's own account and network and survive a change of wallet key and
+    /// device, because that is what makes the index stable for a returning user.
     #[tokio::test]
-    async fn verified_anchor_survives_keys_devices_and_has_network_separation() {
-        let mut anchors = Vec::new();
+    async fn verified_identity_fields_survive_keys_and_devices() {
+        let mut identities = Vec::new();
         for seed in [1, 2] {
             let wallet = key(seed);
             let device = key(seed + 10);
@@ -484,26 +592,15 @@ mod tests {
                 device.public_key().as_ref()
             );
             assert_eq!(result.expires_at(), 400);
-            anchors.push(*result.anchor_hash());
+            identities.push((
+                result.account_id().to_string(),
+                result.network().to_string(),
+            ));
         }
-        assert_eq!(anchors[0], anchors[1]);
+        assert_eq!(identities[0], identities[1]);
         assert_eq!(
-            hex::encode(anchors[0]),
-            "9c2335d9afa6312a1b75700f1baf786dd207823002eaff79da64dd572cf53463"
-        );
-        assert_ne!(
-            anchors[0],
-            framed_hash(
-                b"trace_commons.near_account_anchor.v1\n",
-                &[b"testnet", b"alice.near"]
-            )
-        );
-        assert_ne!(
-            anchors[0],
-            framed_hash(
-                b"trace_commons.near_account_anchor.v1\n",
-                &[b"mainnet", b"bob.near"]
-            )
+            identities[0],
+            ("alice.near".to_string(), "mainnet".to_string())
         );
         assert_ne!(
             framed_hash(b"x", &[b"a", b"bc"]),
@@ -643,5 +740,41 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    /// A stored bind ceremony never parses as a provisioning one, nor the
+    /// reverse, so a ceremony id from one surface finishes nothing on the other
+    /// even before the preimage domains are compared.
+    #[test]
+    fn bind_and_provisioning_ceremony_rows_do_not_parse_as_each_other() {
+        let login = serde_json::to_value(NearAiLoginPending {
+            nonce_hex: "00".repeat(32),
+            code_challenge: "c".into(),
+            device_public_key: "d".into(),
+            expires_at: 1,
+        })
+        .unwrap();
+        let bind = serde_json::to_value(NearAiBindPending {
+            purpose: NearAiBindPurpose::Bind,
+            tenant_id: "nearai-t".into(),
+            account_id: uuid::Uuid::nil(),
+            nonce_hex: "00".repeat(32),
+            code_challenge: "c".into(),
+            device_public_key: "d".into(),
+            expires_at: 1,
+        })
+        .unwrap();
+        assert_eq!(bind["purpose"], "bind");
+        assert!(serde_json::from_value::<NearAiLoginPending>(bind.clone()).is_err());
+        assert!(serde_json::from_value::<NearAiBindPending>(login.clone()).is_err());
+        assert!(serde_json::from_value::<NativeProvisioningPending>(bind.clone()).is_err());
+        // A provisioning row with a purpose smuggled in is still not a bind
+        // row: it has no account to bind.
+        let mut smuggled = login;
+        smuggled["purpose"] = serde_json::json!("bind");
+        assert!(serde_json::from_value::<NearAiBindPending>(smuggled).is_err());
+        let mut wrong_purpose = bind;
+        wrong_purpose["purpose"] = serde_json::json!("provision");
+        assert!(serde_json::from_value::<NearAiBindPending>(wrong_purpose).is_err());
     }
 }

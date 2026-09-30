@@ -236,6 +236,13 @@ pub const REASON_METADATA_CREDENTIAL: &str = "secret-leak-detected";
 /// The privacy filter collapsed two metadata keys into one.
 pub const REASON_METADATA_KEY_COLLISION: &str = "metadata-key-collision";
 
+/// Typed, data-free signal for an upstream classifier outage. The protocol
+/// error's reason may contain an endpoint or transport detail, so only this
+/// fixed marker crosses the contributor boundary.
+#[derive(Debug, thiserror::Error)]
+#[error("trace-redaction-failed")]
+pub(crate) struct TransientRedactionFailure;
+
 /// Run `raw` through `redactor`, mapping any failure to a label-only error
 /// (never trace content).
 pub async fn redact_to_envelope(
@@ -247,6 +254,7 @@ pub async fn redact_to_envelope(
         // reason but this exact one still collapses to the generic label
         // that every caller has always seen.
         match &error {
+            e if e.is_transient() => anyhow::Error::new(TransientRedactionFailure),
             TraceContributionError::RedactionFailed { reason }
                 if reason == REASON_CORRECTION_CREDENTIAL =>
             {
@@ -579,6 +587,39 @@ pub(crate) fn build_import_preview_raw(
     preview
 }
 
+/// Isolate admission evidence from unsigned companion history. The caller must
+/// append the receipt-bound exchange last and review the returned certified
+/// artifact; this projection makes no claim about omitted session execution.
+/// Configuration supplies identity and consent, never imported metadata.
+pub(crate) fn final_call_witness_input(
+    raw: RawTraceContribution,
+    cfg: &ContributorConfig,
+) -> RawTraceContribution {
+    let transcript = SessionTranscript {
+        source: raw
+            .ironclaw
+            .feature_flags
+            .get("agent")
+            .cloned()
+            .unwrap_or_default()
+            .into(),
+        ..Default::default()
+    };
+    let mut isolated = build_raw_contribution_with_id(
+        &transcript,
+        cfg,
+        raw.created_at,
+        raw.submission_id,
+        None,
+        None,
+    );
+    isolated.trace_id = raw.trace_id;
+    isolated.replay.replay_notes = vec![
+        "Final-call evidence only; session history and tool execution are not covered.".into(),
+    ];
+    isolated
+}
+
 fn build_raw_contribution_with_id(
     t: &SessionTranscript,
     cfg: &ContributorConfig,
@@ -732,6 +773,7 @@ fn build_raw_contribution_with_id(
         embedding_analysis: None,
         value: ValueMetadata::default(),
         conversation_id: t.conversation_id.clone(),
+        source_session: None,
     }
 }
 
@@ -811,13 +853,17 @@ pub fn apply_verdict(envelope: &mut TraceContributionEnvelope, verdict: Contribu
 /// builder reads them apart, and three positional bools is exactly the shape
 /// that silently swaps two of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct DeclaredPresence {
-    message_text: bool,
-    tool_payloads: bool,
-    routing_metadata: bool,
+pub(crate) struct DeclaredPresence {
+    pub(crate) message_text: bool,
+    pub(crate) tool_payloads: bool,
+    pub(crate) routing_metadata: bool,
 }
 
-fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPresence {
+/// `pub(crate)` because the witness transport appends the attested exchange
+/// after this module has finished building the contribution, and the
+/// declaration has to describe the list as it goes out rather than the list as
+/// it was built. See `witness::transport::witness_contribution`.
+pub(crate) fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPresence {
     let mut presence = DeclaredPresence::default();
 
     for event in events {
@@ -1161,6 +1207,8 @@ mod tests {
     fn test_config() -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example".into(),

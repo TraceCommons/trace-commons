@@ -26,13 +26,13 @@ public sealed class SubmitToastTests
     public void TheSpecWorkedExamplesRenderExactly()
     {
         Assert.Equal(
-            "Approved. Scrubbing removed 4. 1 flagged.",
+            "Approved. 4 redactions applied. 1 flagged.",
             SubmitToast.Render(1, 4, 1, new List<string>()).Line);
         Assert.Equal(
-            "Approved 47. Scrubbing removed 213. 3 flagged.",
+            "Approved 47. 213 redactions applied. 3 flagged.",
             SubmitToast.Render(47, 213, 3, new List<string>()).Line);
         Assert.Equal(
-            "Approved 44. Scrubbing removed 213. 3 flagged, 3 not approved: too large to send.",
+            "Approved 44. 213 redactions applied. 3 flagged, 3 not approved: too large to send.",
             SubmitToast.Render(
                 44, 213, 3,
                 new List<string> { "envelope-too-large", "envelope-too-large", "envelope-too-large" })
@@ -129,7 +129,7 @@ public sealed class SubmitToastTests
             "Approved. Scrubbing matched nothing.",
             SubmitToast.Render(1, 0, 0, new List<string>()).Line);
         Assert.Equal(
-            "Approved 2. Scrubbing removed 1.",
+            "Approved 2. 1 redaction applied.",
             SubmitToast.Render(2, 1, 0, new List<string>()).Line);
     }
 
@@ -155,7 +155,7 @@ public sealed class SubmitToastTests
     public void TheJoinedClauseCarriesBothHalvesWhenBothApply()
     {
         Assert.Equal(
-            "Approved 44. Scrubbing removed 213. 3 flagged, 1 not approved: too large to send.",
+            "Approved 44. 213 redactions applied. 3 flagged, 1 not approved: too large to send.",
             SubmitToast.Render(44, 213, 3, new List<string> { "envelope-too-large" }).Line);
     }
 }

@@ -60,6 +60,15 @@ struct PreviewSheet: View {
     /// the body per keystroke, 17.5 MB at a time on a real session.
     @State private var document: TranscriptDocument?
     @State private var failure: String?
+    /// The daemon's sentence for a review it refused.
+    ///
+    /// Separate from `failure`, which also holds messages from the local
+    /// preview build -- including raw error text. Only a refusal the daemon
+    /// classified lands here, so the notice below can prefer it without
+    /// risking an internal string reaching a screen.
+    @State private var witnessRefusal: String?
+    /// Set when a review met a busy witness: the time it may be tried again.
+    @State private var witnessBusyRetry: String?
     @State private var loading: Bool
 
     /// The contributor's answer to `VerdictCopy.question`, or `nil` for the
@@ -207,6 +216,11 @@ struct PreviewSheet: View {
     /// screen, because that is the number a person reads the body against.
     private var header: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
+            if let copy = model.publicRunCopy {
+                Text(copy.sessionDetail)
+                    .font(TC.Font_.sectionTitle)
+                    .foregroundStyle(TC.inkPrimary)
+            }
             HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
                 Text(entry.projectLabel)
                     .font(TC.Font_.cardTitle)
@@ -258,6 +272,26 @@ struct PreviewSheet: View {
                 }
                 Spacer(minLength: 0)
             }
+            // K11: what leaves this computer for this session, before and
+            // after redaction, and what its witness was checked against.
+            if let summary {
+                SessionSendDisclosureView(
+                    entry: entry,
+                    rawSessionBytes: summary.rawSessionBytes,
+                    wouldSendBytes: summary.wouldSendBytes)
+            }
+            if let summary, let copy = model.publicRunCopy {
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    TCFieldLabel(copy.task)
+                    Text(summary.openingPrompt.isEmpty ? copy.noTask : summary.openingPrompt)
+                        .font(TC.Font_.body)
+                        .foregroundStyle(
+                            summary.openingPrompt.isEmpty ? TC.inkSecondary : TC.inkPrimary
+                        )
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                }
+            }
             Text("Nothing has been sent. This is what would be.")
                 .font(TC.Font_.caption)
                 .foregroundStyle(TC.inkSecondary)
@@ -296,9 +330,24 @@ struct PreviewSheet: View {
             )
         } else if let failure {
             VStack(spacing: TC.Space.md) {
-                CenteredNotice(title: "This one can't be shown.", detail: witnessRequested ? (model.witnessCopy?.review?.failed ?? failure) : failure)
-                if model.daemonSettings?.admissionEvidenceRequired == true {
-                    AdmissionPreparationView(entryID: entry.entryID)
+                // A refusal the daemon classified wins; otherwise the one
+                // fixed sentence, which is also what a failure that is not a
+                // refusal gets -- `failure` can hold raw local error text and
+                // must not reach a screen on this path.
+                if witnessRequested, let retry = witnessBusyRetry {
+                    // A busy witness judged nothing: not a refusal. The
+                    // daemon's busy sentence, and when to try again.
+                    CenteredNotice(
+                        title: model.witnessCopy?.review?.heading ?? "",
+                        detail: [witnessRefusal ?? failure, retry].joined(separator: "\n")
+                    )
+                } else {
+                    CenteredNotice(
+                        title: "This one can't be shown.",
+                        detail: witnessRequested
+                            ? (witnessRefusal ?? model.witnessCopy?.review?.failed ?? failure)
+                            : failure
+                    )
                 }
                 if witnessSupported, model.witnessStateCode == 1, let copy = model.witnessCopy?.review {
                     Text(copy.disclosure).font(TC.Font_.caption)
@@ -426,6 +475,7 @@ struct PreviewSheet: View {
             // on when they reach for Contribute is not a reason to stop
             // saying it.
             ScrubbingCaveatAtCommit()
+            admissibility
             gateStatement
             if model.witnessStateCode == 1 || witnessRequested || witnessWorking, let copy = model.witnessCopy?.review {
                 Text(copy.immutable).font(TC.Font_.meta).foregroundStyle(TC.inkSecondary)
@@ -433,6 +483,19 @@ struct PreviewSheet: View {
             verdictQuestion.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
             if correctionIsOffered {
                 correctionField.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
+            }
+            // Drawn on every preview, in the place GTK has always drawn it,
+            // rather than only where one failed. It arms this session's NEXT
+            // call -- "continue the agent task and return here to review" --
+            // so it is something a contributor comes here to do, not a
+            // remedy for the sheet in front of them. Reaching it used to
+            // require a witness review that failed first.
+            //
+            // Still gated on the enrolment, and gated nowhere else: an
+            // invited contributor has no evidence-bearing path, so the
+            // control could only refuse them and is absent instead.
+            if model.daemonSettings?.admissionEvidenceOffered == true {
+                AdmissionPreparationView(entryID: entry.entryID)
             }
             HStack(spacing: TC.Space.s) {
                 // Outlined like "Close", never filled: it must not read as a
@@ -476,6 +539,36 @@ struct PreviewSheet: View {
         TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
     }
 
+    /// This session's row AS THE QUEUE HOLDS IT NOW, not as it was when the
+    /// sheet opened.
+    ///
+    /// `entry` is a `let` captured at open time, and this sheet can stay up
+    /// across any number of snapshots -- including the one carrying a
+    /// submit-time failure written back into the row. Reading the opening
+    /// copy would apply the eligibility gate once and then never again,
+    /// which is the same defect as never applying it.
+    ///
+    /// ONLY the eligibility gate and its sentence read this. Everything the
+    /// sheet approves still goes through `entry`, whose id is the same
+    /// either way -- what a preview pinned must not start moving under a
+    /// contributor who is reading it.
+    private var liveEntry: QueueEntry {
+        EligibilitySurface.current(entry, in: model.awaitingDecision, id: \.entryID)
+    }
+
+    /// What the daemon said about contributing THIS session, or nothing at
+    /// all for a contributor who has no eligibility question.
+    private var eligibility: ContributionEligibility? { liveEntry.contributionEligibility }
+
+    /// Whether the shared table offers a send control for this session.
+    ///
+    /// Answers `true` for an entry that carried no `eligibility` key: an
+    /// invited contributor's queue is entirely contributable and the sheet is
+    /// the sheet they always had. Nothing here branches on a state string.
+    private var eligibilityOffersContribute: Bool {
+        EligibilitySurface.offersContribute(eligibility, calls: model.eligibilityCalls)
+    }
+
     private var canContribute: Bool {
         // `enrolled`, not `summary != nil`. An approval binds to the
         // envelope a preview pinned, and a preview built without an
@@ -485,7 +578,51 @@ struct PreviewSheet: View {
         // And no claim, no approval: the statement above the button is the
         // whole of what a contributor is told before pressing it, so a
         // build that cannot read it must not arm the button either.
+        //
+        // And the daemon's own answer about this session. DISARMED HERE
+        // RATHER THAN REMOVED, which is the opposite of the queue card: the
+        // sheet's Contribute is already on screen and under a person's
+        // cursor when the sentence above it is read, and a primary control
+        // that vanished mid-read is its own confusion. On the card the
+        // button is drawn fresh or not at all, so there is nothing to
+        // vanish. Both routes go through the same shared table.
         consent != nil && ReadGate.canContribute(hasPinnedPreview: summary?.enrolled == true)
+            && eligibilityOffersContribute
+    }
+
+    /// Whether this session can be contributed at all, above the statement
+    /// the sheet already makes.
+    ///
+    /// Drawn WHEREVER Contribute is disarmed for this reason and never
+    /// separated from it: a disarmed primary button with nothing beside it
+    /// is a contributor hunting for a setting that would arm it. Absent
+    /// entirely when the entry carried no `eligibility` key.
+    @ViewBuilder
+    private var admissibility: some View {
+        if let copy = model.privateInferenceCopy,
+           let line = EligibilitySurface.stateLine(
+               eligibility, copy: copy, calls: model.eligibilityCalls)
+        {
+            let tone = PrivateInferenceIndicator.palette(
+                EligibilitySurface.tone(eligibility, calls: model.eligibilityCalls)
+                    ?? .neutral)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Label(line, systemImage: tone.symbol)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(tone.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let reason = EligibilitySurface.reasonLine(
+                    eligibility, calls: model.eligibilityCalls)
+                {
+                    Text(reason)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+        }
     }
 
     /// The tooltip that explains the current answer, chosen by the ABI.
@@ -556,6 +693,16 @@ struct PreviewSheet: View {
     /// the answers is "that correction contains a credential" and the
     /// contributor needs the text still in front of them to act on it.
     private func contribute() {
+        // THE PRESS DECIDES WHAT IS SENT. `canContribute` decided what was
+        // offered, at the last render; a snapshot landing between that
+        // render and this tap leaves the button acting on what was drawn.
+        // Asking again here costs nothing and closes the window. Declining
+        // leaves the sheet up, which repaints against the queue's current
+        // answer and says why.
+        guard EligibilitySurface.mayProceed(
+            entry, in: model.awaitingDecision, id: \.entryID,
+            eligibility: { $0.contributionEligibility }, calls: model.eligibilityCalls)
+        else { return }
         guard let text = correctionToSend else {
             model.approve(entry, verdict: verdict)
             dismiss()
@@ -682,10 +829,21 @@ struct PreviewSheet: View {
         witnessWorking = true
         summary = nil
         closePreview()
-        let succeeded = await model.requestWitnessReview(entryID: entry.entryID)
+        let outcome = await model.witnessReviewOutcome(entryID: entry.entryID)
         witnessWorking = false
-        if succeeded { await load() }
-        else { failure = model.witnessCopy?.review?.failed; loading = false }
+        if outcome.succeeded { await load() }
+        else {
+            // The daemon classifies the refusal and chooses the words; this
+            // used to render one sentence for all fourteen causes, so a
+            // receipt the reviewer declined read exactly like a reviewer that
+            // was down. `review.failed` remains the fallback for a response
+            // carrying no sentence -- a transport failure, or a daemon older
+            // than this shell.
+            witnessRefusal = outcome.sentence
+            witnessBusyRetry = outcome.retryLine
+            failure = outcome.sentence ?? model.witnessCopy?.review?.failed
+            loading = false
+        }
     }
 
     private func load() async {
@@ -896,8 +1054,7 @@ struct SearchTab: View {
                 VStack(alignment: .leading, spacing: TC.Space.sm) {
                     ForEach(Array(contexts.enumerated()), id: \.offset) { _, snippet in
                         Text(highlighting(snippet, term: needle))
-                            .font(TC.Font_.monoCode)
-                            .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+                            .tcType(TC.Font_.monoCodeText)
                             .textSelection(.enabled)
                             .padding(.horizontal, TC.Space.sm)
                             .padding(.vertical, TC.Space.s)
@@ -1083,6 +1240,7 @@ struct WhatsInItTab: View {
                 LabeledContent("Turns recorded", value: "\(summary.eventCount)")
                 LabeledContent("Session on disk", value: Format.bytes(summary.rawSessionBytes))
                 LabeledContent("Would send", value: Format.bytes(summary.wouldSendBytes))
+                if let probabilities = summary.tokenDistributionSummary { Text(probabilities) }
                 Text("""
                 "Would send" is usually larger than the file on disk: a redacted \
                 envelope also carries schema, consent and privacy metadata the raw \
@@ -1271,8 +1429,7 @@ struct TranscriptTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             Text(TranscriptMarkers.chipped(Self.caption, font: TC.Font_.caption))
-                .font(TC.Font_.caption)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+                .tcType(TC.Font_.captionText)
                 .foregroundStyle(TC.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -1326,10 +1483,7 @@ struct TranscriptTab: View {
         Group {
             if let chunk = resident.rendered[index] {
                 Text(chunk.text)
-                    .font(TC.Font_.monoTranscript)
-                    .lineSpacing(
-                        TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
-                    )
+                    .tcType(TC.Font_.monoTranscriptText)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     // The chips are named here and nowhere else: SwiftUI has
@@ -1402,7 +1556,8 @@ struct TranscriptTab: View {
     private static let columnWidth = ("M" as NSString).size(withAttributes: [.font: font]).width
     private static let rowHeight =
         NSLayoutManager().defaultLineHeight(for: font)
-        + TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
+        + TC.Font_.LineHeight.spacing(
+            for: font.pointSize, TC.Font_.monoTranscriptText.lineHeight)
 
     /// Spec copy, with the sample marker rendered as a live chip so the
     /// sentence demonstrates the thing it describes.

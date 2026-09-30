@@ -230,9 +230,104 @@ export TRACE_COMMONS_WEBAUTHN_RP_NAME="TraceCommons"            # shown in authe
   exact origin the browser sees (scheme + host + port). A mismatch makes every
   ceremony fail verification at the authenticator. `RP_ID` must be a registrable
   suffix of that origin's host.
+- **Several origins.** `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` may be a
+  comma-separated list, e.g. `https://tracecommons.ai,https://ingest.tracecommons.ai`.
+  The first entry is the primary origin; every entry is accepted. A single value
+  means what it always did. Every entry must be the `RP_ID` host or a subdomain
+  of it, or startup fails. Subdomains are never implied: list each origin.
 - The `webauthn-authenticator-rs` crate is a **DEV-dependency only** (it backs the
   in-process soft-authenticator used by the passkey tests). It is **not** compiled
   into or shipped with the production binaries; no production env var enables it.
+
+### Native passkey creation (Z2 S2)
+
+The native app creates a passkey, and with it an `unbound` account, through the
+unauthenticated `POST /v1/account/native/passkey/create/{start,finish}`. Because
+anyone can call it, and attestation is `none`, creation is capped by:
+
+```sh
+export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value; there is no default
+```
+
+- **Unset disables creation.** Every `create` request gets the uniform deny.
+  A value that is not a non-negative integer fails startup.
+- The cap is on passkey accounts in state `unbound` or `closed`, counted
+  across every tenant. It is checked at `create/start` and again inside the
+  `create/finish` transaction. A `closed` account (a bind refused because the
+  NEAR AI account already had one, see S3 below) keeps its slot until the
+  reaper deletes it, 30 days after the close, so creating and closing accounts
+  in a loop cannot get past the cap (V102; before V102 only `unbound` counted).
+  `bound` accounts never count.
+- When the count reaches the cap, ingest logs the label
+  `unbound_account_ceiling_reached` once (target `trace_commons::passkey`), and
+  again only after the count has dropped below and reached it a second time.
+  Alert on it.
+- Each client IP (as the per-IP rate limiter reads it) may make at most
+  `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` successful
+  `create/finish` calls in a rolling 24 hours; the next gets the uniform deny.
+  Unset means **10**; `0` refuses every creation; a value that is not a
+  non-negative integer fails startup. The count is held in process, like the
+  per-minute limits, and holds only a salted hash of each IP: nothing about
+  the caller's address is written to the database. A restart clears it, and
+  with more than one ingest instance each keeps its own count.
+- Native passkey **sign-in** (`/v1/account/native/passkey/login/*`) is not
+  capped and needs no new setting; like the browser sign-in it needs the
+  login-resolver pool above.
+
+V98 grants `trace_ingest_runtime` `INSERT` on `trace_account_bindings`, and
+`EXECUTE` on `trace_unbound_passkey_account_count()`, a `SECURITY DEFINER`
+function owned by the new NOLOGIN role `trace_unbound_account_count_guard`.
+An ingest login that holds its grants some other way than through
+`trace_ingest_runtime` needs both, or every `create` is refused:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'INSERT'),
+       has_function_privilege('<ingest runtime login>', 'public.trace_unbound_passkey_account_count()', 'EXECUTE');
+```
+
+### Connect near.ai: binding a passkey account (Z2 S3)
+
+An unbound account attaches its NEAR AI identity through
+`POST /v1/account/near-ai/provision/bind/{start,finish}`, behind the account
+middleware with a native (`tcn1_`) session. It runs the NEAR AI login
+provisioning ceremony and needs exactly what that path needs (the provisioning
+switch, the admission gate, the NEAR account identity, the published issuer,
+and the login-resolver pool); there is no new setting. It uses the v2
+readiness, so no witness JSON is required.
+
+V100 grants `trace_ingest_runtime` `UPDATE (state, bound_at)` on
+`trace_account_bindings` and nothing else. An ingest login that holds its
+grants some other way needs it, or every bind fails and leaves the account
+`unbound`:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'state', 'UPDATE'),
+       has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'bound_at', 'UPDATE');
+```
+
+When the NEAR AI account already belongs to another commons account, the bind
+is refused: the passkey account is closed (its sessions and passkey revoked)
+and the response carries the existing account's session. Nothing moves between
+the two accounts; folding the passkey into the existing account is not built.
+
+When the daemon's device key is already registered to another account (the
+machine ran NEAR AI or wallet provisioning for a different account first),
+bind finish answers `409 {"error":"device_key_registered_elsewhere"}` rather
+than the uniform deny, and writes an `account_binding_failed` audit row with
+that stage. Nothing else is written: the passkey account stays `unbound`, and
+no fresh device key is minted. The label names no tenant or account.
+
+### Browser passkey step-up page (Z2 S7)
+
+`GET /account/step-up` is where the native app sends a person to add or remove
+a passkey or change the payout, which a weak native session cannot do. It runs
+the browser passkey sign-in on the ingest origin, so that origin must be on the
+origin list above, e.g.
+`TRACE_COMMONS_WEBAUTHN_RP_ORIGIN=https://tracecommons.ai,https://ingest.tracecommons.ai`.
+Without it the page loads but every sign-in is refused. There is no other
+setting; with the relying party or the account database unset, the page is a
+scriptless 503. The URL contract, headers and log labels are in
+[`native-step-up-page.md`](./native-step-up-page.md).
 
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
@@ -400,6 +495,267 @@ If any of the above is missing or stalls, see
 [`troubleshooting.md`](troubleshooting.md).
 
 ## Redeploying the binary
+
+### First: does this build carry a migration the database does not have?
+
+Check before you build, not after you install:
+
+```sh
+git diff --name-only <running build_commit> <commit to ship> -- migrations
+```
+
+`<running build_commit>` is what `/health` reports. **If that prints anything,
+a plain install will take the service down**, on any deployment that runs the
+least-privilege role split the pilot does.
+
+Ingest applies migrations at boot and treats a failure as fatal. On the pilot,
+ingest connects as a runtime role that is not the owner of any table — every
+table is owned by a separate migrator role.
+[`invite-free-admission.md`](invite-free-admission.md) §1.3 requires that split
+for the admission tables; the pilot applies it to all of them. A runtime
+role cannot run DDL, so the first new migration fails, ingest exits, and
+systemd restarts it in a loop. This happened on 2026-09-21: a build carrying
+V63 through V73 died on `ERROR: must be owner of table device_keys`, restarted
+58 times, and was down for about ten minutes until it was rolled back. Nothing
+was applied, because the first statement of the first new migration is what
+failed.
+
+So apply new migrations **as the migrator, before installing the binary**, by
+either route in `invite-free-admission.md` §1.3: point `DATABASE_URL` at the
+migrator role for one boot, or apply the files with `psql` as the migrator and
+record them in `_trace_commons_migrations`. Then grant the runtime role what
+the new tables need; the features that add tables document their own grant
+blocks (for example [`native-admission-session.md`](native-admission-session.md)
+and [`mission-insight-rewards.md`](mission-insight-rewards.md)). Only then
+install. An older binary ignores migration versions it does not know, so
+applying them ahead of the binary is safe for the build still running.
+
+Two more things this incident showed:
+
+- **The build publishes both binaries and moves both `latest.txt` pointers**,
+  ingest and issuer, even when you mean to deploy one. After a rollback, a bare
+  `pull-and-install.sh` would reinstall the build you just backed out. Point
+  each `latest.txt` back at the running build, or always pass the tag.
+- **"The issuer's source did not change" is not "the issuer binary did not
+  change."** It links the same library crate as ingest; its published sha256
+  differed across a range in which its own `bin` file was untouched.
+
+### V74: the public-run functions move to a runtime role
+
+V64 meant to close its four public-run definer functions
+(`trace_public_run_page`, `trace_resolve_public_run_source`,
+`trace_public_run_would_cycle`, `trace_public_run_retained_source`) to PUBLIC
+and grant EXECUTE to the migrator, but it did so after leaving the roles that
+own them. A non-superuser migrator may not change the ACL of a function it does
+not own, and PostgreSQL warns rather than fails there, so on every deployment
+migrated by its own owner V64 recorded as applied with PUBLIC still holding
+EXECUTE on all four and nobody holding an explicit grant. Every role could call
+them; they were reachable because nothing had been closed.
+
+V74 repairs that from inside the owner roles, and the runtime's EXECUTE now
+comes from membership in a new `NOLOGIN NOBYPASSRLS` role,
+`trace_public_run_runtime`, the way `trace_reward_runtime` works. The migrator
+keeps EXECUTE directly, so a deployment that migrates and serves as one role
+(CI, local development) needs nothing further.
+
+**A least-privilege deployment must grant the runtime role in the same step as
+V74.** V74 takes PUBLIC's EXECUTE away, so from the moment it commits an ingest
+login that is not the migrator loses the public-run pages -- every
+`/v1/community/runs/{slug}` read and every publication returns a permission
+error -- until the grant exists. Apply V74 as the migrator and, in the same session or
+the same `psql` script, run:
+
+```sql
+GRANT trace_public_run_runtime TO <ingest runtime login>;
+```
+
+On the pilot that is, as the migrator:
+
+```sql
+GRANT trace_public_run_runtime TO trace_ingest_runtime;
+```
+
+V74 also makes the unpublish trigger
+(`trace_unpublish_run_when_submission_leaves_accepted`, fired when a
+submission's status leaves `accepted`) a `SECURITY DEFINER` function owned by
+`trace_public_run_unpublisher`, a role that holds only the columns its one
+UPDATE touches. Under V64 the trigger ran as the caller and needed UPDATE on
+`trace_public_runs`, which the ingest runtime has no other reason to hold; a
+deployment that added `GRANT SELECT, UPDATE ON trace_public_runs TO <ingest
+runtime login>` by hand to get past `permission denied for table
+trace_public_runs` no longer needs it and may revoke it. The caller's tenant
+setting carries into the definer function, so the forced tenant policy still
+scopes the update to the caller's own tenant.
+
+### V75: account invite trust runtime grant
+
+V75 adds tenant-scoped account trust, invite grant, and event tables. Its
+`trace_account_invite_runtime` role has column-scoped access to the existing
+account, verified-anchor, and durable invite rows and access to the three new
+tables. The role is `NOLOGIN NOBYPASSRLS`; the ingest login must inherit it for
+`POST /v1/account/invites/redeem` to work under the restricted runtime role:
+
+```sql
+GRANT trace_account_invite_runtime TO <ingest runtime login>;
+```
+
+The invite remains issued by the separate registry role. This grant does not
+allow the ingest login to mint or revoke invites.
+
+### V90: the ingest runtime role
+
+Migrations since V62 created tables on paths every client uses and granted
+the ingest runtime nothing on them. On a deployment whose runtime login owns
+no tables, that fails with `permission denied`:
+
+- every new submission, and every status write, on `trace_submission_sessions`
+  (V78);
+- every idempotent re-POST of an existing submission, on
+  `trace_witness_certificate_evidence` (V76);
+- every withdrawal, on `trace_submission_sessions` and then on
+  `trace_token_bundles`, whose V65-V68 trigger runs as the caller.
+
+V90 names the pilot's runtime group, `trace_ingest_runtime`, as the schema's
+ingest runtime role. It creates the role `NOLOGIN NOBYPASSRLS` if it does not
+exist, and refuses to apply if an existing one is `SUPERUSER` or `BYPASSRLS`.
+It then grants the role exactly this:
+
+| Object | Grant | Why |
+|---|---|---|
+| `trace_submission_sessions` | `SELECT` | the source-session lock on every submission; withdrawal's mapping read |
+| `trace_source_sessions` | `SELECT, UPDATE (withdrawn_at)` | the `FOR UPDATE` row lock; withdrawal's stamp |
+| `trace_witness_evidence_runtime` | membership | V76's role for the evidence table |
+| `trace_token_bundles` | `SELECT, UPDATE (state, processing_state, processing_summary)` | the revocation trigger and withdrawal's pending-deletion sweep |
+| `trace_token_attachments` | `SELECT, UPDATE (deleted, prepared)` | withdrawal marking a bundle's objects deleted |
+| `trace_accounts` | `UPDATE (created_at, closed_at)`, replacing any table-wide `UPDATE` | an account merge closes the absorbed account; `created_at` is the row-lock column |
+
+V90 also grants `INSERT` on both source-session tables to
+`trace_account_admission_runtime`. Claiming a source session is the only
+writer of those rows, and only account admission claims one.
+
+The `trace_accounts` change matters when account admission is switched on.
+Its readiness check refuses a runtime that can update
+`trace_accounts.account_id`, and a table-wide `UPDATE` grant allows that.
+V90 revokes the group's table-wide `UPDATE` and checks that none remains.
+
+Opt-in token-bundle creation (`TRACE_COMMONS_BUNDLE_SERVER_ID`) still needs its
+own grants: `INSERT` on both token tables, and `UPDATE` on the receipt,
+expiry and processing columns. V90 does not grant them.
+
+On the pilot the role already exists and holds the ingest login's grants, so
+V90 fixes the grants itself and nothing is left to do by hand. On any other
+deployment whose ingest login is not the migrator, grant the role once, in the
+same session that applies V90:
+
+```sql
+GRANT trace_ingest_runtime TO <ingest runtime login>;
+```
+
+A deployment that migrates and serves as one role needs nothing.
+
+### V92 to V95: the pipeline tables
+
+V92 to V95 create the versioned pipeline's tables. Each of them grants
+`trace_ingest_runtime`, the group V90 names, what the pipeline code reads and
+writes on the tables it creates, and nothing broader. Each refuses to apply if
+the group does not exist; V90 creates it. The grants are these:
+
+| Table | Grant | Why |
+|---|---|---|
+| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash` | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, or its admission decision |
+| `phase_outcomes` | `SELECT, INSERT` | each phase commit appends its outcome, and later phases read it |
+| `pipeline_bundle_packages` | `SELECT, INSERT` | registering a bundle appends its package, and every phase reads it |
+| `pipeline_active_bundles` | `SELECT, INSERT` | startup selects the default bundle for a tenant that has none; the receipt reads it. Switching a tenant to a different bundle is an operator action, not something ingest calls on its own, so the runtime holds no `UPDATE` here |
+| `pipeline_bundle_policy_status` | `SELECT, INSERT` | registering a bundle adds one row per phase; the receipt and the worker read whether a phase is runnable |
+| `pipeline_receipt_artifacts` | `SELECT, INSERT, DELETE, UPDATE (state, committed_at, cleanup_after)` | receipt staging, its final commit, a refused attempt's clean-up, and the orphan sweep |
+| `pipeline_run_settlements` | `SELECT, INSERT`; `UPDATE` on `operation_state`, `result_ref_hash`, `external_receipt_hash`, `credit_event_id`, `settlement_batch_id`, `payout_state`, `lease_token`, `lease_expires_at`, `dispatched_at`, `attempt_count`, `last_error_label`, `updated_at` | Score adds one leg per award; Settle, reconciliation, and a failed run advance each leg. Nothing updates a leg's identity, its payout rail, or `created_at` |
+| `pipeline_admission_usage` | `SELECT, INSERT` | the receipt counts each key once and reads the counts for its quota |
+
+No grant allows `DELETE` on runs, outcomes, or legs. They go only with their
+submission or tenant, through foreign-key cascades, which run as the table
+owner. Outcomes and bundle packages also refuse `UPDATE` and a direct `DELETE`
+by trigger.
+
+The pipeline also uses tables older than V62:
+
+| Table | What the pipeline needs |
+|---|---|
+| `trace_tenants` | `INSERT` |
+| `trace_submissions` | `SELECT, INSERT`; `UPDATE` on `status`, `reviewed_at`, `updated_at`; row locks (`FOR UPDATE`, `FOR SHARE`) |
+| `trace_object_refs` | `SELECT, INSERT`; a row lock (`FOR SHARE`) |
+| `trace_derived_records` | `INSERT` |
+| `trace_tombstones` | `SELECT` |
+| `trace_withdrawals` | `SELECT` |
+| `trace_credit_holds` | `SELECT` |
+| `trace_credit_ledger` | `SELECT, INSERT`; `UPDATE` on `settlement_state` |
+| `trace_credit_settlement_batches` | `SELECT, INSERT`; `UPDATE` on `instrument_id` |
+
+V92 to V95 grant nothing on these tables: the pipeline needs them at V1 or
+V2, long before any pipeline migration runs. V90 does not grant them either
+-- its own table, above, covers only the tables V63 to V89 added. The pilot's
+group holds these as table-wide privileges taken by hand when its schema was
+at V62, not by any migration. A deployment whose ingest runtime group holds
+V90's grants but never took the pilot's V62-era table grants by hand is still
+missing them, and the pipeline -- like the legacy path -- fails closed with
+`permission denied` until it does. Only a deployment carrying both, the
+pilot's V62-era grants and V90's own, has nothing left to do by hand for the
+pipeline.
+
+### Account cookies take the `__Host-` prefix: a one-time browser sign-out
+
+The browser cookies ingest sets for contributor accounts are bound to the
+exact host that set them:
+
+| Cookie | Was | Now |
+|---|---|---|
+| account session | `tc_account_session` | `__Host-tc_account_session` |
+| passkey ceremony | `tc_passkey_ceremony` | `__Host-tc_passkey_ceremony` |
+| NEAR ceremony | `tc_near_ceremony` | `__Host-tc_near_ceremony` |
+| sign-in link ceremony | `tc_login_ceremony` (`Path=/account/login`) | `__Host-tc_login_ceremony` (`Path=/`) |
+
+A browser accepts a `__Host-` cookie only with `Secure`, `Path=/` and no
+`Domain`, which every one of these already carried except the sign-in link
+ceremony's path. Nothing changes for native clients: the desktop apps
+authenticate with a `tcn1_` bearer, not a cookie.
+
+**The first deploy of this build signs every browser out once.** The server
+does not read the old session cookie name, so a browser that presents only
+`tc_account_session` gets a `401` from `/v1/account/*` and has to sign in
+again. There is deliberately no period in which both names are accepted.
+Server-side, the old sessions stay valid rows until they expire (seven days)
+or are revoked; only the browser's handle to them is dropped.
+
+The old cookie is also cleaned out of browsers. Every response that sets the
+new session cookie (sign-in by link, passkey or NEAR, and session rotation),
+and a browser logout, carries a second `Set-Cookie` that expires
+`tc_account_session` (`Max-Age=0`, `Path=/`, same attributes). The in-flight
+ceremony cookies need no cleanup: they live three to ten minutes, and a
+ceremony started before the deploy simply has to be started again.
+
+Nothing needs configuring. If a contributor reports being signed out after the
+deploy, that is this change; signing in again is the fix.
+
+Signing in again does not end the old session, and the contributor cannot log
+it out: logout identifies the session by the new cookie, and the browser no
+longer presents the old one. That row stays valid until it expires, up to
+seven days. A contributor who wants it gone now should sign in again and call
+`POST /v1/account/sessions/revoke-all`, which revokes every session on the
+account, the old one and the current one alike, and then sign in once more.
+
+### V97: account bindings
+
+V97 (`trace_account_bindings`, native passkey identity) grants
+`trace_ingest_runtime` `SELECT` on the new table and nothing else. Session
+validation joins it on every authenticated `/v1/account/*` request, so an
+ingest login that holds its grants some other way than through
+`trace_ingest_runtime` fails those requests with a 500 until it can read the
+table. Check before deploying:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
+```
+
+### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and
 pulled from GCS. From a clean checkout at the commit you intend to ship:

@@ -45,6 +45,223 @@
             <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
 
                 <!--
+                    The credential this computer answers calls with, and it
+                    comes before the tool list: without one, a connect has
+                    nothing to offer, and a screen that hid the control
+                    without saying why would leave a contributor pressing a
+                    button that is not there.
+
+                    Nothing on this card renders a key, a prefix, an id or an
+                    account name. The payload carries no hole for one.
+
+                    One button, and which one it is comes from the shared
+                    table across the ABI rather than from anything decided
+                    here. The sentence above it is the consequence of
+                    pressing it, drawn from the same call that chose it, so a
+                    button that opens a browser and mints a key at a third
+                    party can never appear without the line saying so.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind ViewModel.CredentialTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialWhat, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            One line per tone, chosen from the tone and never
+                            from the text, exactly as the listener row below
+                            is. Only the clear one, which is the one meaning a
+                            key is kept here, is green.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsNeutral, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsHeld, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcBlueBrandBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsClear, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsRefused, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            What pressing the button below costs, or what
+                            forgetting does not do. Bound to the same action
+                            the button is, so neither can be drawn without
+                            the other.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.CredentialActionPreamble, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasCredentialActionPreamble, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <ComboBox Header="{x:Bind ViewModel.CredentialProviderLabel}"
+                                  ItemsSource="{x:Bind ViewModel.CredentialProviders}"
+                                  DisplayMemberPath="Label" SelectedValuePath="Id"
+                                  SelectedValue="{x:Bind ViewModel.CredentialProvider, Mode=TwoWay}"
+                                  Visibility="{x:Bind ViewModel.HasCredentialProvider, Mode=OneWay}"
+                                  IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                  MinHeight="44" HorizontalAlignment="Stretch" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialWalletNotice}"
+                                   Visibility="{x:Bind ViewModel.HasCredentialWalletNotice, Mode=OneWay}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                Style="{StaticResource TcPrimaryButtonStyle}"
+                                HorizontalAlignment="Left"
+                                Click="OnCredentialAction" />
+                        <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.ShowCredentialOtherAction, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                HorizontalAlignment="Left"
+                                Click="OnCredentialAction" />
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    What is left in that account, and it sits directly beneath
+                    the sign-in it describes.
+
+                    THIS CARD JUDGES NO AMOUNT. There is no threshold here, no
+                    low balance colour and no warning: a figure this app
+                    painted red would be inventing a limit nobody set, on an
+                    account whose ceiling may not exist at all. The colours on
+                    this card come from the state, and they say whether the
+                    READ succeeded, never whether the money is comfortable.
+
+                    The figure and its absence are two different things. An
+                    empty amount is never zero: the account with no ceiling is
+                    the ordinary one, it reports no remaining figure, and the
+                    sentence in its place says so in words rather than letting
+                    a contributor read $0.00 and top up money they still have.
+
+                    On the one state that carries figures the state sentence
+                    is deliberately empty, so nothing is drawn above the
+                    number except the heading naming what it is.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind ViewModel.ShowAccountBalance, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind ViewModel.BalanceTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            The figure the heading just named. No Foreground
+                            of its own, deliberately: the ink is the card's,
+                            and nothing here reads the number back to pick a
+                            colour from it.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.BalanceAmountText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceAmount, Mode=OneWay}"
+                                   Style="{StaticResource TcMetricValueTextStyle}" />
+                        <!--
+                            And where there is no figure, the sentence that
+                            explains why there is not. Drawn only when the
+                            figure is not, so the two never say it twice.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.BalanceRemainingText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceRemainingText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.BalanceWhat, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            One line per tone, chosen from the tone and never
+                            from the text, exactly as the two cards around it
+                            are. The whole group is absent on the state whose
+                            sentence is empty, so a card of figures never
+                            opens with a blank line.
+                        -->
+                        <StackPanel Spacing="0"
+                                    Visibility="{x:Bind ViewModel.HasBalanceStateText, Mode=OneWay}">
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsNeutral, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsHeld, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcBlueBrandBrush}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsClear, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcGreenTextBrush}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsAttention, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcGoldTextBrush}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsRefused, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcCoralTextBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <TextBlock Text="{x:Bind ViewModel.BalanceLimitText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceLimitText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.BalanceSpentText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceSpentText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            When THIS COMPUTER asked. Not when the service
+                            updated anything, which is a claim about its
+                            bookkeeping that nothing here supports.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.BalanceObservedText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceObservedText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionSmallTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            The way back in, and it is the sign-in card's own
+                            action: the same words, the same cost sentence and
+                            the same ceremony. Withheld while that card is
+                            already offering one, because two buttons that
+                            mint the same key are one button too many.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.BalanceActionPreamble, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceActionPreamble, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="{x:Bind ViewModel.BalanceActionText, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.HasBalanceAction, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                HorizontalAlignment="Left"
+                                Click="OnBalanceAction" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.Title}" Style="{StaticResource TcTitleSectionTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.Message, Mode=OneWay}" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.What}" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+                        <Button Content="{x:Bind ViewModel.Funding.Action, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.Funding.Enabled, Mode=OneWay}"
+                                HorizontalAlignment="Left" MinHeight="44" Click="OnFundingAction" />
+                    </StackPanel>
+                </Border>
+
+                <!--
                     The tools on this computer, and they come FIRST. Connecting
                     one is what a contributor came here to do; the switch below
                     is the kill switch over all of them, not the first question.
@@ -94,38 +311,53 @@
                                    Visibility="{x:Bind ViewModel.HasNoHarnesses, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
+                        <!--
+                            Why a connect is not on offer. Once, above the
+                            rows, because the fact is about the destination
+                            this app would answer from and not about any one
+                            tool, and absent entirely on a daemon that does
+                            not gate connects: telling somebody to sign in
+                            before connecting a tool they can connect right
+                            now would be false.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.HarnessesCredentialNotice, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasHarnessesCredentialNotice, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGoldTextBrush}"
+                                   TextWrapping="Wrap" />
                         <ItemsControl ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:HarnessRowViewModel">
-                                    <StackPanel Spacing="4"
-                                                Margin="0,10,0,0"
-                                                BorderBrush="{ThemeResource TcHairlineDividerBrush}"
-                                                BorderThickness="0,1,0,0"
-                                                Padding="0,10,0,0">
-                                        <!--
-                                            The tool's own name, off the wire.
-                                            No shell spells one: a tool renamed
-                                            upstream must not go on being called
-                                            the old thing here.
-                                        -->
-                                        <TextBlock Text="{x:Bind Name}"
-                                                   Style="{StaticResource TcTitleCardTextStyle}"
-                                                   TextWrapping="Wrap" />
-                                        <!--
-                                            The file an action would change,
-                                            shown to the contributor. It goes on
-                                            no log line and into no audit row.
-                                        -->
-                                        <TextBlock Text="{x:Bind ConfigPath}"
-                                                   Visibility="{x:Bind HasConfigPath}"
-                                                   Style="{StaticResource TcMonoCodeTextStyle}"
-                                                   IsTextSelectionEnabled="True"
-                                                   TextWrapping="Wrap" />
-                                        <!--
-                                            Two lines, one state, chosen from
-                                            the state rather than from the text.
-                                            Only the answering one is green.
-                                        -->
+                                    <StackPanel Spacing="12" Margin="0,12,0,0" Padding="20"
+                                                Background="{ThemeResource TcSurfaceInsetBrush}"
+                                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                                        <Grid ColumnSpacing="12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Padding="12" Background="{ThemeResource TcSurfaceCardBrush}"
+                                                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                                                <FontIcon Glyph="&#xE756;" FontSize="20"
+                                                          Foreground="{ThemeResource TcGreenTextBrush}"
+                                                          AutomationProperties.AccessibilityView="Raw" />
+                                            </Border>
+                                            <TextBlock Grid.Column="1" Text="{x:Bind Name}"
+                                                       VerticalAlignment="Center"
+                                                       Style="{StaticResource TcTitleCardTextStyle}"
+                                                       TextWrapping="Wrap" />
+                                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8"
+                                                        VerticalAlignment="Center">
+                                                <Button Content="{x:Bind ConnectText}"
+                                                        Style="{StaticResource TcPrimaryButtonStyle}"
+                                                        Visibility="{x:Bind CanConnect}"
+                                                        Tag="{x:Bind Id}" Click="OnConnectHarness" />
+                                                <Button Content="{x:Bind DisconnectText}"
+                                                        Visibility="{x:Bind CanDisconnect}"
+                                                        Tag="{x:Bind Id}" Click="OnDisconnectHarness" />
+                                            </StackPanel>
+                                        </Grid>
                                         <TextBlock Text="{x:Bind StateText}"
                                                    Visibility="{x:Bind StateIsPlain}"
                                                    Style="{StaticResource TcCaptionTextStyle}"
@@ -135,46 +367,25 @@
                                                    Style="{StaticResource TcCaptionTextStyle}"
                                                    Foreground="{ThemeResource TcGreenTextBrush}"
                                                    TextWrapping="Wrap" />
-                                        <!--
-                                            When a call last arrived, assembled
-                                            across the ABI and absent when
-                                            there is nothing to report, which
-                                            draws no line at all.
-                                        -->
                                         <TextBlock Text="{x:Bind LastCallText}"
                                                    Visibility="{x:Bind HasLastCallText}"
                                                    Style="{StaticResource TcCaptionTextStyle}"
                                                    TextWrapping="Wrap" />
-                                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
-                                            <Button Content="{x:Bind ConnectText}"
-                                                    Visibility="{x:Bind CanConnect}"
-                                                    Tag="{x:Bind Id}"
-                                                    Click="OnConnectHarness" />
-                                            <!--
-                                                Offered whenever the tool is
-                                                connected, installed or not:
-                                                uninstalling a coding tool does
-                                                not remove the line we put in
-                                                its file, and "remove only what
-                                                we put there" is worth nothing
-                                                if this control is hidden.
-                                            -->
-                                            <Button Content="{x:Bind DisconnectText}"
-                                                    Visibility="{x:Bind CanDisconnect}"
-                                                    Tag="{x:Bind Id}"
-                                                    Click="OnDisconnectHarness" />
-                                        </StackPanel>
-                                        <!--
-                                            The same thing done outside this
-                                            app, verbatim and selectable, for a
-                                            contributor who would rather not
-                                            have an app edit their files.
-                                        -->
-                                        <TextBlock Text="{x:Bind ConnectCommand}"
-                                                   Visibility="{x:Bind HasConnectCommand}"
-                                                   Style="{StaticResource TcMonoCodeTextStyle}"
-                                                   IsTextSelectionEnabled="True"
-                                                   TextWrapping="Wrap" />
+                                        <Expander Header="{x:Bind SettingsTitle}"
+                                                  IsExpanded="{x:Bind IsSettingsExpanded, Mode=TwoWay}"
+                                                  HorizontalAlignment="Stretch"
+                                                  HorizontalContentAlignment="Stretch">
+                                            <StackPanel Spacing="12">
+                                                <TextBlock Text="{x:Bind ConfigPath}"
+                                                           Visibility="{x:Bind HasConfigPath}"
+                                                           Style="{StaticResource TcMonoCodeTextStyle}"
+                                                           IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind ConnectCommand}"
+                                                           Visibility="{x:Bind HasConnectCommand}"
+                                                           Style="{StaticResource TcMonoCodeTextStyle}"
+                                                           IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Expander>
                                     </StackPanel>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
@@ -199,6 +410,10 @@
                         Padding="14,12"
                         Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
                     <StackPanel Spacing="10">
+                        <Expander Header="{x:Bind ViewModel.Title, Mode=OneWay}"
+                                  HorizontalAlignment="Stretch"
+                                  HorizontalContentAlignment="Stretch">
+                            <StackPanel Spacing="10">
                         <TextBlock Text="{x:Bind ViewModel.What, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
@@ -215,6 +430,8 @@
                                       IsOn="{x:Bind ViewModel.Enabled, Mode=OneWay}"
                                       IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
                                       Toggled="OnToggled" />
+                            </StackPanel>
+                        </Expander>
                         <!--
                             One line per tone, chosen from the tone and never
                             from the text: three of the sentences begin with

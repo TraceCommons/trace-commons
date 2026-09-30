@@ -60,6 +60,8 @@ finish-args:
   # their own finish-arg, except Notifications and the SNI watcher, which
   # need this socket explicitly.
   - --socket=session-bus
+  # Cloud credentials use the host's unlocked Secret Service collection.
+  - --talk-name=org.freedesktop.secrets
   # The update path (src/update.rs). org.freedesktop.portal.Flatpak is the
   # *flatpak* portal -- a different service from org.freedesktop.portal.Desktop
   # -- and it is what CreateUpdateMonitor and UpdateMonitor.Update live on.

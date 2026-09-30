@@ -59,6 +59,7 @@ struct OnboardingRootsView: View {
             header
             explanation
             rows
+                .disabled(model.isStartingDaemon)
             if let failure {
                 Text(failure).font(TC.Font_.body).foregroundStyle(.red)
             }
@@ -148,7 +149,7 @@ struct OnboardingRootsView: View {
             Spacer(minLength: 0)
             Button("Continue") { start() }
                 .tcPrimaryAction()
-                .disabled(!roots.isComplete)
+                .disabled(!roots.isComplete || model.isStartingDaemon)
         }
     }
 
@@ -173,18 +174,17 @@ struct OnboardingRootsView: View {
             return
         }
         failure = nil
-        model.startDaemon(at: configDirectory, settingsJSON: settingsJSON)
-        // A refusal here is not the roots refusal -- that one cannot recur,
-        // the settings were just persisted -- so it is something else and
-        // belongs on this screen rather than silently returning to it.
-        // startDaemon is synchronous: its final startup state is available here.
-        switch model.startup {
-        case .refused(let reason):
-            failure = reason
-        case .running:
-            onStarted()
-        case .starting, .needsRoots:
-            break
+        model.startDaemon(at: configDirectory, settingsJSON: settingsJSON) { outcome in
+            switch outcome {
+            case .refused(let reason):
+                failure = reason
+            case .running:
+                onStarted()
+            case .needsRoots:
+                failure = String(describing: TCDaemon.TCError.rootsNotDeclared)
+            case .starting:
+                break
+            }
         }
     }
 }

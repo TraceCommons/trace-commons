@@ -99,6 +99,10 @@ public sealed class HarnessRowViewModel
     /// <summary>The state line in the plain colour: everything that is not answering.</summary>
     public bool StateIsPlain => HasStateText && !ReadsAsWorking;
 
+    public bool IsSettingsExpanded { get; set; }
+
+    public string SettingsTitle => _copy.HarnessPreviewTitle;
+
     public string ConnectText => _copy.HarnessConnect;
 
     public string DisconnectText => _copy.HarnessDisconnect;

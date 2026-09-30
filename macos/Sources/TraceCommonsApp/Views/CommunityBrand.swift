@@ -138,13 +138,30 @@ enum CommunityBrand {
         /// See `displayPanel`.
         static let displayPanelTracking = tracking(-0.035, at: 24)
         /// `lede`, 500/18, line-height 1.3, `-.01em`.
-        static let lede = sans(18)
+        ///
+        /// The size is a constant rather than a literal repeated at each of
+        /// the face, its tracking and its leading. This face is `.custom`,
+        /// so unlike the SF faces it does not answer to the system text
+        /// size; what its call sites got wrong was not scaling but
+        /// agreement -- three places had to keep saying 18.
+        static let ledeSize: CGFloat = 18
+        /// See `ledeSize`.
+        static let ledeLineHeight: CGFloat = 1.3
+        static let lede = sans(ledeSize)
         /// See `lede`.
-        static let ledeTracking = tracking(-0.01, at: 18)
-        /// `body.brand`, 500/13, line-height 1.4-1.45, `-.01em`.
-        static let body = sans(13)
+        static let ledeTracking = tracking(-0.01, at: ledeSize)
+        /// The `.lineSpacing()` `lede` is specified with.
+        static let ledeLineSpacing = TC.Font_.LineHeight.spacing(for: ledeSize, ledeLineHeight)
+        /// `body.brand`, 500/13, line-height 1.4-1.45, `-.01em`. See
+        /// `ledeSize` for why the size is named.
+        static let bodySize: CGFloat = 13
+        /// See `bodySize`.
+        static let bodyLineHeight: CGFloat = 1.45
+        static let body = sans(bodySize)
         /// See `body`.
-        static let bodyTracking = tracking(-0.01, at: 13)
+        static let bodyTracking = tracking(-0.01, at: bodySize)
+        /// The `.lineSpacing()` `body` is specified with.
+        static let bodyLineSpacing = TC.Font_.LineHeight.spacing(for: bodySize, bodyLineHeight)
         /// `field.value`, 500/15 sans -- the bio.
         static let fieldValue = sans(15)
         /// `field.value`, 500/15 mono -- the handle.

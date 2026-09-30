@@ -115,8 +115,10 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
             calls.lock().unwrap().push("collateral".into());
             include_str!("../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json")
         }}}))
-        .route("/v1/witness", post({let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();move |Json(request):Json<serde_json::Value>|{let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();async move{
+        .route("/v1/witness", post({let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();move |headers: axum::http::HeaderMap, Json(request):Json<serde_json::Value>|{let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();async move{
             calls.lock().unwrap().push("witness".into());
+            // A review a person asked for is not background work (#1014).
+            assert!(headers.get(trace_commons_protocol::witness_pacing::WITNESS_WORKLOAD_HEADER).is_none());
             let raw=serde_json::from_value(request["raw_contribution"].clone()).unwrap();
             let redactor=crate::envelope::build_redactor_with(&cfg,None,None).unwrap();
             let mut envelope=crate::envelope::redact_to_envelope(&redactor,raw).await.unwrap();
@@ -149,6 +151,30 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
         *calls.lock().unwrap(),
         vec!["claim", "attestation", "collateral", "witness"]
     );
+    // The stored review records what the witness was actually handed. This
+    // session joined no inference hop, so the honest answer is uncertified
+    // with the reason -- and the queue row carries the same record for as
+    // long as the review is pinned, absent everywhere else.
+    {
+        use crate::witness::inference_record::{
+            InferenceAttestationRecord, REASON_NO_ATTESTED_CALL,
+        };
+        let artifact = super::super::super::approved_envelope::load_witnessed(&s.store, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            artifact.attested_inference(),
+            Some(&InferenceAttestationRecord::uncertified(
+                REASON_NO_ATTESTED_CALL
+            ))
+        );
+        let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
+        let row = entry_value(&entry, s.admission_evidence());
+        assert_eq!(
+            row["attested_inference"],
+            serde_json::json!({"state": "uncertified", "reason": "no_attested_call"})
+        );
+    }
     let approved = handle_approve(&s, &req("approve", serde_json::json!({"entry_id":id}))).await;
     assert_eq!(approved.result.unwrap()["approved"], 1);
     let entry = s.queue.lock().unwrap().get(id).unwrap().clone();

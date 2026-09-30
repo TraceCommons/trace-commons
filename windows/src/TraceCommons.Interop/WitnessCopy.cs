@@ -50,6 +50,17 @@ public sealed record WitnessCopy
 
     [JsonPropertyName("applies_at_once")] public string AppliesAtOnce { get; init; } = "";
 
+    [JsonPropertyName("token_heading")] public string TokenHeading { get; init; } = "";
+    [JsonPropertyName("token_disclosure")] public string TokenDisclosure { get; init; } = "";
+    [JsonPropertyName("token_capture_note")] public string TokenCaptureNote { get; init; } = "";
+    [JsonPropertyName("token_scope_note")] public string TokenScopeNote { get; init; } = "";
+    [JsonPropertyName("token_enable")] public string TokenEnable { get; init; } = "";
+    [JsonPropertyName("token_disable")] public string TokenDisable { get; init; } = "";
+    [JsonPropertyName("token_confirm")] public string TokenConfirm { get; init; } = "";
+    [JsonPropertyName("token_cancel")] public string TokenCancel { get; init; } = "";
+    [JsonPropertyName("token_enabled")] public string TokenEnabled { get; init; } = "";
+    [JsonPropertyName("token_disabled")] public string TokenDisabled { get; init; } = "";
+    [JsonPropertyName("token_save_failed")] public string TokenSaveFailed { get; init; } = "";
     [JsonPropertyName("inference_heading")] public string InferenceHeading { get; init; } = "";
     [JsonPropertyName("inference_disclosure")] public string InferenceDisclosure { get; init; } = "";
     [JsonPropertyName("inference_capture_note")] public string InferenceCaptureNote { get; init; } = "";
@@ -244,6 +255,8 @@ public sealed record WalletCopy
     [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
     [JsonPropertyName("available")] public string Available { get; init; } = "";
     [JsonPropertyName("unavailable")] public string Unavailable { get; init; } = "";
+    [JsonPropertyName("address_refused")] public string AddressRefused { get; init; } = "";
+    [JsonPropertyName("unreachable")] public string Unreachable { get; init; } = "";
     [JsonPropertyName("opening")] public string Opening { get; init; } = "";
     [JsonPropertyName("waiting")] public string Waiting { get; init; } = "";
     [JsonPropertyName("failed")] public string Failed { get; init; } = "";
@@ -263,6 +276,17 @@ public sealed record AdmissionCopy
     [JsonPropertyName("working")] public string Working { get; init; } = "";
     [JsonPropertyName("ready")] public string Ready { get; init; } = "";
     [JsonPropertyName("failed")] public string Failed { get; init; } = "";
+    [JsonPropertyName("failed_receipt_endpoint")] public string FailedReceiptEndpoint { get; init; } = "";
+    [JsonPropertyName("failed_receipt_endpoint_invalid")] public string FailedReceiptEndpointInvalid { get; init; } = "";
+    [JsonPropertyName("failed_permission")] public string FailedPermission { get; init; } = "";
+    [JsonPropertyName("failed_not_enrolled")] public string FailedNotEnrolled { get; init; } = "";
+    [JsonPropertyName("failed_session_unreadable")] public string FailedSessionUnreadable { get; init; } = "";
+    [JsonPropertyName("failed_source_unsupported")] public string FailedSourceUnsupported { get; init; } = "";
+    [JsonPropertyName("failed_proxy_missing")] public string FailedProxyMissing { get; init; } = "";
+    [JsonPropertyName("failed_proxy_untrusted")] public string FailedProxyUntrusted { get; init; } = "";
+    [JsonPropertyName("failed_hosts_untrusted")] public string FailedHostsUntrusted { get; init; } = "";
+    [JsonPropertyName("failed_backend")] public string FailedBackend { get; init; } = "";
+    [JsonPropertyName("failed_try_again")] public string FailedTryAgain { get; init; } = "";
     [JsonPropertyName("refused_glyph")] public string RefusedGlyph { get; init; } = "";
     [JsonPropertyName("refused_tone")] public string RefusedTone { get; init; } = "";
 }

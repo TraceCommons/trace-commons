@@ -37,12 +37,32 @@ pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 /// carry this string, so a v2 stamp means the glued-assignment shape was not
 /// covered when that envelope was redacted.
 pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v3";
-pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
+/// v2 refuses classifier errors; v1 could return deterministic-only output.
+/// Never treat a historical v1 certificate as proof of a complete pipeline.
+pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v2";
 pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
 /// Distinct from the near-ai suffix even though both serve the same weights:
 /// the hosted endpoint wraps a 512-context model in an internal splitter, so
 /// a stored summary must record which one actually produced the redaction.
 pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-self-hosted-v1";
+
+/// Exact known fail-closed classifier pipelines, shared by client and server.
+///
+/// Use only with a verified certificate bound to the artifact and an approved
+/// witness signer/measurement. A self-reported version is not evidence, and
+/// membership does not replace consent, risk holds or operator trust policy.
+/// Historical sidecar v1 is deliberately excluded: it could silently fall back.
+/// New versions require explicit review; do not accept prefixes or normalize.
+pub const FULL_REDACTION_PIPELINE_VERSIONS: &[&str] = &[
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1",
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2",
+];
+
+/// Whether a verified certificate names an exact known full pipeline.
+pub fn is_full_redaction_pipeline_version(version: &str) -> bool {
+    FULL_REDACTION_PIPELINE_VERSIONS.contains(&version)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivacyFilterBackendTag {
@@ -127,6 +147,59 @@ fn default_submission_status() -> String {
     "accepted".to_string()
 }
 
+/// Untrusted, adapter-native session identity. The server validates and scopes
+/// this to an authenticated account before using it as an equality key.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSessionIdentity {
+    pub adapter: String,
+    pub native_id: String,
+}
+
+impl std::fmt::Debug for SourceSessionIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceSessionIdentity")
+            .field("adapter", &"[untrusted]")
+            .field("native_id", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceSessionIdentityError {
+    UnsupportedAdapter,
+    InvalidNativeId,
+}
+
+/// Validates the bounded shape before a source ID can bypass prose redaction.
+/// This is a syntax contract only; it cannot prove which local file supplied
+/// the adapter-native ID or authorize an account.
+pub fn validate_source_session_identity(
+    identity: &SourceSessionIdentity,
+) -> Result<(), SourceSessionIdentityError> {
+    let requires_uuid = match identity.adapter.as_str() {
+        "codex" | "claude-code" => true,
+        "opencode" | "cline" | "gemini-cli" => false,
+        _ => return Err(SourceSessionIdentityError::UnsupportedAdapter),
+    };
+    let native_id = identity.native_id.as_bytes();
+    if native_id.is_empty()
+        || native_id.len() > 128
+        || !native_id
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
+    {
+        return Err(SourceSessionIdentityError::InvalidNativeId);
+    }
+    if requires_uuid {
+        match Uuid::parse_str(&identity.native_id) {
+            Ok(parsed) if parsed.hyphenated().to_string() == identity.native_id => {}
+            _ => return Err(SourceSessionIdentityError::InvalidNativeId),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEnvelope {
     pub schema_version: String,
@@ -153,6 +226,10 @@ pub struct TraceContributionEnvelope {
     /// never reach a gate, a scoring input, or a tenant-scoping decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Adapter-native equality key for account-scoped session withdrawal.
+    /// This is untrusted and never authorizes access by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session: Option<SourceSessionIdentity>,
     #[serde(default)]
     pub trace_card: TraceCard,
     #[serde(default)]
@@ -486,6 +563,9 @@ pub struct SafePrivacyFilterSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SafePrivacyFilterRedaction {
+    /// Private byte edits from the classifier; absent for legacy text-only backends.
+    #[serde(skip)]
+    pub private_edits: Option<crate::private_edit_map::PrivateRedactionEdits>,
     pub redacted_text: String,
     pub summary: SafePrivacyFilterSummary,
     pub report: RedactionReport,
@@ -1026,6 +1106,27 @@ impl Default for StandingTraceContributionPolicy {
 
 fn default_trace_upload_claim_issuer_timeout_ms() -> u64 {
     TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS
+}
+
+/// What this deployment is actually doing with credit.
+///
+/// Label-only: a settlement-mode label, a grading flag and one sentence. It
+/// carries no URL, account reference or transaction hash, so it is safe on any
+/// surface a device credential can reach. The server derives it in one place
+/// (`trace_commons_server::credit_numbers::credit_posture`); clients only read
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreditPosture {
+    /// The live value of `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`: `http`,
+    /// `dry_run`, or `disabled` (the fail-safe).
+    pub settlement: String,
+    /// Whether quality, duplicate penalty and the per-contributor cap are
+    /// authoritative. False while that pipeline is shadow-mode, which is what
+    /// lets a client say a figure may still be revised.
+    pub graded: bool,
+    /// The same sentence the submission receipt gives, so two surfaces cannot
+    /// describe one deployment differently.
+    pub explanation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1589,6 +1690,8 @@ pub struct RawTraceContribution {
     /// redaction after the same privacy checks as other contributed metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session: Option<SourceSessionIdentity>,
 }
 
 /// The pre-redaction event an emitter builds.
@@ -1914,6 +2017,7 @@ impl RawTraceContribution {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
         }
     }
 
@@ -2166,6 +2270,7 @@ impl RawTraceContribution {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
         }
     }
 }
@@ -2283,6 +2388,7 @@ pub fn safe_privacy_filter_redaction_from_output(
         .unwrap_or(false);
 
     Ok(SafePrivacyFilterRedaction {
+        private_edits: None,
         redacted_text,
         summary: SafePrivacyFilterSummary {
             schema_version,
@@ -2849,6 +2955,94 @@ pub fn privacy_filter_backend_from_env() -> Result<PrivacyFilterBackendTag, Priv
         .unwrap_or(PrivacyFilterBackendTag::None))
 }
 
+/// What tells one environment-attached privacy filter from another of the
+/// same kind: the host and model a remote backend sends prose to, or the
+/// program and arguments a sidecar runs. `None` when no backend is named.
+///
+/// Read the way the adapters are built -- trimmed, empty as unset, the
+/// canonical sidecar variable before its legacy name, and a remote backend's
+/// unset host or model as the default it would use -- so two environments
+/// that build the same filter give the same identity. Credentials and limits
+/// are left out: they change nothing about who reads the prose.
+///
+/// `var` reads one environment variable; pass `|k| std::env::var(k).ok()` for
+/// the process environment. Taking it as a parameter keeps this testable
+/// without mutating process state.
+pub fn privacy_filter_backend_identity(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let backend = get("TRACE_PRIVACY_FILTER_BACKEND")?;
+    let parts: Vec<String> = match backend.as_str() {
+        "sidecar" => {
+            let pick = |canonical: &str, legacy: &str| get(canonical).or_else(|| get(legacy));
+            vec![
+                pick(
+                    "TRACE_PRIVACY_FILTER_COMMAND",
+                    "IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND",
+                )
+                .unwrap_or_default(),
+                pick(
+                    "TRACE_PRIVACY_FILTER_ARGS",
+                    "IRONCLAW_TRACE_PRIVACY_FILTER_ARGS",
+                )
+                .map(|raw| raw.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default(),
+            ]
+        }
+        "near-ai" => vec![
+            get("TRACE_NEAR_AI_PRIVACY_BASE_URL")
+                .unwrap_or_else(|| near_ai_default(NearAiDefault::BaseUrl)),
+            get("TRACE_NEAR_AI_PRIVACY_MODEL")
+                .unwrap_or_else(|| near_ai_default(NearAiDefault::Model)),
+        ],
+        "self-hosted" => vec![
+            get("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL").unwrap_or_default(),
+            get("TRACE_PRIVACY_FILTER_SELF_HOSTED_MODEL").unwrap_or_else(self_hosted_default_model),
+        ],
+        _ => Vec::new(),
+    };
+    let mut identity = backend;
+    for part in parts {
+        identity.push('\n');
+        identity.push_str(&part);
+    }
+    Some(identity)
+}
+
+enum NearAiDefault {
+    BaseUrl,
+    Model,
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+fn near_ai_default(which: NearAiDefault) -> String {
+    match which {
+        NearAiDefault::BaseUrl => crate::privacy_filter_near_ai::DEFAULT_BASE_URL,
+        NearAiDefault::Model => crate::privacy_filter_near_ai::DEFAULT_MODEL,
+    }
+    .to_string()
+}
+
+// Without the feature the backend cannot be built at all, so there is no
+// default to resolve to.
+#[cfg(not(feature = "near-ai-privacy-filter"))]
+fn near_ai_default(_which: NearAiDefault) -> String {
+    String::new()
+}
+
+#[cfg(feature = "self-hosted-privacy-filter")]
+fn self_hosted_default_model() -> String {
+    crate::privacy_filter_self_hosted::DEFAULT_MODEL.to_string()
+}
+
+#[cfg(not(feature = "self-hosted-privacy-filter"))]
+fn self_hosted_default_model() -> String {
+    String::new()
+}
+
 fn build_sidecar_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
     let command = read_privacy_env(
         "TRACE_PRIVACY_FILTER_COMMAND",
@@ -3076,6 +3270,10 @@ const CUE_WINDOW: usize = 48;
 /// It is paired with the `{8,}` bound in `entropy_candidate_regex`: the
 /// regex decides what is a candidate at all, so raising either one alone
 /// silently disables the band while the other still claims to cover it.
+///
+/// Below 10 characters this floor never binds: `ENTROPY_BITS_MIN` already
+/// requires at least 10 distinct characters, so what is actually redacted
+/// starts at 10. Pinned by `cued_entropy_floor_is_ten_distinct_characters`.
 const ENTROPY_MIN_LEN: usize = 8;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
@@ -3884,51 +4082,63 @@ impl DeterministicTraceRedactor {
         report: &mut RedactionReport,
         privacy_filter_summary: &mut Option<SafePrivacyFilterSummary>,
     ) -> Result<String, TraceContributionError> {
+        self.apply_privacy_filter_to_text_mapped(text, report, privacy_filter_summary, &mut None)
+            .await
+    }
+    async fn apply_privacy_filter_to_text_mapped(
+        &self,
+        text: String,
+        report: &mut RedactionReport,
+        privacy_filter_summary: &mut Option<SafePrivacyFilterSummary>,
+        map: &mut Option<crate::private_edit_map::EditMap>,
+    ) -> Result<String, TraceContributionError> {
         let Some(adapter) = self.privacy_filter.as_ref() else {
             return Ok(text);
         };
-        let redaction = match adapter.redact_text(&text).await {
-            Ok(Some(redaction)) => redaction,
-            Ok(None) => return Ok(text),
-            Err(error) => {
-                match self.privacy_filter_backend {
-                    PrivacyFilterBackendTag::NearAi | PrivacyFilterBackendTag::SelfHosted => {
-                        // Spec fail-closed: surface as RedactionFailed.
-                        //
-                        // The self-hosted backend joins near-ai rather than
-                        // the sidecar arm deliberately. Being on loopback
-                        // makes it more reliable, not less required: it is a
-                        // configured prose-PII control, and degrading to
-                        // deterministic-only redaction on failure is exactly
-                        // the silent downgrade the fail-closed convention
-                        // exists to prevent. A local process that is down
-                        // should stop the path, not quietly narrow it.
-                        return Err(error);
-                    }
-                    PrivacyFilterBackendTag::Sidecar => {
-                        let error_text = error.to_string();
-                        let backend_label =
-                            privacy_filter_backend_label(self.privacy_filter_backend);
-                        report.increment(format!("privacy_filter:{backend_label}_failure"));
-                        // The configured filter did not examine this text, so
-                        // this pass cannot claim coverage of it. Fail closed.
-                        report.coverage_incomplete = true;
-                        report.add_warning(format!(
-                            "Privacy Filter {backend_label} backend failed; deterministic redaction fallback was used. error_hash={}",
-                            canonical_hash(&error_text)
-                        ));
-                        return Ok(text);
-                    }
-                    PrivacyFilterBackendTag::None => {
-                        // Unreachable: when backend tag is None, no adapter is
-                        // installed and we returned early above. Be defensive
-                        // and surface the error rather than silently swallow.
-                        return Err(error);
-                    }
-                }
-            }
+        // A configured prose classifier is a required control. Preserve its
+        // error category; never certify deterministic-only fallback as full.
+        let redaction = match adapter.redact_text(&text).await? {
+            Some(redaction) => redaction,
+            None => return Ok(text),
         };
 
+        if map.is_some() {
+            if let Some(edits) = &redaction.private_edits {
+                let mut rebuilt = Vec::new();
+                let mut cursor = 0usize;
+                let mut valid = true;
+                for edit in &edits.0 {
+                    let start = edit.original.start as usize;
+                    let end = edit.original.end as usize;
+                    if start < cursor
+                        || end < start
+                        || end > text.len()
+                        || rebuilt
+                            .len()
+                            .saturating_add(start.saturating_sub(cursor))
+                            .saturating_add(edit.replacement.len())
+                            > 1024 * 1024
+                    {
+                        valid = false;
+                        break;
+                    }
+                    rebuilt.extend_from_slice(&text.as_bytes()[cursor..start]);
+                    rebuilt.extend_from_slice(&edit.replacement);
+                    cursor = end;
+                }
+                if valid {
+                    rebuilt.extend_from_slice(&text.as_bytes()[cursor..]);
+                }
+                if !valid
+                    || rebuilt != redaction.redacted_text.as_bytes()
+                    || map.as_mut().is_some_and(|m| m.apply(&edits.0).is_none())
+                {
+                    *map = None;
+                }
+            } else if text != redaction.redacted_text {
+                *map = None;
+            }
+        }
         merge_privacy_filter_summary(privacy_filter_summary, &redaction.summary);
         report.merge(redaction.report);
         Ok(redaction.redacted_text)
@@ -3947,10 +4157,9 @@ impl DeterministicTraceRedactor {
     /// function, it is not cheap, and it is cancellation-visible -- do not
     /// call it in a loop over a large corpus without a budget.
     ///
-    /// A configured `near-ai` or `self-hosted` backend that fails returns
-    /// `Err` (fail-closed); a `sidecar` failure degrades to the deterministic
-    /// result with `report.coverage_incomplete` set. Both behaviours come from
-    /// [`Self::apply_privacy_filter_to_text`] and are unchanged here.
+    /// Any configured classifier that fails returns `Err` (fail-closed),
+    /// including `sidecar`. A caller never receives deterministic-only
+    /// fallback stamped as a completed classifier pipeline.
     ///
     /// # Ordering, and why it is this one
     ///
@@ -3976,6 +4185,45 @@ impl DeterministicTraceRedactor {
     /// [`residual_risk`]/[`residual_risk_basis`] consume. It is returned
     /// rather than folded into a [`PrivacyMetadata`] precisely because
     /// `PrivacyMetadata` cannot reconstruct it.
+    /// Like the normal text pass, with private provenance from its actual edits.
+    pub async fn redact_text_with_edits(
+        &self,
+        input: &str,
+    ) -> Result<
+        (
+            FullyRedactedText,
+            Option<crate::private_edit_map::PrivateRedactionEdits>,
+        ),
+        TraceContributionError,
+    > {
+        let mut state = RedactionState {
+            edit_map: crate::private_edit_map::EditMap::new(input.len()),
+            ..Default::default()
+        };
+        let mut report = RedactionReport::default();
+        let mut privacy_filter_summary = None;
+        let redacted = self
+            .redact_text_with_state_through_prose_filter(
+                input,
+                &mut state,
+                &mut report,
+                &mut privacy_filter_summary,
+            )
+            .await?;
+        let edits = state
+            .edit_map
+            .take()
+            .and_then(|map| map.finish(redacted.as_bytes()));
+        Ok((
+            FullyRedactedText {
+                redacted,
+                report,
+                privacy_filter_summary,
+            },
+            edits,
+        ))
+    }
+
     pub async fn redact_text_through_prose_filter(
         &self,
         input: &str,
@@ -4014,8 +4262,18 @@ impl DeterministicTraceRedactor {
     ) -> Result<String, TraceContributionError> {
         let (redacted, child_report) = self.redact_text_with_state(input, state);
         report.merge(child_report);
-        self.apply_privacy_filter_to_text(redacted, report, privacy_filter_summary)
+        if state.edit_map.is_some() {
+            self.apply_privacy_filter_to_text_mapped(
+                redacted,
+                report,
+                privacy_filter_summary,
+                &mut state.edit_map,
+            )
             .await
+        } else {
+            self.apply_privacy_filter_to_text(redacted, report, privacy_filter_summary)
+                .await
+        }
     }
 
     // Metadata is also contributor input. Share the exact text pipeline and
@@ -4348,6 +4606,15 @@ impl DeterministicTraceRedactor {
         let mut redacted = self.redact_private_emails(input, state, &mut report);
         redacted = self.redact_generic_paths(&redacted, state, &mut report);
         redacted = self.redact_known_paths(&redacted, state, &mut report);
+        if state.edit_map.is_some() {
+            state.track_ranges(
+                &pem_block_regex()
+                    .find_iter(&redacted)
+                    .map(|m| m.start()..m.end())
+                    .collect::<Vec<_>>(),
+                "<REDACTED_PRIVATE_KEY>",
+            );
+        }
         redacted = apply_pem_block_redaction(&redacted, &mut report);
 
         let ranges = self.scan_secret_ranges(&redacted, &mut report);
@@ -4355,6 +4622,7 @@ impl DeterministicTraceRedactor {
             return (redacted, report);
         }
 
+        state.track_ranges(&ranges, "[REDACTED]");
         (apply_redaction_ranges(&redacted, &ranges), report)
     }
 
@@ -4421,6 +4689,15 @@ impl DeterministicTraceRedactor {
                 continue;
             }
             let placeholder = state.placeholders.placeholder_for("local_path", prefix);
+            if state.edit_map.is_some() {
+                state.track_ranges(
+                    &output
+                        .match_indices(prefix)
+                        .map(|(start, matched)| start..start + matched.len())
+                        .collect::<Vec<_>>(),
+                    &placeholder,
+                );
+            }
             output = output.replace(prefix, &placeholder);
             for _ in 0..count {
                 report.increment("local_path");
@@ -4440,9 +4717,45 @@ impl DeterministicTraceRedactor {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct RedactionState {
+    edit_map: Option<crate::private_edit_map::EditMap>,
     placeholders: PlaceholderMap,
+}
+
+impl RedactionState {
+    fn track_ranges(&mut self, ranges: &[std::ops::Range<usize>], replacement: &str) {
+        if self.edit_map.is_none() {
+            return;
+        }
+        let mut ranges = ranges.to_vec();
+        ranges.sort_by_key(|r| r.start);
+        let mut end = 0;
+        let mut edits = Vec::new();
+        for range in ranges {
+            if range.start < end {
+                continue;
+            }
+            end = range.end;
+            edits.push(crate::token_distribution::RedactionEdit {
+                original: crate::token_distribution::ByteSpan {
+                    start: range.start as u64,
+                    end: range.end as u64,
+                },
+                replacement: replacement.as_bytes().to_vec(),
+            });
+        }
+        self.track_edits(&edits);
+    }
+    fn track_edits(&mut self, edits: &[crate::token_distribution::RedactionEdit]) {
+        if self
+            .edit_map
+            .as_mut()
+            .is_some_and(|map| map.apply(edits).is_none())
+        {
+            self.edit_map = None;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -4489,6 +4802,40 @@ impl TraceRedactor for DeterministicTraceRedactor {
         &self,
         trace: RawTraceContribution,
     ) -> Result<TraceContributionEnvelope, TraceContributionError> {
+        self.redact_trace_internal(trace, None).await
+    }
+}
+impl DeterministicTraceRedactor {
+    /// Returns event-scoped private byte edits from the actual pipeline pass.
+    /// Missing maps mean unavailable provenance, never an unchanged event.
+    pub async fn redact_trace_with_edits(
+        &self,
+        trace: RawTraceContribution,
+    ) -> Result<
+        (
+            TraceContributionEnvelope,
+            BTreeMap<Uuid, crate::private_edit_map::PrivateRedactionEdits>,
+        ),
+        TraceContributionError,
+    > {
+        let mut maps = BTreeMap::new();
+        let envelope = self.redact_trace_internal(trace, Some(&mut maps)).await?;
+        Ok((envelope, maps))
+    }
+    async fn redact_trace_internal(
+        &self,
+        trace: RawTraceContribution,
+        mut maps: Option<&mut BTreeMap<Uuid, crate::private_edit_map::PrivateRedactionEdits>>,
+    ) -> Result<TraceContributionEnvelope, TraceContributionError> {
+        if trace
+            .source_session
+            .as_ref()
+            .is_some_and(|identity| validate_source_session_identity(identity).is_err())
+        {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: "source_session_invalid".into(),
+            });
+        }
         let mut report = RedactionReport::default();
         let mut state = RedactionState::default();
         let mut privacy_filter_summary = None;
@@ -4569,6 +4916,9 @@ impl TraceRedactor for DeterministicTraceRedactor {
                     // `redact_text_through_prose_filter`: they share this
                     // helper so the pipeline a witness attests cannot drift
                     // from the one ingest runs.
+                    if maps.is_some() {
+                        state.edit_map = crate::private_edit_map::EditMap::new(content.len());
+                    }
                     let redacted = self
                         .redact_text_with_state_through_prose_filter(
                             &content,
@@ -4577,6 +4927,15 @@ impl TraceRedactor for DeterministicTraceRedactor {
                             &mut privacy_filter_summary,
                         )
                         .await?;
+                    if let Some(map) = state
+                        .edit_map
+                        .take()
+                        .and_then(|map| map.finish(redacted.as_bytes()))
+                    {
+                        if let Some(maps) = maps.as_deref_mut() {
+                            maps.insert(raw_event.event_id, map);
+                        }
+                    }
                     Some(redacted)
                 }
                 None => None,
@@ -4694,6 +5053,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
             embedding_analysis: trace.embedding_analysis,
             value: trace.value,
             conversation_id: trace.conversation_id,
+            source_session: trace.source_session,
             trace_card,
             value_card,
             hindsight: None,
@@ -4939,6 +5299,8 @@ pub const METADATA_KEY_COLLISION_REFUSAL: &str = "metadata-redaction-key-collisi
 /// are contributor identity, and identity does not leave the machine for a
 /// third-party classifier. They are opaque identifiers, not prose, so the
 /// deterministic pass is the whole of what they need.
+/// `source_session` is likewise an opaque adapter-native identity. A classifier
+/// rewrite would break the stable key needed to honor withdrawal.
 ///
 /// Consulted only where `redact_keys` is false, i.e. inside fixed-schema
 /// objects. A dynamic map keyed `timestamp` by an importer is still scanned.
@@ -4959,6 +5321,7 @@ const TYPED_METADATA_FIELDS: &[&str] = &[
     "nearest_trace_ids",
     "parent_event_id",
     "scopes",
+    "source_session",
     "submission_id",
     "task_success",
     "timestamp",
@@ -7725,6 +8088,7 @@ fn apply_placeholder_regex(
     let mut result = String::with_capacity(input.len());
     let mut last_end = 0usize;
     let mut changed = false;
+    let mut edits = Vec::new();
 
     for mat in regex.find_iter(input) {
         let candidate = mat.as_str();
@@ -7734,6 +8098,15 @@ fn apply_placeholder_regex(
         result.push_str(&input[last_end..mat.start()]);
         let placeholder = state.placeholders.placeholder_for(label, candidate);
         result.push_str(&placeholder);
+        if state.edit_map.is_some() {
+            edits.push(crate::token_distribution::RedactionEdit {
+                original: crate::token_distribution::ByteSpan {
+                    start: mat.start() as u64,
+                    end: mat.end() as u64,
+                },
+                replacement: placeholder.as_bytes().to_vec(),
+            });
+        }
         last_end = mat.end();
         report.increment(label);
         report.add_pii_label(label);
@@ -7743,6 +8116,7 @@ fn apply_placeholder_regex(
     if !changed {
         return input.to_string();
     }
+    state.track_edits(&edits);
     result.push_str(&input[last_end..]);
     result
 }
@@ -7880,10 +8254,22 @@ pub struct TraceSubmissionStatusUpdate {
     pub consent_scopes: Vec<ConsentScope>,
 }
 
+/// Computes the value scorecard and writes it onto the envelope.
+///
+/// `submission_score`, the scorecard, and the explanation lines are kept:
+/// the review queue, the ranker feature exports and process evaluation read
+/// them. `credit_points_pending` is deliberately NOT taken from the
+/// estimate. That figure was `round(10 * clamp(raw))` with a 0.40 duplicate
+/// penalty from a header-plus-first-12-events comparison against every
+/// prior record in the tenant, which read same-project sessions as
+/// near-duplicates of each other; on the pilot 12 of 13 real uploads showed
+/// 0.0 that way. The contributor-facing figure is the gate's credit
+/// quality, presented once a decision exists, so the envelope's pending
+/// credit is held at 0.0 here regardless of what the client sent.
 pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelope) {
     let estimate = estimate_initial_credit(envelope);
     envelope.value.submission_score = estimate.submission_score;
-    envelope.value.credit_points_pending = estimate.credit_points_pending;
+    envelope.value.credit_points_pending = 0.0;
     envelope.value.explanation = estimate.explanation;
     envelope.value_card.scorecard = estimate.scorecard;
     envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
@@ -8161,6 +8547,56 @@ mod tests {
         }
     }
 
+    /// The effective floor of the cued-entropy pass is a count of DISTINCT
+    /// characters, not a length: ten of them, whatever the token's length.
+    ///
+    /// Shannon entropy over a token's bytes cannot exceed log2 of the number
+    /// of distinct bytes in it. log2(9) ~= 3.17 is under `ENTROPY_BITS_MIN`
+    /// (3.2) and log2(10) ~= 3.32 is over it, so a token built from nine or
+    /// fewer distinct characters is never redacted by this pass however long
+    /// it is, and a 10-character token is redacted only when all ten
+    /// characters differ. The contributor README states the range in these
+    /// terms; this pins it. It documents current behaviour -- it passed when
+    /// written -- and exists so that a change to `ENTROPY_BITS_MIN` fails
+    /// here and forces the README to be re-derived.
+    #[test]
+    fn cued_entropy_floor_is_ten_distinct_characters() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let redacted = |value: &str| {
+            let (out, rep) = r.redact_text(&format!("api_key={value}"));
+            let gone = !out.contains(value);
+            assert_eq!(
+                gone, rep.blocked_secret_detected,
+                "redaction and blocked_secret_detected disagree for {value}: {out}"
+            );
+            gone
+        };
+
+        // Nine characters, all distinct: the best a 9-char token can do.
+        assert!(!redacted("Q7vM2xP9s"), "9 distinct chars cleared 3.2 bits");
+        // Ten characters, all distinct: just over the floor.
+        assert!(
+            redacted("Q7vM2xP9sL"),
+            "10 distinct chars were not redacted"
+        );
+        // Ten characters with one repeat (nine distinct): under the floor.
+        assert!(
+            !redacted("Q7vM2xP9sQ"),
+            "10 chars with only 9 distinct cleared 3.2 bits"
+        );
+        // Length does not rescue a small alphabet: 27 chars, 9 distinct.
+        assert!(
+            !redacted("Q7vM2xP9sQ7vM2xP9sQ7vM2xP9s"),
+            "a long token over 9 distinct chars cleared 3.2 bits"
+        );
+        // Ten distinct is enough at any length, even repeated.
+        assert!(
+            redacted("Q7vM2xP9sLQ7vM2xP9sLQ7vM2xP9sL"),
+            "a 30-char token over 10 distinct chars was not redacted"
+        );
+    }
+
     /// The other half of #225's bargain: lowering the LENGTH floor must not
     /// lower the ENTROPY floor or bypass the allowlists, or the 8-to-15 band
     /// fills with git shas and ordinary words. This is the FP budget the
@@ -8423,6 +8859,53 @@ mod tests {
     }
 
     #[test]
+    fn full_pipeline_allowlist_requires_exact_known_versions() {
+        for version in [
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2",
+        ] {
+            assert!(
+                super::is_full_redaction_pipeline_version(version),
+                "{version}"
+            );
+            for changed in [
+                format!("{version}+server-rescrub-v2"),
+                format!(" {version}"),
+                format!("{version} "),
+                version.to_uppercase(),
+            ] {
+                assert!(
+                    !super::is_full_redaction_pipeline_version(&changed),
+                    "{changed}"
+                );
+            }
+        }
+        for version in [
+            "",
+            "full-pipeline",
+            "ironclaw-deterministic-secret-path-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-unknown-v1",
+            "ironclaw-deterministic-secret-path-v2+privacy-filter-near-ai-v1",
+        ] {
+            assert!(
+                !super::is_full_redaction_pipeline_version(version),
+                "{version}"
+            );
+        }
+        for backend in [
+            super::PrivacyFilterBackendTag::NearAi,
+            super::PrivacyFilterBackendTag::SelfHosted,
+            super::PrivacyFilterBackendTag::Sidecar,
+        ] {
+            assert!(super::is_full_redaction_pipeline_version(
+                &super::redaction_pipeline_version(backend)
+            ));
+        }
+    }
+
+    #[test]
     fn redaction_pipeline_version_emits_per_backend_suffix() {
         use super::{
             DETERMINISTIC_REDACTION_PIPELINE_VERSION, PrivacyFilterBackendTag,
@@ -8434,7 +8917,7 @@ mod tests {
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::Sidecar),
-            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v1")
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v2")
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::NearAi),
@@ -8584,6 +9067,7 @@ mod tests {
             report.increment("privacy_filter:person_name");
             report.add_pii_label("person_name");
             Ok(Some(super::SafePrivacyFilterRedaction {
+                private_edits: None,
                 redacted_text: text.replace(CLASSIFIER_ONLY_PII, "<CLASSIFIER_NAME>"),
                 summary: super::SafePrivacyFilterSummary {
                     span_count: 1,
@@ -8613,6 +9097,7 @@ mod tests {
         ) -> Result<Option<super::SafePrivacyFilterRedaction>, super::TraceContributionError>
         {
             Ok(Some(super::SafePrivacyFilterRedaction {
+                private_edits: None,
                 redacted_text: text.replace(CLASSIFIER_EMITS_HERE, EMITTED_CREDENTIAL),
                 summary: super::SafePrivacyFilterSummary::default(),
                 report: super::RedactionReport::default(),
@@ -8792,7 +9277,7 @@ mod tests {
     }
 
     /// Fail-closed is preserved through the new entry point: a configured
-    /// self-hosted or NEAR AI backend that errors must refuse, never hand
+    /// configured classifier backend that errors must refuse, never hand
     /// back a deterministic-only result that a caller would attest as full.
     #[tokio::test]
     async fn full_pipeline_entry_point_fails_closed_on_backend_error() {
@@ -8800,6 +9285,7 @@ mod tests {
         for backend in [
             super::PrivacyFilterBackendTag::NearAi,
             super::PrivacyFilterBackendTag::SelfHosted,
+            super::PrivacyFilterBackendTag::Sidecar,
         ] {
             let redactor = super::DeterministicTraceRedactor::bare()
                 .with_privacy_filter(Arc::new(AlwaysFailingPrivacyFilterAdapter), backend);
@@ -8813,30 +9299,21 @@ mod tests {
         }
     }
 
-    /// A sidecar failure degrades rather than refusing -- but it must set
-    /// `coverage_incomplete`, which is the flag that forces High and the
-    /// reason the report has to be returned at all.
+    /// A failed sidecar must not produce a full envelope for certification.
     #[tokio::test]
-    async fn full_pipeline_entry_point_marks_coverage_incomplete_on_sidecar_failure() {
-        use std::sync::Arc;
+    async fn sidecar_failure_refuses_whole_envelope() {
+        use super::TraceRedactor;
         let redactor = super::DeterministicTraceRedactor::bare().with_privacy_filter(
-            Arc::new(AlwaysFailingPrivacyFilterAdapter),
+            std::sync::Arc::new(AlwaysFailingPrivacyFilterAdapter),
             super::PrivacyFilterBackendTag::Sidecar,
         );
         let result = redactor
-            .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
-            .await
-            .expect("sidecar failure degrades rather than refusing");
-        assert!(
-            result.report.coverage_incomplete,
-            "a sidecar failure must leave the pass unable to claim coverage: {:?}",
-            result.report
-        );
-        assert!(
-            !result.redacted.contains(BOTH_STAGES_SECRET),
-            "the deterministic stage still applies: {}",
-            result.redacted
-        );
+            .redact_trace(raw_contribution_with_content(BOTH_STAGES_INPUT))
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::TraceContributionError::RedactionFailed { .. })
+        ));
     }
 
     #[derive(Debug)]
@@ -8894,46 +9371,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidecar_runtime_error_falls_back_with_backend_label() {
-        use super::{DeterministicTraceRedactor, PrivacyFilterBackendTag, RedactionReport};
-        use std::sync::Arc;
-        let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
-        let redactor = DeterministicTraceRedactor::bare()
-            .with_privacy_filter(adapter, PrivacyFilterBackendTag::Sidecar);
-        let mut report = RedactionReport::default();
-        let mut summary = None;
-        let text = redactor
-            .apply_privacy_filter_to_text(
-                "alice@example.com".to_string(),
-                &mut report,
-                &mut summary,
-            )
+    async fn sidecar_preserves_transient_failure_category() {
+        struct TransientFilter;
+        #[async_trait::async_trait]
+        impl super::PrivacyFilterAdapter for TransientFilter {
+            async fn redact_text(
+                &self,
+                _text: &str,
+            ) -> Result<Option<super::SafePrivacyFilterRedaction>, super::TraceContributionError>
+            {
+                Err(super::TraceContributionError::TransientRedactionFailed {
+                    reason: "synthetic temporary unavailability".to_string(),
+                })
+            }
+        }
+        let redactor = super::DeterministicTraceRedactor::bare().with_privacy_filter(
+            std::sync::Arc::new(TransientFilter),
+            super::PrivacyFilterBackendTag::Sidecar,
+        );
+        let error = redactor
+            .redact_text_through_prose_filter("Alice Brannigan")
             .await
-            .expect("sidecar must swallow runtime errors");
-        // Original text is returned to the caller (sidecar legacy
-        // contract).
-        assert_eq!(text, "alice@example.com");
-        let dump = format!("{:?}", report);
+            .err()
+            .expect("temporary failure must refuse too");
         assert!(
-            dump.contains("privacy_filter:sidecar_failure"),
-            "expected sidecar_failure counter to be incremented; got {dump}"
+            error.is_transient(),
+            "retry classification must survive: {error:?}"
         );
-        assert!(
-            dump.contains("sidecar backend failed"),
-            "expected backend-aware warning; got {dump}"
+    }
+
+    #[tokio::test]
+    async fn sidecar_runtime_error_propagates_fail_closed() {
+        let redactor = super::DeterministicTraceRedactor::bare().with_privacy_filter(
+            std::sync::Arc::new(AlwaysFailingPrivacyFilterAdapter),
+            super::PrivacyFilterBackendTag::Sidecar,
         );
-        // Case 4 (issue #373): the configured filter did not examine this
-        // text, so the pass must not be able to speak for it.
-        assert!(
-            report.coverage_incomplete,
-            "a filter fallback must mark the pass as not covering the text"
-        );
-        let consent = clean_consent();
-        assert_eq!(
-            super::residual_risk(&consent, &report),
-            super::ResidualPiiRisk::High,
-            "a coverage gap must fail closed to High"
-        );
+        let mut report = super::RedactionReport::default();
+        let mut summary = None;
+        let result = redactor
+            .apply_privacy_filter_to_text("Alice Brannigan".to_string(), &mut report, &mut summary)
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::TraceContributionError::RedactionFailed { .. })
+        ));
+        assert!(summary.is_none());
     }
 
     #[test]
@@ -9961,6 +10443,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -10104,6 +10587,7 @@ mod tests {
                 summary.by_label.insert("private_email".into(), 1);
             }
             Ok(Some(SafePrivacyFilterRedaction {
+                private_edits: None,
                 redacted_text: text.replace(self.address, "[REDACTED:private_email]"),
                 summary,
                 report,
@@ -10137,6 +10621,7 @@ mod tests {
             // that found nothing, on both the real field AND the
             // canary probe text. Text is returned unchanged.
             Ok(Some(SafePrivacyFilterRedaction {
+                private_edits: None,
                 redacted_text: text.to_string(),
                 summary: SafePrivacyFilterSummary {
                     ..empty_filter_summary()
@@ -10169,6 +10654,7 @@ mod tests {
                 }
             }
             Ok(Some(SafePrivacyFilterRedaction {
+                private_edits: None,
                 redacted_text: redacted,
                 summary: SafePrivacyFilterSummary {
                     span_count: canary_values.len() as u32,
@@ -10531,6 +11017,78 @@ mod tests {
         assert_eq!(parsed.conversation_id, None);
     }
 
+    #[test]
+    fn source_session_identity_round_trips_without_debug_disclosure() {
+        let identity = super::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_private-123".into(),
+        };
+        let encoded = serde_json::to_value(&identity).unwrap();
+        assert_eq!(encoded["native_id"], "ses_private-123");
+        let decoded: super::SourceSessionIdentity = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, identity);
+        assert!(!format!("{identity:?}").contains("ses_private-123"));
+    }
+
+    #[tokio::test]
+    async fn source_session_survives_raw_redaction_and_legacy_envelopes_parse() {
+        use super::TraceRedactor;
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.source_session = Some(super::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_stable-123".into(),
+        });
+        let mut legacy_raw = serde_json::to_value(&raw).unwrap();
+        legacy_raw.as_object_mut().unwrap().remove("source_session");
+        let parsed_raw: super::RawTraceContribution = serde_json::from_value(legacy_raw).unwrap();
+        assert!(parsed_raw.source_session.is_none());
+        let redacted = super::DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .unwrap();
+        assert_eq!(
+            redacted.source_session.as_ref().unwrap().native_id,
+            "ses_stable-123"
+        );
+        let mut legacy = serde_json::to_value(&redacted).unwrap();
+        legacy.as_object_mut().unwrap().remove("source_session");
+        let parsed: super::TraceContributionEnvelope = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.source_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_source_session_is_refused_before_classifier_bypass() {
+        use super::{TraceContributionError, TraceRedactor};
+        for (adapter, native_id) in [
+            ("unknown", "ses_123".to_string()),
+            (
+                "patient Alice Smith lives at 123 Maple Street",
+                "ses_123".to_string(),
+            ),
+            ("opencode", "../private".to_string()),
+            ("opencode", "private@example.com".to_string()),
+            ("opencode", "é".to_string()),
+            ("opencode", "x".repeat(129)),
+            ("codex", "not-a-uuid".to_string()),
+        ] {
+            let mut raw = raw_contribution_with_content("safe content");
+            raw.source_session = Some(super::SourceSessionIdentity {
+                adapter: adapter.into(),
+                native_id,
+            });
+            let filter = std::sync::Arc::new(RecordingFilter::default());
+            let error = super::DeterministicTraceRedactor::deterministic_only(Vec::new())
+                .with_privacy_filter(filter.clone(), super::PrivacyFilterBackendTag::SelfHosted)
+                .redact_trace(raw)
+                .await
+                .expect_err("invalid identity must be rejected before classifier bypass");
+            assert!(
+                matches!(error, TraceContributionError::RedactionFailed { reason } if reason == "source_session_invalid")
+            );
+            assert!(filter.0.lock().unwrap().is_empty());
+        }
+    }
+
     /// A guard, not a formality: an emitter-declared id that reached a gate
     /// would be a spoofable input to admission.
     #[test]
@@ -10796,6 +11354,10 @@ mod tests {
     async fn typed_metadata_and_contributor_identity_never_reach_the_classifier() {
         let mut raw = raw_contribution_with_content("ran the build");
         raw.conversation_id = Some("a note the contributor typed".to_string());
+        raw.source_session = Some(SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_private-123".into(),
+        });
         raw.contributor.pseudonymous_contributor_id = Some("pseudonymous-contributor-0001".into());
         raw.contributor.tenant_scope_ref = Some("tenant-scope-0001".into());
         raw.contributor.credit_account_ref = Some("credit-account-0001".into());
@@ -10816,6 +11378,7 @@ mod tests {
             "pseudonymous-contributor-0001",
             "tenant-scope-0001",
             "credit-account-0001",
+            "ses_private-123",
         ] {
             assert!(
                 !seen.iter().any(|t| t == identity),
@@ -10922,6 +11485,10 @@ mod tests {
         // those are contributor-chosen, not schema.
         let mut raw = raw_contribution_with_content("ran the build");
         raw.conversation_id = Some("note".into());
+        raw.source_session = Some(SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_abc".into(),
+        });
         raw.ironclaw.engine_version = Some("1".into());
         raw.ironclaw.model_name = Some("model".into());
         raw.ironclaw
@@ -10984,6 +11551,7 @@ mod tests {
         found.remove("DYNAMIC");
 
         let expected: std::collections::BTreeSet<String> = [
+            "adapter",
             "canonical_summary_hash",
             "channel",
             "cluster_id",
@@ -11018,6 +11586,7 @@ mod tests {
             "model_name",
             "nearest_cluster_id",
             "nearest_trace_ids",
+            "native_id",
             "novelty_score",
             // `TraceFailureMode::Other`'s payload key.
             "other",
@@ -11034,6 +11603,7 @@ mod tests {
             "revocation_handle",
             "routing_metadata_included",
             "scopes",
+            "source_session",
             "structured_payload",
             "submission_id",
             "submission_score",
@@ -11163,6 +11733,7 @@ mod tests {
                 report.increment("privacy_filter:person_name");
                 report.add_pii_label("person_name");
                 Ok(Some(SafePrivacyFilterRedaction {
+                    private_edits: None,
                     redacted_text: text.replace("staging", "[REDACTED:person_name]"),
                     summary: SafePrivacyFilterSummary {
                         span_count: 1,
@@ -12230,6 +12801,39 @@ mod tests {
             scored.credit_points_estimate > 0.0,
             "medium-risk work that is accepted must be able to earn credit, got {}",
             scored.credit_points_estimate
+        );
+    }
+
+    /// The submit-time estimate is no longer a contributor-facing figure.
+    /// The scorecard is still computed and still lands on the envelope --
+    /// `submission_score`, the scorecard, and the explanation lines feed the
+    /// review queue, ranker exports and process evaluation -- but the
+    /// `credit_points_pending` a contributor is shown is the gate's, so the
+    /// envelope's copy stays at 0.0 until the gate assigns one.
+    #[test]
+    fn applying_the_estimate_leaves_pending_credit_at_zero() {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.value.credit_points_pending = 4.2;
+        let scorecard = compute_value_scorecard(&envelope);
+        assert!(
+            scorecard.credit_points_estimate > 0.0,
+            "the fixture must produce a positive estimate for this test to mean anything, got {}",
+            scorecard.credit_points_estimate
+        );
+
+        apply_credit_estimate_to_envelope(&mut envelope);
+
+        assert_eq!(
+            envelope.value.credit_points_pending, 0.0,
+            "the estimate must not be stored as pending credit"
+        );
+        assert_eq!(envelope.value.submission_score, scorecard.online_score);
+        assert_eq!(envelope.value_card.scorecard, scorecard);
+        assert_eq!(envelope.value.explanation, scorecard.explanation);
+        assert_eq!(
+            envelope.value_card.user_visible_explanation,
+            scorecard.explanation
         );
     }
 

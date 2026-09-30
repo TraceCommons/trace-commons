@@ -33,8 +33,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// sentence claims this window can see the send land, because it cannot.
     /// </summary>
     public const string UndoBody =
-        "The watcher sends approved sessions on its next sweep. Undo works until the sweep "
-        + "starts, and says so plainly if it is already too late.";
+        "Approved sessions will send automatically. You can undo until uploading starts.";
 
     /// <summary>
     /// What is said when the daemon granted no hold. There is nothing to
@@ -81,6 +80,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private HealthNavigationTarget _healthNavigation;
     private ArmingOffer? _armingOffer;
     private HealthCopy? _budget;
+    private HealthCopy? _witness;
+    private GateHeldNotice? _gateHeld;
     private HistoryRollup _rollup = new();
 
     /// <summary>
@@ -97,6 +98,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <see cref="ReplacePending"/>.
     /// </summary>
     private Dictionary<string, QueueEntryViewModel> _rowsByEntryId = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// How many sessions each project would actually send, as the daemon
+    /// counted them, keyed by project id. Missing key means the daemon sent
+    /// no count for that project.
+    /// </summary>
+    /// <remarks>
+    /// Kept across a failed <c>list_projects</c> rather than cleared: an
+    /// empty map makes every group offer its whole count, so a daemon that
+    /// could not answer would silently restore the over-offer this exists to
+    /// remove. A read that failed has not told us the counts changed --
+    /// matching how this class treats every other error frame.
+    /// </remarks>
+    private Dictionary<string, int> _contributableByProject = new(StringComparer.Ordinal);
 
     /// <summary>
     /// The entry ids <see cref="Pending"/> carried before the most recent
@@ -135,6 +150,64 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
 
     /// <summary>
+    /// One card per grant the daemon voided and no shell has shown yet.
+    /// Rebuilt from every status read: a card another shell already
+    /// acknowledged must go, not linger saying something stopped.
+    /// </summary>
+    public ObservableCollection<GrantVoidCard> GrantVoidCards { get; } = new();
+
+    /// <summary>
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// in the Rust's words, or null when there is nothing to show. Re-read on
+    /// every status read, so a notice another shell acknowledged goes.
+    /// </summary>
+    public LegacyMigrationNotice? LegacyMigration { get; private set; }
+
+    public bool HasLegacyMigrationNotice => LegacyMigration is not null;
+
+    public string LegacyMigrationTitle => LegacyMigration?.Title ?? string.Empty;
+
+    public string LegacyMigrationBody => LegacyMigration?.Body ?? string.Empty;
+
+    public string LegacyMigrationFolders => LegacyMigration?.Folders ?? string.Empty;
+
+    public string LegacyMigrationAcknowledge => LegacyMigration?.Acknowledge ?? string.Empty;
+
+    /// <summary>
+    /// One card per armed folder whose arming wording no longer claims a
+    /// model scrubs it, not yet shown by any shell (K5). Rebuilt from every
+    /// status read, as the void cards are.
+    /// </summary>
+    public ObservableCollection<ArmingRewordingCard> ArmingRewordingCards { get; } = new();
+
+    /// <summary>Whether the automatic-contribution gate is holding armed folders.</summary>
+    public bool HasGateHeldBanner => _gateHeld is not null;
+
+    /// <summary>The held notice, in the Rust's words, or null when nothing is held.</summary>
+    public GateHeldNotice? GateHeld => _gateHeld;
+
+    /// <summary>
+    /// This entry as the queue describes it NOW, or null if it has left the
+    /// queue.
+    /// </summary>
+    /// <remarks>
+    /// For an open preview sheet, whose own copy stops being true the moment
+    /// the queue refreshes: <see cref="ReplacePending"/> clears and refills
+    /// rather than diffing, so every row object is replaced and the sheet
+    /// keeps one nobody updates. A submit-time failure writes its reason back
+    /// into the row, so a session can be downgraded while its sheet is on
+    /// screen. See <c>PreviewSheetViewModel.LiveEntry</c>.
+    ///
+    /// <para>
+    /// Null when the entry is gone, and the sheet then falls back to its
+    /// pinned copy rather than to a guess -- an entry that has left the queue
+    /// is not evidence that it became ineligible.
+    /// </para>
+    /// </remarks>
+    public QueueEntryViewModel? LiveEntry(string entryId) =>
+        _rowsByEntryId.TryGetValue(entryId, out QueueEntryViewModel? row) ? row : null;
+
+    /// <summary>
     /// The same queue, grouped by project. Rebuilt alongside <see cref="Pending"/>
     /// by <see cref="ReplacePending"/> from <see cref="QueueGrouping.ByProject"/> --
     /// the grouping rule itself (bucket key, order, whether "Submit all"
@@ -155,6 +228,61 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// the location.
     /// </remarks>
     public ObservableCollection<QueueEntryViewModel> OpenFolderEntries { get; } = new();
+
+    /// <summary>
+    /// The sessions a witness certificate is held for, gathered above the
+    /// folders they are scattered across.
+    /// </summary>
+    /// <remarks>
+    /// Membership is the row's own answer and takes no reading: which rows
+    /// are in the list is the same question for both audiences, and only the
+    /// words differ. A filter that accepted the reading could one day depend
+    /// on it, and then an invited and an uninvited contributor would be
+    /// looking at different sessions rather than the same ones described
+    /// differently.
+    /// </remarks>
+    public ObservableCollection<QueueEntryViewModel> CertificateHeld { get; } = new();
+
+    /// <summary>
+    /// <c>admission_evidence_required</c> as the daemon last answered it,
+    /// held VERBATIM and never negated.
+    /// </summary>
+    /// <remarks>
+    /// True for a contributor who signed up through NEAR and therefore has
+    /// no invite, which selects the candidate reading. False until the first
+    /// settings read, the reading that claims less: a section that has not
+    /// been told yet must not assert attestation.
+    /// </remarks>
+    private bool _evidenceAdmitted;
+
+    /// <summary>The section heading, in this contributor's reading.</summary>
+    public string CertificateHeldTitle =>
+        CertificateSurface.ListTitle(_evidenceAdmitted) ?? string.Empty;
+
+    /// <summary>The row sentence, in the same reading.</summary>
+    public string CertificateHeldLine =>
+        CertificateSurface.RowLine(_evidenceAdmitted) ?? string.Empty;
+
+    /// <summary>
+    /// What the section says with nothing in it. Never blank.
+    /// </summary>
+    /// <remarks>
+    /// A filtered section that renders as nothing when nothing matches cannot
+    /// be told apart from one that failed to load, and System.Text.Json
+    /// defaults a missing <c>holds_certificate</c> to false on every row,
+    /// which produces exactly that.
+    /// </remarks>
+    public string CertificateHeldEmptyText =>
+        _privateInferenceCopy?.CertificateListEmpty ?? string.Empty;
+
+    /// <summary>Whether to draw the empty sentence rather than the rows.</summary>
+    public bool CertificateHeldIsEmpty => CertificateHeld.Count == 0;
+
+    /// <summary>
+    /// The inverse, for the row sentence's visibility. x:Bind cannot negate,
+    /// so the pair is spelled here rather than in the markup.
+    /// </summary>
+    public bool CertificateHeldIsNotEmpty => !CertificateHeldIsEmpty;
 
     /// <summary>
     /// Whether the queue is showing the folder list rather than one folder's
@@ -298,6 +426,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Queue,
         History,
         PrivateInference,
+        Insights,
+        MissionDrafts,
         Settings,
     }
 
@@ -306,6 +436,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool ShowingHistory => _pane == MainPane.History;
 
     public bool ShowingPrivateInference => _pane == MainPane.PrivateInference;
+
+    public bool ShowingInsights => _pane == MainPane.Insights;
+
+    public bool ShowingMissionDrafts => _pane == MainPane.MissionDrafts;
+
+    public void ShowInsights() => SetPane(MainPane.Insights);
+
+    public void ShowMissionDrafts() => SetPane(MainPane.MissionDrafts);
 
     public bool ShowingSettings => _pane == MainPane.Settings;
 
@@ -334,6 +472,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShowingHistory));
         Raise(nameof(ShowingPrivateInference));
         Raise(nameof(ShowingSettings));
+        Raise(nameof(ShowingInsights));
+        Raise(nameof(ShowingMissionDrafts));
     }
 
     // --- The health banner -------------------------------------------------
@@ -538,6 +678,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (settings is not null)
         {
             _privateInferenceKnown = true;
+            // The certificate section's reading, from the same settings read.
+            // Passed through, never negated.
+            _evidenceAdmitted = settings.AdmissionEvidenceRequired == true;
+            Raise(nameof(CertificateHeldTitle));
+            Raise(nameof(CertificateHeldLine));
             _privateInferenceState = PrivateInferenceState.From(settings.PrivateInferenceReport);
             Raise(nameof(PrivateInferenceQuitDetail));
             Raise(nameof(PrivateInferenceIsWorking));
@@ -580,6 +725,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string BudgetTitle => _budget?.Title ?? string.Empty;
 
     public string BudgetDetail => _budget?.Detail ?? string.Empty;
+
+    // Approved sessions held because the privacy witness is busy. Drawn from
+    // status.witness_capacity rather than the health label, which a higher
+    // label can mask; see SetWitnessCapacity.
+
+    /// <summary>Whether approved sessions are waiting on the privacy witness.</summary>
+    public bool HasWitnessBanner => _witness is not null;
+
+    public string WitnessTitle => _witness?.Title ?? string.Empty;
+
+    public string WitnessDetail => _witness?.Detail ?? string.Empty;
 
     /// <summary>
     /// Whether this condition has an action worth offering.
@@ -778,7 +934,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// The other half of the pair. Not "Dismiss": what this button does is let
     /// the send happen, and it should say so.
     /// </summary>
-    public const string LetItSend = "Let it send";
+    public const string LetItSend = "Dismiss";
 
     /// <summary>
     /// Records what the preview sheet decided.
@@ -865,6 +1021,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task SubmitEntryAsync(QueueEntryViewModel entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
+
+        // Re-checked AT THE PRESS, against the LIVE row rather than the one
+        // this click carried.
+        //
+        // Draw time decides what is offered; the press decides what is sent,
+        // and only the second is load-bearing. The button's Tag holds the row
+        // object as it was when the card was drawn, and ReplacePending
+        // rebuilds every row on refresh -- so a session downgraded between the
+        // last render and this click arrives here still claiming it can be
+        // contributed. Asking the queue closes that window; the pinned copy
+        // only narrows it.
+        //
+        // Refuses and refreshes rather than sending: the refresh redraws the
+        // row without its control and with the sentence saying why, which is
+        // the honest outcome and not a silent no-op.
+        if (LiveEntry(entry.EntryId) is { } live && !live.CanContribute)
+        {
+            await RefreshAsync().ConfigureAwait(true);
+            return;
+        }
+
+        // An entry the queue no longer knows about falls back to what the
+        // click carried, for the reason the preview sheet does: gone from the
+        // queue is not evidence that it became ineligible.
+        if (LiveEntry(entry.EntryId) is null && !entry.CanContribute)
+        {
+            await RefreshAsync().ConfigureAwait(true);
+            return;
+        }
 
         ClearUndo();
 
@@ -1010,7 +1195,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        Notice = hold.Toast.Line;
+        // What a group approve left behind, appended to the toast the shared
+        // crate already wrote. Absent for a single-entry approve and for an
+        // invited contributor, and empty for a present zero -- so nothing
+        // here branches on the count.
+        string withheld = hold.ExcludedIneligible is { } excluded
+            ? ContributionEligibilitySurface.WithheldLine(excluded) ?? string.Empty
+            : string.Empty;
+
+        Notice = withheld.Length > 0
+            ? string.Format(
+                CultureInfo.CurrentCulture, "{0} {1}", hold.Toast.Line, withheld)
+            : hold.Toast.Line;
 
         if (hold.Toast.OfferUndo && hold.IsLive(DateTimeOffset.UtcNow))
         {
@@ -1250,6 +1446,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
             IsBusy = true;
 
             IReadOnlyList<QueueEntry> pending = await _host.ListPendingAsync().ConfigureAwait(true);
+
+            // Before ReplacePending, because the groups it builds need these
+            // counts to know what a "Submit all" would actually send. The
+            // daemon applies the same filter inside a group approve; asking
+            // it here is what lets the button say so BEFORE the press rather
+            // than reporting it afterwards.
+            DaemonResponse projects = await _host
+                .CallAsync(DaemonProtocol.Methods.ListProjects)
+                .ConfigureAwait(true);
+            if (!projects.IsError
+                && projects.ResultAs<ProjectSettingsPayload>() is { } projectRows)
+            {
+                var contributable = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (ProjectSetting row in projectRows.Projects)
+                {
+                    // Only a count the daemon actually sent. An absent one is
+                    // left out of the map entirely, so the group falls back to
+                    // offering everything -- which is the right answer for an
+                    // invited contributor and the wrong one to reach by
+                    // reading a missing key as zero.
+                    if (row.ContributableCount is { } value)
+                    {
+                        contributable[row.ProjectId] = value;
+                    }
+                }
+
+                _contributableByProject = contributable;
+            }
+
             ReplacePending(pending);
 
             // Asked alongside the queue because it is drawn on the queue
@@ -1303,7 +1528,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // say the same thing with real numbers, so it has to see
                 // this pass's budget rather than the previous pass's.
                 SetBudget(parsedStatus.DailyBudget);
+                // Likewise the witness banner, which SetHealth steps the bare
+                // witness-saturated line aside for.
+                SetWitnessCapacity(parsedStatus.WitnessCapacity);
+                // And the held notice, which SetHealth steps the bare
+                // automatic-contribution-held line aside for.
+                SetGateHeld(SwitchOnNotices.Held(parsedStatus.AutomaticContributionHeld));
                 SetHealth(parsedStatus.Health?.LastErrorLabel);
+                SetGrantVoids(GrantVoidNotices.Cards(parsedStatus.GrantVoids));
+                SetLegacyMigration(LegacyMigrationNotices.Notice(parsedStatus.LegacyInviteMigration));
+                SetArmingRewordings(SwitchOnNotices.RewordingCards(parsedStatus.ArmingRewordings));
             }
 
             DaemonResponse rollup = await _host
@@ -1427,7 +1661,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </remarks>
     private void SetHealth(string? label)
     {
-        HealthCopy? next = _budget is not null && label == "daily-cap-reached"
+        HealthCopy? next = (_budget is not null && label == "daily-cap-reached")
+            || (_witness is not null && label == "witness-saturated")
+            || (_gateHeld is not null && label == SwitchOnNotices.GateHeldLabel)
             ? null
             : HealthCopy.ForLabel(label);
         _healthNavigation = next is null ? HealthNavigationTarget.None : HealthNavigation.ForLabel(label);
@@ -1468,6 +1704,181 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(BudgetDetail));
     }
 
+    private void SetGrantVoids(IReadOnlyList<GrantVoidCard> cards)
+    {
+        GrantVoidCards.Clear();
+        foreach (GrantVoidCard card in cards)
+        {
+            GrantVoidCards.Add(card);
+        }
+    }
+
+    private void SetLegacyMigration(LegacyMigrationNotice? notice)
+    {
+        if (Equals(LegacyMigration, notice))
+        {
+            return;
+        }
+
+        LegacyMigration = notice;
+        Raise(nameof(LegacyMigration));
+        Raise(nameof(HasLegacyMigrationNotice));
+        Raise(nameof(LegacyMigrationTitle));
+        Raise(nameof(LegacyMigrationBody));
+        Raise(nameof(LegacyMigrationFolders));
+        Raise(nameof(LegacyMigrationAcknowledge));
+    }
+
+    /// <summary>
+    /// The button on the legacy invite migration notice: records that it was
+    /// shown, then re-reads status so the daemon decides it is gone.
+    /// </summary>
+    public async Task AcknowledgeLegacyMigrationAsync()
+    {
+        await _host
+            .CallAsync(DaemonProtocol.Methods.AcknowledgeLegacyInviteMigration, "{}")
+            .ConfigureAwait(true);
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// The button on one void notice: records that this notice was shown,
+    /// then re-reads status so the daemon's own list decides what stays.
+    /// </summary>
+    public async Task AcknowledgeGrantVoidAsync(GrantVoidCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (card.Id is not { } id)
+        {
+            return;
+        }
+
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.AcknowledgeGrantVoids,
+                JsonSerializer.Serialize(
+                    new Dictionary<string, ulong[]> { ["ids"] = new[] { id } }))
+            .ConfigureAwait(true);
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// "Turn back on" on a project's void notice: the Settings arming call,
+    /// unchanged. The daemon clears the notice when it arms the project; a
+    /// refusal changes nothing, and the notice stays with the core's
+    /// refusal line shown.
+    /// </summary>
+    private void SetArmingRewordings(IReadOnlyList<ArmingRewordingCard> cards)
+    {
+        ArmingRewordingCards.Clear();
+        foreach (ArmingRewordingCard card in cards)
+        {
+            ArmingRewordingCards.Add(card);
+        }
+    }
+
+    /// <summary>
+    /// Takes the held notice and re-renders its banner. Compared by value
+    /// before raising, as the other banners are.
+    /// </summary>
+    private void SetGateHeld(GateHeldNotice? next)
+    {
+        if (Equals(_gateHeld, next)
+            || (_gateHeld is not null && next is not null
+                && _gateHeld.Title == next.Title && _gateHeld.Body == next.Body
+                && _gateHeld.Release == next.Release && _gateHeld.AskFirst == next.AskFirst
+                && _gateHeld.Reasons.SequenceEqual(next.Reasons)
+                && _gateHeld.Projects.SequenceEqual(next.Projects)))
+        {
+            return;
+        }
+
+        _gateHeld = next;
+        Raise(nameof(HasGateHeldBanner));
+        Raise(nameof(GateHeld));
+    }
+
+    /// <summary>
+    /// The button on one rewording notice: records that this notice was
+    /// shown, then re-reads status so the daemon's own list decides what
+    /// stays.
+    /// </summary>
+    public async Task AcknowledgeArmingRewordingAsync(ArmingRewordingCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (card.Id is not { } id)
+        {
+            return;
+        }
+
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.AcknowledgeArmingRewordings,
+                JsonSerializer.Serialize(
+                    new Dictionary<string, ulong[]> { ["ids"] = new[] { id } }))
+            .ConfigureAwait(true);
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// "Ask me first" on a rewording or held-folder notice: the Settings
+    /// call, unchanged, which also answers a rewording notice. A refusal
+    /// changes nothing, and <paramref name="failed"/>, the core's refusal
+    /// line, is shown.
+    /// </summary>
+    public async Task AskFirstAsync(string projectId, string? failed)
+    {
+        ArgumentNullException.ThrowIfNull(projectId);
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.SetProjectMode, SwitchOnNotices.AskFirstParams(projectId))
+            .ConfigureAwait(true);
+
+        Notice = response.IsError ? failed ?? string.Empty : string.Empty;
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    public async Task RearmGrantVoidAsync(GrantVoidCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (GrantVoidNotices.RearmParams(card) is not { } payload)
+        {
+            return;
+        }
+
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
+            .ConfigureAwait(true);
+
+        Notice = response.IsError ? card.Notice.RearmFailed ?? string.Empty : string.Empty;
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Takes status.witness_capacity and re-renders the third banner, in the
+    /// Rust's words. Independent of SetHealth for the reason SetBudget is.
+    /// Compared by value before raising.
+    /// </summary>
+    private void SetWitnessCapacity(WitnessCapacity? capacity)
+    {
+        HealthCopy? next = HealthCopy.ForWitnessCapacity(
+            capacity,
+            WitnessCapacitySurface.Notice(capacity));
+        if (Equals(_witness, next))
+        {
+            return;
+        }
+
+        _witness = next;
+        Raise(nameof(HasWitnessBanner));
+        Raise(nameof(WitnessTitle));
+        Raise(nameof(WitnessDetail));
+    }
+
     private void SetPaused(bool paused)
     {
         if (_isPaused == paused)
@@ -1497,14 +1908,44 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     private void ReplacePending(IReadOnlyList<QueueEntry> entries)
     {
-        Pending.Clear();
-
+        // EVERYTHING IS BUILT AND PUBLISHED BEFORE ONE OBSERVABLE COLLECTION
+        // IS TOUCHED, and the order is the whole point of this arrangement.
+        //
+        // Pending is an ObservableCollection, and MainWindow.OpenPreview
+        // subscribes an open preview sheet to its CollectionChanged so the
+        // sheet re-reads its gate when the queue is replaced. The sheet's
+        // QueueChanged raises five properties that all resolve through
+        // LiveEntry, which reads the _rowsByEntryId FIELD.
+        //
+        // So the sheet's only notification arrives from Clear and from Add,
+        // and nothing raises a collection change after the refill. Publish
+        // the field last and the sheet is notified ONLY while the map still
+        // holds the previous snapshot, every time -- a deterministic
+        // ordering, not a race.
+        //
+        // Whether a contributor could SEE that is a separate question and an
+        // open one: it turns on whether x:Bind pulls synchronously on
+        // PropertyChanged (the sheet would render one snapshot behind until
+        // the next refresh) or defers the read to the dispatcher queue (it
+        // would land after this method returns, and there would be no visible
+        // defect at all). That cannot be settled from source, and is not the
+        // reason to hold the order -- the resolution being fed the snapshot
+        // it exists to replace is.
+        //
+        // Nothing incorrect is ever SENT either way: ContributeAsync
+        // re-tests the gate at the press, long after this returns, so the
+        // press reads the fresh map and refuses. The worst case is a control
+        // that looks armed and disarms when pressed.
+        //
+        // Nothing below the publication line may be moved above it, and
+        // nothing above it may be made observable.
         var rowsByEntryId = new Dictionary<string, QueueEntryViewModel>(StringComparer.Ordinal);
         var currentIds = new List<string>(entries.Count);
+        var rows = new List<QueueEntryViewModel>(entries.Count);
         foreach (QueueEntry entry in entries)
         {
             var row = new QueueEntryViewModel(entry);
-            Pending.Add(row);
+            rows.Add(row);
             rowsByEntryId[entry.EntryId] = row;
             currentIds.Add(entry.EntryId);
         }
@@ -1514,26 +1955,70 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // TraceCommons.Interop.Tests. This only reassembles which rows go
         // under each group, using QueueGrouping.KeyOf so membership is
         // computed by the exact same rule the groups were bucketed with.
-        Groups.Clear();
-        _groups = QueueGrouping.ByProject(entries);
-        foreach (ProjectQueueGroup group in _groups)
+        IReadOnlyList<ProjectQueueGroup> groups =
+            QueueGrouping.ByProject(entries, _contributableByProject);
+        var groupRows = new List<QueueGroupViewModel>(groups.Count);
+        foreach (ProjectQueueGroup group in groups)
         {
-            var rows = new ObservableCollection<QueueEntryViewModel>();
+            var groupEntries = new ObservableCollection<QueueEntryViewModel>();
             foreach (QueueEntry entry in entries)
             {
                 if (QueueGrouping.KeyOf(entry) == group.ProjectId)
                 {
-                    rows.Add(rowsByEntryId[entry.EntryId]);
+                    groupEntries.Add(rowsByEntryId[entry.EntryId]);
                 }
             }
 
-            Groups.Add(new QueueGroupViewModel(group, rows));
+            groupRows.Add(new QueueGroupViewModel(group, groupEntries));
+        }
+
+        // An id present before this call and absent now left the queue for
+        // good -- dismissed, submitted, expired, or superseded, all alike
+        // from here -- and its scheduled preview is cancelled. This is the
+        // queue's own membership diff, not a scroll signal: visibility
+        // (SetVisiblePreviewsAsync) is a completely separate axis that only
+        // ever affects build ORDER for ids still in this set.
+        //
+        // Computed here, against the field, because publishing currentIds is
+        // what makes the previous set unreadable.
+        IReadOnlyList<string> removed = PreviewCancellation.EntriesRemoved(_previousEntryIds, currentIds);
+
+        // The publication line.
+        _rowsByEntryId = rowsByEntryId;
+        _previousEntryIds = currentIds;
+        _groups = groups;
+
+        Pending.Clear();
+        foreach (QueueEntryViewModel row in rows)
+        {
+            Pending.Add(row);
+        }
+
+        // The certificate-held section, filtered from the same rows. No
+        // reading is applied here: which rows belong is one question for both
+        // audiences, and only the words differ.
+        CertificateHeld.Clear();
+        foreach (QueueEntryViewModel row in rows)
+        {
+            if (row.HoldsCertificate)
+            {
+                CertificateHeld.Add(row);
+            }
+        }
+        Raise(nameof(CertificateHeldIsEmpty));
+        Raise(nameof(CertificateHeldIsNotEmpty));
+
+        Groups.Clear();
+        foreach (QueueGroupViewModel group in groupRows)
+        {
+            Groups.Add(group);
         }
 
         // Re-resolved on every snapshot, not only when the contributor
         // navigates. A folder can be emptied by their own "Submit all" or by
         // an upload finishing in the background, and this is what returns
-        // them to the list when it is.
+        // them to the list when it is. It reads _groups and Groups, both
+        // published above.
         SetQueueLocation(_queueLocation);
 
         Raise(nameof(IsEmpty));
@@ -1543,17 +2028,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // is null on a freshly built QueueEntryViewModel, which reads as
         // pending. What follows only SCHEDULES the work; nothing here blocks
         // the draw on a daemon round trip.
-        //
-        // An id present before this call and absent now left the queue for
-        // good -- dismissed, submitted, expired, or superseded, all alike
-        // from here -- and its scheduled preview is cancelled. This is the
-        // queue's own membership diff, not a scroll signal: visibility
-        // (SetVisiblePreviewsAsync) is a completely separate axis that only
-        // ever affects build ORDER for ids still in this set.
-        IReadOnlyList<string> removed = PreviewCancellation.EntriesRemoved(_previousEntryIds, currentIds);
-        _previousEntryIds = currentIds;
-        _rowsByEntryId = rowsByEntryId;
-
         foreach (string entryId in removed)
         {
             _ = _host.CallAsync(DaemonProtocol.Methods.PreviewCancel, SubmitParams.ForEntry(entryId));

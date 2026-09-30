@@ -19,8 +19,8 @@ import Foundation
 /// 2. Never claim more erasure than the tier achieved -- see the ambiguity
 ///    note below, which is the whole reason this file is more than three
 ///    strings.
-/// 3. Withdrawal does not reverse settled credit -- `creditNote`, and
-///    nothing here says or implies otherwise.
+/// 3. Withdrawal does not reverse settled credit and forfeits pending
+///    credit -- `creditNote`, and nothing here says or implies otherwise.
 /// 4. `not_found` must not disclose which -- `failureSentence`.
 /// 5. Bulk withdrawal spans tiers -- `noBulkAction` explains why this app
 ///    does not offer it.
@@ -37,9 +37,10 @@ import Foundation
 ///
 /// So the confirmation is keyed on what this machine actually knows:
 ///
-/// - `submitted` / `quarantined` -> `not_distributed`, unambiguously. The
-///   server's own rule is `status != Accepted`, so this mapping is exact and
-///   the canonical `not_distributed` body is shown alone.
+/// - Pre-acceptance states (`submitted`, `received`, `quarantined`,
+///   `awaiting_pii_backstop`, or `rejected`) -> `not_distributed`,
+///   unambiguously. The server's own rule is `status != Accepted`, so this
+///   mapping is exact and the canonical `not_distributed` body is shown alone.
 /// - `accepted` -> either of the two commons tiers, and **this app cannot
 ///   tell which.** Showing only the `commons_not_distributed` body would be
 ///   claiming more erasure than may have been achieved, which is rule 2. So
@@ -83,12 +84,12 @@ enum WithdrawalCopy {
         }
     }
 
-    /// Credit is not clawed back. Verified rather than assumed: the
-    /// endpoint's response sets `credit_retained: true` unconditionally
-    /// ("Always true. Withdrawal is not a punishment: credit already awarded
-    /// stays awarded"). This app states only that -- nothing about how much
-    /// credit, when it settles, or what it is worth.
-    static let creditNote = "Credit already recorded stays."
+    /// Settled credit is not clawed back; credit still pending is forfeited,
+    /// because settlement never picks up a withdrawn trace. The endpoint's
+    /// `credit_retained` is false exactly when pending credit was forfeited.
+    /// This app states only that -- nothing about how much credit, when it
+    /// would have settled, or what it is worth.
+    static let creditNote = "Credit that has already settled stays. Credit still pending is forfeited."
 
     // MARK: - Before the action
 
@@ -96,7 +97,8 @@ enum WithdrawalCopy {
     /// off the history record's status. Not the server's tier: this is the
     /// weaker thing the client knows before it asks.
     enum Stage {
-        /// `submitted` or `quarantined`. `not_distributed`, exactly.
+        /// Any current server state other than accepted or terminal.
+        /// `not_distributed`, exactly.
         case notInTheCommons
         /// `accepted`. One of the two commons tiers; not knowable which.
         case inTheCommons
@@ -105,7 +107,8 @@ enum WithdrawalCopy {
 
         init(status: String) {
             switch status {
-            case "submitted", "quarantined": self = .notInTheCommons
+            case "submitted", "received", "quarantined", "awaiting_pii_backstop", "rejected":
+                self = .notInTheCommons
             case "accepted": self = .inTheCommons
             default: self = .unknown
             }
@@ -157,8 +160,7 @@ enum WithdrawalCopy {
         case .unknown:
             return Confirmation(
                 question: "Withdraw this trace?",
-                ambiguity: "This app does not recognise what stage this trace reached, so "
-                    + "it cannot rule out the furthest one:",
+                ambiguity: "This session may already have been distributed. Withdrawal cannot recall distributed copies.",
                 bodies: [canonicalCommonsDistributed],
                 gravest: 0,
                 credit: creditNote,
@@ -235,12 +237,7 @@ enum WithdrawalCopy {
     /// counts, so afterwards there is no per-trace tier to report and rule 1
     /// -- never a generic "withdrawn" -- cannot be honoured at all.
     static let noBulkAction =
-        "There is no button here that withdraws all of them at once. The daemon's bulk "
-        + "call reports only how many succeeded, never what happened to any one trace, "
-        + "and it chooses what to withdraw from this machine's copy of your history, "
-        + "which can be out of date -- so it could not tell you afterwards which of "
-        + "these had already been distributed. Withdraw them one at a time below and "
-        + "each one tells you what it actually did."
+        "Withdraw sessions individually to see the result for each one."
 }
 
 /// Assertions that belong on the copy, not on the plumbing.

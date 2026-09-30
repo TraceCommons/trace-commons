@@ -68,7 +68,7 @@ public final class TCDaemon {
         case leaked(String)
     }
 
-    public enum TCError: Error, CustomStringConvertible {
+    public enum TCError: Error, Equatable, CustomStringConvertible {
         case startFailed(String)
         case previewFailed(String)
         case daemonGone
@@ -82,6 +82,29 @@ public final class TCDaemon {
         /// old shell with a refusal it could never clear.
         case rootsNotDeclared
 
+        /// Another process holds this state directory's lock.
+        ///
+        /// Its own case for the same reason `rootsNotDeclared` is: the two
+        /// lead somewhere different. This one is not a refusal to report at
+        /// all -- the header calls it "not an error to repair: the daemon the
+        /// contributor wants is already up" -- and it routes to `attach`.
+        /// Flattening it into `startFailed` is what made the shell announce
+        /// that the watcher was not running while it was running.
+        case alreadyRunning
+
+        /// Nothing is listening on the state directory's endpoint. Only
+        /// `attach` produces this; a start would have said something else.
+        case noDaemonListening
+
+        /// The state directory itself could not be written or opened.
+        case stateDirectoryNotWritable
+
+        /// `daemon-settings.json` exists and this version cannot parse it.
+        case settingsUnreadable
+
+        /// The control socket could not be bound.
+        case ipcBindFailed
+
         public var description: String {
             switch self {
             case .startFailed(let msg): return "tc_daemon_start failed: \(msg)"
@@ -92,14 +115,42 @@ public final class TCDaemon {
                     This app hasn't been told which session folders to watch, and it \
                     won't guess. Nothing is being watched.
                     """
+            // Every sentence below comes from `attach_copy` in the Rust
+            // contributor crate, not from here: one written in this shell is
+            // one the GTK and Windows shells never get. The label is the
+            // fallback only when the ABI could not answer at all, which is
+            // the same thing this type already does for an unrecognized one.
+            case .alreadyRunning: return TCDaemon.line("already-running")
+            case .noDaemonListening: return TCDaemon.line("no-daemon-listening")
+            case .stateDirectoryNotWritable: return TCDaemon.line("state-directory-not-writable")
+            case .settingsUnreadable: return TCDaemon.line("settings-unreadable")
+            case .ipcBindFailed: return TCDaemon.line("ipc-bind-failed")
             }
         }
     }
 
-    /// The fixed label the C ABI reports for a roots refusal. Matched, not
-    /// parsed: `trace_commons.h` documents it as a fixed, content-free
-    /// string precisely so a host can branch on it.
-    private static let rootsNotDeclaredLabel = "roots-not-declared"
+    /// The sentence for a fixed label, falling back to the label itself if
+    /// the ABI could not answer. Not a sentence authored here.
+    private static func line(_ label: String) -> String {
+        TCAttach.line(forLabel: label) ?? label
+    }
+
+    /// The fixed labels the C ABI reports, mapped to the cases that lead
+    /// somewhere. Matched, not parsed: `trace_commons.h` documents them as
+    /// fixed, content-free strings precisely so a host can branch on them,
+    /// and it lists this set as complete.
+    ///
+    /// A label not in this table is treated as `startFailed`, which is what
+    /// the header asks for: "treat an unrecognized label as equivalent to
+    /// `daemon-start-failed` rather than assuming it is safe to display."
+    private static let namedFailures: [String: TCError] = [
+        "roots-not-declared": .rootsNotDeclared,
+        "already-running": .alreadyRunning,
+        "no-daemon-listening": .noDaemonListening,
+        "state-directory-not-writable": .stateDirectoryNotWritable,
+        "settings-unreadable": .settingsUnreadable,
+        "ipc-bind-failed": .ipcBindFailed,
+    ]
 
     /// How many calls are inside the C ABI with the handle right now.
     /// Diagnostics only -- true the instant it is read and possibly not the
@@ -153,7 +204,7 @@ public final class TCDaemon {
     ///
     /// Do not build `settingsJSON` by string concatenation: a folder a
     /// contributor picked can contain quotes and backslashes. Encode it.
-    public init(configDir: String, settingsJSON: String? = nil) throws {
+    public convenience init(configDir: String, settingsJSON: String? = nil) throws {
         var errPtr: UnsafeMutablePointer<CChar>?
         let h: OpaquePointer? = configDir.withCString { cDir in
             withUnsafeMutablePointer(to: &errPtr) { errOut in
@@ -165,6 +216,39 @@ public final class TCDaemon {
                 return tc_daemon_start(cDir, errOut)
             }
         }
+        try self.init(handleOrNil: h, errPtr: errPtr)
+    }
+
+    /// Attach to a daemon ALREADY RUNNING in another process.
+    ///
+    /// This is what `TCError.alreadyRunning` is for. The daemon holding the
+    /// lock may be a previous instance of this app that has not exited, or a
+    /// `trace-commons-contributor daemon` under a service manager; either
+    /// way it is the watcher the contributor wants, and it is reachable.
+    ///
+    /// The handle behaves like a started one except that it cannot stop the
+    /// daemon and cannot open a redacted body preview -- see
+    /// `tc_daemon_attach` in `trace_commons.h`. `isAttached` is how a caller
+    /// tells, so a shell can say what it cannot do rather than failing at
+    /// the moment somebody asks.
+    public convenience init(attachingTo configDir: String) throws {
+        var errPtr: UnsafeMutablePointer<CChar>?
+        let h: OpaquePointer? = configDir.withCString { cDir in
+            withUnsafeMutablePointer(to: &errPtr) { errOut in
+                tc_daemon_attach(cDir, errOut)
+            }
+        }
+        try self.init(handleOrNil: h, errPtr: errPtr, attached: true)
+    }
+
+    /// The shared tail of both initializers: turn the ABI's
+    /// pointer-plus-owned-label pair into either a handle or a typed error,
+    /// so the two cannot drift on how a label is read or freed.
+    private init(
+        handleOrNil h: OpaquePointer?,
+        errPtr: UnsafeMutablePointer<CChar>?,
+        attached: Bool = false
+    ) throws {
         if h == nil {
             let message: String
             if let e = errPtr {
@@ -173,13 +257,21 @@ public final class TCDaemon {
             } else {
                 message = "unknown error"
             }
-            if message == Self.rootsNotDeclaredLabel {
-                throw TCError.rootsNotDeclared
-            }
-            throw TCError.startFailed(message)
+            throw Self.namedFailures[message] ?? TCError.startFailed(message)
         }
+        // A successful call can still have written a label; free it rather
+        // than leaking the allocation the ABI handed over.
+        if let e = errPtr { tc_string_free(e) }
+        self.isAttached = attached
         self.handle = h
     }
+
+    /// Whether this handle reaches a daemon in another process.
+    ///
+    /// Not cosmetic: an attached handle cannot stop the daemon and cannot
+    /// open a body preview, and a shell that does not know which kind it
+    /// holds can only find out by trying and failing in front of somebody.
+    public let isAttached: Bool
 
     /// Calls `method` with `paramsJSON` (a JSON object literal, e.g. "{}")
     /// and returns the daemon's JSON response as a Swift String. Never

@@ -17,8 +17,8 @@
 //!
 //! # Canonical bytes are length-prefixed, never JSON
 //!
-//! [`WitnessCertificate::signing_bytes`] is the only encoder, and it is a
-//! length-prefixed encoding in the shape of
+//! The certificate dispatches to the original v1 encoder or the shared v2
+//! encoder in the permissive protocol crate. Both use length prefixes in the shape of
 //! `instance_enroll_attestation_signing_bytes` in `trace-commons-protocol`.
 //! Serializing this struct to JSON and hashing that would be wrong twice
 //! over: `serde_json`'s map ordering is not guaranteed, and a dependency
@@ -43,51 +43,35 @@
 //! verifying a certificate is the same operation as verifying a receipt, over
 //! a different message.
 //!
-//! # Why there are no inference fields, and why they are not coming back
+//! # Final-call inference provenance
 //!
-//! An earlier shape of this certificate carried `chat_id`, `prompt_tokens`,
-//! `completion_tokens` and `model` -- what the upstream inference cost and
-//! which model served it. They are gone, deliberately, and this note exists
-//! so that they are not re-added by someone reading the gap as an oversight.
+//! The v2 profile signs a closed provenance value under a distinct domain.
+//! `Attested` records the witness's verification of the final declared call
+//! against a pinned receipt signer. Provider TEE and gateway
+//! signers have different classes. A gateway signature does not establish the
+//! serving model's TEE identity. This says nothing about the authenticity of
+//! the rest of the session, omitted calls, model quality, or receipt replay.
+//! The original v1 profile keeps its exact signing bytes and has unknown
+//! inference provenance.
 //!
-//! **No trace population in this repo can fill them honestly.** A CLI
-//! transcript is a local agent session with no upstream receipt at all.
-//! IronWire's ledger records a routing decision, not an inference receipt.
-//! The witness in this design never sees the inference: it is handed a raw
-//! transcript and performs the redaction. So every one of those fields could
-//! only ever have been passed through from whatever the caller typed, signed
-//! by an enclave, and thereby made to *look* attested. A field that no honest
-//! path can fill is an invitation to fill it dishonestly.
-//!
-//! **They are not returning as optional fields here.** IronWire now records a
-//! provider response id (`nearai/ironwire#19`), so a future IronWire-sourced
-//! trace could genuinely carry a receipt, and the temptation will be to bolt
-//! four `Option`s onto [`CertificateDetails`]. That would be wrong three ways.
-//! An optional field in a length-prefixed signed encoding still has to be
-//! encoded when absent, or the encoding stops being injective -- so "optional"
-//! buys nothing on the wire and costs an absent/present discriminant that every
-//! verifier must get identically right. Two field sets under one domain string
-//! is exactly the confusion `SIGNING_DOMAIN` exists to prevent. And a
-//! certificate that sometimes attests to inference and sometimes does not is
-//! one a consumer must branch on, which is where "verified" quietly becomes
-//! "verified something".
-//!
-//! If a receipt-bearing population does arrive, the shape to build is a
-//! separate certificate profile with its own domain string -- a
-//! `redaction_witness_certificate.v2`, or a distinct receipt-binding
-//! structure -- chosen deliberately, by a witness that actually holds the
-//! receipt it binds. Not fields grafted onto this one.
+//! Raw inference request/response hashes and receipt identities are omitted:
+//! they can identify an upstream conversation or confirm guessed raw text.
+//! Receipt verification stays inside the witness; downstream parties verify
+//! its signed statement, not the provider receipt independently. The base
+//! `redacted_sha256` binds the exact redacted submission bytes, not raw inference
+//! bodies. Model, signer, class and timing still disclose metadata.
 //!
 //! # Logging
 //!
-//! Nothing here logs. With the inference fields gone, no field on this type
-//! identifies a contributor or an upstream conversation: a digest, a coarse
-//! three-valued risk verdict, a policy alias, an image measurement and a
-//! timestamp. `Debug` therefore renders all of them. It stays hand-written
-//! rather than derived so that adding an identifying field is a visible
-//! decision here rather than a silent widening of every `?cert` in a log.
+//! Nothing here logs. `Debug` renders hashes, labels, and timestamps, while
+//! the provenance payload exposes only its class, omitting model and signer.
+//! It stays hand-written so an identifying field cannot silently widen every
+//! `?cert` in a log.
 
 use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
+use trace_commons_protocol::witness_provenance::{
+    InferenceProvenance, WitnessCertificateV2Base, witness_certificate_v2_signing_bytes,
+};
 
 use super::correspondence::CorrespondenceProof;
 use crate::near_attestation::receipt::{ReceiptError, decode_address, recover_eip191_signer};
@@ -158,16 +142,17 @@ pub struct CertificateDetails {
 ///
 /// # Construction
 ///
-/// The fields are private and there is exactly one production constructor,
-/// [`Self::from_proof`], which consumes a [`CorrespondenceProof`] by value.
+/// The fields are private and both issuance constructors,
+/// [`Self::from_proof`] and [`Self::from_proof_v2`], consume a
+/// [`CorrespondenceProof`] by value.
 /// A public-field record would have made that constructor decoration: anybody
 /// could write a struct literal with a digest they typed in, and the
 /// correspondence check -- the strongest link in this chain -- would have sat
 /// next to the weakest with nothing requiring it. Private fields are what
 /// make holding a proof a *requirement* rather than a convention.
 ///
-/// The wire type's `into_certificate` will be the second path when the
-/// witness service slice lands. There is deliberately no third.
+/// [`Self::from_wire`] and [`Self::from_wire_v2`] decode untrusted claims;
+/// neither is an issuance path or confers verification.
 #[derive(Clone, PartialEq, Eq)]
 pub struct WitnessCertificate {
     /// Lowercase hex SHA-256 of the redacted artifact, as carried by
@@ -177,14 +162,20 @@ pub struct WitnessCertificate {
     redaction_policy_version: String,
     witness_measurement: String,
     timestamp: i64,
+    version: CertificateVersion,
+}
+
+/// Explicit signed profile; v1 has no signed inference provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertificateVersion {
+    V1,
+    V2(InferenceProvenance),
 }
 
 impl std::fmt::Debug for WitnessCertificate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Every field, because no field on this type identifies a contributor
-        // or an upstream conversation -- see the module's Logging note. Kept
-        // hand-written rather than derived so that a field which *does*
-        // identify one cannot start rendering by accident.
+        // Provenance's own Debug renders only class. Keep this
+        // hand-written so additions cannot silently widen operational logs.
         formatter
             .debug_struct("WitnessCertificate")
             .field("redacted_sha256", &self.redacted_sha256)
@@ -192,6 +183,7 @@ impl std::fmt::Debug for WitnessCertificate {
             .field("redaction_policy_version", &self.redaction_policy_version)
             .field("witness_measurement", &self.witness_measurement)
             .field("timestamp", &self.timestamp)
+            .field("version", &self.version)
             .finish()
     }
 }
@@ -278,14 +270,27 @@ impl WitnessCertificate {
             redaction_policy_version: details.redaction_policy_version,
             witness_measurement: details.witness_measurement,
             timestamp: details.timestamp,
+            version: CertificateVersion::V1,
         }
+    }
+
+    /// Issue an explicit v2 profile after the correspondence proof has bound
+    /// the redacted artifact. Provenance must come from a separate verified
+    /// final-call check; this constructor does not verify a receipt itself.
+    pub fn from_proof_v2(
+        proof: CorrespondenceProof,
+        details: CertificateDetails,
+        provenance: InferenceProvenance,
+    ) -> Self {
+        let mut certificate = Self::from_proof(proof, details);
+        certificate.version = CertificateVersion::V2(provenance);
+        certificate
     }
 
     /// Rebuild a certificate that arrived over the wire, from fields a
     /// decoder parsed one by one.
     ///
-    /// **This is the second construction path the type doc promises, and it
-    /// is the last one.** It exists because the receiving side has no proof
+    /// This exists because the receiving side has no proof
     /// and cannot have one: a server holding an artifact and a claimed digest
     /// has, by construction, only what the sender said. Anything else it
     /// could do here would be theatre.
@@ -304,9 +309,7 @@ impl WitnessCertificate {
     /// server actually holds. Typing a field here only produces a certificate
     /// that fails all three.
     ///
-    /// The caller is `redaction_witness::request::witness_headers`, and it
-    /// must stay the only one: a second decoder is a second wire format, and
-    /// two wire formats is how an honest certificate starts failing.
+    /// The v1 header decoder calls this; v2 uses [`Self::from_wire_v2`].
     pub fn from_wire(redacted_sha256: String, details: CertificateDetails) -> Self {
         WitnessCertificate {
             redacted_sha256,
@@ -314,7 +317,24 @@ impl WitnessCertificate {
             redaction_policy_version: details.redaction_policy_version,
             witness_measurement: details.witness_measurement,
             timestamp: details.timestamp,
+            version: CertificateVersion::V1,
         }
+    }
+
+    /// Decode an untrusted v2 wire claim. Verification must still check the
+    /// signature, measurement and artifact before using its provenance.
+    pub fn from_wire_v2(
+        redacted_sha256: String,
+        details: CertificateDetails,
+        provenance: InferenceProvenance,
+    ) -> Self {
+        let mut certificate = Self::from_wire(redacted_sha256, details);
+        certificate.version = CertificateVersion::V2(provenance);
+        certificate
+    }
+
+    pub fn version(&self) -> &CertificateVersion {
+        &self.version
     }
 
     /// Build a certificate with an arbitrary digest, for tests that need a
@@ -330,6 +350,7 @@ impl WitnessCertificate {
             redaction_policy_version: details.redaction_policy_version,
             witness_measurement: details.witness_measurement,
             timestamp: details.timestamp,
+            version: CertificateVersion::V1,
         }
     }
 
@@ -402,6 +423,18 @@ impl WitnessCertificate {
     /// the verifier ever encode differently, every honest certificate fails,
     /// so there must never be a second encoder.
     pub fn signing_bytes(&self) -> Vec<u8> {
+        if let CertificateVersion::V2(provenance) = &self.version {
+            return witness_certificate_v2_signing_bytes(
+                WitnessCertificateV2Base {
+                    redacted_sha256: &self.redacted_sha256,
+                    redaction_policy_version: &self.redaction_policy_version,
+                    witness_measurement: &self.witness_measurement,
+                    residual_risk_tag: residual_risk_tag(self.residual_risk_verdict),
+                    timestamp: self.timestamp,
+                },
+                provenance,
+            );
+        }
         let mut out = Vec::new();
         out.extend_from_slice(SIGNING_DOMAIN);
         for field in [
@@ -473,6 +506,7 @@ mod tests {
             redaction_policy_version: "policy-v3".to_string(),
             witness_measurement: "b".repeat(64),
             timestamp: 1_788_000_000,
+            version: CertificateVersion::V1,
         }
     }
 
@@ -634,6 +668,54 @@ mod tests {
         assert!(bytes.starts_with(SIGNING_DOMAIN));
         // Same input, same bytes: the encoder has no map iteration in it.
         assert_eq!(bytes, certificate().signing_bytes());
+        let frozen = concat!(
+            "74726163655f636f6d6d6f6e732e726564616374696f6e5f7769746e6573735f63657274696669636174652e76310a40000000000000006161616161",
+            "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616109",
+            "00000000000000706f6c6963792d76334000000000000000626262626262626262626262626262626262626262626262626262626262626262626262",
+            "626262626262626262626262626262626262626262626262626262620200b7926a00000000",
+        );
+        assert_eq!(hex::encode(bytes), frozen);
+    }
+
+    #[test]
+    fn v2_unattested_has_its_own_signing_domain() {
+        let proof =
+            crate::redaction_witness::correspondence::check_correspondence("hello", "hello", &[])
+                .unwrap();
+        let cert = WitnessCertificate::from_proof_v2(
+            proof,
+            CertificateDetails {
+                residual_risk_verdict: ResidualPiiRisk::Medium,
+                redaction_policy_version: "policy-v3".to_string(),
+                witness_measurement: "b".repeat(64),
+                timestamp: 1_788_000_000,
+            },
+            InferenceProvenance::Unattested,
+        );
+        assert!(
+            cert.signing_bytes()
+                .starts_with(b"trace_commons.redaction_witness_certificate.v2\n")
+        );
+    }
+
+    #[test]
+    fn v2_provenance_is_bound_by_the_signature() {
+        use trace_commons_protocol::witness_provenance::{AttestationClass, FinalCallAttestation};
+
+        let mut cert = certificate();
+        cert.version = CertificateVersion::V2(InferenceProvenance::Unattested);
+        let witness = key("witness");
+        let signature = sign(&witness, &cert);
+        assert_eq!(cert.verify(&signature, &address_of_key(&witness)), Ok(()));
+
+        let call =
+            FinalCallAttestation::new(AttestationClass::ProviderTeeFinalCall, None, "d".repeat(64))
+                .unwrap();
+        cert.version = CertificateVersion::V2(InferenceProvenance::Attested(call));
+        assert_eq!(
+            cert.verify(&signature, &address_of_key(&witness)),
+            Err(CertificateError::SignerMismatch)
+        );
     }
 
     #[test]

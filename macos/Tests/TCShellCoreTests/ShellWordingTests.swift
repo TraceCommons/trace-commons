@@ -58,12 +58,12 @@ final class ShellWordingTests: XCTestCase {
         // The app model and its non-view surfaces.
         "TraceCommonsApp/AppDelegate.swift": 1,
         "TraceCommonsApp/AppModel.swift": 8,
-        "TraceCommonsApp/HealthCopy.swift": 32,
+        "TraceCommonsApp/HealthCopy.swift": 23,
         "TraceCommonsApp/Notifier.swift": 2,
         "TraceCommonsApp/SelfTest.swift": 15,
 
         // The SwiftUI views, which carry their own labels and help text.
-        "TraceCommonsApp/Views/ActionErrorBanner.swift": 2,
+        "TraceCommonsApp/Views/ActionMessageBanner.swift": 2,
         "TraceCommonsApp/Views/BrandMark.swift": 1,
         "TraceCommonsApp/Views/ConsentScopesView.swift": 7,
         "TraceCommonsApp/Views/CreditRecordView.swift": 9,
@@ -79,12 +79,15 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/OnboardingWelcomeView.swift": 8,
         "TraceCommonsApp/Views/PreviewSheet.swift": 38,
         "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
+        // Back to 3: the withheld line briefly lived here and is now
+        // `tc_contribution_withheld_line`, assembled in the Rust and shared
+        // with the other two shells. Do not raise this again for it.
         "TraceCommonsApp/Views/QueueFolderRow.swift": 3,
-        "TraceCommonsApp/Views/QueueView.swift": 26,
+        "TraceCommonsApp/Views/QueueView.swift": 25,
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
         "TraceCommonsApp/Views/SettingsView.swift": 40,
         "TraceCommonsApp/Views/WhatGetsRemovedSheet.swift": 4,
-        "TraceCommonsApp/Views/WithdrawalCopy.swift": 55,
+        "TraceCommonsApp/Views/WithdrawalCopy.swift": 49,
     ]
 
     /// The surfaces whose wording already comes from Rust. Nothing may ever
@@ -92,11 +95,16 @@ final class ShellWordingTests: XCTestCase {
     /// and an entry here would be a quiet way of undoing that.
     private static let rustOwnedSurfaces = [
         "TCBridge/TCConsentCopy.swift",
+        "TCBridge/TCContributionEligibility.swift",
         "TCBridge/TCRoutingCopy.swift",
+        "TCBridge/TCSkillLearning.swift",
         "TCShellCore/ConsentCopy.swift",
+        "TCShellCore/EligibilitySurface.swift",
         "TCShellCore/ReadGate.swift",
         "TCShellCore/RoutingCopy.swift",
         "TCShellCore/RoutingSurface.swift",
+        "TraceCommonsApp/SkillLearningModels.swift",
+        "TraceCommonsApp/Views/SkillLearningView.swift",
     ]
 
     /// Words a sentence has and an identifier, a wire key, a symbol name or

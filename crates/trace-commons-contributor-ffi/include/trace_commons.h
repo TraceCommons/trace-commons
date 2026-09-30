@@ -116,6 +116,7 @@
 #define TRACE_COMMONS_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -291,6 +292,70 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  * daemon. Declaring only one root here is refused exactly as it is above.
  */
 tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* settings_json, char** err);
+
+/* Attach to a daemon ALREADY RUNNING in another process, over its socket.
+ *
+ * This is the answer to tc_daemon_start reporting "already-running". That
+ * label means another process holds daemon.lock, which is documented above
+ * as "not an error to repair: the daemon the contributor wants is already
+ * up" -- and until this call existed a host had no way to act on it, so a
+ * shell that hit it told the contributor their watcher was not running
+ * while it was running. A host that treats "already-running" as a dead end
+ * is stating something false; this is the call that makes it true instead.
+ *
+ * The returned handle is a tc_handle* in every respect that matters:
+ * tc_call, tc_subscribe, tc_unsubscribe and tc_handle_free all take it, and
+ * tc_handle_free remains the only function that frees it. Three deliberate
+ * differences from a started handle, each REPORTED rather than silently
+ * degraded:
+ *
+ *   - tc_daemon_stop does NOT stop the daemon; it stops listening to it.
+ *     The process on the other end may be a service-managed daemon or
+ *     another window, and a shell that did not start it does not get to end
+ *     it. tc_call(h, "shutdown", ...) is refused for the same reason, with
+ *     the error frame code "refused" and message "attached-stop-refused".
+ *   - tc_preview_open and tc_preview_turns_json are refused with
+ *     "preview-requires-embedded". The redacted BODY is this ABI's
+ *     in-process content exemption; the socket's "preview" carries the
+ *     summary only, and answering with a summary where a body was asked for
+ *     would be a content promise this path cannot keep.
+ *   - Events arrive over the socket, so a subscriber DOES receive the
+ *     "snapshot" frame the daemon sends a client that has just subscribed --
+ *     the courtesy tc_subscribe's in-process path never gets.
+ *
+ * Returns NULL and sets *err (if err is non-NULL) to a fixed label on
+ * failure. *err is an owned string; free it with tc_string_free.
+ *
+ *   "no-daemon-listening"          nothing is listening on this state
+ *                                  directory's endpoint -- no daemon was
+ *                                  ever started, or a crashed one left the
+ *                                  socket file behind with nothing behind
+ *                                  it. Deliberately distinct from
+ *                                  "already-running": a host that gets
+ *                                  "already-running" from a start and then
+ *                                  this from an attach is looking at a
+ *                                  daemon that exited in between.
+ *   "state-directory-not-writable" the state directory could not be opened.
+ *   "attach-failed"                the endpoint was reached and the
+ *                                  connection could not be held.
+ *   "attach-unsupported"           this platform's daemon endpoint cannot
+ *                                  carry a held-open connection at all.
+ *                                  Windows today: its named pipe is a
+ *                                  synchronous handle, so a client that
+ *                                  reads it from one thread while writing
+ *                                  from another never completes a round
+ *                                  trip. Nothing is wrong with the machine
+ *                                  or the daemon and retrying will never
+ *                                  help; a host there must treat
+ *                                  "already-running" as terminal, as it did
+ *                                  before this call existed.
+ *
+ * Unlike tc_daemon_start, this does NOT evaluate the session roots: the
+ * daemon being attached to has already made that decision for itself, and
+ * re-deciding it here would refuse a running watcher on the strength of a
+ * settings file it is not using.
+ */
+tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
 
 /* Describe the session stores on this machine, so a roots screen can ask the
  * contributor about something specific rather than showing an empty field.
@@ -584,6 +649,57 @@ char*       tc_routing_last_checked(const char* when);
  */
 char*       tc_private_inference_copy(void);
 
+/* Every fixed word for a watcher another process is already running, as one
+ * owned JSON object. Free it with tc_string_free.
+ *
+ * This is the surface a host renders after tc_daemon_start answers
+ * "already-running" and tc_daemon_attach succeeds: the banner saying this
+ * window is driving somebody else's watcher, plus one sentence per fixed
+ * start-failure label. Keys:
+ *
+ *   attached_title, attached_detail,
+ *   already_running, no_daemon_listening,
+ *   state_directory_not_writable, settings_unreadable, ipc_bind_failed
+ *
+ * There is deliberately NO sentence for "roots-not-declared" (it has its own
+ * screen) or for "daemon-start-failed" (opaque by construction). A host that
+ * meets a label with no sentence here must treat it as daemon-start-failed
+ * rather than display it.
+ *
+ * Needs no handle because it describes the build. Returns NULL only on a
+ * caught panic.
+ */
+char*       tc_attach_copy(void);
+
+/* Every fixed word on owned session detail and reviewed publication, as one
+ * OWNED JSON object; free it with tc_string_free. Needs no handle because it
+ * describes the build. NULL only on a caught panic.
+ */
+char*       tc_public_run_copy(void);
+
+/* Every fixed word on the correction-derived skill surface, as one OWNED JSON
+ * object. Validate a skill editor payload with the Rust contract and receive
+ * validity, a fixed error label, character counts, and display limits without
+ * echoing the draft. Returned strings are owned; free with tc_string_free.
+ */
+char*       tc_skill_learning_copy(void);
+char*       tc_skill_draft_validate(const char* input_json);
+
+/* Validate and normalize a native publication editor payload through the
+ * shared Rust protocol. Returns an owned JSON result; free it with
+ * tc_string_free. input_json may be NULL, otherwise it must be NUL-terminated
+ * UTF-8.
+ */
+char*       tc_public_run_validate_editor(const char* input_json);
+
+/* Contributor-facing sentences for fixed daemon error labels. Each returns
+ * an owned string; free it with tc_string_free. label may be NULL, otherwise
+ * it must be a NUL-terminated UTF-8 string.
+ */
+char*       tc_session_detail_error_line(const char* label);
+char*       tc_public_run_error_line(const char* label);
+char*       tc_skill_learning_error_line(const char* label);
+
 /* Whether quitting may interrupt owned model-call work, including stopping.
  * requested_on is boolean (0/nonzero). Off and foreign ownership return 0;
  * owned running/stopping return 1. Unknown/invalid status or panic retains
@@ -616,6 +732,466 @@ char*       tc_private_inference_state_line(const char* state);
  * failure value, for the reason on tc_routing_tool_tone.
  */
 int32_t     tc_private_inference_state_tone(const char* state);
+
+/* What a shell may offer for one credential state.
+ *
+ * A range of its own, disjoint from every tone range for the reason those
+ * ranges are disjoint from each other: a shell that cross-wired an action onto
+ * a tone mapper would draw a button from a colour. There is no failure value.
+ * NONE is the safe direction, and not by analogy: OBTAIN opens a browser and
+ * mints a key at a third party, so drawing it for a state nobody could read is
+ * how a contributor ends up holding a second key.
+ */
+#define TC_CREDENTIAL_ACTION_NONE   30
+#define TC_CREDENTIAL_ACTION_OBTAIN 31
+#define TC_CREDENTIAL_ACTION_CANCEL 32
+#define TC_CREDENTIAL_ACTION_FORGET 33
+/* Copy a sign-in an earlier build kept in the macOS login keychain into the
+ * store this build uses (near_ai_credential_migrate). Offered only for
+ * "migration_available", which only macOS produces. */
+#define TC_CREDENTIAL_ACTION_MIGRATE 34
+
+/* Why a connect control is not on offer, or the EMPTY STRING.
+ *
+ * credentialed is harness_list's destination_credentialed as a tri-state: any
+ * negative value means the field was absent, 0 false, 1 true -- the encoding
+ * tc_private_inference_write_confirmed uses for the same reason.
+ *
+ * AN ABSENT FIELD IS NOT A REFUSED CONNECT. A daemon that predates the
+ * credential gate answers the empty string, because telling somebody to sign in
+ * before connecting a tool they can connect right now would be false.
+ *
+ * Draw it once, beside the connect controls: the fact is about the destination
+ * and not about any one tool. A destination the contributor runs themselves
+ * reports credentialed and gets no sentence.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_credential_notice(int32_t credentialed);
+
+/* The sentence for one near_ai_credential_status state label.
+ *
+ * state is that method's state field: "absent", "obtaining", "failed",
+ * "cancelled" or "present".
+ *
+ * An empty, NULL or non-UTF-8 label reports that this daemon does not answer
+ * the question. An unfamiliar nonempty label reports that the state could not
+ * be read. NEITHER SAYS THAT NO KEY IS KEPT HERE: that is a claim about the
+ * machine, and a shell that made it up would invite a second sign-in.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_credential_state_line(const char* state);
+
+/* How firmly the sentence tc_near_ai_credential_state_line returned reads: one
+ * of the TC_PRIVATE_INFERENCE_TONE_* values.
+ *
+ * The same five values as the listener state row, because a shell maps those
+ * onto colours once and a second enum with the same five meanings is a second
+ * mapping to keep in agreement.
+ *
+ * "present" is the only label that answers _CLEAR. Everything else --
+ * including a label this build has never heard of, a NULL or non-UTF-8 state,
+ * and a caught panic -- answers TC_PRIVATE_INFERENCE_TONE_NEUTRAL.
+ */
+int32_t     tc_near_ai_credential_state_tone(const char* state);
+
+/* The one action a shell may offer for a credential state: one of the
+ * TC_CREDENTIAL_ACTION_* values.
+ *
+ * THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each deciding
+ * which button belongs beside which state is three chances to draw "Sign in"
+ * next to a key that is already here, or next to a state nobody could read.
+ */
+int32_t     tc_near_ai_credential_action(const char* state);
+
+/* What a shell may offer for one queue entry's eligibility state.
+ *
+ * Distinct from the TC_CREDENTIAL_ACTION_* block above despite both having a
+ * "nothing" member: they govern different controls, and one numbering shared
+ * between them is one renumbering away from drawing a sign-in button on a
+ * queue row.
+ */
+#define TC_CONTRIBUTION_CONTROL_NONE       50
+#define TC_CONTRIBUTION_CONTROL_CONTRIBUTE 51
+
+/* What the outcome list says about a contribution the commons refused.
+ *
+ * THE EMPTY STRING MEANS "not one of these" and is the caller's signal to use
+ * its own outcome table, not a failure. Five labels are answered here;
+ * everything else on that surface is still each shell's own.
+ *
+ * The one thing a caller must not do with a non-empty answer is pair it with
+ * a sentence saying nothing was sent. On this path the envelope WAS
+ * transmitted and the gate declined it after receiving it, which is why the
+ * shells' own defaults are wrong here.
+ *
+ * label is the queue entry's reason_label in the server's own spelling, with
+ * underscores. The hyphenated constants in daemon::health name the same
+ * events for the health banner and are NOT what arrives here.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_outcome_refusal_line(const char* label);
+/* Shared queue outcome sentence. Unknown labels are neutral. Free with tc_string_free. */
+char*       tc_queue_outcome_line(const char* label);
+
+/* The sentence for one NEAR AI login-enrolment control name.
+ *
+ * Ten labels, each with its own sentence, and anything else -- including a
+ * label from a newer daemon, an empty string or NULL -- reaching the generic
+ * one. NEVER THE EMPTY STRING: a refusal this build cannot name is the whole
+ * of what a contributor is being told, unlike an attestation reason, where
+ * saying nothing is honest.
+ *
+ * The three that refuse before anything is spent must not be collapsed by a
+ * caller. near_ai_enroll_no_session means sign in first,
+ * near_ai_enroll_commons_unreachable means the network, and
+ * near_ai_enroll_commons_unsupported means this commons does not offer the
+ * path at all. A contributor told the wrong one debugs the wrong thing.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_enroll_line(const char* label);
+
+/* How firmly that sentence reads: one of the TC_PRIVATE_INFERENCE_TONE_*
+ * values.
+ *
+ * near_ai_enroll_no_session is _ATTENTION, because there is a step the
+ * contributor can take and the surface should point at it rather than paint a
+ * wall. near_ai_enroll_already_enrolled is _CLEAR, because nothing was
+ * refused: the device is joined, which is the outcome they wanted. Everything
+ * else, including an unknown label, a NULL and a caught panic, is _REFUSED.
+ */
+int32_t     tc_near_ai_enroll_tone(const char* label);
+
+/* The sentence for one row of the certificate-held list.
+ *
+ * evidence_admitted is the daemon's admission_evidence_required VERBATIM,
+ * never its negation. That flag is true for a contributor who signed up
+ * through NEAR and therefore has NO invite, and false for one enrolled on an
+ * invite. So a non-zero argument returns the CANDIDATE reading -- "you can
+ * put this forward" -- and zero returns the ATTESTED one. It looks backwards
+ * until you know which way the flag points, which is exactly why the choice
+ * is here and not in each shell: three shells each writing
+ * flag ? candidate : attested would be three chances to swap them, and a
+ * swapped reading tells a contributor with no invite that their session
+ * carries cryptographic proof when nothing has attested it.
+ *
+ * Any non-zero value is the flag set, so a shell may widen a native bool
+ * however its language does. A NEGATIVE VALUE IS A CALLER ERROR and resolves
+ * to the CANDIDATE reading, the one that claims less: a malformed argument
+ * must not be able to assert a security property.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_certificate_row_line(int32_t evidence_admitted);
+
+/* The heading over that list, on the same split as tc_certificate_row_line
+ * and with the same argument.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_certificate_list_title(int32_t evidence_admitted);
+
+/* The sentence for one queue entry's eligibility label.
+ *
+ * state is that field from a list_pending entry: "eligible",
+ * "ineligible_permanent", "ineligible_configuration" or "unknown".
+ *
+ * A SHELL THAT RECEIVED NO eligibility FIELD MUST NOT CALL THIS. An absent
+ * field means the contributor was invited and has no eligibility question;
+ * answering one they do not have puts a caveat on work that carries none.
+ * Absent is not "unknown".
+ *
+ * An empty, NULL, non-UTF-8 or unfamiliar state reports that the answer has
+ * not been worked out. IT NEVER REPORTS AN INELIGIBILITY: a state this build
+ * cannot read is not evidence about a contributor's session, and saying it is
+ * would stop them offering work that is fine.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_contribution_eligibility_line(const char* state);
+
+/* How firmly the sentence tc_contribution_eligibility_line returned reads:
+ * one of the TC_PRIVATE_INFERENCE_TONE_* values.
+ *
+ * "eligible" is _CLEAR and "ineligible_configuration" is _ATTENTION -- the one
+ * state with something to do about it. Everything else, including a state this
+ * build has never heard of, a NULL or non-UTF-8 state, and a caught panic, is
+ * TC_PRIVATE_INFERENCE_TONE_NEUTRAL. A permanent ineligibility is deliberately
+ * NOT _REFUSED: nothing was refused and nothing went wrong, and painting a
+ * contributor's ordinary older work as a failure is a judgement this surface
+ * has no business making.
+ */
+int32_t     tc_contribution_eligibility_tone(const char* state);
+
+/* The one control a shell may offer for an eligibility state: one of the
+ * TC_CONTRIBUTION_CONTROL_* values.
+ *
+ * THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each deciding
+ * which rows get a send button is three chances to offer one beside a session
+ * the server will refuse -- which is the defect this whole surface exists to
+ * remove, and it is worse than an inert button: pressing it sends a
+ * contributor's work and has it turned away.
+ *
+ * TC_CONTRIBUTION_CONTROL_NONE is not "hide the row". Every session is shown,
+ * because hiding a contributor's own work is its own dishonesty. The row is
+ * present, unoffered, and carries its sentence.
+ */
+int32_t     tc_contribution_eligibility_control(const char* state);
+
+/* The sentence for one queue entry's eligibility_reason label.
+ *
+ * THE EMPTY STRING for an absent, NULL, non-UTF-8 or unfamiliar reason, and a
+ * shell renders nothing for it. That is not the hedge the state line makes:
+ * the state sentence has already said what is true, and a second sentence
+ * guessing at a reason this build does not know would add a detail nobody
+ * established. An "eligible" entry carries no reason at all.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_contribution_eligibility_reason_line(const char* reason);
+
+/* The sentence for one queue entry's attestation label.
+ *
+ * mark is that field from a list_pending entry: "attested",
+ * "unattested_permanent", "unattested_configuration" or "unknown".
+ *
+ * EVERY SHELL CALLS THIS FOR EVERY ROW. The opposite rule to
+ * tc_contribution_eligibility_line, which must not be called when the wire
+ * carried no eligibility field. That field answers whether this contributor
+ * may send this session -- a question only an evidence-admitted contributor
+ * has. This one answers whether the session carries a checkable copy of its
+ * last model call, which is a fact about the trace, and the field
+ * is always present.
+ *
+ * THE POSITIVE CASE IS THE INTERESTING ONE HERE. A session that IS attested
+ * says so. A surface that only speaks up to explain what is missing teaches a
+ * contributor that the mark means bad news.
+ *
+ * An empty, NULL, non-UTF-8 or unfamiliar mark reports that the answer has not
+ * been worked out. IT NEVER REPORTS AN UNATTESTED SESSION: a mark this build
+ * cannot read is not evidence about a contributor's work.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_contribution_attestation_line(const char* mark);
+
+/* How firmly the sentence tc_contribution_attestation_line returned reads:
+ * one of the TC_PRIVATE_INFERENCE_TONE_* values.
+ *
+ * "attested" is _CLEAR -- the one mark on this surface that is good news --
+ * and "unattested_configuration" is _ATTENTION, the one with something to do
+ * about it. Everything else, including a mark this build has never heard of, a
+ * NULL or non-UTF-8 mark and a caught panic, is
+ * TC_PRIVATE_INFERENCE_TONE_NEUTRAL.
+ *
+ * A permanently unattested session is deliberately NOT _REFUSED. Nothing was
+ * refused and nothing went wrong: most of a contributor's history was recorded
+ * before anything was keeping copies, and painting all of it as a failure --
+ * on a surface they cannot act on -- is a judgement this has no business
+ * making.
+ */
+int32_t     tc_contribution_attestation_tone(const char* mark);
+
+/* The sentence for one queue entry's attestation_reason label.
+ *
+ * THE EMPTY STRING for an absent, NULL, non-UTF-8 or unfamiliar reason, and a
+ * shell renders nothing for it -- the same rule
+ * tc_contribution_eligibility_reason_line follows. An "attested" entry carries
+ * no reason at all: there is nothing to explain.
+ *
+ * The reason labels are the SAME THIRTEEN the eligibility reason line takes,
+ * because a reason names a fact about the session rather than an answer to
+ * either question. THE SENTENCES ARE NOT THE SAME, and a shell must not
+ * substitute one call for the other: five of the eligibility sentences say the
+ * session cannot be sent, which is true for an evidence-admitted contributor
+ * and false for an invited one, whose session sends perfectly well and merely
+ * arrives without a copy of its call.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_contribution_attestation_reason_line(const char* reason);
+
+/* Whether a group's submit control may be offered: one of the
+ * TC_CONTRIBUTION_CONTROL_* values.
+ *
+ * pending is a list_projects row's pending_count. contributable is its
+ * contributable_count, or ANY NEGATIVE VALUE when that key was ABSENT -- an
+ * invited contributor, for whom every pending session is sendable.
+ *
+ * ABSENT IS NOT ZERO, and this is the distinction most likely to be got wrong.
+ * contributable = 0 means the question applies and nothing in this group can
+ * be sent, so nothing is offered. A negative contributable means the question
+ * does not apply, and the control is offered on pending alone. A shell that
+ * passed 0 for an absent field would refuse a control to somebody whose
+ * sessions are all perfectly sendable.
+ *
+ * A header offering "Submit all" on a group where nothing is eligible is a
+ * press with no visible consequence -- the row-level rule ("shown, not
+ * offered") applied one level up, and it crosses this ABI for the reason
+ * tc_contribution_eligibility_control does.
+ */
+int32_t     tc_contribution_group_control(int64_t pending, int64_t contributable);
+
+/* How many sessions a group submit is leaving behind, as a sentence.
+ *
+ * withheld is approve's excluded_ineligible, or the difference between a
+ * project row's pending_count and its contributable_count.
+ *
+ * THE EMPTY STRING for zero, and for a negative value, which no honest caller
+ * produces. Render nothing: there is no gap to explain, and a line reading
+ * "0 sessions are not being sent" invents a caveat where none exists.
+ *
+ * The sentence says how many and NOT why. The reason a particular session
+ * cannot be sent is that row's own sentence, one level in; a summary here
+ * would stand for up to thirteen different reasons and would say nothing true
+ * about any of them. Assembled on the Rust side for the reason on
+ * tc_routing_token_line.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_contribution_withheld_line(int64_t withheld);
+
+/* The sentence for one near_ai_balance state.
+ *
+ * state is the state field of a near_ai_balance answer. A NULL or non-UTF-8
+ * pointer is treated as a missing state and gets the "this daemon does not
+ * report a balance" sentence; a state this build has never heard of gets its
+ * own sentence and BORROWS NOBODY'S. Neither may degrade to the "no sign-in
+ * is kept here" sentence, which is a claim about this machine.
+ *
+ * "known" answers the EMPTY STRING: that state's row is figures, and a
+ * sentence above them announcing the read succeeded is this app narrating
+ * itself.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_balance_state_line(const char* state);
+
+/* How firmly the balance row reads: one of the TC_PRIVATE_INFERENCE_TONE_*
+ * values.
+ *
+ * "known" is the only state that answers _CLEAR, and it means THE READ
+ * SUCCEEDED, not that the balance is healthy. Nothing across this ABI judges
+ * an amount. A shell that painted a low figure red would be inventing a
+ * threshold nobody set, on an account whose ceiling may not exist at all.
+ *
+ * Everything unread -- including a state this build has never heard of, a
+ * NULL or non-UTF-8 state, and a caught panic -- answers
+ * TC_PRIVATE_INFERENCE_TONE_NEUTRAL.
+ */
+int32_t     tc_near_ai_balance_state_tone(const char* state);
+
+/* The one action a shell may offer beside a balance state: one of the
+ * TC_CREDENTIAL_ACTION_* values.
+ *
+ * The sign-in row's enum and not a second one, because the only action this
+ * row has ever needed is that row's OBTAIN.
+ *
+ * "no_session" and "session_expired" answer TC_CREDENTIAL_ACTION_OBTAIN, and
+ * those two only. A refused session gets it WITHOUT a forget first: the
+ * ceremony overwrites both records, and forgetting would throw away a working
+ * key to fix an unrelated sign-in. Everything else answers
+ * TC_CREDENTIAL_ACTION_NONE.
+ */
+int32_t     tc_near_ai_balance_action(const char* state);
+
+/* Turn a near_ai_balance integer into money, once, for all three shells.
+ *
+ * scale IS THE WIRE'S OWN scale FIELD, not a constant. It is on the wire
+ * because a daemon may change it, and a shell dividing by 1000000000 of its
+ * own would then be wrong by a factor of a thousand. Pass what arrived.
+ *
+ * present is a separate argument, deliberately. Every other money export here
+ * encodes absence as an out-of-range integer; this one cannot, because these
+ * amounts are SIGNED -- an overdrawn account is a negative figure, and folding
+ * "null" onto "negative" would render a real debt as no figure at all. So
+ * present is 0 for the wire's null and non-zero otherwise, and a 0 gives the
+ * EMPTY STRING.
+ *
+ * AN EMPTY STRING IS NEVER $0.00. A null on this wire means "we know we do not
+ * know"; zero is a real balance and means the money is gone.
+ *
+ * The rounding is DOWN, toward minus infinity, so a figure printed here is
+ * never larger than the figure that arrived. Half-up would let 9.996 dollars
+ * print as "$10.00", which is this ABI inventing somebody else's money. A
+ * nonzero amount under a cent is "less than $0.01" rather than "$0.00", for
+ * the reason tc_harness_spend_line does it.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_balance_amount(int32_t present, int64_t nanos, uint8_t scale);
+
+/* What is left, as a finished sentence.
+ *
+ * present, nanos and scale are tc_near_ai_balance_amount's, from
+ * remaining_nanos and scale.
+ *
+ * present == 0 DOES NOT GIVE THE EMPTY STRING HERE. It gives the sentence for
+ * an account with no spending limit set, because remaining_nanos is nullable
+ * even when state is "known" -- the ordinary case for an account nobody has
+ * capped -- and that contributor must not be told they have $0.00 left.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_balance_remaining_line(int32_t present, int64_t nanos, uint8_t scale);
+
+/* The configured ceiling, as a finished sentence, or the empty string.
+ *
+ * From spend_limit_nanos. present == 0 gives the EMPTY STRING and not a
+ * sentence: tc_near_ai_balance_remaining_line has already said the part that
+ * matters about an uncapped account, and saying it twice is once too many.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_balance_limit_line(int32_t present, int64_t nanos, uint8_t scale);
+
+/* What the account has spent, as a finished sentence, or the empty string.
+ *
+ * From total_spent_nanos. present == 0 gives the empty string, drawn as no
+ * line at all. A zero is NOT that: an account that has spent nothing renders
+ * "$0.00", which is true.
+ *
+ * The figure is the WHOLE ACCOUNT, not this computer -- the payload's
+ * balance_what says so, and it belongs beside this sentence.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_balance_spent_line(int32_t present, int64_t nanos, uint8_t scale);
+
+/* How long ago THIS COMPUTER asked, assembled.
+ *
+ * seconds_ago is now minus the answer's observed_at. ABSENCE IS AN
+ * OUT-OF-RANGE INTEGER, the convention tc_harness_last_call_line uses: any
+ * negative value -- which is what a shell passes for a null observed_at --
+ * gives the empty string.
+ *
+ * observed_at is the DAEMON'S clock at the moment the service answered, not
+ * the service's own updated_at, so the sentence says when the question was put
+ * and never that anything was updated then.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_balance_observed_line(int64_t seconds_ago);
 
 /* The reported local port, assembled without a readiness claim.
  *
@@ -894,12 +1470,16 @@ char*       tc_source_check_line(const char* tool, const char* source_mode);
 /* Every fixed sentence on the consent surface, as an owned JSON object; free
  * it with tc_string_free. NULL only on a caught panic.
  *
- * Keys: gate_statement, ready_help, not_pinned_help.
+ * Keys: gate_statement, ready_help, not_pinned_help, auto_scrub_scope,
+ * auto_scrub_limit, auto_no_review. The auto_* three are for the automatic
+ * grant screen and are shown together, only where the certified full
+ * pipeline runs on every automatic session (see consent_copy.rs).
  *
- * ONE CALL, NOT ONE PER SENTENCE. Three sentences is not three exports: a
- * per-sentence export would let a shell take two of them and hand-write the
- * third, and one of the three is the claim about what leaves this machine that
- * a contributor reads immediately above an irreversible button.
+ * ONE CALL, NOT ONE PER SENTENCE. Six sentences is not six exports: a
+ * per-sentence export would let a shell take some of them and hand-write the
+ * rest, and gate_statement and the auto_* three are claims about what leaves
+ * this machine that a contributor reads immediately above an irreversible
+ * button.
  *
  * Refuse the WHOLE payload if any field is empty rather than rendering a blank
  * label. A missing sentence here is a missing claim.
@@ -925,6 +1505,116 @@ char*       tc_consent_copy(void);
  * panic.
  */
 char*       tc_consent_gate_help(int32_t pinned);
+
+/* The notice for one grant R6 voided (the connect-and-forget design): that
+ * automatic contributing stopped, for which project or for new projects, why,
+ * and that it can be turned back on.
+ *
+ * void_json is ONE element of status's grant_voids list, passed through as
+ * the JSON object the daemon sent. Returns an owned JSON object with title,
+ * body, reasons_heading, reasons (a list of sentences), rearm, acknowledge,
+ * rearm_action and rearm_failed; free it with tc_string_free.
+ *
+ * THE BRANCH CROSSES, NOT ONLY THE WORDS. Do not read kind or reasons to
+ * choose words natively. Once shown, call acknowledge_grant_voids with the
+ * element's id; acknowledging is all that button does.
+ *
+ * rearm_action and rearm_failed are null except on a project void that
+ * carries a project_id. When rearm_action is present, draw a second button
+ * with it that calls set_project_mode with the element's project_id and
+ * mode auto_upload -- the same call as arming by hand -- and show
+ * rearm_failed if the daemon refuses it. No other notice gets that button.
+ *
+ * An unknown kind, or a project void without a label, gets a notice that
+ * says automatic contributing stopped without saying for what: do not write
+ * a fallback natively. NULL only for a NULL, non-UTF-8 or unparseable
+ * argument, one that is not a JSON object, and on a caught panic.
+ */
+char*       tc_grant_void_notice(const char* void_json);
+
+/* The notice after a legacy invite identity moved to the contributor's NEAR
+ * AI account: that their contributions now go under that account, and
+ * whether their automatic folders were kept.
+ *
+ * notice_json is status's legacy_invite_migration.notice object, passed
+ * through as the daemon sent it. Returns an owned JSON object with title,
+ * body, folders and acknowledge; free it with tc_string_free. The folders
+ * sentence is already chosen: do not read folders_kept to choose words
+ * natively. Once shown, call acknowledge_legacy_invite_migration; that is all
+ * the button does.
+ *
+ * NULL for a NULL, non-UTF-8 or unparseable argument, JSON null (nothing to
+ * show), anything that is not an object, and on a caught panic.
+ */
+char*       tc_legacy_migration_notice(const char* notice_json);
+
+/* The notice for approved sessions held because the privacy witness is busy.
+ *
+ * capacity_json is status's witness_capacity object, passed through as the
+ * daemon sent it. Returns an owned JSON object with title, body (counted) and
+ * next_check, the label to show beside next_retry_at rendered in local time;
+ * free it with tc_string_free.
+ *
+ * NULL when nothing is waiting (waiting_sessions absent, not a non-negative
+ * integer, or zero), for a NULL, non-UTF-8 or unparseable argument, and on a
+ * caught panic. Show nothing then; do not write a sentence natively.
+ */
+char*       tc_witness_capacity_notice(const char* capacity_json);
+
+/* K11: what leaves this machine, to whom, and what this client checked.
+ *
+ * facts_json is the daemon's route_disclosure result, passed through as sent.
+ * Returns an owned JSON object {"facts": ..., "copy": ...}: the facts,
+ * canonicalised, and the words for exactly those facts -- title, route,
+ * witness (check, classifier, origin and labels, or null), local_filter,
+ * receipts, attested_bodies (each a sentence or null) and session (the
+ * per-session labels and lines). A block is present only when it is true of
+ * the route; render what is there and decide nothing. Free it with
+ * tc_string_free.
+ *
+ * NULL for a NULL, non-UTF-8 or unparseable argument, for a route or origin
+ * this build does not know, and on a caught panic. Say it could not be read
+ * then; do not write a sentence natively.
+ */
+char*       tc_route_disclosure_copy(const char* facts_json);
+
+/* The labels for the daemon's certificate_detail: heading, measurement_label,
+ * signer_label and verified_at_review. Owned JSON; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_certificate_detail_copy(void);
+
+/* What a disclosure surface says when tc_route_disclosure_copy answers NULL:
+ * title, panel and session. Owned JSON; free it with tc_string_free. NULL only on a
+ * caught panic.
+ */
+char*       tc_route_disclosure_unreadable_copy(void);
+
+/* The notice for one armed folder whose arming wording no longer claims a
+ * model scrubs its sessions (K5), from one element of status's
+ * arming_rewordings list, passed through as the daemon sent it. Returns an
+ * owned JSON object with title, body, now_heading, scope, limit, no_review,
+ * acknowledge, and ask_first_action / ask_first_failed (null unless the
+ * element carries a project_id); free it with tc_string_free. Acknowledge it
+ * with acknowledge_arming_rewordings and the element's id.
+ *
+ * NULL only for a NULL, non-UTF-8 or unparseable argument, one that is not a
+ * JSON object, and on a caught panic.
+ */
+char*       tc_arming_reworded_notice(const char* rewording_json);
+
+/* The notice for armed folders the automatic-contribution gate is holding,
+ * from status's automatic_contribution_held object, passed through as the
+ * daemon sent it. Returns an owned JSON object with title, body (counted),
+ * reasons (a list of sentences), release, ask_first, and projects (each with
+ * project_id, line, ask_first_action, ask_first_failed); free it with
+ * tc_string_free. It is never acknowledged: it goes when the hold does.
+ *
+ * NULL when nothing is held (held_sessions absent, not a non-negative
+ * integer, or zero), for a NULL, non-UTF-8 or unparseable argument, and on a
+ * caught panic. Show nothing then; do not write a sentence natively.
+ */
+char*       tc_gate_held_notice(const char* held_json);
 
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
@@ -1290,6 +1980,66 @@ void        tc_handle_free(tc_handle*);
  */
 char*       tc_call(tc_handle*, const char* method, const char* params_json);
 
+/* Handle-free local Insights, available before enrollment. Synchronous local IO;
+ * schedule off the UI thread. Closing a window does not cancel started writes.
+ * request is borrowed readable UTF-8 bytes (no trailing NUL), at most 65536.
+ * Example: {"operation":{"type":"list"}}. Optional top-level store_dir selects
+ * a dedicated store; omitted uses the platform local-data Insights directory.
+ * Operations: analyze {source:codex|claude_code|trajectory,file,save:false}, list, summary,
+ * explain {id}, delete {id}, annotate {id,category,outcome}, clear_annotation {id},
+ * usage {source:codex|claude_code,file}, copy; each has a "type" discriminator.
+ * Explicit links: link_git {id,repository,commit}, link_test_report {id,file},
+ * unlink_evidence {id,evidence_id}. Links do not establish verified task success.
+ * copy returns shared UI vocabulary. list/summary create no state for an absent store.
+ * Question cards: question_cards {questions,snapshot_ids,episode_ids} returns
+ * a typed result plus shared rendered text. It is a read-only local operation;
+ * an empty selection creates no absent store. Questions are recorded_activity,
+ * episode_outcomes, observed_models, and estimated_cost.
+ * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
+ * Episode edits require {id,expected_revision}: episode_replace_members also
+ * takes snapshot_ids; episode_annotate takes category,outcome;
+ * episode_clear_assessment and episode_delete take no additional fields.
+ * Groups contain whole saved snapshots, not inferred independent tasks.
+ * Episode reads create no absent store and do not reread source files.
+ * Analyze/delete add mutation_effects.invalidated_episode_ids for lost groups.
+ * Responses are capped at 16 MiB; oversized results are never truncated.
+ * Fixed typed episode errors include insights_episode_revision_conflict
+ * (refresh and review), insights_episode_not_found, insights_episode_missing_members,
+ * insights_episode_invalid, insights_episode_member_limit,
+ * insights_episode_duplicate_member, insights_episode_limit_exceeded,
+ * insights_episode_revision_overflow, and insights_response_too_large.
+ * Fixed typed store errors include insights_not_found,
+ * insights_evidence_link_not_found, insights_store_busy (another window or
+ * client holds the store; retry), insights_store_invalid (that entry cannot be
+ * read; repair removes exactly what is withheld), insights_store_symlink_refused,
+ * insights_store_requires_private_directory, and insights_store_unavailable.
+ * Unexpected execution errors remain insights-operation-failed.
+ * A list response carries quarantined identifiers when the store is
+ * withholding an unreadable entry; the operation repair removes exactly those.
+ * store_dir and the analyze file are chosen by the caller, so this entry point
+ * is for in-process callers only. Reaching it from any IPC transport without
+ * an authorization gate and a store-directory allow-list would hand the caller
+ * a digest oracle for any readable file and a directory-write primitive.
+ * Returns owned JSON tagged by type, or NULL plus owned fixed-label *err.
+ * Free result/error with tc_string_free. err may be NULL; otherwise writable
+ * and cleared on success. Request buffers must remain valid until return. */
+char*       tc_insights_call(const uint8_t* request, size_t request_len, char** err);
+/* Stateless shared Insights UI vocabulary. Opens no store. Owned JSON string;
+ * free with tc_string_free. Returns NULL only after a caught panic. */
+char*       tc_insights_copy_json(void);
+
+/* Handle-free local mission draft inbox, available before enrollment.
+ * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8
+ * JSON at most 65536 bytes. Optional store_dir selects a dedicated inbox.
+ * Operations: import {file}, list, show {id}, delete {id}, copy. Import/list
+ * return metadata and structural review only; the full bounded proposal is
+ * returned only by explicit show. Proposal strings and URLs are untrusted data
+ * and must never be executed or opened implicitly. No operation fetches sources,
+ * publishes, funds, runs, or authorizes a mission. Responses are owned JSON at
+ * most 1 MiB; errors are owned fixed labels. Free either with tc_string_free. */
+char*       tc_mission_drafts_call(const uint8_t* request, size_t request_len, char** err);
+
+
 /* Events. cb is invoked on a background thread with a JSON event frame
  * each time the daemon publishes one, until tc_unsubscribe is called with
  * the returned token. The event_json pointer passed to cb is borrowed for
@@ -1457,6 +2207,21 @@ void        tc_string_free(char*);
  * the returned pointer.
  */
 const char* tc_last_error(void);
+
+/*
+ * Can this process reach the Cloud credential store?
+ *
+ * 0 reachable, 1 unentitled, 2 otherwise. Reads and writes nothing. Exists so
+ * a release pipeline can ask a signed bundle a question no unit test can
+ * answer.
+ *
+ * "Reachable" means the store answered -- with nothing stored, which is the
+ * expected answer for a probe of a reference that was never written. Any
+ * other read failure is 2, not 0: this gates a release, so a store that is
+ * broken for a reason other than entitlement must not report PASS. The
+ * daemon's own sign-in guard maps the same probe more leniently on purpose.
+ */
+int32_t     tc_credential_store_self_check(void);
 
 #ifdef __cplusplus
 }

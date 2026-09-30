@@ -19,6 +19,11 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/InsightsViewModel.cs" Link="InsightsViewModel.cs" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/MissionDraftsViewModel.cs" Link="MissionDraftsViewModel.cs" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/CredentialBrowser.cs" Link="CredentialBrowser.cs" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/PrivateInferenceViewModel.cs" Link="PrivateInferenceViewModel.cs" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/HarnessRowViewModel.cs" Link="HarnessRowViewModel.cs" />
   </ItemGroup>
 
   <!--
@@ -127,6 +132,31 @@
     paraphrased into a shorter, friendlier one, and a paraphrase would pass
     every behavioural test in this file.
   -->
+  <!--
+    The credential surface's implementation source, copied for the reason the
+    others are and read by NoWordingIsAuthoredInTheCredentialSurface.
+
+    The sentence most at risk here is the one saying what obtaining a
+    credential costs: a browser opens, the contributor signs in with a company
+    that is not this app, and a key is minted and kept on this machine. A
+    shorter, friendlier paraphrase of it beside the button would render and
+    would pass every behavioural test in the suite.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/NearAiCredentialSurface.cs"
+          Link="NearAiCredentialSurface.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/ContributionEligibility.cs"
+          Link="ContributionEligibility.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/PrivateInferenceView.xaml.cs"
+          Link="PrivateInferenceView.xaml.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/CredentialBrowser.cs"
+          Link="CredentialBrowser.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/PrivateInferenceSurface.cs"
           Link="PrivateInferenceSurface.cs.txt"
@@ -136,6 +166,38 @@
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/MainViewModel.cs"
           Link="MainViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      The preview sheet, whose admission-preparation control must be offered
+      only to a contributor whose enrolment can use it. The enrolment check
+      lives one hop from the property the markup binds, so both halves are
+      copied and held by AdmissionPreparationTests.
+    -->
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/PreviewSheetViewModel.cs"
+          Link="PreviewSheetViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/PreviewSheet.xaml"
+          Link="PreviewSheet.xaml.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      The onboarding screen and its view model, for the login-enrolment guard.
+      TraceCommons.App is WinUI and cannot be referenced from a test assembly,
+      so the only way to hold "no shell spells a control name" is to read the
+      source as text.
+    -->
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/OnboardingViewModel.cs"
+          Link="OnboardingViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      The history view model, for the refused-outcome guard. It renders the
+      outcome list, and it is WinUI, so the only way to hold "a refusal says
+      so in words" on this shell is to read the source as text.
+    -->
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/HistoryViewModel.cs"
+          Link="HistoryViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/OnboardingWindow.xaml"
+          Link="OnboardingWindow.xaml.txt"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

@@ -112,8 +112,9 @@ public sealed class SubmitToast
     internal static string ScrubClause(ulong totalRedactions) => totalRedactions switch
     {
         0 => "Scrubbing matched nothing.",
+        1 => "1 redaction applied.",
         _ => string.Format(
-            CultureInfo.InvariantCulture, "Scrubbing removed {0}.", totalRedactions),
+            CultureInfo.InvariantCulture, "{0} redactions applied.", totalRedactions),
     };
 
     /// <summary>

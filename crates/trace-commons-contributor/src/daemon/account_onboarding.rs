@@ -9,8 +9,8 @@
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use crate::config::{
-    ACCOUNT_SESSION_FILE, CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig,
-    WitnessSettings, allowlist_for,
+    CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, WitnessSettings,
+    allowlist_for,
 };
 use crate::identity::DeviceIdentity;
 use anyhow::{Result, anyhow, bail};
@@ -25,6 +25,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use trace_commons_operator_client::host_allowlist::HostAllowlist;
 
 pub const LOOPBACK_PATH: &str = "/trace-commons/near-onboarding/callback";
 #[derive(Deserialize)]
@@ -40,9 +41,28 @@ struct Options {
 #[derive(Deserialize)]
 struct Capability {
     ready: bool,
+    /// Whether this commons offers the NEAR AI **login** enrollment path.
+    ///
+    /// Additive and deliberately separate from `ready`, which is the wallet
+    /// path's readiness and stays exactly as it was: redefining it would have
+    /// silently changed behaviour for every existing wallet client with no
+    /// test going red. `Capability` does not `deny_unknown_fields`, so a
+    /// client older than this field ignores it rather than refusing the
+    /// response, and `Option` is what lets a client newer than the *server*
+    /// fall back — see [`Path::ready_for`].
+    #[serde(default)]
+    near_ai_login_ready: Option<bool>,
     witness: Option<serde_json::Value>,
     issuer_url: Option<String>,
     audience: Option<String>,
+    /// The provider base URL clients fetch inference receipts from.
+    ///
+    /// Optional in both directions: a commons serving no attested inference
+    /// publishes nothing here, and a commons older than this field is simply
+    /// one that publishes nothing. `Capability` deliberately does not
+    /// `deny_unknown_fields`, so the reverse -- this client against a newer
+    /// commons -- was already safe.
+    inference_receipt_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -108,9 +128,113 @@ fn random() -> Result<String> {
         .map_err(|_| anyhow!("near_signup_unavailable"))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
-fn client(url: &str) -> Result<trace_commons_operator_client::Client> {
+/// Why a signup step stopped, in the three classes a person acts on
+/// differently. Every failure below is one of these, and the shells render
+/// one sentence per class -- see [`crate::witness_copy::wallet_refusal_line`].
+/// Collapsing them, as this surface used to, leaves a person told only that
+/// signup is "unavailable" with nothing to check and nothing to report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignupRefusal {
+    /// The address was rejected here, before any request left the process:
+    /// not https, carrying credentials or a query, unparseable, or not on a
+    /// host list this installation was configured with.
+    AddressRefused,
+    /// The address was dialled and did not answer, or answered in a way this
+    /// client could not read.
+    Unreachable,
+    /// The commons answered and does not offer wallet signup, or published
+    /// trust material this client will not accept.
+    Unsupported,
+}
+
+impl SignupRefusal {
+    /// The stable wire value. Native shells map this to a sentence; they must
+    /// never re-derive the class from anything else in the response.
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::AddressRefused => "address_refused",
+            Self::Unreachable => "unreachable",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// The hosts one signup step may reach, and who chose each of them.
+///
+/// This exists because the shipped applications set no
+/// `TRACE_COMMONS_ALLOWED_HOSTS`, and [`client`] refuses when the allowlist
+/// is not enforcing -- so signup was impossible from Finder, the Start Menu
+/// or a flatpak, and the only documented remedy was an environment variable
+/// no contributor can reasonably be asked to set.
+///
+/// The list is now:
+///
+/// * An operator's `TRACE_COMMONS_ALLOWED_HOSTS`, unchanged and in full,
+///   whenever it is set. An operator who pins hosts keeps pinning them, and
+///   an origin outside that list is still refused.
+/// * Otherwise exactly the hosts named in `origin` and `published`: `origin`
+///   is the commons address the person typed on the signup screen, and
+///   `published` holds hosts that same origin returned over authenticated
+///   HTTPS for this step (its issuer, its witness). Nothing else is
+///   reachable, and no host enters the list that the person did not choose
+///   or that their chosen origin did not name.
+///
+/// The derivation never degrades to permissive: an origin with no host is an
+/// error, and [`HostAllowlist::from_hosts`] treats an empty set as
+/// "nothing", not "everything".
+/// The allowlist that admits a receipt endpoint this origin published.
+///
+/// The same derivation signup uses, exposed for the adoption that happens
+/// after signup: an already-enrolled client asking its commons for an endpoint
+/// must vet the answer on the same basis signup would have, rather than
+/// against a list that is permissive on every machine where no operator set
+/// one.
+///
+/// `configured` is the operator's own allowlist and still governs when it is
+/// enforcing -- at signup that is the environment's, and after signup the
+/// enrolled config's, which is the operator choice that outlived the ceremony.
+///
+/// # Errors
+///
+/// When the origin or the endpoint has no host to derive from.
+pub(super) fn published_host_allowlist(
+    configured: &HostAllowlist,
+    origin: &str,
+    endpoint: &str,
+) -> Result<HostAllowlist> {
+    derive_signup_allowlist(configured, origin, &[endpoint])
+}
+
+pub(super) fn signup_allowlist(origin: &str, published: &[&str]) -> Result<HostAllowlist> {
+    derive_signup_allowlist(&allowlist_for(None), origin, published)
+}
+
+fn derive_signup_allowlist(
+    configured: &HostAllowlist,
+    origin: &str,
+    published: &[&str],
+) -> Result<HostAllowlist> {
+    if configured.is_enforcing() {
+        return Ok(configured.clone());
+    }
+    let mut hosts = Vec::with_capacity(1 + published.len());
+    for url in std::iter::once(origin).chain(published.iter().copied()) {
+        let parsed =
+            reqwest::Url::parse(url).map_err(|_| anyhow!("near_signup_endpoint_refused"))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow!("near_signup_endpoint_refused"))?;
+        hosts.push(host.to_string());
+    }
+    Ok(HostAllowlist::from_hosts(hosts))
+}
+
+pub(super) fn client(
+    url: &str,
+    allowed: &HostAllowlist,
+) -> Result<trace_commons_operator_client::Client> {
     let parsed = reqwest::Url::parse(url)?;
-    let allowed = allowlist_for(None);
     if !allowed.is_enforcing()
         || parsed.scheme() != "https"
         || !parsed.username().is_empty()
@@ -126,7 +250,7 @@ fn client(url: &str) -> Result<trace_commons_operator_client::Client> {
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token("unauthenticated")
-    .host_allowlist(allowlist_for(None))
+    .host_allowlist(allowed.clone())
     .build()
     .map_err(|_| anyhow!("near_signup_endpoint_refused"))
 }
@@ -135,22 +259,89 @@ pub async fn handle_capabilities(_shared: &DaemonShared, req: &Request) -> Respo
     let Some(url) = req.params.get("ingest_url").and_then(|v| v.as_str()) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "near_signup_invalid");
     };
-    match validated_capability(url).await {
-        Ok((issuer, audience, witness)) => Response::ok(
+    match validated_capability(url, Path::Wallet).await {
+        Ok((issuer, audience, witness, _endpoint)) => Response::ok(
             req.id,
             serde_json::json!({"ready":true,"issuer_url":issuer,"audience":audience,"witness":witness,"funding_available":false}),
         ),
-        Err(_) => Response::ok(
+        // A refusal names its class. Without it every failure here -- an
+        // address this daemon will not dial, a commons that did not answer,
+        // and a commons that does not offer wallet signup -- reached the
+        // person as one "unavailable" sentence they could not act on.
+        Err(refusal) => Response::ok(
             req.id,
-            serde_json::json!({"ready":false,"funding_available":false}),
+            serde_json::json!({"ready":false,"reason":refusal.wire(),"funding_available":false}),
         ),
     }
 }
-async fn validated_capability(url: &str) -> Result<(String, String, WitnessSettings)> {
-    if reqwest::Url::parse(url)?.scheme() != "https" {
-        bail!("near_signup_endpoint_refused");
+
+/// Which enrollment path is asking, and therefore which readiness flag in the
+/// capabilities response answers it.
+///
+/// This type exists because of #839: readiness checks belonging to one
+/// onboarding path were silently gating the other, in three separate places.
+/// The rule it encodes is that a path's readiness is derived from what that
+/// path's own route requires, never mirrored from a neighbour.
+///
+/// The two paths have genuinely different preconditions: the wallet ceremony
+/// needs NEP-413 sign-in configuration and a public origin to redirect a
+/// browser to, and the login ceremony needs neither because it has no browser
+/// redirect at all. A commons can offer one and not the other, so one flag
+/// cannot answer for both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Path {
+    Wallet,
+    NearAiLogin,
+}
+
+impl Path {
+    /// The path an already-enrolled config was enrolled by, read from the
+    /// tenant namespace it holds.
+    ///
+    /// A client asking its commons a readiness question after enrollment must
+    /// ask it for the path it actually took. Asking as the wallet on behalf of
+    /// a login-enrolled contributor is the same class of mistake as gating the
+    /// login ceremony on `ready`: a check belonging to the other mechanism.
+    pub(super) fn for_tenant(tenant_id: &str) -> Self {
+        if crate::daemon::nearai_onboarding::is_near_ai_tenant_id(tenant_id) {
+            Self::NearAiLogin
+        } else {
+            Self::Wallet
+        }
     }
-    let capability: Capability = client(url)?
+
+    /// Whether this commons offers this path.
+    ///
+    /// The login path prefers `near_ai_login_ready` and falls back to `ready`
+    /// when it is absent, which is what makes the field additive in both
+    /// directions: a commons older than the field, and one offering both
+    /// paths, are both answered correctly by `ready`, while a login-only
+    /// commons publishes `near_ai_login_ready: true` alongside `ready: false`.
+    ///
+    /// **An explicit `false` wins over the fallback, and that clause is not
+    /// redundant.** `unwrap_or` is doing two different jobs here: absent means
+    /// "this commons is older than the field, so ask the flag that existed",
+    /// and `Some(false)` means "this commons has been asked and says no". A
+    /// later reader may notice that a commons with `ready: true` is plainly
+    /// running and simplify this to `capability.ready ||
+    /// capability.near_ai_login_ready.unwrap_or(false)`. That would silently
+    /// re-enable the login path on every commons that turned it off
+    /// deliberately, and no test of the wallet path would notice. See #839.
+    fn ready_for(self, capability: &Capability) -> bool {
+        match self {
+            Self::Wallet => capability.ready,
+            Self::NearAiLogin => capability.near_ai_login_ready.unwrap_or(capability.ready),
+        }
+    }
+}
+
+pub(super) async fn validated_capability(
+    url: &str,
+    path: Path,
+) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
+    let origin_only = signup_allowlist(url, &[]).map_err(|_| SignupRefusal::AddressRefused)?;
+    let capability: Capability = client(url, &origin_only)
+        .map_err(|_| SignupRefusal::AddressRefused)?
         .call_json(
             reqwest::Method::GET,
             "/v1/account/near/provision/capabilities",
@@ -158,29 +349,101 @@ async fn validated_capability(url: &str) -> Result<(String, String, WitnessSetti
             None::<&serde_json::Value>,
         )
         .await
-        .map_err(|_| anyhow!("near_signup_unavailable"))?;
-    if !capability.ready {
-        bail!("near_signup_unavailable");
+        .map_err(|_| SignupRefusal::Unreachable)?;
+    validate_capability(url, capability, path)
+}
+
+/// Everything the capabilities response has to satisfy, with no I/O of its
+/// own, so the decision is testable without a live HTTPS commons.
+fn validate_capability(
+    origin: &str,
+    capability: Capability,
+    path: Path,
+) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
+    if !path.ready_for(&capability) {
+        return Err(SignupRefusal::Unsupported);
     }
-    let issuer = capability
-        .issuer_url
-        .ok_or_else(|| anyhow!("near_signup_unavailable"))?;
-    let audience = capability
-        .audience
-        .ok_or_else(|| anyhow!("near_signup_unavailable"))?;
-    if reqwest::Url::parse(&issuer)?.scheme() != "https"
-        || audience.trim().is_empty()
-        || audience.len() > 256
-    {
-        bail!("near_signup_invalid");
+    let issuer = capability.issuer_url.ok_or(SignupRefusal::Unsupported)?;
+    let audience = capability.audience.ok_or(SignupRefusal::Unsupported)?;
+    if audience.trim().is_empty() || audience.len() > 256 {
+        return Err(SignupRefusal::Unsupported);
     }
-    let _issuer = client(&issuer)?;
-    let witness = validate_published_witness(
-        capability
-            .witness
-            .ok_or_else(|| anyhow!("near_signup_unavailable"))?,
-    )?;
-    Ok((issuer, audience, witness))
+    let witness = published_witness(capability.witness.ok_or(SignupRefusal::Unsupported)?)
+        .map_err(|_| SignupRefusal::Unsupported)?;
+    // The issuer, the witness and the receipt service are hosts this origin
+    // named for itself. They enter the list because the person chose this
+    // origin, and only for as long as this call: an operator's own allowlist,
+    // when set, still governs and refuses any of them if it does not list
+    // them.
+    // Dropped before the derivation, not after: `signup_allowlist` parses
+    // every host it is given, so a commons publishing a receipt endpoint that
+    // is not even a URL would otherwise refuse the whole derivation and take
+    // enrollment down with it. The endpoint is the optional one of the three.
+    let receipt = capability
+        .inference_receipt_endpoint
+        .filter(|endpoint| reqwest::Url::parse(endpoint).is_ok_and(|url| url.host_str().is_some()));
+    let mut named = vec![issuer.as_str(), witness.url.as_str()];
+    if let Some(endpoint) = receipt.as_deref() {
+        named.push(endpoint);
+    }
+    let published = signup_allowlist(origin, &named).map_err(|_| SignupRefusal::AddressRefused)?;
+    client(&issuer, &published).map_err(|_| SignupRefusal::AddressRefused)?;
+    client(&witness.url, &published).map_err(|_| SignupRefusal::AddressRefused)?;
+    // Gated by the list its own source produced. A published endpoint is
+    // admitted on the same basis the issuer and witness are -- this origin
+    // named it -- and an operator's own allowlist, when set, is what
+    // `signup_allowlist` returns instead and refuses it against. Dropped
+    // rather than fatal: a commons naming a receipt service this client will
+    // not call still enrolls the person, and they contribute unattested.
+    let receipt = receipt.filter(|endpoint| {
+        crate::config::validate_inference_receipt_endpoint(endpoint, &published).is_ok()
+    });
+    Ok((issuer, audience, witness, receipt))
+}
+
+/// Ask a commons what receipt endpoint it publishes, for a client that is
+/// already enrolled.
+///
+/// Signup reads the same value out of the same document; this exists because
+/// an account enrolled before the commons published one would otherwise never
+/// get it, and hand-editing `contributor.json` is not a thing a person does.
+///
+/// The whole capability document is validated on the way through -- including
+/// the endpoint against the allowlist this origin's own published hosts derive
+/// -- so a commons that has since stopped being ready, or that names a receipt
+/// service outside its published set, publishes nothing here either.
+///
+/// Never fatal to the caller: no endpoint simply means the refusal the caller
+/// was already going to make.
+pub(super) async fn published_receipt_endpoint(ingest_url: &str, path: Path) -> Option<String> {
+    validated_capability(ingest_url, path)
+        .await
+        .ok()
+        .and_then(|(_, _, _, endpoint)| endpoint)
+}
+
+pub const CEREMONY_MISMATCH: &str = "near_signup_ceremony_mismatch";
+
+#[derive(Debug, thiserror::Error)]
+#[error("near_signup_ceremony_mismatch")]
+struct CeremonyMismatch;
+
+fn verify_device_preimage(encoded: &str, expected: &[u8]) -> Result<()> {
+    let supplied = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| anyhow!("near_signup_invalid"))?;
+    if supplied != expected {
+        return Err(CeremonyMismatch.into());
+    }
+    Ok(())
+}
+
+fn start_error_label(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<CeremonyMismatch>().is_some() {
+        CEREMONY_MISMATCH
+    } else {
+        "near_signup_unavailable"
+    }
 }
 
 pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
@@ -190,7 +453,7 @@ pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
     };
     match begin(&shared.store, options).await {
         Ok(value) => Response::ok(req.id, value),
-        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "near_signup_unavailable"),
+        Err(error) => Response::err(req.id, ERR_UNAVAILABLE, start_error_label(&error)),
     }
 }
 pub fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
@@ -210,6 +473,13 @@ pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, "near_signup_unknown");
     };
     if matches!(a.state.status, "starting" | "waiting_for_wallet") {
+        if super::commons_credentials::invalidate(&shared.store).is_err() {
+            return Response::err(
+                req.id,
+                ERR_UNAVAILABLE,
+                "commons_credential_storage_unavailable",
+            );
+        }
         a.state.status = "cancelled";
         if let Some(task) = &a.abort {
             task.abort();
@@ -222,7 +492,10 @@ async fn begin(store: &ConfigStore, options: Options) -> Result<serde_json::Valu
     if store.load_config()?.is_some() {
         bail!("near_signup_already_enrolled")
     }
-    let ingest = client(&options.ingest_url)?;
+    let ingest = client(
+        &options.ingest_url,
+        &signup_allowlist(&options.ingest_url, &[])?,
+    )?;
 
     let id = random()?;
     let dir = store.dir().to_path_buf();
@@ -265,11 +538,33 @@ async fn prepare(
     ingest: trace_commons_operator_client::Client,
     id: &str,
 ) -> Result<serde_json::Value> {
-    let receipt_endpoint = crate::config::inference_receipt_endpoint_from_env();
-    if let Some(endpoint) = receipt_endpoint.as_deref() {
-        crate::config::validate_inference_receipt_endpoint(endpoint, &allowlist_for(None))?;
-    }
-    let (issuer, audience, witness) = validated_capability(&options.ingest_url).await?;
+    let credential_snapshot =
+        super::commons_credentials::snapshot(store, super::commons_credentials::Kind::Account)?;
+    let (issuer, audience, witness, published) =
+        validated_capability(&options.ingest_url, Path::Wallet)
+            .await
+            .map_err(|refusal| anyhow!(refusal.wire()))?;
+    // The environment stays ahead of the published value so an operator who
+    // set it on this host keeps the last word; a contributor who set nothing
+    // now gets the commons's answer instead of no answer at all. An invalid
+    // operator value refuses here rather than falling through to the server.
+    //
+    // Each source is gated by its own list: an operator's value against the
+    // operator's allowlist, and the published value against the one the
+    // origin's published hosts derived, which `validated_capability` has
+    // already applied.
+    let receipt_endpoint = crate::config::receipt_endpoint_to_adopt(
+        None,
+        crate::config::inference_receipt_endpoint_from_env().as_deref(),
+        &allowlist_for(None),
+        published.as_deref(),
+        &published
+            .as_deref()
+            .and_then(|endpoint| {
+                published_host_allowlist(&allowlist_for(None), &options.ingest_url, endpoint).ok()
+            })
+            .unwrap_or_else(HostAllowlist::permissive),
+    );
     if (!options.issuer_url.is_empty() && options.issuer_url != issuer)
         || (!options.audience.is_empty() && options.audience != audience)
     {
@@ -277,7 +572,7 @@ async fn prepare(
     }
     options.issuer_url = issuer;
     options.audience = audience;
-    let identity = DeviceIdentity::load_or_generate(store)?;
+    let identity = DeviceIdentity::load_or_generate_async(store).await?;
     let verifier = random()?;
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
@@ -321,9 +616,7 @@ async fn prepare(
         &binding,
         Some(&signed.wallet_url),
     );
-    if base64::engine::general_purpose::STANDARD.decode(&signed.device_signing_bytes)? != bytes {
-        bail!("near_signup_invalid")
-    }
+    verify_device_preimage(&signed.device_signing_bytes, &bytes)?;
     let device_signature = identity.sign_b64(&bytes);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let callback = format!(
@@ -348,7 +641,10 @@ async fn prepare(
         let result = async {
             let listener = tokio::net::TcpListener::from_std(listener)?;
             // Never reuse a connection pool attached to the caller's reactor.
-            let ingest = client(&options.ingest_url)?;
+            let ingest = client(
+                &options.ingest_url,
+                &signup_allowlist(&options.ingest_url, &[])?,
+            )?;
             finish(
                 listener,
                 &state,
@@ -362,24 +658,30 @@ async fn prepare(
             .await
         }
         .await;
+        let publish_dir = dir.clone();
+        let published = tokio::task::spawn_blocking(move || {
+            result.and_then(|completed| {
+                persist(
+                    &publish_dir,
+                    &options,
+                    &identity,
+                    completed,
+                    Some(&credential_snapshot),
+                    witness,
+                    receipt_endpoint,
+                )
+            })
+        })
+        .await;
         let mut map = attempts().lock().expect("signup state lock");
         if let Some(entry) = map
             .get_mut(&dir)
             .filter(|a| a.state.attempt_id == attempt_id && a.state.status == "waiting_for_wallet")
         {
-            entry.state.status = match result.and_then(|completed| {
-                persist(
-                    &dir,
-                    &options,
-                    &identity,
-                    completed,
-                    &attempt_id,
-                    witness,
-                    receipt_endpoint,
-                )
-            }) {
-                Ok(()) => "complete",
-                Err(_) => "failed",
+            entry.state.status = if matches!(published, Ok(Ok(()))) {
+                "complete"
+            } else {
+                "failed"
             };
             entry.abort = None;
         }
@@ -484,7 +786,11 @@ async fn receive_wallet(listener: tokio::net::TcpListener, state: &str) -> Resul
     }
 }
 
-fn validate_published_witness(mut value: serde_json::Value) -> Result<WitnessSettings> {
+/// Shape and pin checks on the witness an origin published. Deliberately does
+/// NOT decide whether its host may be reached -- the caller owns that, because
+/// only the caller knows which origin published it. See
+/// [`validated_capability`].
+fn published_witness(mut value: serde_json::Value) -> Result<WitnessSettings> {
     value
         .as_object_mut()
         .ok_or_else(|| anyhow!("near_signup_trust_invalid"))?
@@ -499,7 +805,6 @@ fn validate_published_witness(mut value: serde_json::Value) -> Result<WitnessSet
     {
         bail!("near_signup_trust_invalid")
     }
-    let _allowed = client(&witness.url)?;
     let address = witness
         .signing_address
         .strip_prefix("0x")
@@ -513,12 +818,65 @@ fn validate_published_witness(mut value: serde_json::Value) -> Result<WitnessSet
     Ok(witness)
 }
 
+/// A config written by the real signup path, for tests in sibling modules
+/// that must otherwise hand-build one.
+///
+/// `persist` is what produces it, so a test using this cannot pass by setting
+/// a field signup never sets. That is exactly how the `allowed_hosts: None`
+/// defect survived: every test that reached a host-allowlist gate constructed
+/// its own config and set `allowed_hosts` itself, so the gate was never asked
+/// the question a real enrollment asks it.
+#[cfg(test)]
+pub(super) fn signup_written_config(
+    dir: &std::path::Path,
+    receipt_endpoint: Option<String>,
+) -> ContributorConfig {
+    let store = ConfigStore::open(dir.to_path_buf()).expect("opening the fixture store");
+    let identity = DeviceIdentity::load_or_generate(&store).expect("device identity");
+    let options = Options {
+        account_id: "alice.near".into(),
+        ingest_url: "https://commons.example".into(),
+        issuer_url: "https://issuer.example".into(),
+        audience: "trace-commons-upload".into(),
+    };
+    let witness: WitnessSettings = serde_json::from_value(serde_json::json!({
+        "url": "https://witness.example",
+        "signing_address": format!("0x{}", "ab".repeat(20)),
+        "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+        "admission_evidence": true,
+    }))
+    .expect("witness fixture");
+    let completed = Completed {
+        access_token: "tcn1_example".into(),
+        token_type: "Bearer".into(),
+        expires_in_secs: 3600,
+        account_id: "alice.near".into(),
+        tenant_id: format!("near-{}", "3c".repeat(32)),
+        device_key_id: identity.device_key_id.clone(),
+        anchor_hash: format!("sha256:{}", "ab".repeat(32)),
+    };
+    persist(
+        dir,
+        &options,
+        &identity,
+        completed,
+        None,
+        witness,
+        receipt_endpoint,
+    )
+    .expect("signup persist");
+    store
+        .load_config()
+        .expect("reading back the written config")
+        .expect("signup must have written a config")
+}
+
 fn persist(
     dir: &std::path::Path,
     options: &Options,
     identity: &DeviceIdentity,
     result: Completed,
-    id: &str,
+    expected: Option<&super::commons_credentials::Snapshot>,
     witness: WitnessSettings,
     receipt_endpoint: Option<String>,
 ) -> Result<()> {
@@ -532,7 +890,7 @@ fn persist(
         || !result.anchor_hash[7..]
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || result.tenant_id != format!("near-{}", &result.anchor_hash[7..])
+        || !crate::config::is_near_tenant_id(&result.tenant_id)
     {
         bail!("near_signup_result_invalid")
     }
@@ -557,8 +915,13 @@ fn persist(
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness_origin: Some(crate::config::WitnessOriginRecord::for_witness(
+            &witness,
+            crate::config::WitnessOrigin::PublishedAtJoin,
+        )),
         witness: Some(witness),
         inference_receipt_endpoint: receipt_endpoint,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: true,
     };
     let session = crate::account_auth::AccountSession {
@@ -566,25 +929,43 @@ fn persist(
         expires_at: Utc::now() + chrono::Duration::seconds(result.expires_in_secs),
         account_id: result.account_id,
     };
-    let session_bytes = serde_json::to_vec(&session)?;
-    // Stage the config, then persist the session before publishing enrollment.
-    // A failed session write leaves no enrolled config to block a fresh attempt.
-    // The final create-only link still cannot replace concurrent invite enrollment.
-    let temporary = format!("near-signup-{id}.json");
-    store.write_daemon_file(&temporary, &serde_json::to_vec(&config)?)?;
-    let published = store
-        .write_daemon_file(ACCOUNT_SESSION_FILE, &session_bytes)
-        .and_then(|()| {
-            std::fs::hard_link(dir.join(&temporary), dir.join("contributor.json"))
-                .map_err(Into::into)
-        });
-    let _ = store.remove_daemon_file(&temporary);
-    published
+    let fresh;
+    let expected = match expected {
+        Some(expected) => expected,
+        None => {
+            fresh = super::commons_credentials::snapshot(
+                &store,
+                super::commons_credentials::Kind::Account,
+            )?;
+            &fresh
+        }
+    };
+    super::commons_credentials::replace(
+        &store,
+        expected,
+        &serde_json::to_vec(&session)?,
+        Some(&config),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ACCOUNT_SESSION_FILE;
+    #[test]
+    fn device_preimage_mismatch_survives_start_error_mapping_without_exposing_material() {
+        let expected = b"synthetic expected preimage";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(expected);
+        assert!(verify_device_preimage(&encoded, expected).is_ok());
+        let error = verify_device_preimage(&encoded, b"different preimage").unwrap_err();
+        assert_eq!(start_error_label(&error), CEREMONY_MISMATCH);
+        assert_eq!(error.to_string(), CEREMONY_MISMATCH);
+        assert_eq!(
+            start_error_label(&verify_device_preimage("!", expected).unwrap_err()),
+            "near_signup_unavailable"
+        );
+    }
+
     #[test]
     fn callback_requires_exact_path_state_and_single_result() {
         let state = "expected";
@@ -601,12 +982,374 @@ mod tests {
     fn refuses_untrusted_or_unpinned_witness_capabilities() {
         for witness in [
             serde_json::json!({"url":"http://localhost:1234","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))]}),
-            serde_json::json!({"url":"https://attacker.invalid","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))]}),
             serde_json::json!({"url":"https://api.tracecommons.org","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[]}),
             serde_json::json!({"url":"https://api.tracecommons.org","signing_address":"broken","expected_measurements":["broken"]}),
+            serde_json::json!({"url":"https://api.tracecommons.org?x=1","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))]}),
         ] {
-            assert!(validate_published_witness(witness).is_err());
+            assert!(published_witness(witness).is_err());
         }
+    }
+
+    /// A witness on a host the operator did not list stays refused. This case
+    /// used to live in the loop above, where it passed for the wrong reason:
+    /// `client` refused *every* host, because the allowlist was never
+    /// enforcing. The refusal that remains is the real one -- an operator's
+    /// `TRACE_COMMONS_ALLOWED_HOSTS` still governs what any published host
+    /// may be.
+    #[test]
+    fn an_operator_allowlist_still_refuses_a_published_witness_host() {
+        let operator = HostAllowlist::from_csv("commons.example");
+        let allowed = derive_signup_allowlist(
+            &operator,
+            "https://commons.example",
+            &["https://attacker.invalid"],
+        )
+        .unwrap();
+        assert!(client("https://commons.example", &allowed).is_ok());
+        assert!(client("https://attacker.invalid", &allowed).is_err());
+    }
+
+    #[test]
+    fn with_no_operator_list_the_person_chosen_origin_is_the_list() {
+        // The defect: with `TRACE_COMMONS_ALLOWED_HOSTS` unset the allowlist
+        // was permissive, `client` refused on `!is_enforcing()`, and signup
+        // was impossible in every shipped application.
+        let unset = HostAllowlist::permissive();
+        let allowed = derive_signup_allowlist(&unset, "https://commons.example/join", &[]).unwrap();
+        assert!(allowed.is_enforcing());
+        assert!(client("https://commons.example", &allowed).is_ok());
+        // And it is a list, not a bypass: nothing the person did not choose
+        // is reachable through it.
+        assert!(client("https://evil.example", &allowed).is_err());
+        assert!(client("https://sub.commons.example", &allowed).is_err());
+    }
+
+    #[test]
+    fn a_published_host_is_reachable_only_once_the_origin_has_named_it() {
+        let unset = HostAllowlist::permissive();
+        let origin = "https://commons.example";
+        let before = derive_signup_allowlist(&unset, origin, &[]).unwrap();
+        assert!(client("https://issuer.example", &before).is_err());
+        let after = derive_signup_allowlist(&unset, origin, &["https://issuer.example"]).unwrap();
+        assert!(client("https://issuer.example", &after).is_ok());
+        // Naming one host does not name its neighbours.
+        assert!(client("https://witness.example", &after).is_err());
+    }
+
+    #[test]
+    fn an_origin_without_a_host_is_an_error_and_never_a_permissive_list() {
+        let unset = HostAllowlist::permissive();
+        for origin in ["", "not a url", "file:///etc/passwd", "https://"] {
+            assert!(
+                derive_signup_allowlist(&unset, origin, &[]).is_err(),
+                "{origin} must not yield a list"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shape_refusal_does_not_depend_on_the_allowlist_admitting_the_host() {
+        // Every one of these names a host the derived list contains, so the
+        // only thing that can refuse them is the shape check in `client`.
+        let unset = HostAllowlist::permissive();
+        for url in [
+            "http://commons.example",
+            "https://user@commons.example",
+            "https://user:pw@commons.example",
+            "https://commons.example/?token=abc",
+            "https://commons.example/#frag",
+        ] {
+            let allowed = derive_signup_allowlist(&unset, url, &[]).unwrap();
+            assert!(client(url, &allowed).is_err(), "{url} must be refused");
+        }
+    }
+
+    fn capability(issuer: &str, witness_url: &str) -> Capability {
+        capability_publishing(issuer, witness_url, None)
+    }
+
+    fn capability_publishing(issuer: &str, witness_url: &str, receipt: Option<&str>) -> Capability {
+        Capability {
+            near_ai_login_ready: None,
+            ready: true,
+            issuer_url: Some(issuer.into()),
+            audience: Some("trace-commons-upload".into()),
+            witness: Some(serde_json::json!({
+                "url": witness_url,
+                "signing_address": format!("0x{}", "ab".repeat(20)),
+                "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+            })),
+            inference_receipt_endpoint: receipt.map(str::to_string),
+        }
+    }
+
+    /// A commons that publishes a receipt endpoint hands it back, on the same
+    /// basis it hands back an issuer and a witness: this origin named it.
+    /// The four commons shapes the additive field has to answer correctly,
+    /// including the one that does not exist yet.
+    #[test]
+    fn each_path_reads_its_own_readiness_flag() {
+        let shape = |ready: bool, login: Option<bool>| {
+            let mut c = capability("https://issuer.example", "https://witness.example");
+            c.ready = ready;
+            c.near_ai_login_ready = login;
+            c
+        };
+        let accepted = |c: Capability, path: Path| {
+            validate_capability("https://commons.example", c, path).is_ok()
+        };
+
+        // Today: both paths on. `ready` answers for both, and the field is
+        // absent because no server publishes it yet.
+        assert!(accepted(shape(true, None), Path::Wallet));
+        assert!(accepted(shape(true, None), Path::NearAiLogin));
+
+        // The configuration #836 makes possible: login only. The wallet path
+        // is refused and the login path is not, which is the whole point --
+        // before the field existed this commons could not be expressed.
+        assert!(!accepted(shape(false, Some(true)), Path::Wallet));
+        assert!(accepted(shape(false, Some(true)), Path::NearAiLogin));
+
+        // Wallet only, stated explicitly. An explicit `false` must win over
+        // the fallback -- a commons saying the login path is off is not
+        // overruled because the wallet path is on.
+        assert!(accepted(shape(true, Some(false)), Path::Wallet));
+        assert!(!accepted(shape(true, Some(false)), Path::NearAiLogin));
+
+        // Neither offered.
+        assert!(!accepted(shape(false, None), Path::Wallet));
+        assert!(!accepted(shape(false, None), Path::NearAiLogin));
+    }
+
+    /// An enrolled config asks its commons for the path it took, not for the
+    /// other one.
+    #[test]
+    fn the_path_is_read_from_the_enrolled_tenant_namespace() {
+        assert_eq!(
+            Path::for_tenant(&format!("near-{}", "ab".repeat(32))),
+            Path::Wallet
+        );
+        assert_eq!(
+            Path::for_tenant(&format!("nearai-{}", "ab".repeat(32))),
+            Path::NearAiLogin
+        );
+        // Anything that is not a well-formed login tenant is treated as the
+        // wallet path, which is the pre-existing behaviour and the safe
+        // default: it is the stricter readiness flag of the two.
+        assert_eq!(Path::for_tenant("tenant-whatever"), Path::Wallet);
+    }
+
+    #[test]
+    fn a_published_receipt_endpoint_comes_back_from_the_capability() {
+        let (_, _, _, receipt) = validate_capability(
+            "https://commons.example",
+            capability_publishing(
+                "https://issuer.example",
+                "https://witness.example",
+                Some("https://cloud-api.near.ai/v1"),
+            ),
+            Path::Wallet,
+        )
+        .expect("a ready commons");
+        assert_eq!(receipt.as_deref(), Some("https://cloud-api.near.ai/v1"));
+    }
+
+    /// A commons that publishes none is not a commons that fails. The person
+    /// still enrolls; they contribute unattested, which is what they did
+    /// before any of this existed.
+    #[test]
+    fn a_commons_publishing_no_receipt_endpoint_still_enrolls_the_person() {
+        let (_, _, _, receipt) = validate_capability(
+            "https://commons.example",
+            capability("https://issuer.example", "https://witness.example"),
+            Path::Wallet,
+        )
+        .expect("a ready commons");
+        assert!(receipt.is_none());
+    }
+
+    /// The endpoint is an address this daemon has to dial, so it faces the
+    /// address rules the issuer and witness face. A capabilities response is
+    /// not a licence to name anything.
+    ///
+    /// Dropped rather than fatal: enrollment survives, attestation does not.
+    /// A commons naming a receipt service this client will not call should not
+    /// cost the person their account.
+    #[test]
+    fn a_published_receipt_endpoint_that_is_not_a_dialable_address_is_dropped() {
+        for endpoint in [
+            "http://receipts.example/v1",
+            "https://user:secret@receipts.example/v1",
+            "https://receipts.example/v1?token=secret",
+            "https://receipts.example/v1#fragment",
+            "not a URL",
+            "",
+        ] {
+            let (_, _, _, receipt) = validate_capability(
+                "https://commons.example",
+                capability_publishing(
+                    "https://issuer.example",
+                    "https://witness.example",
+                    Some(endpoint),
+                ),
+                Path::Wallet,
+            )
+            .expect("enrollment survives a receipt endpoint this client will not call");
+            assert!(receipt.is_none(), "{endpoint} was published");
+        }
+    }
+
+    /// A real commons publishes its issuer and its witness on hosts that are
+    /// not the ingest host. If those do not enter the list this step enforces,
+    /// signup is refused against every such deployment -- which is the same
+    /// failure this change exists to remove, moved one step later.
+    #[test]
+    fn a_commons_may_publish_its_issuer_and_witness_on_other_hosts() {
+        let (issuer, audience, witness, _) = validate_capability(
+            "https://commons.example",
+            capability("https://issuer.example", "https://witness.example"),
+            Path::Wallet,
+        )
+        .expect("hosts the chosen origin published must be reachable");
+        assert_eq!(issuer, "https://issuer.example");
+        assert_eq!(audience, "trace-commons-upload");
+        assert_eq!(witness.url, "https://witness.example");
+    }
+
+    /// And the list is still a list. A published host that fails the address
+    /// rules is refused as an address, not admitted because the origin named
+    /// it.
+    #[test]
+    fn a_published_host_still_has_to_be_an_address_this_daemon_will_dial() {
+        for issuer in [
+            "http://issuer.example",
+            "https://user@issuer.example",
+            "https://issuer.example/?token=abc",
+            "https://",
+        ] {
+            assert_eq!(
+                validate_capability(
+                    "https://commons.example",
+                    capability(issuer, "https://witness.example"),
+                    Path::Wallet,
+                ),
+                Err(SignupRefusal::AddressRefused),
+                "{issuer}"
+            );
+        }
+        // A witness address that breaks the same rules is caught earlier, by
+        // the trust checks, and is reported as trust material this client will
+        // not accept rather than as an address.
+        for witness_url in ["http://witness.example", "https://witness.example?x=1"] {
+            assert_eq!(
+                validate_capability(
+                    "https://commons.example",
+                    capability("https://issuer.example", witness_url),
+                    Path::Wallet,
+                ),
+                Err(SignupRefusal::Unsupported),
+                "{witness_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_commons_that_is_not_offering_signup_is_unsupported_rather_than_refused() {
+        let mut not_ready = capability("https://issuer.example", "https://witness.example");
+        not_ready.ready = false;
+        assert_eq!(
+            validate_capability("https://commons.example", not_ready, Path::Wallet),
+            Err(SignupRefusal::Unsupported)
+        );
+        let mut no_audience = capability("https://issuer.example", "https://witness.example");
+        no_audience.audience = Some("   ".into());
+        assert_eq!(
+            validate_capability("https://commons.example", no_audience, Path::Wallet),
+            Err(SignupRefusal::Unsupported)
+        );
+        let mut no_witness = capability("https://issuer.example", "https://witness.example");
+        no_witness.witness = None;
+        assert_eq!(
+            validate_capability("https://commons.example", no_witness, Path::Wallet),
+            Err(SignupRefusal::Unsupported)
+        );
+    }
+
+    /// `client` refuses a permissive list outright rather than trusting
+    /// `HostAllowlist::check`, which is a no-op on one. Every caller here
+    /// passes an enforcing list, so this guard is what keeps a future one
+    /// from quietly reaching anything at all.
+    #[test]
+    fn a_permissive_list_is_refused_rather_than_checked() {
+        let permissive = HostAllowlist::permissive();
+        assert!(
+            permissive
+                .check(&reqwest::Url::parse("https://evil.example").unwrap())
+                .is_ok()
+        );
+        assert!(client("https://evil.example", &permissive).is_err());
+        assert!(client("https://commons.example", &permissive).is_err());
+    }
+
+    #[test]
+    fn the_three_refusal_classes_have_three_distinct_wire_values_and_sentences() {
+        use crate::witness_copy::wallet_refusal_line;
+        let classes = [
+            SignupRefusal::AddressRefused,
+            SignupRefusal::Unreachable,
+            SignupRefusal::Unsupported,
+        ];
+        let wires: std::collections::BTreeSet<_> = classes.iter().map(|c| c.wire()).collect();
+        assert_eq!(wires.len(), classes.len(), "the classes must not collide");
+        let lines: std::collections::BTreeSet<_> = classes
+            .iter()
+            .map(|c| wallet_refusal_line(Some(c.wire())))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            classes.len(),
+            "each class must read differently to a person"
+        );
+        // A class this build does not know about must not be described.
+        assert_eq!(
+            wallet_refusal_line(Some("a_class_from_2027")),
+            wallet_refusal_line(None)
+        );
+    }
+
+    /// The receipt endpoint is read off the capability document under the name
+    /// the server publishes it as, and a commons that omits it publishes none
+    /// rather than failing to parse.
+    ///
+    /// The second case is also the compatibility check that matters in the
+    /// other direction: the extra keys it carries are ones `Capability` does
+    /// not name, and they are tolerated because the struct deliberately does
+    /// not `deny_unknown_fields`.
+    #[test]
+    fn a_capability_document_carries_the_published_receipt_endpoint() {
+        let published: Capability = serde_json::from_value(serde_json::json!({
+            "ready": true,
+            "witness": null,
+            "issuer_url": "https://issuer.example",
+            "audience": "upload",
+            "inference_receipt_endpoint": "https://cloud-api.near.ai/v1"
+        }))
+        .expect("a capability document");
+        assert_eq!(
+            published.inference_receipt_endpoint.as_deref(),
+            Some("https://cloud-api.near.ai/v1")
+        );
+
+        let silent: Capability = serde_json::from_value(serde_json::json!({
+            "ready": true,
+            "witness": null,
+            "issuer_url": "https://issuer.example",
+            "audience": "upload",
+            "network": "mainnet",
+            "funding_available": false
+        }))
+        .expect("a commons that publishes no receipt endpoint still parses");
+        assert!(silent.inference_receipt_endpoint.is_none());
     }
     #[tokio::test]
     async fn callback_accepts_fragmented_http_headers() {
@@ -648,7 +1391,12 @@ mod tests {
                 token_type: "Bearer".into(),
                 expires_in_secs: 3600,
                 account_id: "example-account".into(),
-                tenant_id: format!("near-{}", "ab".repeat(32)),
+                // Deliberately unrelated to anchor_hash below. The server's
+                // tenant id is now drawn at random, so a fixture where the two
+                // agreed would keep passing under the retired
+                // `tenant_id == "near-" || anchor_hash[7..]` binding and prove
+                // nothing about the check that replaced it.
+                tenant_id: format!("near-{}", "3c".repeat(32)),
                 device_key_id: identity.device_key_id.clone(),
                 anchor_hash: format!("sha256:{}", "ab".repeat(32)),
             };
@@ -661,7 +1409,7 @@ mod tests {
                     &options,
                     &identity,
                     completed(),
-                    "failed-session",
+                    None,
                     witness.clone(),
                     None
                 )
@@ -675,7 +1423,7 @@ mod tests {
                 &options,
                 &identity,
                 completed(),
-                "first",
+                None,
                 witness.clone(),
                 receipt_endpoint.clone(),
             )
@@ -686,6 +1434,13 @@ mod tests {
             assert!(config.inference_receipt_check_attestation);
             assert!(config.witness.as_ref().unwrap().admission_evidence);
             assert_eq!(config.witness, Some(witness.clone()));
+            // K11: the join says where the witness came from.
+            assert_eq!(
+                config.witness_origin_view(),
+                Some(crate::config::WitnessOriginView::Recorded(
+                    crate::config::WitnessOrigin::PublishedAtJoin
+                ))
+            );
             assert_eq!(
                 config.inference_receipt_endpoint.as_deref(),
                 receipt_endpoint.as_deref()
@@ -696,7 +1451,7 @@ mod tests {
                     &options,
                     &identity,
                     completed(),
-                    "second",
+                    None,
                     witness,
                     None
                 )
@@ -708,6 +1463,41 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn wallet_tenant_ids_are_accepted_on_shape_and_not_on_a_derivation() {
+        assert!(crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "3c".repeat(32)
+        )));
+        assert!(crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(32)
+        )));
+        // Upper-case hex, the wrong length, and the wrong namespace are all
+        // rejected; the server emits lower-case hex in the `near-` namespace.
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "AB".repeat(32)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(31)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(33)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "tenant-{}",
+            "ab".repeat(32)
+        )));
+        assert!(!crate::config::is_near_tenant_id("near-"));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "gz".repeat(32)
+        )));
+    }
+
     #[test]
     fn callback_survives_originating_ipc_runtime_drop() {
         use std::io::Write;

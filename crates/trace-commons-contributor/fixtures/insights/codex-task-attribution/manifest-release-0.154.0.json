@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "profile_id": "codex-rust-v0.154.0-task-records-v1",
+  "upstream_repository": "https://github.com/openai/codex",
+  "upstream_revision": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
+  "workspace_package_version": "0.154.0",
+  "qualification": "Released writer structure and declared model only; no live provider identity, exclusive serving, independence, or outcome claim.",
+  "record_scope": {
+    "direct_messages": true,
+    "reasoning": true,
+    "sequential_exec_command_call_output": true,
+    "base_instruction_provenance": ["custom", "model_with_matching_declared_model"],
+    "custom_tools": false,
+    "parallel_calls": false,
+    "forks_or_delegation": false
+  },
+  "fixtures": {
+    "codex-release-0.154.0-alpha-direct.jsonl": "a254d4965ec6250f87386ff390ab9a273dd60ad0e9b140091027affa126e0d9a",
+    "codex-release-0.154.0-beta-direct.jsonl": "3fdbb19252144df71527ccdf9f142a9ae9e0c91ce9a5485dea139761a3b78fef",
+    "codex-release-0.154.0-tool-reasoning.jsonl": "b0bbcd2ce3b35a9b96f89b3c9ead28888d61c0b98fe77dd9a1b386518374a9a5",
+    "codex-release-0.154.0-default-instructions.jsonl": "ea9bde6fc651e2404b408eade140c167c6051376c70a55090df772e1990f624e"
+  },
+  "generator_sha256": "c110dcced3976c0308957576c6004b5fba239387fe01f07a5bfc322b4876baa0",
+  "tool_fixture_reproduction": "Two consecutive pinned-source harness runs produced identical bytes. Raw writer output was asserted to contain a successful process exit before deterministic sanitization."
+}

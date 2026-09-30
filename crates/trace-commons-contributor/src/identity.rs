@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Utc};
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -36,6 +36,21 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
+    /// Native credential access may prompt; keep it off async runtime workers.
+    pub async fn load_async(store: &ConfigStore) -> Result<Option<Self>> {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || Self::load(&store))
+            .await
+            .context("commons_credential_worker_unavailable")?
+    }
+
+    pub async fn load_or_generate_async(store: &ConfigStore) -> Result<Self> {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || Self::load_or_generate(&store))
+            .await
+            .context("commons_credential_worker_unavailable")?
+    }
+
     /// Load and validate the persisted device key without creating one.
     pub fn load(store: &ConfigStore) -> Result<Option<Self>> {
         store
@@ -47,16 +62,26 @@ impl DeviceIdentity {
 
     /// Load the persisted device key, or generate and persist a new one.
     pub fn load_or_generate(store: &ConfigStore) -> Result<Self> {
+        use crate::daemon::commons_credentials::{self, Kind};
+        let expected = commons_credentials::snapshot(store, Kind::Device)?;
         if let Some(identity) = Self::load(store)? {
             return Ok(identity);
         }
         let doc = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
             .map_err(|_| anyhow!("generating device keypair"))?;
         let pkcs8_der = doc.as_ref().to_vec();
-        store
-            .save_device_key(&pkcs8_der)
+        // Capture before generation so logout or another creator cannot be
+        // mistaken for permission to publish this in-flight candidate.
+        commons_credentials::replace(store, &expected, &pkcs8_der, None)
             .context("saving device key")?;
         Self::from_pkcs8(&pkcs8_der)
+    }
+
+    /// A key read from the staging slot (`commons_credentials::Kind::
+    /// StagedDevice`). The same parse as the live key; a separate name so
+    /// that a staged key is only ever built where one was asked for.
+    pub(crate) fn from_staged_pkcs8(pkcs8_der: &[u8]) -> Result<Self> {
+        Self::from_pkcs8(pkcs8_der)
     }
 
     fn from_pkcs8(pkcs8_der: &[u8]) -> Result<Self> {
@@ -78,6 +103,24 @@ impl DeviceIdentity {
     pub fn sign_b64(&self, bytes: &[u8]) -> String {
         let sig = self.keypair.sign(bytes);
         BASE64.encode(sig.as_ref())
+    }
+
+    /// Verify a Base64-STANDARD Ed25519 signature with this device's public
+    /// key. The persisted private key never leaves `DeviceIdentity`.
+    pub(crate) fn verifies_b64(&self, bytes: &[u8], signature_b64: &str) -> bool {
+        let Ok(signature) = BASE64.decode(signature_b64) else {
+            return false;
+        };
+        UnparsedPublicKey::new(&ED25519, self.keypair.public_key().as_ref())
+            .verify(bytes, &signature)
+            .is_ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generate_for_test() -> Result<Self> {
+        let document = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .map_err(|_| anyhow!("generating test device keypair"))?;
+        Self::from_pkcs8(document.as_ref())
     }
 }
 
@@ -324,6 +367,8 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example".into(),

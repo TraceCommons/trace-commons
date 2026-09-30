@@ -369,7 +369,7 @@ public sealed class NativeRoundTripTests : IDisposable
             daemon.Call(
                 DaemonProtocol.Methods.SetConsentScopes,
                 "{\"scopes\":[\"debugging_evaluation\"]}"));
-        Assert.False(consent.IsError);
+        Assert.False(consent.IsError, $"{consent.Error?.Code}: {consent.Error?.Message}");
 
         AuditSettingsPayload? audit = DaemonResponse
             .Parse(daemon.Call(DaemonProtocol.Methods.ListAudit, "{\"limit\":20}"))

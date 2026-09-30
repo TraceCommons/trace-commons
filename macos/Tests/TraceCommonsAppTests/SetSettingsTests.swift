@@ -12,15 +12,34 @@ import XCTest
 /// a `TCPreview` cannot be built outside `TCBridge` anyway. It is on the
 /// protocol only because `DaemonClient` offers it.
 private final class RecordingDaemon: DaemonCalling {
-    private(set) var calls: [(method: String, params: String)] = []
+    /// One write fans out into several `Task.detached` calls, so this
+    /// double is called from more than one thread at once while the test
+    /// reads `calls` from the main actor. An unsynchronised `Array.append`
+    /// under that corrupts the buffer's refcount and segfaults the test
+    /// process. See CredentialCancelTests for the crash this prevents.
+    private let lock = NSLock()
+    private var recorded: [(method: String, params: String)] = []
+
+    var calls: [(method: String, params: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
     /// What the next call answers with. Defaults to a well-formed frame
     /// carrying an empty result, which every call here either ignores or
     /// fails to decode -- never a silent success.
-    var response = #"{"id":1,"result":{}}"#
+    private var responseValue = #"{"id":1,"result":{}}"#
+
+    var response: String {
+        get { lock.lock(); defer { lock.unlock() }; return responseValue }
+        set { lock.lock(); defer { lock.unlock() }; responseValue = newValue }
+    }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        calls.append((method: method, params: paramsJSON))
-        return response
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append((method: method, params: paramsJSON))
+        return responseValue
     }
 
     /// Never called by these tests. Nil is the honest answer for a
@@ -539,10 +558,26 @@ final class SourceSettingsModelTests: XCTestCase {
 
 private final class ConsentReconciliationDaemon: DaemonCalling {
     let failRead: Bool
-    private(set) var calls: [String] = []
+    /// Locked pre-emptively, not because a crash was seen here. These tests
+    /// only exercise the failure path of `setConsentScopes`, where every
+    /// daemon call is awaited and nothing races. Its success path fires
+    /// `refreshStatus()` and `refreshAudit()` fire-and-forget onto detached
+    /// tasks (AppModel.swift:1363-1364), so a success-path test -- an
+    /// entirely ordinary thing to add -- would have several threads
+    /// appending here at once. See CredentialCancelTests for what that
+    /// costs when it is left unguarded.
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    var calls: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
     init(failRead: Bool) { self.failRead = failRead }
     func call(_ method: String, params paramsJSON: String) -> String {
-        calls.append(method)
+        lock.lock()
+        recorded.append(method)
+        lock.unlock()
         if method == "status", !failRead {
             return #"{"result":{"logged_in":true,"consent_scopes":["debugging_evaluation","training"],"health":{}}}"#
         }

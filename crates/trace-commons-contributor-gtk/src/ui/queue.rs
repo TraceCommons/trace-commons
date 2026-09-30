@@ -70,6 +70,12 @@ pub struct QueueView {
     undo_undo: gtk::Button,
     undo_let_it_send: gtk::Button,
     heading: gtk::Label,
+    /// The certificate-held section: heading, then either the sessions a
+    /// certificate is held for or the sentence saying there are none yet.
+    ///
+    /// Rebuilt with the queue rather than persisted, because its contents
+    /// are a filter over the same rows.
+    certificates: gtk::Box,
     list: gtk::Box,
     disclosure: gtk::Box,
     week: gtk::Box,
@@ -254,12 +260,18 @@ impl QueueView {
             steps.append(&label);
         }
         first_contribution.set_child(Some(&steps));
+        let certificates = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        certificates.set_margin_start(space::XL);
+        certificates.set_margin_end(space::XL);
+        certificates.set_margin_top(space::M);
+
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("tc-root");
         root.append(&private_inference_clamp);
         root.append(&arming_clamp);
         root.append(&undo_clamp);
         root.append(&first_contribution);
+        root.append(&certificates);
         root.append(&empty);
         root.append(&scroller);
 
@@ -274,6 +286,7 @@ impl QueueView {
             undo_undo,
             undo_let_it_send,
             heading,
+            certificates,
             list,
             disclosure,
             week,
@@ -411,6 +424,9 @@ pub fn render(app: &Rc<App>) {
 
     let entries = app.entries.borrow();
     let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
+    // The certificate section filters the same rows, and `certificate::held`
+    // takes a slice so it can be tested without a window.
+    let pending_owned: Vec<QueueEntry> = pending.iter().map(|e| (*e).clone()).collect();
 
     // The two facts the count cannot carry, both read off the previews the
     // cards already hold: a session scrubbing matched NOTHING in, and one
@@ -443,6 +459,52 @@ pub fn render(app: &Rc<App>) {
     // whatever order the cards are drawn in. `queue_folders::group` is what
     // guarantees that, and `members_keep_their_flat_pending_index` is what
     // guards it.
+    // The sessions a witness certificate is held for, drawn together above
+    // the folders they are scattered across. Both witness routes produce one,
+    // so this is one question rather than two -- see `holds_certificate`.
+    //
+    // ALWAYS DRAWN, heading and all, even with nothing in it. A filtered
+    // section that renders as nothing when nothing matches cannot be told
+    // apart from one that failed to load, and on this shell a
+    // `holds_certificate` that never arrived decodes to `false` on every row
+    // and produces exactly that. The empty sentence is what says which.
+    //
+    // Nothing here chooses a sentence. `evidence_admitted` is the daemon's
+    // flag verbatim and every word comes back from `crate::certificate`.
+    clear(&view.certificates);
+    {
+        let evidence_admitted = app.evidence_admitted.get();
+        let title = gtk::Label::builder()
+            .label(crate::certificate::title(evidence_admitted))
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+        title.add_css_class("tc-card-title");
+        view.certificates.append(&title);
+
+        let held = crate::certificate::held(&pending_owned);
+        if held.is_empty() {
+            let none = style::caveat(crate::certificate::empty());
+            none.add_css_class("tc-tertiary");
+            view.certificates.append(&none);
+        } else {
+            let line = crate::certificate::view(evidence_admitted).line;
+            for entry in held {
+                let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                let label = gtk::Label::builder()
+                    .label(&entry.project_label)
+                    .wrap(true)
+                    .xalign(0.0)
+                    .build();
+                row.append(&label);
+                let meaning = style::caveat(line);
+                meaning.add_css_class("tc-tertiary");
+                row.append(&meaning);
+                view.certificates.append(&row);
+            }
+        }
+    }
+
     let folders = crate::queue_folders::group(&pending);
     // Resolved on every render rather than mutated on every queue change: a
     // folder can be pulled out from under the person standing in it by an
@@ -1099,6 +1161,68 @@ fn manifest_block(
         }
         facts.append(&extent);
     }
+
+    // Whether this session carries a checkable copy of the model call that
+    // produced it.
+    //
+    // **On every row, unconditionally** -- the opposite rule to the
+    // eligibility line below, and deliberately so. Eligibility asks whether
+    // this contributor may send this session and says nothing when nobody
+    // is asking; the mark states a fact about the trace, which an invited
+    // contributor is owed exactly as much as anyone else.
+    // `attestation::view` therefore returns a view rather than an `Option`,
+    // and a daemon that predates the field reports `unknown` rather than
+    // going quiet.
+    //
+    // One line, not two: the reason is drawn only when the entry carried
+    // one, which is what keeps an always-present mark from becoming two
+    // lines of chrome on every card. That branch is on the KEY's presence
+    // and never on the mark -- `unknown` carries a reason only sometimes,
+    // and suppressing it there would drop the only signal saying a receipt
+    // may be fetchable later.
+    //
+    // Nothing is branched on here, and nothing is offered: the mark
+    // describes the trace, so it draws no control. Sendability stays the
+    // eligibility question below.
+    {
+        let mark = crate::attestation::view(entry);
+        let tone = super::private_inference::indicator_tone(mark.tone);
+        let state = style::caveat(mark.state_line);
+        state.add_css_class(tone.css());
+        facts.append(&state);
+        if !mark.reason_line.is_empty() {
+            let reason = style::caveat(mark.reason_line);
+            reason.add_css_class("tc-tertiary");
+            facts.append(&reason);
+        }
+    }
+
+    // Whether this session can be contributed at all, and why not.
+    //
+    // Absent entirely for a contributor who was invited rather than
+    // admitted on evidence: `eligibility::view` answers `None` there and
+    // the card renders exactly as it did before this surface existed. It is
+    // NOT the `unknown` state, which is a real answer with its own
+    // sentence.
+    //
+    // Nothing is branched on here. The sentence, the colour and the reason
+    // all arrive already decided in the view; this is the part that puts
+    // them on screen.
+    if let Some(view) = crate::eligibility::view(entry) {
+        let tone = super::private_inference::indicator_tone(view.tone);
+        let state = style::caveat(view.state_line);
+        state.add_css_class(tone.css());
+        facts.append(&state);
+        // The empty string is what an unfamiliar or absent reason answers,
+        // and it draws no line: the sentence above has already said what is
+        // true, and a second one guessing at a reason nobody established
+        // would be a detail invented on screen.
+        if !view.reason_line.is_empty() {
+            let reason = style::caveat(view.reason_line);
+            reason.add_css_class("tc-tertiary");
+            facts.append(&reason);
+        }
+    }
     block.append(&facts);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -1119,7 +1243,13 @@ fn manifest_block(
     submit.set_tooltip_text(Some(copy::SUBMIT_TOOLTIP));
     actions.append(&skip);
     actions.append(&look);
-    actions.append(&submit);
+    // `Look inside` stays on every row: a contributor may always read their
+    // own session. `Submit` is the control the daemon's answer governs, and
+    // it is the only one -- an ineligible row is present and unoffered, not
+    // hidden and not made inert everywhere.
+    if crate::eligibility::offers_send(entry) {
+        actions.append(&submit);
+    }
     block.append(&actions);
 
     let app_for_look = Rc::clone(app);
@@ -1154,6 +1284,64 @@ fn manifest_block(
     });
 
     block
+}
+
+/// The entries a group-level submit is expected to send, for the undo bar.
+///
+/// Read fresh at click time, never off what `render` captured: the queue can
+/// change between a render and a click.
+pub(super) fn group_candidates(app: &Rc<App>, project_id: &str) -> Vec<String> {
+    let entries = app.entries.borrow();
+    crate::eligibility::sendable_ids(
+        entries
+            .iter()
+            .filter(|e| e.state == "pending" && e.project_id == project_id),
+    )
+}
+
+/// Send a whole project group, meaning **all eligible and never all**.
+///
+/// One call. `approve` with a `project_id` now admits only the entries the
+/// daemon considers contributable and reports the rest as
+/// `excluded_ineligible`, so the selector means what it says and the shell
+/// no longer assembles the subset itself.
+///
+/// This used to fan out one `approve` per eligible entry, because `approve`
+/// took one of `entry_id` / `project_id` / `all` and none of them could say
+/// "these three". That shape is gone: a client-assembled subset is a subset
+/// three clients assemble three ways, with three answers for what happens
+/// when call two of three fails, and the longest-of-N hold rule it needed
+/// is meaningless against a call that takes one approval instant for the
+/// whole group.
+///
+/// **The guarantee did not move, only the layer enforcing it**: a bulk
+/// control may not send a session the daemon says cannot be sent. It is now
+/// the daemon's filter rather than this function's arithmetic, and
+/// `eligibility::tests::a_group_submit_never_sends_by_project_id_directly`
+/// still holds it -- the rule is that no bulk control reaches `approve`
+/// around `submit_group`.
+fn submit_group(
+    app: &Rc<App>,
+    project_id: &str,
+    project_label: &str,
+    verdict: Option<&'static str>,
+) {
+    // The candidate set for the undo bar, and only that -- `project_id`
+    // alone tells the daemon what to approve. Read fresh at click time
+    // because the queue can change between a render and a click, and
+    // narrowed to the sendable rows so the bar does not offer to undo an
+    // entry that was never sent.
+    let candidates = group_candidates(app, project_id);
+    submit_and_toast(
+        app,
+        approve_params(
+            ApproveTarget::Project(project_id.to_string()),
+            verdict,
+            None,
+        ),
+        project_label.to_string(),
+        candidates,
+    );
 }
 
 /// The head of a folder's sessions: the way back, and which folder this is.
@@ -1248,6 +1436,39 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         path.add_css_class("tc-meta");
         naming.append(&path);
     }
+
+    // What a group submit will leave behind, said BEFORE the press.
+    //
+    // A button reading "Submit all" over a folder showing five rows that
+    // sends three, with nothing explaining the gap, is the same small
+    // dishonesty the rest of this surface removes. The sentence is the
+    // shared crate's -- it says HOW MANY and not why, because the reason a
+    // particular session cannot be sent is that row's own sentence one
+    // level in, and a summary here would be a summary of up to thirteen
+    // different reasons.
+    //
+    // The empty string for zero draws nothing, which is also the whole of
+    // the invited contributor's case: their rows carry no eligibility field,
+    // every one of them is sendable, and the gap is zero.
+    //
+    // `saturating_sub` because the count is a difference between two
+    // numbers this shell did not compute together. It cannot go negative
+    // today -- the eligible set is a subset of the members -- and if it ever
+    // did, the honest answer is the one zero already gives: say nothing.
+    // The daemon's own count of what a group submit would send, beside the
+    // total from the rows on screen. Only the FILTER's answer comes off the
+    // wire: the header's total must agree with what the contributor can
+    // count, and the filter's answer must agree with the call that applies
+    // it.
+    let contributable = crate::eligibility::group_contributable(&app.projects.borrow(), project_id);
+    let withheld = copy::group_withheld_line(
+        (waiting as u64).saturating_sub(contributable.unwrap_or(waiting as u64)),
+    );
+    if !withheld.is_empty() {
+        let line = style::caveat(&withheld);
+        line.add_css_class("tc-attention");
+        naming.append(&line);
+    }
     opener.append(&naming);
 
     let summary = gtk::Label::new(Some(&copy::folder_summary(waiting, folder.bytes)));
@@ -1281,35 +1502,59 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         submit_all.add_css_class("suggested-action");
         submit_all.add_css_class("tc-primary");
         submit_all.set_tooltip_text(Some(copy::SUBMIT_ALL_TOOLTIP));
-        bar.append(&submit_all);
+
+        // Both group controls take the gate, or neither should.
+        //
+        // A group with nothing sendable in it must not offer a control that
+        // sends nothing: a press with no visible consequence is the same
+        // defect as a press that is refused, minus the error message. The
+        // verdict menu is the trap -- it is a SECOND ROUTE TO THE SAME CALL,
+        // and a live one sitting beside a disabled button is worse than
+        // either alone, because the disabled button is what tells a
+        // contributor the group cannot be sent.
+        //
+        // **Nothing sendable means no control at all**, the same rule an
+        // ineligible row follows. It used to be drawn and disabled, on the
+        // argument that a folder with no button reads as broken. That
+        // argument was answered by the withheld line below: the folder now
+        // SAYS why it is offering nothing, so the control has nothing left
+        // to communicate and a dead button is just a dead button.
+        //
+        // Counted off this group's own rows rather than `list_projects`'s
+        // `contributable_count`. The queue view builds its folders from the
+        // entries it already holds -- it never fetches project rows -- so
+        // reading the count from a second source would be a second source
+        // that can disagree with the rows on screen. The numbers are the
+        // same by construction: `offers_send` and the daemon's
+        // `contributable_in_a_group` both admit `eligible` alone, and both
+        // admit everything when the evidence flag is off, which is the
+        // absent-field case.
+        // **Asked, not decided.** Whether a group offers a send control is
+        // the same branch table the row control comes from, and the arm it
+        // would get wrong is the absent one: a shell passing `0` for a
+        // missing `contributable_count` would refuse the control to an
+        // invited contributor whose sessions are all perfectly sendable.
+        // `None` carries the absence, exactly as a negative does across the
+        // C ABI that macOS and Windows reach this through.
+        let sendable = crate::eligibility::group_offers_send(waiting as u64, contributable);
+        if sendable {
+            bar.append(&submit_all);
+        }
 
         let app_for_submit = Rc::clone(app);
         let project_id_for_submit = project_id.to_string();
         let project_label_for_submit = project_label.to_string();
         submit_all.connect_clicked(move |_| {
-            // Read fresh at click time rather than off what `render` captured
-            // when the header was drawn: the queue can change between a
-            // render and a click, and this is only ever the CANDIDATE set
-            // for the undo bar -- see `submit_and_toast` -- never what tells
-            // the daemon what to approve. `project_id` alone does that.
-            let candidates: Vec<String> = app_for_submit
-                .entries
-                .borrow()
-                .iter()
-                .filter(|e| e.state == "pending" && e.project_id == project_id_for_submit)
-                .map(|e| e.entry_id.clone())
-                .collect();
-            // `Submit all` never asked the verdict question either -- so
-            // this call always omits `outcome` too.
-            submit_and_toast(
+            // `Submit all` means ALL ELIGIBLE, never all -- see
+            // `submit_group`, which reads the queue fresh at click time and
+            // decides between the one `project_id` call and a per-entry
+            // fan-out. It never asked the verdict question, so no `outcome`
+            // goes with it.
+            submit_group(
                 &app_for_submit,
-                approve_params(
-                    ApproveTarget::Project(project_id_for_submit.clone()),
-                    None,
-                    None,
-                ),
-                project_label_for_submit.clone(),
-                candidates,
+                &project_id_for_submit,
+                &project_label_for_submit,
+                None,
             );
         });
 
@@ -1342,37 +1587,30 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
             let project_label_for_item = project_label.to_string();
             let submit_all_as_for_item = submit_all_as.clone();
             item.connect_clicked(move |_| {
-                // Read fresh at click time, independently of the plain
-                // `Submit all` handler above -- see that handler's comment
-                // for why: the queue can change between a render and a
-                // click, and each handler needs its own fresh read.
-                let candidates: Vec<String> = app_for_item
-                    .entries
-                    .borrow()
-                    .iter()
-                    .filter(|e| e.state == "pending" && e.project_id == project_id_for_item)
-                    .map(|e| e.entry_id.clone())
-                    .collect();
                 submit_all_as_for_item.popdown();
-                submit_and_toast(
+                // The same rule as the plain `Submit all` above, through the
+                // same function: a verdict answered once for a group must
+                // not become a way to send the rows that button correctly
+                // withheld. A bulk verdict never carries a correction --
+                // one written for a group would describe sessions it was
+                // not written about, and the daemon refuses the combination
+                // outright -- and `submit_group` sends none.
+                submit_group(
                     &app_for_item,
-                    approve_params(
-                        ApproveTarget::Project(project_id_for_item.clone()),
-                        Some(verdict),
-                        // A bulk verdict never carries a correction: one
-                        // written for a group would describe sessions it was
-                        // not written about, and the daemon refuses the
-                        // combination outright.
-                        None,
-                    ),
-                    project_label_for_item.clone(),
-                    candidates,
+                    &project_id_for_item,
+                    &project_label_for_item,
+                    Some(verdict),
                 );
             });
         }
         let verdict_popover = gtk::Popover::builder().child(&verdict_popover_box).build();
         submit_all_as.set_popover(Some(&verdict_popover));
-        bar.append(&submit_all_as);
+        // The same answer, not a second computation. `Submit all as...` is
+        // a second route to the same call, and a live one beside an absent
+        // button would offer exactly what the missing button withheld.
+        if sendable {
+            bar.append(&submit_all_as);
+        }
     }
 
     let ignore = gtk::Button::with_label(copy::IGNORE_PROJECT);

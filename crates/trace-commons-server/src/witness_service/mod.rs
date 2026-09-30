@@ -88,6 +88,7 @@ use crate::witness_service::inference::{
     InferenceAttestationPolicy, WitnessedSession, check_inference_attestation,
     strip_inference_bodies,
 };
+use trace_commons_protocol::witness_provenance::InferenceProvenance;
 
 /// What the contributor sends: the raw transcript and the consent flags that
 /// declare what it carries.
@@ -552,6 +553,25 @@ pub async fn witness(
     signer: &dyn Signer,
     enclave: &dyn Enclave,
 ) -> Result<WitnessResponse, WitnessError> {
+    witness_with_issuance(
+        request,
+        policy,
+        WitnessCertificateIssuance::V1,
+        redactor,
+        signer,
+        enclave,
+    )
+    .await
+}
+
+pub(crate) async fn witness_with_issuance(
+    request: WitnessRequest,
+    policy: &InferenceAttestationPolicy,
+    issuance: WitnessCertificateIssuance,
+    redactor: &dyn TranscriptRedactor,
+    signer: &dyn Signer,
+    enclave: &dyn Enclave,
+) -> Result<WitnessResponse, WitnessError> {
     // First, and before the redaction pass: a submission that will be refused
     // must not first spend a metered classifier, and the projection is onto
     // the raw transcript rather than the redacted artifact -- a completion
@@ -587,7 +607,7 @@ pub async fn witness(
     let proof = check_correspondence(&redacted, &redacted, &[])
         .map_err(|_| WitnessError::ArtifactBindingFailed)?;
 
-    let certificate = WitnessCertificate::from_proof(
+    let certificate = issuance.issue_certificate(
         proof,
         CertificateDetails {
             residual_risk_verdict,
@@ -598,6 +618,7 @@ pub async fn witness(
                 .map_err(|SeamUnavailable| WitnessError::MeasurementUnavailable)?,
             timestamp: chrono::Utc::now().timestamp(),
         },
+        InferenceProvenance::Unattested,
     );
 
     let signature_hex = signer
@@ -750,6 +771,23 @@ pub struct RedactedContribution {
 /// masked correction.
 #[async_trait]
 pub trait ContributionRedactor: Send + Sync {
+    /// Private event provenance, available only when every text stage supplied
+    /// exact byte replacements. Legacy redactors safely omit maps.
+    async fn redact_with_edits(
+        &self,
+        raw: RawTraceContribution,
+    ) -> Result<
+        (
+            RedactedContribution,
+            std::collections::BTreeMap<
+                uuid::Uuid,
+                trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
+            >,
+        ),
+        SeamUnavailable,
+    > {
+        Ok((self.redact(raw).await?, std::collections::BTreeMap::new()))
+    }
     /// Redact `raw`. `Err` means the pass did not complete; there is no
     /// partial success.
     async fn redact(
@@ -804,6 +842,32 @@ impl PipelineContributionRedaction {
 
 #[async_trait]
 impl ContributionRedactor for PipelineContributionRedaction {
+    async fn redact_with_edits(
+        &self,
+        raw: RawTraceContribution,
+    ) -> Result<
+        (
+            RedactedContribution,
+            std::collections::BTreeMap<
+                uuid::Uuid,
+                trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
+            >,
+        ),
+        SeamUnavailable,
+    > {
+        let (envelope, maps) = self
+            .redactor
+            .redact_trace_with_edits(raw)
+            .await
+            .map_err(|_| SeamUnavailable)?;
+        Ok((
+            RedactedContribution {
+                envelope,
+                policy_version: self.policy_version.clone(),
+            },
+            maps,
+        ))
+    }
     async fn redact(
         &self,
         raw: RawTraceContribution,
@@ -850,15 +914,34 @@ impl ContributionRedactor for PipelineContributionRedaction {
 ///
 /// [`CorrespondenceProof`]: crate::redaction_witness::correspondence::CorrespondenceProof
 pub async fn witness_contribution(
+    request: WitnessContributionRequest,
+    policy: &InferenceAttestationPolicy,
+    redactor: &dyn ContributionRedactor,
+    signer: &dyn Signer,
+    enclave: &dyn Enclave,
+) -> Result<WitnessContributionResponse, WitnessError> {
+    witness_contribution_with_issuance(
+        request,
+        policy,
+        WitnessCertificateIssuance::V1,
+        redactor,
+        signer,
+        enclave,
+    )
+    .await
+}
+
+pub(crate) async fn witness_contribution_with_issuance(
     mut request: WitnessContributionRequest,
     policy: &InferenceAttestationPolicy,
+    issuance: WitnessCertificateIssuance,
     redactor: &dyn ContributionRedactor,
     signer: &dyn Signer,
     enclave: &dyn Enclave,
 ) -> Result<WitnessContributionResponse, WitnessError> {
     // Before the redaction pass, and onto the raw contribution, for the
     // reasons `witness` gives above.
-    check_inference_attestation(
+    let inference_outcome = check_inference_attestation(
         policy,
         request.offered_receipt.as_ref(),
         &WitnessedSession::Contribution(&request.raw_contribution),
@@ -921,7 +1004,7 @@ pub async fn witness_contribution(
     let proof = check_correspondence(&serialised, &serialised, &[])
         .map_err(|_| WitnessError::ArtifactBindingFailed)?;
 
-    let certificate = WitnessCertificate::from_proof(
+    let certificate = issuance.issue_certificate(
         proof,
         CertificateDetails {
             residual_risk_verdict,
@@ -932,6 +1015,10 @@ pub async fn witness_contribution(
                 .map_err(|SeamUnavailable| WitnessError::MeasurementUnavailable)?,
             timestamp: chrono::Utc::now().timestamp(),
         },
+        inference_outcome.final_call.map_or(
+            InferenceProvenance::Unattested,
+            InferenceProvenance::Attested,
+        ),
     );
 
     let signature_hex = signer
@@ -943,6 +1030,40 @@ pub async fn witness_contribution(
         certificate,
         signature_hex,
     })
+}
+
+/// Immutable deployment issuance policy. Deploy compatible verifiers before V2.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WitnessCertificateIssuance {
+    #[default]
+    V1,
+    V2,
+}
+
+impl std::str::FromStr for WitnessCertificateIssuance {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "v1" => Ok(Self::V1),
+            "v2" => Ok(Self::V2),
+            _ => Err("certificate version must be v1 or v2"),
+        }
+    }
+}
+
+impl WitnessCertificateIssuance {
+    fn issue_certificate(
+        self,
+        proof: crate::redaction_witness::correspondence::CorrespondenceProof,
+        details: CertificateDetails,
+        provenance: InferenceProvenance,
+    ) -> WitnessCertificate {
+        match self {
+            Self::V1 => WitnessCertificate::from_proof(proof, details),
+            Self::V2 => WitnessCertificate::from_proof_v2(proof, details, provenance),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1147,6 +1268,7 @@ mod tests {
         > {
             Ok(Some(
                 trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction {
+                    private_edits: None,
                     redacted_text: text.replace(CLASSIFIER_ONLY_PII, "<PROSE_NAME>"),
                     summary: Default::default(),
                     report: RedactionReport::default(),
@@ -1248,6 +1370,7 @@ mod tests {
         for backend in [
             PrivacyFilterBackendTag::SelfHosted,
             PrivacyFilterBackendTag::NearAi,
+            PrivacyFilterBackendTag::Sidecar,
         ] {
             let redactor =
                 FullPipelineRedaction::new(Vec::new(), Arc::new(UnavailableFilter), backend);
@@ -1257,6 +1380,15 @@ mod tests {
                 "{backend:?}: a down classifier must refuse, not degrade to \
                  the deterministic pass"
             );
+            let error = witness(
+                request("Alice Brannigan deployed the build", false),
+                &redactor,
+                &TestSigner::new("classifier-refusal"),
+                &TestEnclave,
+            )
+            .await
+            .expect_err("a failed full pipeline must not issue a certificate");
+            assert_eq!(error, WitnessError::RedactionFailed);
         }
     }
 
@@ -1296,6 +1428,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_issuance_defaults_v1_and_explicit_v2_covers_text_and_contribution() {
+        for issuance in [None, Some(WitnessCertificateIssuance::V2)] {
+            let signer = Arc::new(TestSigner::new("issuance-fixture"));
+            let mut service = surface::WitnessService::new(
+                Arc::new(redactor()),
+                signer.clone(),
+                Arc::new(TestEnclave),
+                1024 * 1024,
+            )
+            .with_contribution_redactor(Arc::new(contribution_redactor()));
+            if let Some(issuance) = issuance {
+                service = service.with_certificate_issuance(issuance);
+            }
+            let text = service.witness(request("hello", false)).await.unwrap();
+            let contribution = service
+                .witness_contribution(contribution_request("hello"))
+                .await
+                .unwrap()
+                .unwrap();
+            for (certificate, signature, bytes) in [
+                (
+                    &text.certificate,
+                    &text.signature_hex,
+                    text.redacted_artifact.as_bytes(),
+                ),
+                (
+                    &contribution.certificate,
+                    &contribution.signature_hex,
+                    contribution.envelope_bytes.as_slice(),
+                ),
+            ] {
+                let verified = verify_witness_certificate(
+                    certificate.clone(),
+                    signature,
+                    Some(&pin(&signer)),
+                    bytes,
+                )
+                .unwrap();
+                let json = http::certificate_json(certificate, certificate.residual_risk_verdict());
+                if issuance.is_none() {
+                    assert_eq!(verified.certificate_version(), 1);
+                    assert_eq!(verified.inference_provenance(), None);
+                    assert_eq!(json.as_object().unwrap().len(), 5);
+                    assert!(json.get("version").is_none());
+                    assert!(json.get("inference_provenance").is_none());
+                } else {
+                    assert_eq!(verified.certificate_version(), 2);
+                    assert_eq!(
+                        verified.inference_provenance(),
+                        Some(InferenceProvenance::Unattested)
+                    );
+                    assert_eq!(json["version"], 2);
+                    assert_eq!(json["inference_provenance"]["status"], "unattested");
+                }
+            }
+            let mut corrupt = contribution_with_exchange();
+            corrupt.offered_receipt = Some(ReceiptPayload {
+                text: "invalid".into(),
+                signature: "00".repeat(64),
+                signing_address: "ab".repeat(32),
+                signing_algo: crate::near_attestation::receipt::ReceiptAlgo::Ed25519,
+                signature_kind: crate::near_attestation::receipt::ReceiptSignatureKind::Gateway,
+            });
+            assert_eq!(
+                service.witness_contribution(corrupt).await.unwrap().err(),
+                Some(WitnessError::InferenceReceiptUnverified)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_witnessed_artifact_and_its_certificate_agree() {
         let signer = TestSigner::new("witness-agreement");
         let response = witness(
@@ -1327,6 +1530,12 @@ mod tests {
             "the certificate's digest must be of the returned bytes"
         );
         assert_eq!(verified.witness_measurement(), MEASUREMENT);
+        assert_eq!(verified.inference_provenance(), None);
+        assert_eq!(verified.certificate_version(), 1);
+        assert!(matches!(
+            response.certificate.version(),
+            crate::redaction_witness::certificate::CertificateVersion::V1
+        ));
     }
 
     #[tokio::test]
@@ -1983,6 +2192,81 @@ mod tests {
         request
     }
 
+    #[tokio::test]
+    async fn one_witness_issues_attested_and_unattested_v2_from_exact_returned_bytes() {
+        use ring::signature::KeyPair as _;
+        use trace_commons_protocol::witness_provenance::{AttestationClass, InferenceProvenance};
+        let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[11; 32]).unwrap();
+        let provider_key = hex::encode(provider.public_key().as_ref());
+        let policy = InferenceAttestationPolicy::not_required()
+            .pinning_model_keys(std::collections::BTreeMap::from([(
+                "m".into(),
+                vec![provider_key.clone()],
+            )]))
+            .unwrap();
+        let signer = TestSigner::new("provenance-witness");
+        let mut attested_request = contribution_with_exchange();
+        let event = attested_request.raw_contribution.events.last().unwrap();
+        let request_body = event.structured_payload["request"]["body"]
+            .as_str()
+            .unwrap();
+        let response_body = event.content.as_deref().unwrap();
+        let receipt_text = format!(
+            "m:{}:{}",
+            hex::encode(Sha256::digest(request_body.as_bytes())),
+            hex::encode(Sha256::digest(response_body.as_bytes()))
+        );
+        attested_request.offered_receipt = Some(ReceiptPayload {
+            text: receipt_text.clone(),
+            signature: hex::encode(provider.sign(receipt_text.as_bytes()).as_ref()),
+            signing_address: provider_key.clone(),
+            signing_algo: crate::near_attestation::receipt::ReceiptAlgo::Ed25519,
+            signature_kind: crate::near_attestation::receipt::ReceiptSignatureKind::ProviderTee,
+        });
+        let unattested_request = contribution_with_exchange();
+        let attested = super::witness_contribution_with_issuance(
+            attested_request,
+            &policy,
+            WitnessCertificateIssuance::V2,
+            &contribution_redactor(),
+            &signer,
+            &TestEnclave,
+        )
+        .await
+        .unwrap();
+        let unattested = super::witness_contribution_with_issuance(
+            unattested_request,
+            &policy,
+            WitnessCertificateIssuance::V2,
+            &contribution_redactor(),
+            &signer,
+            &TestEnclave,
+        )
+        .await
+        .unwrap();
+        use crate::redaction_witness::certificate::CertificateVersion;
+        assert!(
+            matches!(attested.certificate.version(), CertificateVersion::V2(InferenceProvenance::Attested(call)) if call.class() == AttestationClass::ProviderTeeFinalCall && call.receipt_signer() == provider_key)
+        );
+        assert!(matches!(
+            unattested.certificate.version(),
+            CertificateVersion::V2(InferenceProvenance::Unattested)
+        ));
+        for response in [&attested, &unattested] {
+            verify_witness_certificate(
+                response.certificate.clone(),
+                &response.signature_hex,
+                Some(&pin(&signer)),
+                &response.envelope_bytes,
+            )
+            .unwrap();
+            assert_eq!(
+                response.certificate.claimed_redacted_sha256(),
+                hex::encode(Sha256::digest(&response.envelope_bytes))
+            );
+        }
+    }
+
     /// The artifact a contributor receives carries no inference body and no
     /// header, and still carries the exchange itself.
     #[tokio::test]
@@ -2139,6 +2423,7 @@ mod tests {
             > {
                 Ok(Some(
                     trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction {
+                        private_edits: None,
                         redacted_text: if text == SURVIVOR {
                             SECRET.into()
                         } else {
@@ -2230,6 +2515,234 @@ mod tests {
                 "an incomplete scan cannot speak for what it never examined"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn token_bundle_derives_and_certifies_the_receipt_bound_assistant_event() {
+        use crate::admission_evidence::AdmissionProviderTrust;
+        use ring::signature::KeyPair as _;
+        use trace_commons_protocol::admission::{AdmissionBinding, REQUEST_METADATA_KEY, hash_hex};
+        use trace_commons_protocol::token_distribution::*;
+        use trace_commons_protocol::trace_contribution::TraceContributionEventType;
+        let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
+        let key = hex::encode(provider.public_key().as_ref());
+        let witness = Arc::new(TestSigner::new("token-bundle-fixture"));
+        struct MatchingEnclave(String);
+        #[async_trait]
+        impl Enclave for MatchingEnclave {
+            fn signing_address(&self) -> &str {
+                &self.0
+            }
+            async fn measurement(&self) -> Result<String, SeamUnavailable> {
+                Ok(MEASUREMENT.into())
+            }
+            async fn attestation_quote(&self, _: &[u8]) -> Result<Vec<u8>, SeamUnavailable> {
+                Ok(vec![1; 8])
+            }
+        }
+        let service = surface::WitnessService::new(
+            Arc::new(FullPipelineRedaction::new(
+                Vec::new(),
+                Arc::new(NameRemovingFilter),
+                PrivacyFilterBackendTag::SelfHosted,
+            )),
+            witness.clone(),
+            Arc::new(MatchingEnclave(witness.address())),
+            1024 * 1024,
+        )
+        .with_contribution_redactor(Arc::new(
+            PipelineContributionRedaction::with_privacy_filter(
+                Vec::new(),
+                Arc::new(NameRemovingFilter),
+                PrivacyFilterBackendTag::SelfHosted,
+            ),
+        ))
+        .with_admission_provider_trust(
+            AdmissionProviderTrust::new([key.clone()], Vec::new(), ["fixture-model".into()], 1)
+                .unwrap(),
+        );
+        let binding = AdmissionBinding {
+            account_anchor_sha256: "a".repeat(64),
+            nonce_hex: "c".repeat(64),
+            expires_at: chrono::Utc::now().timestamp() + 120,
+        };
+        let request_body = serde_json::json!({"model":"fixture-model","logprobs":true,"top_logprobs":1,"metadata":{REQUEST_METADATA_KEY:binding.encode().unwrap()},"messages":[{"role":"user","content":"hello"}]}).to_string();
+        let response_body = serde_json::json!({"id":"token-fixture-response","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hello"},"logprobs":{"content":[{"token":"hello","bytes":[104,101,108,108,111],"logprob":-1.25,"top_logprobs":[{"token":"hi","bytes":[104,105],"logprob":-2.5}]}]}}]}).to_string();
+        let receipt_text = format!(
+            "fixture-model:{}:{}",
+            hash_hex(request_body.as_bytes()),
+            hash_hex(response_body.as_bytes())
+        );
+        let mut request = contribution_request("unbound history");
+        let mut exchange = request.raw_contribution.events.pop().unwrap();
+        exchange.event_type = TraceContributionEventType::HttpExchange;
+        exchange.structured_payload =
+            serde_json::json!({"request":{"body":request_body},"response":{}});
+        exchange.content = Some(response_body);
+        request.raw_contribution.events = vec![exchange];
+        request.offered_receipt = Some(ReceiptPayload {
+            signature: hex::encode(provider.sign(receipt_text.as_bytes()).as_ref()),
+            signing_address: key,
+            signing_algo: crate::near_attestation::receipt::ReceiptAlgo::Ed25519,
+            signature_kind: crate::near_attestation::receipt::ReceiptSignatureKind::ProviderTee,
+            text: receipt_text,
+        });
+        let options = || token_bundle::TokenBundleOptions {
+            capture_store_id: "1".repeat(32),
+            capture_id: "2".repeat(32),
+            bundle_revision: "r1".into(),
+            restricted_token_consent: true,
+        };
+        let trust = AdmissionProviderTrust::new(
+            [request
+                .offered_receipt
+                .as_ref()
+                .unwrap()
+                .signing_address
+                .clone()],
+            Vec::new(),
+            ["fixture-model".into()],
+            1,
+        )
+        .unwrap();
+        let verified_call = crate::admission_evidence::verify_admission_call(
+            &request.raw_contribution,
+            request.offered_receipt.as_ref().unwrap(),
+            &trust,
+            chrono::Utc::now().timestamp(),
+            1024 * 1024,
+        )
+        .expect("provider source verifies");
+        let mut restricted = request.clone();
+        verified_call
+            .restrict_contribution(&mut restricted.raw_contribution)
+            .expect("source projection succeeds");
+        trace_commons_protocol::token_distribution_chat::extract_chat_tokens(
+            restricted.raw_contribution.events[0]
+                .content
+                .as_ref()
+                .unwrap()
+                .as_bytes(),
+            false,
+        )
+        .expect("token capture parses");
+        let result = service
+            .witness_token_bundle(request.clone(), options())
+            .await
+            .unwrap();
+        for certificate in [&result.certificate, &result.contribution.certificate] {
+            assert!(matches!(
+                certificate.version(),
+                crate::redaction_witness::certificate::CertificateVersion::V1
+            ));
+            assert_eq!(
+                http::certificate_json(certificate, certificate.residual_risk_verdict())
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                5
+            );
+        }
+        let service = service.with_certificate_issuance(WitnessCertificateIssuance::V2);
+        let v2 = service
+            .witness_token_bundle(request.clone(), options())
+            .await
+            .unwrap();
+        for (certificate, signature, bytes) in [
+            (&v2.certificate, &v2.signature_hex, &v2.manifest_bytes),
+            (
+                &v2.contribution.certificate,
+                &v2.contribution.signature_hex,
+                &v2.contribution.envelope_bytes,
+            ),
+        ] {
+            let verified = verify_witness_certificate(
+                certificate.clone(),
+                signature,
+                Some(&pin(&witness)),
+                bytes,
+            )
+            .unwrap();
+            assert_eq!(verified.certificate_version(), 2);
+            assert_eq!(
+                verified.inference_provenance(),
+                Some(InferenceProvenance::Unattested)
+            );
+            assert_eq!(
+                http::certificate_json(certificate, certificate.residual_risk_verdict())["version"],
+                2
+            );
+        }
+        let envelope: TraceContributionEnvelope =
+            serde_json::from_slice(&result.contribution.envelope_bytes).unwrap();
+        let assistant = envelope
+            .events
+            .iter()
+            .find(|e| e.event_type == TraceContributionEventType::AssistantMessage)
+            .unwrap();
+        assert_eq!(assistant.redacted_content.as_deref(), Some("hello"));
+        let manifest = ContributionBundleManifest::decode(&result.manifest_bytes).unwrap();
+        assert!(
+            manifest
+                .envelope_digest
+                .matches(&result.contribution.envelope_bytes)
+        );
+        assert_eq!(
+            manifest.attachments[0].event_id,
+            assistant.event_id.to_string()
+        );
+        manifest
+            .verify_sanitized_attachment(
+                &manifest.attachments[0].artifact_id,
+                &result.attachment_bytes,
+                b"hello",
+            )
+            .unwrap();
+        verify_witness_certificate(
+            result.certificate.clone(),
+            &result.signature_hex,
+            Some(&pin(&witness)),
+            &result.manifest_bytes,
+        )
+        .unwrap();
+        verify_witness_certificate(
+            result.contribution.certificate.clone(),
+            &result.contribution.signature_hex,
+            Some(&pin(&witness)),
+            &result.contribution.envelope_bytes,
+        )
+        .unwrap();
+        let mut tampered = result.manifest_bytes.clone();
+        tampered.push(b' ');
+        assert!(
+            verify_witness_certificate(
+                result.certificate.clone(),
+                &result.signature_hex,
+                Some(&pin(&witness)),
+                &tampered
+            )
+            .is_err()
+        );
+        assert!(result.admission.is_some());
+        let mut no_consent = options();
+        no_consent.restricted_token_consent = false;
+        assert!(
+            service
+                .witness_token_bundle(request.clone(), no_consent)
+                .await
+                .is_err()
+        );
+        request.raw_contribution.events[0]
+            .content
+            .as_mut()
+            .unwrap()
+            .push(' ');
+        assert!(
+            service
+                .witness_token_bundle(request, options())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2571,3 +3084,5 @@ mod tests {
         );
     }
 }
+
+pub mod token_bundle;

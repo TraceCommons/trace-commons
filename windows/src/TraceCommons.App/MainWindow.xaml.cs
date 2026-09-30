@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -133,6 +134,13 @@ public sealed partial class MainWindow : Window
         // every event hop targets.
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         ViewModel = new MainViewModel(_host, new AppUpdater(_host));
+        ViewModel.PropertyChanged += (_, change) =>
+        {
+            if (change.PropertyName == nameof(MainViewModel.ShowingInsights) && !ViewModel.ShowingInsights)
+                (InsightsPane.Content as InsightsView)?.Deactivate();
+            if (change.PropertyName == nameof(MainViewModel.ShowingMissionDrafts) && !ViewModel.ShowingMissionDrafts)
+                (MissionDraftsPane.Content as MissionDraftsView)?.Deactivate();
+        };
 
         // Found once the template is realized, not here: the ScrollViewer
         // inside a ListView's default template does not exist before Loaded.
@@ -302,30 +310,52 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; }
 
     /// <summary>
-    /// Starts the daemon on first activation rather than in the constructor:
-    /// the window should be on screen before a multi-second first filesystem
-    /// scan begins, so a large session history looks like loading rather than
-    /// like a failure to launch.
+    /// Starts with local Insights. Contribution startup remains an explicit
+    /// action and retains the existing source declaration and enrollment gates.
     /// </summary>
-    private async void OnFirstActivated(object sender, WindowActivatedEventArgs args)
+    private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
         Activated -= OnFirstActivated;
-        await ViewModel.InitializeAsync();
-        _activationReady = ViewModel.NeedsSessionRoots;
-        OfferNextRedirectedInvite();
+        ShowInsightsPane();
+    }
 
-        // Everything below this point talks to a daemon. A start refused for
-        // undeclared session sources has none, so the roots screen goes first
-        // and the rest resumes once it has been answered. Onboarding in
-        // particular is entirely daemon IPC, so running it here would ask the
-        // contributor to enrol through a socket that is not there.
-        if (ViewModel.NeedsSessionRoots)
+    private bool _contributionStartupAttempted;
+    private bool _contributionStartupBusy;
+    private async Task<bool> StartContributionsAsync()
+    {
+        if (_contributionStartupBusy) return false;
+        _contributionStartupBusy = true;
+        try
         {
-            await ShowSessionRootsAsync();
-            return;
+            if (!_contributionStartupAttempted)
+            {
+                await ViewModel.InitializeAsync();
+                _contributionStartupAttempted = _host.IsRunning || ViewModel.NeedsSessionRoots;
+                if (_closed) return false;
+                _activationReady = ViewModel.NeedsSessionRoots;
+                OfferNextRedirectedInvite();
+                if (_host.IsRunning) await ContinueStartupAsync();
+            }
+            if (ViewModel.NeedsSessionRoots)
+            {
+                await ShowSessionRootsAsync();
+                return false;
+            }
+            bool started = !_closed && _host.IsRunning;
+            if (!started && !_closed)
+            {
+                // A start failure that is not "session roots undeclared" --
+                // for example ViewModel.StatusText's "another instance may
+                // already be running" -- must still reach the contributor.
+                // Before Insights became the default landing pane, Queue was
+                // already on screen and its header chip showed that message;
+                // navigate there now so a click from any pane still surfaces
+                // it instead of doing nothing.
+                ViewModel.ShowQueue();
+            }
+            return started;
         }
-
-        await ContinueStartupAsync();
+        finally { _contributionStartupBusy = false; }
     }
 
     /// <summary>
@@ -713,7 +743,10 @@ public sealed partial class MainWindow : Window
         await ViewModel.ResumeAsync();
     }
 
-    private void OnShowQueue(object sender, RoutedEventArgs e) => ViewModel.ShowQueue();
+    private async void OnShowQueue(object sender, RoutedEventArgs e)
+    {
+        if (await StartContributionsAsync()) ViewModel.ShowQueue();
+    }
 
     /// <summary>
     /// Switches to History, creating the view the first time and keeping it
@@ -731,8 +764,9 @@ public sealed partial class MainWindow : Window
     /// IPC calls as soon as it loads, and a contributor who never opens
     /// History should not pay for them at launch.
     /// </remarks>
-    private void OnShowHistory(object sender, RoutedEventArgs e)
+    private async void OnShowHistory(object sender, RoutedEventArgs e)
     {
+        if (!await StartContributionsAsync()) return;
         HistoryPane.Content ??= new HistoryView(_host);
         ViewModel.ShowHistory();
     }
@@ -868,6 +902,142 @@ public sealed partial class MainWindow : Window
         await ViewModel.RefreshAsync().ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// The button on the legacy invite migration notice.
+    /// </summary>
+    private async void OnAcknowledgeLegacyMigration(object sender, RoutedEventArgs e)
+    {
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AcknowledgeLegacyMigrationAsync();
+
+        if (sender is Control again)
+        {
+            again.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// The button on a void notice. Tag first, DataContext second, as for a
+    /// queue row: which notice a click acknowledges must never be ambiguous.
+    /// </summary>
+    private async void OnAcknowledgeGrantVoid(object sender, RoutedEventArgs e)
+    {
+        GrantVoidCard? card = sender is FrameworkElement element
+            ? element.Tag as GrantVoidCard ?? element.DataContext as GrantVoidCard
+            : null;
+        if (card is null)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AcknowledgeGrantVoidAsync(card);
+    }
+
+    /// <summary>
+    /// "Turn back on" on a void notice, resolved the same Tag-first way.
+    /// </summary>
+    private async void OnRearmGrantVoid(object sender, RoutedEventArgs e)
+    {
+        GrantVoidCard? card = sender is FrameworkElement element
+            ? element.Tag as GrantVoidCard ?? element.DataContext as GrantVoidCard
+            : null;
+        if (card is null)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.RearmGrantVoidAsync(card);
+
+        if (sender is Control again)
+        {
+            again.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// The acknowledge button on a rewording notice, resolved Tag first as
+    /// for a void notice.
+    /// </summary>
+    private async void OnAcknowledgeArmingRewording(object sender, RoutedEventArgs e)
+    {
+        ArmingRewordingCard? card = sender is FrameworkElement element
+            ? element.Tag as ArmingRewordingCard ?? element.DataContext as ArmingRewordingCard
+            : null;
+        if (card is null)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AcknowledgeArmingRewordingAsync(card);
+    }
+
+    /// <summary>"Ask me first" on a rewording notice.</summary>
+    private async void OnAskFirstArmingRewording(object sender, RoutedEventArgs e)
+    {
+        ArmingRewordingCard? card = sender is FrameworkElement element
+            ? element.Tag as ArmingRewordingCard ?? element.DataContext as ArmingRewordingCard
+            : null;
+        if (card is null || !card.CanAskFirst)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AskFirstAsync(card.AskFirstProjectId!, card.Notice.AskFirstFailed);
+
+        if (sender is Control again)
+        {
+            again.IsEnabled = true;
+        }
+    }
+
+    /// <summary>"Ask me first" on one folder of the held notice.</summary>
+    private async void OnAskFirstHeldProject(object sender, RoutedEventArgs e)
+    {
+        GateHeldProjectNotice? project = sender is FrameworkElement element
+            ? element.Tag as GateHeldProjectNotice ?? element.DataContext as GateHeldProjectNotice
+            : null;
+        if (project is null || !project.CanAskFirst)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AskFirstAsync(project.ProjectId!, project.AskFirstFailed);
+
+        if (sender is Control again)
+        {
+            again.IsEnabled = true;
+        }
+    }
+
     private void OnHealthAction(object sender, RoutedEventArgs e)
     {
         var target = ViewModel.HealthDestination;
@@ -907,8 +1077,34 @@ public sealed partial class MainWindow : Window
     /// profile as soon as it loads, and a contributor who never opens
     /// Settings should not pay for that at launch.
     /// </remarks>
-    private void OnShowSettings(object sender, RoutedEventArgs e)
+    private void OnShowInsights(object sender, RoutedEventArgs e) => ShowInsightsPane();
+
+    private async void OnShowMissionDrafts(object sender, RoutedEventArgs e)
     {
+        if (MissionDraftsPane.Content is not MissionDraftsView)
+            MissionDraftsPane.Content = new MissionDraftsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+        ViewModel.ShowMissionDrafts();
+        await ((MissionDraftsView)MissionDraftsPane.Content).ActivateAsync();
+    }
+
+    private async void ShowInsightsPane()
+    {
+        if (InsightsPane.Content is not InsightsView)
+        {
+            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+            page.ContributionSetupRequested += async (_, _) =>
+            {
+                if (await StartContributionsAsync()) ViewModel.ShowQueue();
+            };
+            InsightsPane.Content = page;
+        }
+        ViewModel.ShowInsights();
+        await ((InsightsView)InsightsPane.Content).ActivateAsync();
+    }
+
+    private async void OnShowSettings(object sender, RoutedEventArgs e)
+    {
+        if (!await StartContributionsAsync()) return;
         ShowSettingsPane();
     }
 
@@ -940,8 +1136,9 @@ public sealed partial class MainWindow : Window
     ///
     /// Created lazily because it makes an IPC call as soon as it loads.
     /// </remarks>
-    private void OnShowPrivateInference(object sender, RoutedEventArgs e)
+    private async void OnShowPrivateInference(object sender, RoutedEventArgs e)
     {
+        if (!await StartContributionsAsync()) return;
         ShowPrivateInferencePane();
     }
 
@@ -955,36 +1152,46 @@ public sealed partial class MainWindow : Window
     // In-app only: these fire while this window has focus and take nothing
     // away from any other application. See the accelerators in the markup.
 
-    private void OnQueueAccelerator(
+    private void OnInsightsAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        ShowInsightsPane();
+    }
+
+    private async void OnQueueAccelerator(
         KeyboardAccelerator sender,
         KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!await StartContributionsAsync()) return;
         ViewModel.ShowQueue();
     }
 
-    private void OnHistoryAccelerator(
+    private async void OnHistoryAccelerator(
         KeyboardAccelerator sender,
         KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!await StartContributionsAsync()) return;
         HistoryPane.Content ??= new HistoryView(_host);
         ViewModel.ShowHistory();
     }
 
-    private void OnPrivateInferenceAccelerator(
+    private async void OnPrivateInferenceAccelerator(
         KeyboardAccelerator sender,
         KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!await StartContributionsAsync()) return;
         ShowPrivateInferencePane();
     }
 
-    private void OnSettingsAccelerator(
+    private async void OnSettingsAccelerator(
         KeyboardAccelerator sender,
         KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!await StartContributionsAsync()) return;
         ShowSettingsPane();
     }
 
@@ -1146,8 +1353,24 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var sheet = new PreviewWindow(_host, entry);
+        var sheet = new PreviewWindow(_host, entry, ViewModel.LiveEntry);
         sheet.Decided += OnSheetDecided;
+
+        // The sheet's gate reads the LIVE entry, but the properties it feeds
+        // are pull-bound: without a nudge the footer keeps drawing what it
+        // last read, and a session downgraded while the sheet is open would go
+        // on offering Contribute for as long as the sheet stayed up.
+        //
+        // Pending is cleared and refilled on every refresh, so its
+        // CollectionChanged is the queue's own signal that the rows have been
+        // replaced. Unsubscribed on close: a sheet that has gone must not keep
+        // the window alive through an event handler.
+        void OnQueueChanged(object? _, NotifyCollectionChangedEventArgs __) =>
+            sheet.QueueChanged();
+
+        ViewModel.Pending.CollectionChanged += OnQueueChanged;
+        sheet.Closed += (_, _) => ViewModel.Pending.CollectionChanged -= OnQueueChanged;
+
         sheet.Activate();
     }
 
@@ -1526,6 +1749,8 @@ public sealed partial class MainWindow : Window
     private async void OnClosed(object sender, WindowEventArgs args)
     {
         _closed = true;
+        (InsightsPane.Content as InsightsView)?.Dispose();
+        (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;
         _redirectedInvite.Clear();
         // Before the daemon teardown, and synchronously: an icon left in the

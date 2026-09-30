@@ -80,6 +80,14 @@ struct OnboardingConnectContent: View {
                 pasteField
                 phaseView
                 Divider()
+                // The way in that needs no wallet, above the wallet ceremony
+                // rather than below it. Both are offered and neither replaces
+                // the other; this one is first because it is the shorter road
+                // for a contributor who already has the NEAR AI account the
+                // receipts come from anyway.
+                NearAiJoinView(onEnrolled: onEnrolled)
+                    .disabled(isEnrolling)
+                Divider()
                 NearAccountConnectView(onBusyChanged: { nearBusy = $0 }, onEnrolled: onEnrolled)
                     .disabled(isEnrolling)
             }

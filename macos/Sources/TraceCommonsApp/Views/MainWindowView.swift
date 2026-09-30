@@ -1,11 +1,25 @@
 import SwiftUI
+import TCBridge
 import TCShellCore
 
 struct MainWindowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(ComputeModel.self) private var compute
     let navigation: MainWindowNavigation
+    let missionDrafts: MissionDraftsModel
+    let insightsStoreSelection: InsightsStoreSelection
     private var section: Section { navigation.section }
+
+    @MainActor init(navigation: MainWindowNavigation, missionDrafts: MissionDraftsModel,
+                    insightsStoreSelection: InsightsStoreSelection = .standard) {
+        self.navigation = navigation
+        self.missionDrafts = missionDrafts
+        self.insightsStoreSelection = insightsStoreSelection
+    }
+
+    @MainActor init(navigation: MainWindowNavigation) {
+        self.init(navigation: navigation, missionDrafts: MissionDraftsModel())
+    }
 
     enum Section: String, CaseIterable, Identifiable {
         case queue = "Waiting"
@@ -14,14 +28,9 @@ struct MainWindowView: View {
         // The raw value is an identity, not a label: this destination takes
         // its words from the Rust copy payload, the way `compute` does.
         case privateInference = "privateInference"
-        // Settings is last, and last on every shell. GTK and Windows already
-        // ordered it that way; this shell had it third, which put two
-        // destinations BELOW the settings row and made the sidebar disagree
-        // with itself across platforms. Declaration order is the sidebar
-        // order and, through `shortcut`, the Cmd-N numbering -- so this move
-        // renumbers Settings from Cmd-3 to Cmd-5, Compute to Cmd-3 and
-        // Private AI to Cmd-4, which is the intended coupling, not a side
-        // effect of it.
+        // Keep Settings last; declaration order also defines Cmd-N shortcuts.
+        case insights = "Insights"
+        case missionDrafts = "missionDrafts"
         case settings = "Settings"
         var id: String { rawValue }
 
@@ -30,7 +39,7 @@ struct MainWindowView: View {
         /// and a system symbol brings its own weight and optical size.
         ///
         /// `queue` and `compute` already share `.monitor`. A third reuse
-        /// would leave three of five rows with one glyph and make the
+        /// would leave most rows with one glyph and make the
         /// sidebar unreadable at a glance, so this destination gets its own.
         var glyph: MacGlyphs {
             switch self {
@@ -39,6 +48,8 @@ struct MainWindowView: View {
             case .settings: return .gear
             case .compute: return .monitor
             case .privateInference: return .exchange
+            case .insights: return .clock
+            case .missionDrafts: return .eye
             }
         }
 
@@ -59,6 +70,7 @@ struct MainWindowView: View {
         /// before they need to know what to do.
         var subtitle: String {
             switch self {
+            case .insights, .missionDrafts: return ""
             case .queue: return "Nothing is sent unless you say so."
             case .history: return "What you have contributed, and what is still being reviewed."
             case .settings: return "What this machine watches, and what your traces are allowed to do."
@@ -71,24 +83,56 @@ struct MainWindowView: View {
     }
 
     var body: some View {
-        shell
+        // Above the whole shell rather than inside one destination: the two
+        // things an attached handle cannot do (stop the watcher, open a
+        // body) are reached from more than one screen, so a notice pinned to
+        // one of them would be missing wherever the contributor actually
+        // hit the limit.
+        VStack(spacing: 0) {
+            if model.isAttachedDaemon { AttachedDaemonNotice() }
+            // Above the shell for the same reason: a void changes what the
+            // contributor agreed to, and they are told wherever they are.
+            GrantVoidNotices(
+                voids: model.status.grantVoids,
+                refused: model.grantVoidRearmRefused,
+                onAcknowledge: { id in model.acknowledgeGrantVoid(id: id) },
+                onRearm: { id, projectID in model.rearmGrantVoid(id: id, projectID: projectID) }
+            )
+            // The switch-on notices, above the shell for the same reason: a
+            // folder's arming was reworded, or armed folders are on hold.
+            ArmingRewordingNotices(
+                rewordings: model.status.armingRewordings,
+                refused: model.askFirstRefused,
+                onAcknowledge: { id in model.acknowledgeArmingRewording(id: id) },
+                onAskFirst: { projectID in model.askFirst(projectID: projectID) }
+            )
+            if let held = model.gateHeldNotice {
+                GateHeldNoticeCard(
+                    notice: held,
+                    refused: model.askFirstRefused,
+                    onAskFirst: { projectID in model.askFirst(projectID: projectID) }
+                )
+                .padding(.horizontal, TC.Space.md)
+                .padding(.top, TC.Space.s)
+            }
+            // Above the shell too: the contributor is told, wherever they
+            // are, that their contributions now go under their NEAR AI
+            // account (the consent spec requires it in every shell).
+            LegacyMigrationNoticeCard(
+                notice: model.legacyMigrationNotice,
+                onAcknowledge: { model.acknowledgeLegacyInviteMigration() }
+            )
+            shell
+        }
     }
 
     /// Only trace destinations pass through enrollment and session-root gates.
-    /// The sidebar and Compute remain reachable in every watcher startup state.
+    /// Insights is local and account-free. Compute and Private AI have their own activation paths.
     @ViewBuilder
     private var traceContent: some View {
         switch model.startup {
-        case .starting:
-            CenteredNotice(
-                title: "Starting…",
-                detail: "Nothing has been sent."
-            )
-            .onAppear { model.refreshAll() }
-        case .refused(let reason):
-            // Not-running is a first-class state, not a spinner that never
-            // resolves.
-            CenteredNotice(title: "The watcher isn't running.", detail: reason)
+        case .starting, .refused:
+            DaemonStartupNotice(startup: model.startup)
                 .onAppear { model.refreshAll() }
         case .needsRoots, .running:
             // One branch for BOTH states, deliberately: `.needsRoots` is the
@@ -155,6 +199,15 @@ struct MainWindowView: View {
                 if navigation.displaysCompute {
                     contentHeader
                     ComputeView(model: compute)
+                } else if section == .insights {
+                    contentHeader
+                    InsightsView(storeSelection: insightsStoreSelection)
+                } else if section == .missionDrafts {
+                    contentHeader
+                    MissionDraftsView(model: missionDrafts)
+                } else if section == .privateInference {
+                    contentHeader
+                    PrivateInferenceActivationView()
                 } else {
                     if model.traceNavigationReady { contentHeader }
                     traceContent
@@ -174,44 +227,52 @@ struct MainWindowView: View {
         case .history: HistoryView()
         case .settings: SettingsView(navigation: navigation)
         case .compute: EmptyView()
-        case .privateInference: PrivateInferenceView()
+        case .privateInference: EmptyView()
+        case .insights: EmptyView()
+        case .missionDrafts: EmptyView()
         }
     }
 
     private func title(_ item: Section) -> String {
-        Self.title(item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+        Self.title(item, compute: compute.copy, privateInference: model.privateInferenceCopy,
+                   missionCopy: missionDrafts.copy)
     }
 
     private func subtitle(_ item: Section) -> String {
-        Self.subtitle(item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+        Self.subtitle(item, compute: compute.copy, privateInference: model.privateInferenceCopy,
+                      missionCopy: missionDrafts.copy)
     }
 
-    /// The nav label, from the Rust for the two destinations whose words the
+    /// The nav label, from Rust for destinations whose words the
     /// Rust owns and from the raw value for the three whose words this shell
-    /// still authors.
+    /// still authored in this shell.
     ///
     /// Static and copy-taking so a test can ask it what it would render
     /// without standing up a window, and so the answer for a payload that
     /// never arrived is no words at all -- never the raw value, which on
     /// this destination is an identifier and not a label.
     static func title(
-        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?
+        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?,
+        missionCopy: [String: String] = [:]
     ) -> String {
         switch item {
         case .compute: return compute?.destination ?? ""
         case .privateInference: return privateInference?.destination ?? ""
-        case .queue, .history, .settings: return item.rawValue
+        case .missionDrafts: return missionCopy["title"] ?? ""
+        case .queue, .history, .settings, .insights: return item.rawValue
         }
     }
 
     /// The line under the title, on the same terms as `title`.
     static func subtitle(
-        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?
+        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?,
+        missionCopy: [String: String] = [:]
     ) -> String {
         switch item {
         case .compute: return compute?.subtitle ?? ""
         case .privateInference: return privateInference.map(\.subtitle) ?? ""
-        case .queue, .history, .settings: return item.subtitle
+        case .missionDrafts: return missionCopy["intro"] ?? ""
+        case .queue, .history, .settings, .insights: return item.subtitle
         }
     }
 
@@ -329,7 +390,8 @@ struct MainWindowView: View {
                     .foregroundStyle(TC.inkSecondary)
             }
             Spacer(minLength: TC.Space.m)
-            if section != .compute {
+            if section != .compute && section != .privateInference && section != .insights
+                && section != .missionDrafts {
                 watchChip
                 watchControl
             }
@@ -438,6 +500,7 @@ struct MainWindowCommands: Commands {
     @ObservedObject var model: AppModel
     var compute: ComputeModel
     var navigation: MainWindowNavigation
+    var missionDrafts: MissionDraftsModel
 
     /// Cmd-N for the Nth destination.
     static let destinationModifiers: EventModifiers = [.command]
@@ -460,7 +523,8 @@ struct MainWindowCommands: Commands {
     @ViewBuilder
     private func destination(_ item: MainWindowView.Section) -> some View {
         let label = MainWindowView.title(
-            item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+            item, compute: compute.copy, privateInference: model.privateInferenceCopy,
+            missionCopy: missionDrafts.copy)
         // A destination whose words never arrived gets no menu item rather
         // than a blank one.
         if !label.isEmpty {
@@ -689,6 +753,360 @@ enum MacGlyphs: Equatable {
     }
 }
 
+/// Said when this shell is driving a watcher that belongs to another
+/// process.
+///
+/// Drawn rather than left silent because two of this window's controls stop
+/// working and a contributor who is not told meets them as dead buttons:
+/// the watcher cannot be stopped from here, and a trace's redacted body
+/// cannot be opened -- the socket carries the summary only, so showing one
+/// where a body was asked for would be a content promise the attached path
+/// cannot keep.
+struct AttachedDaemonNotice: View {
+    var body: some View {
+        // Both sentences come from `attach_copy` across the ABI. Drawing
+        // nothing when it cannot answer is deliberate: a banner with no
+        // words is worse than no banner, and the controls it warns about
+        // still refuse with their own reasons.
+        if let copy = TCAttach.copy() {
+            NativeFlowNotice(message: copy.attachedDetail, glyph: "", tone: "neutral")
+                .accessibilityLabel(Text(copy.attachedTitle))
+        }
+    }
+}
+
+/// Every grant the daemon voided that no shell has shown yet (R6 of the
+/// connect-and-forget design). The words come from `consent_copy` across the
+/// ABI; this view only lays them out.
+struct GrantVoidNotices: View {
+    let voids: [GrantVoidWire]
+    let refused: Set<UInt64>
+    let onAcknowledge: (UInt64) -> Void
+    let onRearm: (UInt64, String) -> Void
+
+    var body: some View {
+        if !voids.isEmpty {
+            VStack(spacing: TC.Space.s) {
+                ForEach(voids, id: \.id) { void in
+                    // The ABI words every element, including one it cannot
+                    // place, so nil here is a caught panic or a payload this
+                    // build cannot decode. Nothing is drawn then, as with
+                    // `AttachedDaemonNotice`: a card with no words is worse
+                    // than none, and no sentence is written in this shell.
+                    if let notice = TCConsentCopy.voidNoticeJSON(forVoid: void.json)
+                        .flatMap(GrantVoidNotice.decode(fromJSON:))
+                    {
+                        GrantVoidNoticeCard(
+                            notice: notice,
+                            refused: refused.contains(void.id),
+                            onAcknowledge: { onAcknowledge(void.id) },
+                            onRearm: notice.rearmTarget(for: void).map { projectID in
+                                { onRearm(void.id, projectID) }
+                            }
+                        )
+                    }
+                }
+            }
+            .padding(.horizontal, TC.Space.md)
+            .padding(.top, TC.Space.s)
+        }
+    }
+}
+
+/// The notice after a legacy invite identity moved to a NEAR AI account. The
+/// words come from `consent_copy` across the ABI, worded once per notice by
+/// `AppModel.legacyMigrationNotice`; this view only lays them out, and draws
+/// nothing when there is no notice or it cannot be read.
+struct LegacyMigrationNoticeCard: View {
+    let notice: LegacyMigrationNotice?
+    let onAcknowledge: () -> Void
+
+    var body: some View {
+        if let notice {
+            HStack(alignment: .top, spacing: TC.Space.m) {
+                MacGlyph(glyph: .warningTriangle, size: 14, color: TC.Tone.attention.color)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    Text(notice.title)
+                        .font(TC.Font_.cardTitle)
+                        .foregroundStyle(TC.inkPrimary)
+                    Text(notice.body)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(notice.folders)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: TC.Space.m)
+                // Records that the notice was shown, and does nothing else.
+                Button(notice.acknowledge, action: onAcknowledge)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            .padding(.vertical, TC.Space.m)
+            .padding(.horizontal, TC.Space.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard(emphasised: true)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(Text(notice.title))
+            .padding(.horizontal, TC.Space.md)
+            .padding(.top, TC.Space.s)
+        }
+    }
+}
+
+struct GrantVoidNoticeCard: View {
+    let notice: GrantVoidNotice
+    let refused: Bool
+    let onAcknowledge: () -> Void
+    /// Present only when the Rust offered "Turn back on" and the element
+    /// names a project: never on the grant's notice or an unplaced one.
+    let onRearm: (() -> Void)?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            MacGlyph(glyph: .warningTriangle, size: 14, color: TC.Tone.attention.color)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(notice.title)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                Text(notice.body)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(notice.reasonsHeading)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                    .padding(.top, TC.Space.xxs)
+                ForEach(notice.reasons, id: \.self) { reason in
+                    HStack(alignment: .firstTextBaseline, spacing: TC.Space.xxs) {
+                        Text(verbatim: "\u{2022}")
+                        Text(reason)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                }
+                Text(notice.rearm)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, TC.Space.xxs)
+                if refused, let failed = notice.rearmFailed {
+                    Text(failed)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.Tone.attention.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: TC.Space.m)
+            VStack(alignment: .trailing, spacing: TC.Space.xs) {
+                // "Turn back on" sits beside the sentence saying that doing
+                // so agrees to the new settings. It is Settings' arming call.
+                if let onRearm, let action = notice.rearmAction {
+                    Button(action, action: onRearm)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                // Acknowledging records that the notice was shown, and
+                // re-arms nothing.
+                Button(notice.acknowledge, action: onAcknowledge)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+        .padding(.vertical, TC.Space.m)
+        .padding(.horizontal, TC.Space.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(notice.title))
+    }
+}
+
+/// Every armed folder whose arming wording no longer claims a model scrubs
+/// its sessions, not yet shown by any shell (K5). The words come from
+/// `consent_copy` across the ABI; this view only lays them out. As with
+/// `GrantVoidNotices`, nothing is drawn for an element the ABI cannot word.
+struct ArmingRewordingNotices: View {
+    let rewordings: [ArmingRewordingWire]
+    let refused: Set<String>
+    let onAcknowledge: (UInt64) -> Void
+    let onAskFirst: (String) -> Void
+
+    var body: some View {
+        if !rewordings.isEmpty {
+            VStack(spacing: TC.Space.s) {
+                ForEach(rewordings, id: \.id) { rewording in
+                    if let notice = TCConsentCopy.armingRewordedNoticeJSON(forRewording: rewording.json)
+                        .flatMap(ArmingRewordedNotice.decode(fromJSON:))
+                    {
+                        let target = notice.askFirstTarget(for: rewording)
+                        ArmingRewordedNoticeCard(
+                            notice: notice,
+                            refused: target.map(refused.contains) ?? false,
+                            onAcknowledge: { onAcknowledge(rewording.id) },
+                            onAskFirst: target.map { projectID in { onAskFirst(projectID) } }
+                        )
+                    }
+                }
+            }
+            .padding(.horizontal, TC.Space.md)
+            .padding(.top, TC.Space.s)
+        }
+    }
+}
+
+struct ArmingRewordedNoticeCard: View {
+    let notice: ArmingRewordedNotice
+    let refused: Bool
+    let onAcknowledge: () -> Void
+    /// Present only when the Rust offered "Ask me first" and the element
+    /// names a project.
+    let onAskFirst: (() -> Void)?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            MacGlyph(glyph: .warningTriangle, size: 14, color: TC.Tone.attention.color)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(notice.title)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                Text(notice.body)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(notice.nowHeading)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                    .padding(.top, TC.Space.xxs)
+                ForEach([notice.scope, notice.limit, notice.noReview], id: \.self) { line in
+                    Text(line)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if refused, let failed = notice.askFirstFailed {
+                    Text(failed)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.Tone.attention.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: TC.Space.m)
+            VStack(alignment: .trailing, spacing: TC.Space.xs) {
+                if let onAskFirst, let action = notice.askFirstAction {
+                    Button(action, action: onAskFirst)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                // Acknowledging records that the notice was shown, and
+                // changes nothing about the folder.
+                Button(notice.acknowledge, action: onAcknowledge)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+        .padding(.vertical, TC.Space.m)
+        .padding(.horizontal, TC.Space.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(notice.title))
+    }
+}
+
+/// Armed folders the automatic-contribution gate is holding, in the Rust's
+/// words. No dismiss button: it goes when the hold does.
+struct GateHeldNoticeCard: View {
+    let notice: GateHeldNotice
+    let refused: Set<String>
+    let onAskFirst: (String) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            MacGlyph(glyph: .warningTriangle, size: 14, color: TC.Tone.attention.color)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(notice.title)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                Text(notice.body)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(notice.reasons, id: \.self) { reason in
+                    HStack(alignment: .firstTextBaseline, spacing: TC.Space.xxs) {
+                        Text(verbatim: "\u{2022}")
+                        Text(reason)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                }
+                Text(notice.release)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !notice.projects.isEmpty {
+                    Text(notice.askFirst)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, TC.Space.xxs)
+                    ForEach(notice.projects, id: \.line) { project in
+                        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                            Text(project.line)
+                                .tcType(TC.Font_.captionText)
+                                .foregroundStyle(TC.inkPrimary)
+                            if let projectID = project.projectId, let action = project.askFirstAction {
+                                Button(action) { onAskFirst(projectID) }
+                                    .lineLimit(1)
+                                    .fixedSize()
+                            }
+                            if let projectID = project.projectId, refused.contains(projectID),
+                                let failed = project.askFirstFailed
+                            {
+                                Text(failed)
+                                    .tcType(TC.Font_.captionText)
+                                    .foregroundStyle(TC.Tone.attention.color)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: TC.Space.m)
+        }
+        .padding(.vertical, TC.Space.m)
+        .padding(.horizontal, TC.Space.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(notice.title))
+    }
+}
+
+/// Shared startup states for the contribution and Private AI destinations.
+struct DaemonStartupNotice: View {
+    let startup: AppModel.Startup
+
+    var body: some View {
+        switch startup {
+        case .starting:
+            CenteredNotice(title: "Starting…", detail: "Nothing has been sent.")
+        case .refused(let reason):
+            CenteredNotice(title: "The watcher isn't running.", detail: reason)
+        case .needsRoots, .running:
+            EmptyView()
+        }
+    }
+}
+
 struct CenteredNotice: View {
     let title: String
     let detail: String
@@ -729,9 +1147,8 @@ struct HealthBanner: View {
                     .font(TC.Font_.cardTitle)
                     .foregroundStyle(TC.inkPrimary)
                 Text(health.detail)
-                    .font(TC.Font_.meta)
+                    .tcType(TC.Font_.captionText)
                     .foregroundStyle(TC.inkSecondary)
-                    .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: TC.Space.m)

@@ -133,6 +133,9 @@ public sealed class DaemonHost : IAsyncDisposable
     /// <summary>Whether a daemon is currently running in this process.</summary>
     public bool IsRunning => _daemon is not null;
 
+    /// <summary>Changes whenever the running daemon connection is replaced or stopped.</summary>
+    public long ConnectionGeneration { get; private set; }
+
     /// <summary>
     /// The UI thread's queue, for the one caller that needs a timer on it.
     ///
@@ -189,6 +192,7 @@ public sealed class DaemonHost : IAsyncDisposable
             .ConfigureAwait(true);
 
         _daemon = daemon;
+        ConnectionGeneration++;
         _subscription = daemon.Subscribe(OnDaemonEvent);
     }
 
@@ -367,6 +371,7 @@ public sealed class DaemonHost : IAsyncDisposable
         TcDaemon? daemon = _daemon;
         TcSubscription? subscription = _subscription;
         _daemon = null;
+        ConnectionGeneration++;
         _subscription = null;
 
         if (daemon is null)

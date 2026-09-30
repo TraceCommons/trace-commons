@@ -23,8 +23,8 @@
 //!
 //! # The token is a secret at rest
 //!
-//! It is written to the same 0700 state directory as the device key, at 0600,
-//! through the same atomic writer. It appears in no log line and no error
+//! It is stored in the OS credential store. The 0700 state directory holds
+//! only an opaque reference, replaced after readback verification. It appears in no log line and no error
 //! string: every error below is a fixed label, like every other boundary in
 //! this crate.
 
@@ -40,7 +40,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use trace_commons_operator_client::Client;
 
-use crate::config::{ACCOUNT_SESSION_FILE, ConfigStore, ContributorConfig, allowlist_for};
+use crate::config::{ACCOUNT_SESSION_FILE, ConfigStore, ContributorConfig, config_allowlist};
 
 /// The loopback path the server accepts, and the ONLY one it accepts. Pinned
 /// here and cross-checked against the server's own constant by
@@ -74,6 +74,12 @@ pub struct AccountSession {
     pub account_id: String,
 }
 
+#[derive(Clone)]
+pub(crate) struct LoadedAccountSession {
+    pub session: AccountSession,
+    pub snapshot: crate::daemon::commons_credentials::Snapshot,
+}
+
 /// What a completed sign-in reports to a caller. Carries no token.
 #[derive(Debug, Clone)]
 pub struct SignInOutcome {
@@ -87,15 +93,53 @@ pub struct SignInOutcome {
 /// absent, unparseable, or expired (or about to be). Fail closed: the caller
 /// then reports "sign in again" rather than making a call that will 401.
 pub fn load_token(store: &ConfigStore) -> Option<String> {
-    let raw = store
-        .read_daemon_file(ACCOUNT_SESSION_FILE)
-        .ok()
-        .flatten()?;
-    let session: AccountSession = serde_json::from_slice(&raw).ok()?;
-    if session.expires_at <= Utc::now() + EXPIRY_SKEW {
-        return None;
+    try_load_token(store).ok().flatten()
+}
+
+/// Distinguish an unavailable OS store from a signed-out account. Callers may
+/// ask the user to unlock the system store without starting a new login flow.
+pub fn try_load_token(store: &ConfigStore) -> Result<Option<String>> {
+    Ok(try_load_session_with_snapshot(store)?.map(|loaded| loaded.session.access_token))
+}
+
+pub(crate) fn try_load_session_with_snapshot(
+    store: &ConfigStore,
+) -> Result<Option<LoadedAccountSession>> {
+    let Some((raw, snapshot)) = crate::daemon::commons_credentials::load_with_snapshot(
+        store,
+        crate::daemon::commons_credentials::Kind::Account,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Ok(session) = serde_json::from_slice::<AccountSession>(&raw) else {
+        return Ok(None);
+    };
+    if !session_is_usable(&session) {
+        return Ok(None);
     }
-    Some(session.access_token)
+    Ok(Some(LoadedAccountSession { session, snapshot }))
+}
+
+/// Whether a session is still worth presenting: not expired, and not about
+/// to be. The same test [`try_load_session_with_snapshot`] applies on load,
+/// for a caller that holds a loaded session across time.
+pub(crate) fn session_is_usable(session: &AccountSession) -> bool {
+    session.expires_at > Utc::now() + EXPIRY_SKEW
+}
+
+pub(crate) fn store_rotated_token(
+    store: &ConfigStore,
+    loaded: &LoadedAccountSession,
+    rotated_token: String,
+) -> Result<()> {
+    if rotated_token.trim().is_empty() || rotated_token.trim() != rotated_token {
+        bail!("account_session_rotation_invalid");
+    }
+    let mut session = loaded.session.clone();
+    session.access_token = rotated_token;
+    let body = serde_json::to_vec(&session).context("serializing the rotated account session")?;
+    crate::daemon::commons_credentials::replace_account_rotation(store, &loaded.snapshot, &body)
 }
 
 /// Whether a usable token is stored, without handing the token out. For status
@@ -109,7 +153,8 @@ pub fn session_status(store: &ConfigStore) -> Option<DateTime<Utc>> {
     (session.expires_at > Utc::now()).then_some(session.expires_at)
 }
 
-/// Persist a token at 0600 inside the 0700 state directory.
+/// Persist a token through the shared Commons credential lifecycle.
+#[cfg(test)]
 fn save_session(store: &ConfigStore, session: &AccountSession) -> Result<()> {
     let body = serde_json::to_vec(session).context("serializing the account session")?;
     store.write_daemon_file(ACCOUNT_SESSION_FILE, &body)
@@ -175,7 +220,7 @@ fn native_client(cfg: &ContributorConfig) -> Result<Client> {
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token(UNAUTHENTICATED_PLACEHOLDER)
-    .host_allowlist(allowlist_for(cfg.allowed_hosts.as_deref()))
+    .host_allowlist(config_allowlist(cfg))
     .build()
     .context("building the ingest client for native sign-in")
 }
@@ -296,6 +341,7 @@ pub async fn sign_in<F>(
 where
     F: FnOnce(&str),
 {
+    let expected = crate::daemon::commons_credentials::account_snapshot(store, cfg)?;
     // Bind BEFORE registering the redirect, so the port we register is the port
     // we are actually listening on.
     let (listener, port) = bind_loopback().await?;
@@ -323,12 +369,7 @@ where
     // endpoint. This is an authority the device key ALREADY has; the flow adds
     // none.
     let login_path = crate::submit::mint_account_login_link(store, cfg).await?;
-    let separator = if login_path.contains('?') { '&' } else { '?' };
-    let browser_url = format!(
-        "{}{login_path}{separator}native={}",
-        cfg.ingest_url.trim_end_matches('/'),
-        start.request_id
-    );
+    let browser_url = browser_url(&cfg.ingest_url, &login_path, &start.request_id)?;
 
     if open_browser {
         try_open_browser(&browser_url);
@@ -357,12 +398,34 @@ where
         expires_at,
         account_id: exchanged.account_id.clone(),
     };
-    save_session(store, &session)?;
+    let owned_store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::daemon::commons_credentials::replace(
+            &owned_store,
+            &expected,
+            &serde_json::to_vec(&session)?,
+            None,
+        )
+    })
+    .await
+    .context("commons_credential_worker_unavailable")??;
 
     Ok(SignInOutcome {
         account_id: exchanged.account_id,
         expires_at,
     })
+}
+
+/// The URL the human opens: the server's root-relative login path on the
+/// ingest ORIGIN, plus this flow's `native` request id.
+///
+/// Not `ingest_url + login_path`: `ingest_url` is the upload endpoint and
+/// carries `/v1/traces`, which is how 0.12.6 printed a login URL that 404s.
+fn browser_url(ingest_url: &str, login_path: &str, request_id: &str) -> Result<String> {
+    let mut url = crate::config::ingest_origin_url(ingest_url, login_path)
+        .context("building the sign-in URL")?;
+    url.query_pairs_mut().append_pair("native", request_id);
+    Ok(url.into())
 }
 
 /// Revoke the stored token server-side, then forget it locally.
@@ -371,15 +434,29 @@ where
 /// asked to sign out must not be left holding a live token on disk because the
 /// network was down. The token expires on its own regardless.
 pub async fn sign_out(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()> {
-    let token = load_token(store);
-    let result = match token {
+    let expected = crate::daemon::commons_credentials::account_snapshot(store, cfg)?;
+    crate::daemon::commons_credentials::clear_expected(store, &expected)?;
+    let owned_store = store.clone();
+    let token = tokio::task::spawn_blocking(move || {
+        let raw = crate::daemon::commons_credentials::removed_payload(&owned_store, &expected)
+            .ok()
+            .flatten();
+        let token = raw
+            .and_then(|bytes| serde_json::from_slice::<AccountSession>(&bytes).ok())
+            .map(|session| session.access_token);
+        let _ = crate::daemon::commons_credentials::cleanup(&owned_store);
+        token
+    })
+    .await
+    .context("commons_credential_worker_unavailable")?;
+    match token {
         Some(token) => {
             let client = Client::builder(
                 &cfg.ingest_url,
                 "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
             )
             .bearer_token(token)
-            .host_allowlist(allowlist_for(cfg.allowed_hosts.as_deref()))
+            .host_allowlist(config_allowlist(cfg))
             .build()
             .context("building the ingest client for sign-out")?;
             client
@@ -389,14 +466,65 @@ pub async fn sign_out(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()
                 .context("revoking the account session")
         }
         None => Ok(()),
-    };
-    clear_token(store)?;
-    result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ingest_url` is the upload endpoint and carries a path (`/v1/traces`),
+    /// so the browser URL is built on its origin. 0.12.6 appended the login
+    /// path to the whole string and printed `/v1/traces/account/login`, a 404.
+    #[test]
+    fn the_browser_url_is_built_on_the_ingest_origin_not_its_path() {
+        for ingest in [
+            "https://commons.example/v1/traces",
+            "https://commons.example/v1/traces/",
+            "https://commons.example/",
+            "https://commons.example",
+        ] {
+            assert_eq!(
+                browser_url(ingest, "/account/login?code=abc", "req-1").unwrap(),
+                "https://commons.example/account/login?code=abc&native=req-1",
+                "ingest_url = {ingest}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_browser_url_keeps_the_ingest_port_and_scheme() {
+        for ingest in [
+            "http://127.0.0.1:8443/v1/traces",
+            "http://127.0.0.1:8443/v1/traces/",
+            "http://127.0.0.1:8443",
+        ] {
+            assert_eq!(
+                browser_url(ingest, "/account/login", "req-1").unwrap(),
+                "http://127.0.0.1:8443/account/login?native=req-1",
+                "ingest_url = {ingest}"
+            );
+        }
+    }
+
+    /// The login path comes from the server. Only a root-relative path is
+    /// joined: anything that could name another host is refused rather than
+    /// handed to the browser.
+    #[test]
+    fn a_login_path_that_could_leave_the_ingest_origin_is_refused() {
+        for login_path in [
+            "https://elsewhere.example/account/login?code=abc",
+            "//elsewhere.example/account/login?code=abc",
+            "/\\elsewhere.example/account/login?code=abc",
+            "account/login?code=abc",
+            "",
+        ] {
+            assert!(
+                browser_url("https://commons.example/v1/traces", login_path, "req-1").is_err(),
+                "login_path = {login_path:?}"
+            );
+        }
+    }
 
     /// The client's copy of the wire constants must equal the server's. Both
     /// are in this workspace, and `trace-commons-server` is a dev-dependency
@@ -560,5 +688,64 @@ mod tests {
 
         clear_token(&store).expect("clear");
         assert!(load_token(&store).is_none());
+    }
+
+    fn live_session(token: &str) -> AccountSession {
+        AccountSession {
+            access_token: token.to_string(),
+            expires_at: Utc::now() + chrono::TimeDelta::hours(6),
+            account_id: "synthetic-account".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_server_rotation_replaces_the_os_stored_account_token() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        save_session(&store, &live_session("synthetic-token-before")).expect("save session");
+        let loaded = try_load_session_with_snapshot(&store)
+            .expect("load account session")
+            .expect("account session exists");
+        store_rotated_token(&store, &loaded, "synthetic-token-after".to_string())
+            .expect("store rotated token");
+        assert_eq!(
+            try_load_token(&store).expect("reload token").as_deref(),
+            Some("synthetic-token-after")
+        );
+    }
+
+    #[test]
+    fn a_rotation_cannot_restore_a_concurrently_signed_out_session() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        save_session(&store, &live_session("synthetic-token-before")).expect("save session");
+        let loaded = try_load_session_with_snapshot(&store)
+            .expect("load account session")
+            .expect("account session exists");
+        clear_token(&store).expect("sign out locally");
+        assert!(store_rotated_token(&store, &loaded, "synthetic-token-after".to_string()).is_err());
+        assert!(
+            try_load_token(&store)
+                .expect("reload signed-out state")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_concurrent_rotation_keeps_the_first_newer_token() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        save_session(&store, &live_session("synthetic-token-before")).expect("save session");
+        let first = try_load_session_with_snapshot(&store)
+            .expect("load first account session")
+            .expect("first account session exists");
+        let second = try_load_session_with_snapshot(&store)
+            .expect("load second account session")
+            .expect("second account session exists");
+        store_rotated_token(&store, &first, "synthetic-token-newer".to_string())
+            .expect("store first rotation");
+        store_rotated_token(&store, &second, "synthetic-token-late".to_string())
+            .expect("accept concurrent rotation without rollback");
+        assert_eq!(
+            try_load_token(&store).expect("reload token").as_deref(),
+            Some("synthetic-token-newer")
+        );
     }
 }

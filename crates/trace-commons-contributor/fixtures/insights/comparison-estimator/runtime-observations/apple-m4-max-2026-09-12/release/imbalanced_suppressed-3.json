@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "case": "imbalanced_suppressed",
+  "first_total": 255,
+  "first_outcomes": [
+    128,
+    64,
+    63
+  ],
+  "second_total": 1,
+  "second_outcomes": [
+    1,
+    0,
+    0
+  ],
+  "candidate_elapsed_nanos": 250,
+  "evaluation": {
+    "status": "suppressed_below_minimum_cohort_support"
+  }
+}

@@ -69,7 +69,7 @@ pub const ERR_UNKNOWN_SOURCE: &str = "unknown-source";
 /// thing to leave behind than an unanswered question.
 pub fn declare_sources(dir: &std::path::Path, answers: &[(&str, SourceDeclaration)]) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
-    let mut settings = daemon::settings::DaemonSettings::load(&store)?;
+    let mut settings = daemon::settings::DaemonSettings::load_for_preferences(&store)?;
     // Every answer the screen collected, keyed by adapter name rather than
     // by a list of fields kept here. A source the roots screen can now
     // discover but this function had never heard of would otherwise be
@@ -195,14 +195,7 @@ impl Backend {
             }
             Backend::Hosting(h) => daemon::ipc::handle_local(&h.shared, method, params),
         };
-        if let Some(err) = response.error {
-            // `error.message` is a fixed label by contract, so forwarding it
-            // cannot leak a path or a token.
-            bail!("{}", err.message);
-        }
-        response
-            .result
-            .ok_or_else(|| anyhow!("daemon answered with neither a result nor an error"))
+        response_result(response)
     }
 
     /// How many times `needle` appears in an entry's PRE-redaction session
@@ -270,6 +263,125 @@ impl Backend {
                 rx: h.shared.events.subscribe(),
             })),
         }
+    }
+}
+
+/// A daemon answer that was an error: its fixed label, and whatever
+/// `result` the daemon sent beside it.
+///
+/// `Display` is the label and nothing else, so every caller that renders or
+/// matches `to_string()` sees exactly what it saw before the payload was
+/// kept. The payload is for the few handlers that read a structured error on
+/// purpose -- an interactive witness review that met a busy witness carries
+/// `view.retry_at` there -- and is never rendered as a whole.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DaemonFailure {
+    pub label: String,
+    pub result: Option<serde_json::Value>,
+}
+
+impl std::fmt::Display for DaemonFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+impl std::error::Error for DaemonFailure {}
+
+impl From<String> for DaemonFailure {
+    fn from(label: String) -> Self {
+        Self {
+            label,
+            result: None,
+        }
+    }
+}
+
+impl DaemonFailure {
+    /// Recover the daemon's payload from an error `Backend::call` returned.
+    /// Any other failure -- a socket that went away, a malformed answer --
+    /// is its label alone.
+    pub fn from_error(error: anyhow::Error) -> Self {
+        match error.downcast::<DaemonFailure>() {
+            Ok(failure) => failure,
+            Err(error) => error.to_string().into(),
+        }
+    }
+}
+
+/// One response, one result.
+fn response_result(response: daemon::ipc::Response) -> Result<serde_json::Value> {
+    if let Some(err) = response.error {
+        // `error.message` is a fixed label by contract, so forwarding it
+        // cannot leak a path or a token. The `result` beside it is kept, not
+        // displayed: see `DaemonFailure`.
+        return Err(anyhow::Error::new(DaemonFailure {
+            label: err.message,
+            result: response.result,
+        }));
+    }
+    response
+        .result
+        .ok_or_else(|| anyhow!("daemon answered with neither a result nor an error"))
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use trace_commons_contributor::daemon::ipc::Response;
+
+    fn busy_response() -> Response {
+        let mut response = Response::err(7, "unavailable", "witness_saturated");
+        response.result = Some(serde_json::json!({
+            "view": {"state": "Busy", "retry_at": "2026-09-27T12:00:00Z"}
+        }));
+        response
+    }
+
+    /// An error answer keeps its `result`, and still reads as its label.
+    #[test]
+    fn an_error_answer_keeps_its_result_beside_the_label() {
+        let error = response_result(busy_response()).unwrap_err();
+        assert_eq!(error.to_string(), "witness_saturated");
+        let failure = DaemonFailure::from_error(error);
+        assert_eq!(failure.label, "witness_saturated");
+        assert_eq!(
+            failure.result.as_ref().map(|r| r["view"]["state"].clone()),
+            Some(serde_json::json!("Busy"))
+        );
+    }
+
+    /// An error with no payload, and a failure that never reached the
+    /// daemon, carry no payload: nothing is invented.
+    #[test]
+    fn a_failure_without_a_payload_is_its_label_alone() {
+        let error = response_result(Response::err(1, "unavailable", "preview-failed")).unwrap_err();
+        assert_eq!(
+            DaemonFailure::from_error(error),
+            DaemonFailure {
+                label: "preview-failed".into(),
+                result: None
+            }
+        );
+        assert_eq!(
+            DaemonFailure::from_error(anyhow!("daemon-not-running")),
+            DaemonFailure {
+                label: "daemon-not-running".into(),
+                result: None
+            }
+        );
+    }
+
+    /// A success is unchanged.
+    #[test]
+    fn a_success_is_its_result() {
+        let mut response = Response::err(1, "x", "y");
+        response.error = None;
+        response.result = Some(serde_json::json!({"ok": true}));
+        assert_eq!(
+            response_result(response).unwrap(),
+            serde_json::json!({"ok": true})
+        );
     }
 }
 

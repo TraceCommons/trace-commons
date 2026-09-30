@@ -68,8 +68,44 @@ Rollout-smoke evidence goes stale after 24 hours, so a deployment that keeps
 | `TRACE_COMMONS_NEAR_AI_MODEL` | yes | Model id. Shared with the scorer. |
 | `TRACE_COMMONS_NEAR_AI_API_KEY` | yes | Bearer token. Never logged, never on the CLI. Shared with the scorer. |
 | `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` | **yes, for the drill to mean anything** | Comma-separated `key=value` pins over `mrtd`, `rtmr0`, `rtmr1`, `rtmr2`, `rtmr3`. |
+| `TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL` | no | Where the **per-model attestation registry** is fetched from. Defaults to `https://cloud-api.near.ai/v1`, NEAR AI's gateway. Set this only if you front the gateway yourself. **Not** the completions host above -- see "Two hosts, two questions". |
 | `TRACE_COMMONS_NEAR_AI_PCCS_URL` | no | Collateral source. Defaults to Intel's own PCS, `https://api.trustedservices.intel.com`. |
 | `TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS` | no | Per-call timeout, default 60. |
+
+### Two hosts, two questions
+
+The two drills on this page fetch reports from **different hosts**, and the
+distinction is the whole of issue #802.
+
+`TRACE_COMMONS_NEAR_AI_BASE_URL` is the *direct-completions* endpoint -- the
+host that actually scores traces, e.g.
+`https://qwen3-6-35b.completions.near.ai/v1`. Ask it for
+`/attestation/report` and it answers with **its own single-enclave
+attestation**: a document keyed `all_attestations`, with no
+`model_attestations` array and no `gateway_attestation`, whatever query
+parameters you send. That is the right report for the ECDSA drill, whose
+question is "is the host we score against the enclave we think it is", and it
+is the wrong report for the drift probe.
+
+The **per-model registry** -- the set of `provider_tee` ed25519 keys, one per
+hosted model -- is published only by the gateway,
+`https://cloud-api.near.ai/v1`, and only when the request carries
+`model=<model>` *and* `signing_algo=ed25519`. Drop either parameter and the
+response still looks entirely well formed while attesting nothing about the
+model: without `signing_algo` you get ECDSA attestations whose keys sign no
+receipt, and without `model=` you get no `model_attestations` at all.
+
+Pointing the probe at the completions host is what made it report
+`report_shape` with `model_entry_count: 0`. It now uses its own URL, and unset
+means the gateway, so no deployment needs to set anything for this to be
+right.
+
+A gateway-shaped report yields **no model keys, never the gateway key** --
+the gateway key signs no `provider_tee` receipt, and the code refuses rather
+than substituting it. So does a completions-host document: its entry is real
+and its key is sound, which is exactly why accepting it would be wrong, since
+a deployment pointed at the wrong host would look like it was reading the
+registry when it was reading one host's self-description.
 
 Any of the first three missing and the drill refuses with
 `missing_control:near_ai_base_url` / `near_ai_model` / `near_ai_api_key`. It
@@ -218,3 +254,150 @@ Note that this drill is **not** in the `REQUIRED_DRILLS` loop in
 That loop POSTs an empty body and asserts a `success` field; this drill takes
 a JSON body and reports `ready`, as every drill added since that script was
 written does. Run it with the curl above.
+
+## The attested-key drift probe
+
+`POST /v1/admin/near-attestation-key-drift-drill`
+
+A second drill against the same endpoint and the same credential, asking a
+different question. The drill above fetches the `signing_algo=ecdsa` report and
+checks the gateway. This one fetches the **`signing_algo=ed25519`** report and
+derives the **per-model** keys that appear only in `model_attestations` — the
+keys a `provider_tee` receipt is actually signed with, and therefore the keys
+the client already depends on.
+
+It is read-only. It pins nothing, admits nothing, spends nothing (there is no
+paid completion in this drill at all) and changes no admission behaviour.
+Running it can only produce a report and, optionally, one hash-only evidence
+row.
+
+Same auth as its neighbour: an **admin** bearer token, over
+`authenticate_with_tenant_access_grant` plus `require_admin`.
+
+### Why it reports several findings rather than one verdict
+
+Under static pins, a silent key rotation at NEAR AI does not present as
+"rotation". It presents as every contribution being refused with a signature
+error that names nothing. The probe exists to tell an operator **which** thing
+moved, so the response names each difference separately rather than collapsing
+them into one red light:
+
+| Label | What moved | Where to go |
+| --- | --- | --- |
+| `report_unavailable` | The report fetched before and does not now | The endpoint, or the network to it |
+| `credential_rejected` | The endpoint stopped accepting a credential it accepted | Our NEAR AI credential |
+| `gateway_key_rotated` | The gateway's ed25519 key changed | NEAR AI re-keyed the gateway |
+| `model_keys_rotated` | The per-model key set changed | NEAR AI re-keyed the model; anything pinning those keys is now stale |
+| `model_entry_count_changed:<before>-><after>` | The number of enclaves serving the model changed | Capacity change, or a model served from a new enclave |
+| `measurement_moved:<register>` | One measurement register moved — one finding per register | A redeployed image; re-pin `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` only after establishing what was deployed |
+| `tcb_status_changed:<before>-><after>` | Intel's verdict for the platform changed | Intel's TCB, not NEAR AI's code |
+| `quote_verification_regressed` | The quote verified before and does not now | Expired collateral, or something worse |
+| `quote_verification_recovered` | It did not verify before and does now | Usually a collateral window reopening |
+
+The same findings appear structurally in `drift` (a tagged object per finding,
+carrying the before/after values where there are any) and flattened in
+`drift_labels`.
+
+Alongside the findings, `credential` answers separately whether our existing
+API key reaches the report endpoint at all: `accepted`, `unauthorized` or
+`inconclusive`. `unauthorized` also pushes a named
+`report_credential_unauthorized` gap, so "our key is not authorized for this
+endpoint" never arrives as an anonymous HTTP-status failure. The probe cannot
+tell an unset key from a wrong one — only that the endpoint refused.
+
+### The baseline
+
+The probe stores nothing. A run compares against the previous run's outcome
+**only if you hand it one**:
+
+```bash
+# First run. Nothing to compare against; this is a baseline, not a failure.
+curl -sS -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"purpose":"attested key drift baseline"}' \
+  "$BASE/v1/admin/near-attestation-key-drift-drill" \
+  | jq '.outcome' > attested-key-baseline.json
+```
+
+The response's `outcome` object is exactly what the next run accepts as
+`baseline`, verbatim:
+
+```bash
+jq -n --slurpfile b attested-key-baseline.json \
+  '{purpose:"attested key drift", record_evidence:true, baseline:$b[0]}' \
+| curl -sS -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d @- "$BASE/v1/admin/near-attestation-key-drift-drill" | jq
+```
+
+Read the result in two parts, because they mean different things:
+
+- `baseline_compared` is `false` when you sent no baseline. `drift` is then
+  empty because there was nothing to compare, **not** because nothing moved.
+  A first run is a baseline.
+- `ready` describes **this run only** — every step passed. `drift_detected`
+  describes the comparison. They are independent: a run can pass every step
+  and still have drifted, which is the interesting case.
+
+Roll the baseline forward — replace `attested-key-baseline.json` with the new
+`outcome` — only once you have accounted for whatever the run reported.
+Rolling it forward over an unexplained `model_keys_rotated` is how a rotation
+becomes the new normal without anyone deciding that it should.
+
+Two runs against **different models** are not comparable and report nothing:
+per-model keys differ per model by design, so calling that drift would be
+exactly wrong. The `model_label` in each outcome says which model was probed.
+
+### Evidence, and why this check is advisory for now
+
+`record_evidence: true` writes a `near_attestation_key_drift` rollout-smoke
+evidence row — its own check name, deliberately not the ECDSA drill's, so one
+drill's evidence cannot satisfy the other's gate. The row is **failed** when
+the run did not pass every step *or* when drift was found against a supplied
+baseline. Green evidence beside a moved key would be worse than no evidence.
+
+`near_attestation_key_drift` is **advisory**: it is not in
+`TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS` and it gates nothing, on any
+deployment, configured or not.
+
+That is a stage, not an oversight. This probe has never run against the live
+endpoint, so we do not yet know that it *can* pass — whether our credential is
+authorized for the report endpoint at all is one of the things it exists to
+find out, and per-quote collateral has never been fetched for a live model
+enclave. A required check that turns out to be structurally unpassable is
+permanently missing on every configured deployment, and a control nobody can
+ever turn green teaches operators to ignore red controls, which is the exact
+failure this surface exists to prevent.
+
+**Promote it to a conditional required check — beside `near_attestation`,
+keyed on the NEAR AI endpoint being configured — once a live run has produced
+a baseline.** A test named
+`the_key_drift_check_is_advisory_until_a_live_run_has_passed` pins the current
+stage; updating it is part of that promotion.
+
+Until then, note that a non-required check's evidence is filtered out of the
+rollout-smoke summary **entirely** — it appears in neither `required_checks`
+nor `not_applicable_checks`, and counts towards neither passed, failed nor
+stale. So do not look for this drill in the rollout-smoke summary; there is
+nothing there to find. In the meantime:
+
+- **Read the drill's own response.** `ready`, `blocking_gaps`, `credential`
+  and `drift` are the whole result, and the body is safe to paste into a
+  ticket.
+- **The evidence row is still written** when you pass `record_evidence: true`,
+  as a hash-only audit event, so a run leaves a durable trace even though
+  nothing reads it as a gate yet.
+
+Evidence goes stale after 24 hours, which will matter once the check is
+promoted.
+
+Like its neighbour, this drill is not in the `REQUIRED_DRILLS` loop in
+`scripts/operator/smoke-gate.sh`; run it with the curl above.
+
+The response body is safe to paste into a ticket. Keys appear only as
+`sha256:` digests, the API key and the base URL appear not at all, and the
+values that do appear in full — the nonce this process generated, and the
+measurement registers — are public image identifiers that a mismatch is
+useless without.

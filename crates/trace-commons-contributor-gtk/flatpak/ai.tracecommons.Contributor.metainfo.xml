@@ -62,6 +62,42 @@
   </provides>
 
   <releases>
+    <release version="0.12.4" date="2026-09-15">
+      <description>
+        <p>Signing in to NEAR AI through the browser now reports success only after the inference key is created and stored, so a failed setup is visible instead of hidden behind an older key.</p>
+      </description>
+    </release>
+    <release version="0.12.3" date="2026-09-14">
+      <description>
+        <p>Reopening the app while a watcher is already running now attaches to it instead of reporting that the watcher is not running.</p>
+        <p>A window driving a watcher started elsewhere says so, and says what it cannot do: stop that watcher, or open a trace's full text.</p>
+      </description>
+    </release>
+    <release version="0.12.2" date="2026-09-10">
+      <description>
+        <p>Choose GitHub, Google or a NEAR wallet when signing in to NEAR AI. Wallet sign-in requests a login message, not a transaction.</p>
+        <p>Open Cloud billing for the organization associated with your inference key, with an account check before opening the browser.</p>
+        <p>Tool cards and account sign-in explanations are clearer across the desktop apps.</p>
+      </description>
+    </release>
+    <release version="0.12.1" date="2026-09-10">
+      <description>
+        <p>Route AI requests through NEAR AI. Private AI now starts with sign-in when you are signed out, with clearer controls and status messages across Linux, macOS and Windows.</p>
+        <p>Private AI keys, Commons sessions and device keys now use the operating system credential store. Existing credentials migrate automatically when read, preserving your device identity.</p>
+        <p>Wallet signup now checks that the server is ready and explains mismatched signup details before signing a device proof.</p>
+      </description>
+    </release>
+    <release version="0.12.0" date="2026-09-09">
+      <description>
+        <p>Every session in the list now says whether it carries a checkable copy of the model call that produced it. That is a statement about the recording, not about your standing, so it is on every row for every contributor, including those who already have an invite and whose sessions send perfectly well. A session can arrive without such a copy whichever of those you are, and until now there was no way to tell which of yours had one.</p>
+        <p>Where a session has no usable copy, the row says which fact is in the way. Most of those cannot be changed afterwards, because they are about bytes that were already sent. One names a setting, because it is the only case where changing something helps the sessions you record next. One is neither: if the service that issues the receipt could not be reached, the session is not marked as lacking proof, but as unknown, and the row says the receipt could not be fetched. An unreachable service is not evidence about your session, and it may well succeed later. There is nothing to press here; the mark describes the recording and offers no button that would imply otherwise.</p>
+        <p>Separately, each session can also say whether you are allowed to send it at all, and which of its own facts stands in the way when you are not. That is the other question -- whether you may send this session, rather than whether its record is complete. Contributing without an invite is switched on in this release: a contribution is admitted on evidence it carries rather than on someone vouching for you, and you join with the NEAR AI login you already have rather than a wallet. An invited contributor sees no such line, because every one of their sessions is contributable and that is the correct answer.</p>
+        <p>Approving a group sends the ones that may be sent and tells you how many it left behind. A group control that would send nothing is not offered.</p>
+        <p>OpenCode sessions are read, where OpenCode has been asked to export them. Only an export it was explicitly told to write is imported; nothing is taken from its working files. A session recorded in a format this version does not understand says so rather than being skipped in silence.</p>
+        <p>Signing in for Private AI can now be reached from the app. The sentence in front of the button says what pressing it does before you press it: it opens a browser, signs you in to a company that is not this app, and mints a key this app then keeps. Signing out removes the key from this computer and nothing else -- it does not revoke anything at the other end, and the screen says so.</p>
+        <p>A sign-in that is under way can be cancelled, and cancelling stops the attempt this computer is running rather than leaving it to time out.</p>
+      </description>
+    </release>
     <release version="0.11.0" date="2026-09-07">
       <description>
         <p>Answering model calls on this computer now has its own screen, called Private AI, rather than a setting buried under Tools. It lists the coding tools on this computer and says, for each one, whether it is connected, whether anything has arrived from it, and whether it is actually answering. A settings file with the right value in it only proves a file has a value in it; until now there was no way to tell whether a single call had ever come through.</p>

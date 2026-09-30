@@ -159,6 +159,9 @@ fn completion_file() -> Option<std::path::PathBuf> {
 /// enrolled at all, and walked to the end for *this* tenant -- are answers
 /// the daemon has to give first.
 pub fn present_if_needed(app: &Rc<App>, logged_in: bool, tenant_id: Option<&str>) {
+    if app.stack.visible_child_name().as_deref() == Some("insights") {
+        return;
+    }
     if logged_in && is_complete(tenant_id) {
         return;
     }
@@ -631,6 +634,13 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
             }
         }
     });
+
+    // The way in that needs no wallet, above the wallet ceremony rather than
+    // below it. Both are offered and neither replaces the other; this one is
+    // first because it is the shorter road for a contributor who already has
+    // the NEAR AI account the receipts come from anyway.
+    let near_ai = super::onboarding_nearai::build(app, onboarding);
+    body.append(&near_ai);
 
     let wallet = super::onboarding_wallet::build(app, onboarding);
     body.append(&wallet);

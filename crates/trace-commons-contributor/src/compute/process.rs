@@ -18,6 +18,43 @@ use tokio::process::{Child, Command};
 #[error("worker-already-running")]
 pub(super) struct WorkerAlreadyRunning;
 
+/// An advisory file lock that is unlocked before its descriptor is closed.
+///
+/// `flock` ownership belongs to the open file description, not to the
+/// descriptor and not to the process. `fork` duplicates every descriptor, and
+/// `O_CLOEXEC` only takes effect at the following `exec`, so a child spawned
+/// from any other thread here carries a copy of a lock descriptor this thread
+/// has already closed and holds its lock until it execs. Closing is therefore
+/// not a release: the next acquisition of the same file sees `WouldBlock` with
+/// no real contender, and a worker refuses to start because it believes one is
+/// already running.
+///
+/// `flock(LOCK_UN)` releases the description's lock itself, which no concurrent
+/// fork can defeat, so every held lock goes out through this type.
+#[derive(Debug)]
+pub(super) struct HeldLock(File);
+
+impl HeldLock {
+    /// Take the lock, or report why not. The file stays open on refusal so the
+    /// caller can distinguish contention from an unopenable path.
+    fn acquire(file: File) -> Result<Self, std::fs::TryLockError> {
+        file.try_lock()?;
+        Ok(Self(file))
+    }
+
+    /// Release without waiting for the drop, so a caller that must confirm the
+    /// release can observe a failure instead of assuming one.
+    fn unlock(&self) -> std::io::Result<()> {
+        self.0.unlock()
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        let _ = self.unlock();
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalWorkerConfig {
@@ -98,7 +135,7 @@ pub struct StopReport {
 pub struct WorkerProcess {
     // Drop order: kill_on_drop child before releasing controller ownership.
     child: Option<Child>,
-    controller_lock: Option<File>,
+    controller_lock: Option<HeldLock>,
     credential: Option<wire::Credential>,
     address: Option<SocketAddr>,
     config: LocalWorkerConfig,
@@ -137,8 +174,7 @@ mod tests {
             .write(true)
             .open(worker.home.join("node/controller.lock"))
             .unwrap();
-        lock.try_lock().unwrap();
-        worker.controller_lock = Some(lock);
+        worker.controller_lock = Some(HeldLock::acquire(lock).unwrap());
         worker.child = Some(
             Command::new("/bin/sleep")
                 .arg(seconds)
@@ -241,6 +277,7 @@ mod tests {
             .controller_lock
             .as_ref()
             .unwrap()
+            .0
             .try_clone()
             .unwrap();
         assert!(
@@ -447,15 +484,15 @@ impl WorkerProcess {
         for name in ["", "node", "host-home", "cache", "tmp"] {
             crate::config::ConfigStore::open(self.home.join(name))?;
         }
-        let lock = |name: &str| -> anyhow::Result<File> {
+        let lock = |name: &str| -> anyhow::Result<HeldLock> {
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
                 .read(true)
                 .write(true)
                 .open(self.home.join("node").join(name))?;
-            match file.try_lock() {
-                Ok(()) => Ok(file),
+            match HeldLock::acquire(file) {
+                Ok(held) => Ok(held),
                 Err(std::fs::TryLockError::WouldBlock) if name == "worker.lock" => {
                     Err(WorkerAlreadyRunning.into())
                 }

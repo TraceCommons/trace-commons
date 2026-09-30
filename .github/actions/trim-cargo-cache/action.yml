@@ -1,0 +1,62 @@
+name: Trim the cargo target directory before it is cached
+description: >-
+  Removes the parts of `target` that are large and worthless across runners,
+  so what actions/cache saves is the compiled dependency graph and not the
+  linked outputs. Run as the LAST step of a job that caches `target`.
+#
+# Why this exists. The repository's active caches sat at 14-16 GB against
+# GitHub's 10 GB per-repository ceiling, so the LRU evictor ran continuously
+# and a cache written on main was gone within minutes -- the weston job
+# restored nothing on most PR runs and rebuilt two workspaces cold every
+# time. Eighteen jobs cache `target`; at that count the only way under the
+# ceiling is for each saved `target` to be smaller.
+#
+# What goes. `incremental/` is already empty on CI (CARGO_INCREMENTAL=0 at
+# the workflow level) and is removed anyway so a job that sets it locally
+# cannot quietly grow the cache. `examples/` and the linked executables --
+# every test binary in `deps/`, every uplifted binary at the profile root,
+# and on Windows the `.exe` and `.pdb` beside them -- are outputs, not
+# inputs: cargo relinks them from the cached rlibs in seconds, and on a
+# measured local workspace they were about 40% of `deps/`. Nothing that
+# takes compile time to reproduce is touched: rlibs, rmeta, build-script
+# outputs, fingerprints and the registry all stay.
+#
+# What it does NOT do: change any cache key. A key that nothing restores
+# looks exactly like success, and this action's whole contribution is that
+# the existing keys start to restore.
+runs:
+  using: composite
+  steps:
+    - name: Trim linked outputs and incremental state from every target directory
+      shell: bash
+      run: |
+        set -euo pipefail
+        report() {
+          for t in target crates/trace-commons-contributor-gtk/target; do
+            [ -d "$t" ] && du -sh "$t" 2>/dev/null || true
+          done
+        }
+        echo "before trim:"; report
+        # On Windows the runner's bash reports most files as executable, so
+        # `-perm -u+x` there would select rlibs and rmeta and empty the cache
+        # of exactly what it exists to keep. Windows selects by name only.
+        if [ "${RUNNER_OS:-}" = "Windows" ]; then
+          linked=( \( -name '*.exe' -o -name '*.pdb' \) )
+        else
+          linked=( -perm -u+x ! -name '*.so' ! -name '*.dylib' ! -name '*.rlib' )
+        fi
+        for profile in target/debug target/release \
+                       crates/trace-commons-contributor-gtk/target/debug \
+                       crates/trace-commons-contributor-gtk/target/release; do
+          [ -d "$profile" ] || continue
+          rm -rf "$profile/incremental" "$profile/examples"
+          # Linked executables: every test binary in deps/ and every uplifted
+          # binary at the profile root. Shared objects are excluded on unix
+          # because they are executable and are real outputs of proc-macro
+          # and cdylib crates that cargo would otherwise recompile.
+          if [ -d "$profile/deps" ]; then
+            find "$profile/deps" -maxdepth 1 -type f "${linked[@]}" -delete
+          fi
+          find "$profile" -maxdepth 1 -type f "${linked[@]}" ! -name '*.d' -delete
+        done
+        echo "after trim:"; report

@@ -5,11 +5,17 @@
 //! has a real one -- would only ever be a shortcut into it. Nothing in this
 //! application tells a contributor to install a shell extension.
 
+pub mod balance;
 pub mod community_brand;
+pub mod credential;
 mod css_contract;
+pub mod funding;
 pub mod history;
+pub mod insights;
 pub mod mark;
+pub mod mission_drafts;
 pub mod onboarding;
+mod onboarding_nearai;
 mod onboarding_wallet;
 pub mod preview;
 pub mod private_inference;
@@ -47,7 +53,7 @@ const HEADER_HEIGHT: i32 = 46;
 const COLUMN_MAX: i32 = 840;
 const COLUMN_TIGHTEN: i32 = 680;
 
-/// The four screens, in the order the switcher shows them, with the icon
+/// The six screens, in the order the switcher shows them, with the icon
 /// each one carries. One list, so the stack pages and the switcher items
 /// cannot drift apart.
 ///
@@ -63,7 +69,8 @@ const COLUMN_TIGHTEN: i32 = 680;
 /// never retyped: the word this surface may not say is "private", and the
 /// only way three shells keep saying the same true thing is by reading one
 /// definition. The stack name below it is internal and is read by nobody.
-pub(crate) const SCREENS: [(&str, &str, &str); 4] = [
+pub(crate) const SCREENS: [(&str, &str, &str); 6] = [
+    ("insights", "Insights", "view-statistics-symbolic"),
     ("queue", "Queue", "view-list-symbolic"),
     ("history", "History", "document-open-recent-symbolic"),
     (
@@ -72,6 +79,7 @@ pub(crate) const SCREENS: [(&str, &str, &str); 4] = [
         "network-transmit-receive-symbolic",
     ),
     ("settings", "Settings", "emblem-system-symbolic"),
+    ("mission-drafts", "Mission drafts", "document-edit-symbolic"),
 ];
 
 /// The stack's name for the model-calls screen. Named once because the
@@ -117,6 +125,18 @@ pub struct App {
     pub toasts: adw::ToastOverlay,
     pub stack: adw::ViewStack,
 
+    /// `admission_evidence_required`, as `get_settings` last answered it.
+    ///
+    /// Held verbatim and NEVER negated. It is true for a contributor who
+    /// signed up through NEAR and therefore has no invite, so it selects the
+    /// candidate reading of the certificate-held section. A `!` anywhere on
+    /// the way to `certificate::view` would swap both readings and compile.
+    ///
+    /// False until the first settings read, which is the reading that claims
+    /// less: a section that has not been told yet must not assert
+    /// attestation.
+    pub evidence_admitted: std::cell::Cell<bool>,
+
     pub queue: queue::QueueView,
     pub history: history::HistoryView,
     /// The model-calls screen. Its own destination rather than a card on
@@ -141,6 +161,10 @@ pub struct App {
     health_banner: adw::Clamp,
     health_label: gtk::Label,
     health_button: gtk::Button,
+    /// Grants the daemon voided and no shell has shown yet (R6). Beside the
+    /// health banner rather than in it: the health slot carries one label,
+    /// and a void must neither hide an outage nor be hidden by one.
+    void_notices: gtk::Box,
     /// The count on the switcher's Queue item. Hidden at zero rather than
     /// drawn as a "0": an empty badge is a decoration, and the queue's own
     /// empty state already says the true thing.
@@ -148,6 +172,16 @@ pub struct App {
 
     callbacks: RefCell<HashMap<u64, Callback>>,
     pub entries: RefCell<Vec<QueueEntry>>,
+    /// `list_projects` rows, held for the two counts they carry.
+    ///
+    /// The queue builds its folders from `entries` and always will -- the
+    /// header must agree with the rows on screen, not with a number the
+    /// contributor cannot check. What these rows are for is the ONE number
+    /// the shell must not compute: how many of a group a project-wide
+    /// `approve` would actually send. That is the daemon's filter, and a
+    /// shell deriving it is a second implementation which agrees until the
+    /// day the rule changes an arm.
+    pub projects: RefCell<Vec<crate::model::Project>>,
     pub status: RefCell<Option<Status>>,
     /// The week band's three figures. Read here rather than passed down from
     /// `history` so the queue can draw the band without depending on which
@@ -241,6 +275,7 @@ impl App {
             .default_height(720)
             .build();
 
+        window.set_widget_name("contributions-window");
         let stack = adw::ViewStack::new();
         let queue = queue::QueueView::new();
         let history = history::HistoryView::new();
@@ -251,11 +286,15 @@ impl App {
         // Pages and switcher items are built from the same list, in the same
         // order, so a screen cannot be renamed in one place and not the
         // other.
-        let pages: [&gtk::Box; 4] = [
+        let insights = insights::InsightsView::new(&window);
+        let mission_drafts = mission_drafts::MissionDraftsView::new(&window);
+        let pages: [&gtk::Box; 6] = [
+            &insights.root,
             &queue.root,
             &history.root,
             &private_inference.root,
             &settings.root,
+            &mission_drafts.root,
         ];
         for ((name, label, icon_name), page) in SCREENS.into_iter().zip(pages) {
             stack
@@ -263,6 +302,8 @@ impl App {
                 .set_icon_name(Some(icon_name));
         }
 
+        // This window is entered by the explicit Contributions action.
+        stack.set_visible_child_name("queue");
         let queue_badge = gtk::Label::builder().visible(false).build();
         queue_badge.add_css_class("tc-count-badge");
         queue_badge.set_valign(gtk::Align::Center);
@@ -327,11 +368,29 @@ impl App {
             .margin_end(style::space::XL)
             .build();
 
+        // Every void notice, in the same column as the health banner and for
+        // the same reason: a void changes what the contributor agreed to,
+        // and they learn it on whichever screen they are reading.
+        let void_notices = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::M)
+            .build();
+        let void_column = adw::Clamp::builder()
+            .maximum_size(COLUMN_MAX)
+            .tightening_threshold(COLUMN_TIGHTEN)
+            .child(&void_notices)
+            .visible(false)
+            .margin_top(style::space::L)
+            .margin_start(style::space::XL)
+            .margin_end(style::space::XL)
+            .build();
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("tc-root");
         content.append(&header);
         content.append(&update.root);
         content.append(&banner_column);
+        content.append(&void_column);
         content.append(&stack);
         stack.set_vexpand(true);
 
@@ -345,6 +404,7 @@ impl App {
             window,
             toasts,
             stack,
+            evidence_admitted: std::cell::Cell::new(false),
             queue,
             history,
             private_inference,
@@ -353,9 +413,11 @@ impl App {
             health_banner: banner_column,
             health_label,
             health_button,
+            void_notices,
             queue_badge,
             callbacks: RefCell::new(HashMap::new()),
             entries: RefCell::new(Vec::new()),
+            projects: RefCell::new(Vec::new()),
             status: RefCell::new(None),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
@@ -386,6 +448,7 @@ impl App {
         queue::wire(&app);
         history::wire(&app);
         private_inference::wire(&app);
+        funding::wire(&app);
         settings::wire(&app);
         update::wire(&app);
         app.refresh();
@@ -574,9 +637,26 @@ impl App {
     }
 
     /// One daemon call, with its answer delivered back on the main loop.
+    ///
+    /// A failure is its fixed label. A caller that needs the payload a
+    /// daemon sent beside an error uses [`Self::call_with_failure`].
     pub fn call<F>(self: &Rc<Self>, method: &str, params: serde_json::Value, callback: F)
     where
         F: FnOnce(&Rc<App>, Result<serde_json::Value, String>) + 'static,
+    {
+        self.call_with_failure(method, params, move |app, result| {
+            callback(app, result.map_err(|failure| failure.label))
+        });
+    }
+
+    /// [`Self::call`], keeping the `result` a daemon sent beside an error.
+    pub fn call_with_failure<F>(
+        self: &Rc<Self>,
+        method: &str,
+        params: serde_json::Value,
+        callback: F,
+    ) where
+        F: FnOnce(&Rc<App>, Result<serde_json::Value, crate::backend::DaemonFailure>) + 'static,
     {
         let id = self.worker.call(method, params);
         self.callbacks.borrow_mut().insert(
@@ -627,6 +707,7 @@ impl App {
         self.call("status", serde_json::json!({}), |app, result| {
             if let Ok(Ok(status)) = result.map(serde_json::from_value::<Status>) {
                 app.render_health(&status);
+                app.render_grant_voids(&status);
                 settings::render_status(app, &status);
                 // The witness lives in the contributor's config rather than
                 // in daemon settings, so nothing in the settings answer
@@ -661,7 +742,24 @@ impl App {
             else {
                 return;
             };
+            // The certificate-held section's reading, from the same read.
+            // Re-rendered rather than latched: the flag can change under a
+            // running window when a contributor completes signup.
+            app.evidence_admitted
+                .set(settings.admission_evidence_required == Some(true));
             queue::render_private_inference_offer(app, &settings);
+            queue::render(app);
+        });
+        // The group counts, asked on the same refresh as the queue itself.
+        // Only `contributable_count` is read from here: the folder's total
+        // stays the rows on screen.
+        self.call("list_projects", serde_json::json!({}), |app, result| {
+            let Ok(value) = result else { return };
+            let projects: Vec<crate::model::Project> =
+                serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
+                    .unwrap_or_default();
+            *app.projects.borrow_mut() = projects;
+            queue::render(app);
         });
         self.call("list_pending", serde_json::json!({}), |app, result| {
             let Ok(value) = result else { return };
@@ -909,27 +1007,331 @@ impl App {
         overlaps_viewport(bounds.y(), bounds.height(), viewport_height)
     }
 
-    fn render_health(self: &Rc<Self>, status: &Status) {
-        // Two independent conditions, and the banner shows both. The health
-        // slot carries one label at a time by design, and `daily-cap-reached`
-        // is last in its precedence order -- so a spent upload budget behind
-        // a full queue was reported by neither, and the window looked simply
-        // broken. The budget line is therefore drawn from
-        // `status.daily_budget` rather than waiting for the label.
-        let mut lines: Vec<String> = Vec::new();
-        if let Some(label) = status.health.last_error_label.as_deref() {
-            // The label's own sentence, except when it IS the cap: the
-            // budget line below says the same thing with real numbers.
-            if label != "daily-cap-reached" || !status.daily_budget.blocked {
-                lines.push(copy::health_sentence(label).to_string());
+    /// One card per void, in the core's words (`Status::grant_void_notices`).
+    ///
+    /// Rebuilt on every status read rather than diffed: there are at most a
+    /// handful, and a card left over from a notice another shell already
+    /// acknowledged would say something stopped that this window has no
+    /// record of anymore.
+    fn render_grant_voids(self: &Rc<Self>, status: &Status) {
+        while let Some(child) = self.void_notices.first_child() {
+            self.void_notices.remove(&child);
+        }
+        let notices = status.grant_void_notices();
+        // The switch-on notices share the column: a folder whose arming was
+        // reworded (K5), and armed folders the gate is holding. So does the
+        // legacy invite migration notice: it changes what the contributor's
+        // sessions go under, and they are told on whichever screen they are
+        // reading (the consent spec requires it in every shell).
+        let rewordings = status.arming_rewording_notices();
+        let held = status.gate_held_notice();
+        let migration = status.legacy_migration_notice();
+        if let Some(column) = self.void_notices.parent() {
+            column.set_visible(
+                !notices.is_empty()
+                    || !rewordings.is_empty()
+                    || held.is_some()
+                    || migration.is_some(),
+            );
+        }
+        for card in notices {
+            self.void_notices.append(&self.grant_void_card(&card));
+        }
+        for card in rewordings {
+            self.void_notices.append(&self.arming_rewording_card(&card));
+        }
+        if let Some(held) = held {
+            self.void_notices.append(&self.gate_held_card(&held));
+        }
+        if let Some(notice) = &migration {
+            self.void_notices
+                .append(&self.legacy_migration_card(notice));
+        }
+    }
+
+    /// A card in the notices column: the attention glyph, a column of text,
+    /// and a column of buttons.
+    fn notice_card() -> (gtk::Box, gtk::Box, gtk::Box) {
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        let glyph = gtk::Label::new(Some(style::Tone::Attention.glyph()));
+        glyph.add_css_class("tc-attention");
+        glyph.add_css_class("tc-card-title");
+        glyph.set_valign(gtk::Align::Start);
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&glyph);
+        card.append(&column);
+        let buttons = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .valign(gtk::Align::Center)
+            .build();
+        card.append(&buttons);
+        (card, column, buttons)
+    }
+
+    fn notice_text(value: &str, class: &str) -> gtk::Label {
+        let label = gtk::Label::builder()
+            .label(value)
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+        label.add_css_class(class);
+        label
+    }
+
+    /// "Ask me first": Settings' call, unchanged -- `set_project_mode` with
+    /// this project's id and `notify_only`. It also answers a rewording
+    /// notice. A refusal changes nothing; the core's refusal line says so.
+    fn ask_first_button(
+        self: &Rc<Self>,
+        project_id: String,
+        action: &str,
+        failed: &'static str,
+    ) -> gtk::Button {
+        let button = gtk::Button::with_label(action);
+        button.add_css_class("tc-quiet");
+        let app = Rc::clone(self);
+        button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            app.call(
+                "set_project_mode",
+                serde_json::json!({ "project_id": project_id, "mode": "notify_only" }),
+                move |app, result| {
+                    if result.is_err() {
+                        app.toast(failed);
+                    }
+                    app.refresh();
+                },
+            );
+        });
+        button
+    }
+
+    /// One rewording notice (K5), in the core's words.
+    fn arming_rewording_card(
+        self: &Rc<Self>,
+        card_data: &crate::model::ArmingRewordingCard,
+    ) -> gtk::Box {
+        let notice = &card_data.notice;
+        let (card, column, buttons) = Self::notice_card();
+        column.append(&Self::notice_text(&notice.title, "tc-card-title"));
+        column.append(&Self::notice_text(notice.body, "tc-body"));
+        column.append(&Self::notice_text(notice.now_heading, "tc-card-title"));
+        for line in [notice.scope, notice.limit, notice.no_review] {
+            column.append(&Self::notice_text(line, "tc-body"));
+        }
+        if let (Some(project_id), Some(action), Some(failed)) = (
+            card_data.ask_first_project_id.clone(),
+            notice.ask_first_action,
+            notice.ask_first_failed,
+        ) {
+            buttons.append(&self.ask_first_button(project_id, action, failed));
+        }
+        // Records that this notice was shown, and nothing else. Only the id
+        // on this card, so a rewording raised after this window drew is never
+        // cleared unseen.
+        if let Some(id) = card_data.id {
+            let button = gtk::Button::with_label(notice.acknowledge);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "acknowledge_arming_rewordings",
+                    serde_json::json!({ "ids": [id] }),
+                    |app, _result| app.refresh(),
+                );
+            });
+            buttons.append(&button);
+        }
+        card
+    }
+
+    /// Armed folders the gate is holding, in the core's words. No dismiss:
+    /// it goes when the hold does.
+    fn gate_held_card(self: &Rc<Self>, notice: &crate::copy::GateHeldNoticeCopy) -> gtk::Box {
+        let (card, column, _buttons) = Self::notice_card();
+        column.append(&Self::notice_text(notice.title, "tc-card-title"));
+        column.append(&Self::notice_text(&notice.body, "tc-body"));
+        for reason in &notice.reasons {
+            column.append(&Self::notice_text(&format!("\u{2022} {reason}"), "tc-body"));
+        }
+        column.append(&Self::notice_text(notice.release, "tc-body"));
+        if !notice.projects.is_empty() {
+            column.append(&Self::notice_text(notice.ask_first, "tc-body"));
+        }
+        for project in &notice.projects {
+            let row = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(style::space::S)
+                .build();
+            row.append(&Self::notice_text(&project.line, "tc-body"));
+            if let (Some(project_id), Some(action), Some(failed)) = (
+                project.project_id.clone(),
+                project.ask_first_action,
+                project.ask_first_failed,
+            ) {
+                row.append(&self.ask_first_button(project_id, action, failed));
             }
+            column.append(&row);
         }
-        if status.daily_budget.blocked {
-            lines.push(copy::daily_cap_sentence(
-                status.daily_budget.blocked_entries,
-                status.daily_budget.resets_at,
-            ));
+        card
+    }
+
+    /// The notice after the move, in the core's words. Its one button
+    /// records that it was shown and does nothing else.
+    fn legacy_migration_card(
+        self: &Rc<Self>,
+        notice: &crate::copy::LegacyMigrationNoticeCopy,
+    ) -> gtk::Box {
+        let text = |value: &str, class: &str| {
+            let label = gtk::Label::builder()
+                .label(value)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class(class);
+            label
+        };
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        column.append(&text(notice.title, "tc-card-title"));
+        column.append(&text(notice.body, "tc-body"));
+        column.append(&text(notice.folders, "tc-body"));
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&column);
+        let button = gtk::Button::with_label(notice.acknowledge);
+        button.add_css_class("tc-quiet");
+        button.set_valign(gtk::Align::Center);
+        let app = Rc::clone(self);
+        button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            app.call(
+                "acknowledge_legacy_invite_migration",
+                serde_json::json!({}),
+                |app, _result| app.refresh(),
+            );
+        });
+        card.append(&button);
+        card
+    }
+
+    fn grant_void_card(self: &Rc<Self>, card_data: &crate::model::GrantVoidCard) -> gtk::Box {
+        let id = card_data.id;
+        let notice = &card_data.notice;
+        let text = |value: &str, class: &str| {
+            let label = gtk::Label::builder()
+                .label(value)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class(class);
+            label
+        };
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        column.append(&text(&notice.title, "tc-card-title"));
+        column.append(&text(notice.body, "tc-body"));
+        column.append(&text(notice.reasons_heading, "tc-card-title"));
+        for reason in &notice.reasons {
+            column.append(&text(&format!("\u{2022} {reason}"), "tc-body"));
         }
+        column.append(&text(notice.rearm, "tc-body"));
+
+        let glyph = gtk::Label::new(Some(style::Tone::Attention.glyph()));
+        glyph.add_css_class("tc-attention");
+        glyph.add_css_class("tc-card-title");
+        glyph.set_valign(gtk::Align::Start);
+
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&glyph);
+        card.append(&column);
+        let buttons = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .valign(gtk::Align::Center)
+            .build();
+        card.append(&buttons);
+        // "Turn back on", beside the sentence saying that doing so agrees to
+        // the new settings. It is Settings' arming call, unchanged:
+        // `set_project_mode` with this project's id and `auto_upload`, so the
+        // daemon applies the same refusals, writes the same
+        // `armed-auto-upload` row, and clears this notice. A refusal changes
+        // nothing; the core's refusal line says so.
+        if let (Some(project_id), Some(action), Some(failed)) = (
+            card_data.rearm_project_id.clone(),
+            notice.rearm_action,
+            notice.rearm_failed,
+        ) {
+            let button = gtk::Button::with_label(action);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "set_project_mode",
+                    serde_json::json!({ "project_id": project_id, "mode": "auto_upload" }),
+                    move |app, result| {
+                        if result.is_err() {
+                            app.toast(failed);
+                        }
+                        app.refresh();
+                    },
+                );
+            });
+            buttons.append(&button);
+        }
+        // This button records that this notice was shown, and nothing else.
+        // Only the id on this card is acknowledged, so a void raised after
+        // this window drew is never cleared unseen.
+        if let Some(id) = id {
+            let button = gtk::Button::with_label(notice.acknowledge);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "acknowledge_grant_voids",
+                    serde_json::json!({ "ids": [id] }),
+                    |app, _result| app.refresh(),
+                );
+            });
+            buttons.append(&button);
+        }
+        card
+    }
+
+    fn render_health(self: &Rc<Self>, status: &Status) {
+        // Independent conditions, and the banner shows each. The health slot
+        // carries one label at a time by design, and `daily-cap-reached` is
+        // last in its precedence order -- so a spent upload budget behind a
+        // full queue was reported by neither, and the window looked simply
+        // broken. The budget and witness lines are therefore drawn from
+        // their own status objects rather than waiting for the label; see
+        // `Status::health_banner_lines`.
+        let lines = status.health_banner_lines();
         if lines.is_empty() {
             self.health_banner.set_visible(false);
             return;
@@ -1079,7 +1481,25 @@ impl App {
             approve.flagged,
             &skipped,
         );
-        self.toast(&rendered.line);
+        // What a group selector left out for being ineligible, said after
+        // the press as the folder said it before.
+        //
+        // NOT branched on. `group_withheld_line` answers the empty string
+        // for zero, and an absent `excluded_ineligible` -- a single-entry
+        // call, or an invited contributor, where no filter ran at all --
+        // reads as zero here and draws nothing for the same reason. Reading
+        // the absence as a real zero would be claiming "nothing was left
+        // out" about a filter that never ran; drawing nothing claims
+        // nothing either way.
+        //
+        // Appended to the toast rather than given a second one: a
+        // contributor pressed one button and gets one answer.
+        let withheld = crate::copy::group_withheld_line(approve.excluded_ineligible.unwrap_or(0));
+        if withheld.is_empty() {
+            self.toast(&rendered.line);
+        } else {
+            self.toast(&format!("{} {withheld}", rendered.line));
+        }
         // `ApproveResult::offers_undo` is the single source of truth for
         // this decision -- see its doc comment for the defect it fixes --
         // so this checks it directly rather than re-deriving `rendered`'s
@@ -1260,6 +1680,36 @@ fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
     track
 }
 
+/// Replace `parent`'s children with K11 disclosure rows. Machine values --
+/// addresses, keys, measurements -- are selectable and monospace, shown
+/// verbatim; every word is `crate::disclosure`'s, which is the core's.
+///
+/// One widget per `crate::disclosure::drawn` item and nothing else, so the
+/// tests on `drawn` are tests of what this puts on screen.
+pub fn fill_disclosure_rows(parent: &gtk::Box, rows: &[crate::disclosure::Row]) {
+    use crate::disclosure::Drawn;
+    while let Some(child) = parent.first_child() {
+        parent.remove(&child);
+    }
+    for item in crate::disclosure::drawn(rows) {
+        match item {
+            Drawn::Eyebrow(text) => parent.append(&style::eyebrow(&text)),
+            Drawn::Body(text) => style::append_body(parent, text),
+            Drawn::Mono(value) => {
+                let value = gtk::Label::builder()
+                    .label(value)
+                    .wrap(true)
+                    .wrap_mode(gtk::pango::WrapMode::Char)
+                    .selectable(true)
+                    .xalign(0.0)
+                    .css_classes(["monospace"])
+                    .build();
+                parent.append(&value);
+            }
+        }
+    }
+}
+
 /// A heading and a paragraph, the shape most of this window is made of.
 ///
 /// The heading is set as an eyebrow rather than as a bold sentence: these
@@ -1436,6 +1886,7 @@ mod card_preview_tests {
                 previews.insert(
                     id,
                     PreviewSummary {
+                        token_distribution_summary: None,
                         would_send_bytes: 0,
                         raw_session_bytes: 0,
                         event_count: 0,
@@ -1486,6 +1937,7 @@ mod card_preview_tests {
         previews.insert(
             "a".to_string(),
             PreviewSummary {
+                token_distribution_summary: None,
                 would_send_bytes: 10,
                 raw_session_bytes: 10,
                 event_count: 1,
@@ -1639,7 +2091,7 @@ mod screen_tests {
     /// length itself, so the next screen has to grow both.
     #[test]
     fn every_screen_has_a_page() {
-        assert_eq!(SCREENS.len(), 4);
+        assert_eq!(SCREENS.len(), 6);
         for (name, label, icon) in SCREENS {
             assert!(!name.is_empty(), "a screen needs a stack name");
             assert!(!label.is_empty(), "a screen needs a switcher label");
@@ -1659,6 +2111,18 @@ mod screen_tests {
             .expect("the Private AI screen is one of the switcher's items");
         assert_eq!(name, "private-inference");
         assert_eq!(label, copy::PRIVATE_INFERENCE_DESTINATION);
+    }
+
+    #[test]
+    fn the_mission_drafts_screen_takes_its_label_from_shared_copy() {
+        let (_, label, _) = SCREENS
+            .into_iter()
+            .find(|(name, _, _)| *name == "mission-drafts")
+            .expect("the local mission inbox is one of the switcher's items");
+        assert_eq!(
+            label,
+            trace_commons_contributor::mission_draft_service::ui_copy()["title"]
+        );
     }
 
     /// No switcher label may PROMISE privacy.

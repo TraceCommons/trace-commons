@@ -40,9 +40,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::health::{
-    HealthState, LABEL_CANARY_FAILED, LABEL_CLAIM_MINT_FAILED, LABEL_DAILY_CAP_REACHED,
-    LABEL_INGEST_UNREACHABLE, LABEL_NEAR_AI_NOTICE_PENDING, LABEL_NOT_LOGGED_IN,
-    LABEL_PII_FILTER_UNAVAILABLE,
+    HealthState, LABEL_ADMISSION_LIMIT_REACHED, LABEL_ADMISSION_REFUSED, LABEL_CANARY_FAILED,
+    LABEL_CLAIM_MINT_FAILED, LABEL_DAILY_CAP_REACHED, LABEL_INGEST_UNREACHABLE,
+    LABEL_NEAR_AI_NOTICE_PENDING, LABEL_NOT_LOGGED_IN, LABEL_PII_FILTER_UNAVAILABLE,
 };
 use super::queue::QueueEntry;
 use super::settings::DaemonSettings;
@@ -53,37 +53,50 @@ use crate::submit::{
     PRECONDITION_CANARY_FAILED, PRECONDITION_NEAR_AI_NOTICE_UNRECORDED, PRECONDITION_NOT_LOGGED_IN,
     SubmitContext, SubmitOutcome, SubmitPreconditionFailure,
 };
+use trace_commons_protocol::admission::AdmissionRefusal;
 use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum UploadDecision {
     Uploaded {
         submission_id: Uuid,
+        /// What the receipt fetch produced for this upload, so the daemon can
+        /// correct the attestation mark on a row whose receipt did not
+        /// arrive. See `attestation_mark::writeback_after_upload`.
+        receipt: crate::submit::ReceiptShipped,
+        /// For a session approved on the contributor's behalf, what its
+        /// certificate shows about the redaction it had (K6), for the armed
+        /// project's disclosure. `None` for one a person approved.
+        unattended_redaction: Option<super::automatic_gate::SessionRedaction>,
     },
     /// Already delivered previously; nothing sent.
-    AlreadySubmitted {
-        submission_id: Uuid,
-    },
+    AlreadySubmitted { submission_id: Uuid },
     /// The session changed after it was offered. Nothing was sent, and
     /// `new_hash` describes what is on disk now.
-    Superseded {
-        new_hash: String,
-    },
+    Superseded { new_hash: String },
     /// The pipeline declined to send this, fail-closed.
-    Refused {
-        reason_label: String,
-    },
+    Refused { reason_label: String },
     /// The approval no longer covers what would be sent -- an
     /// envelope-determining input moved, or the envelope the pipeline built
     /// is not the one the contributor was shown. Nothing was sent; the
     /// entry goes back in front of the contributor under `reason_label`.
-    ApprovalStale {
+    ApprovalStale { reason_label: String },
+    /// Approved on the contributor's behalf, certified by the witness, and
+    /// held for a person because the certificate's verdict is not `low`.
+    /// Nothing reached the commons. The certified review is already saved
+    /// under the entry; `pin` is its digest.
+    HeldForReview {
         reason_label: String,
+        pin: String,
+        attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
     },
-    /// Network or auth failure.
-    Failed {
-        reason_label: String,
-    },
+    /// Network, auth, or transient classifier failure.
+    Failed { reason_label: String },
+    /// The witness is at capacity (`503 witness_saturated`) and judged
+    /// nothing. Nothing was sent. The session keeps its approval and is
+    /// tried again no sooner than `retry_after_secs`, the witness's own
+    /// bounded `Retry-After`.
+    WitnessSaturated { retry_after_secs: u32 },
     /// A daily volume cap is in force.
     CapReached,
 }
@@ -208,10 +221,58 @@ pub fn budget_snapshot(
     }
 }
 
+/// Save the certified review of a held session, so opening it shows the
+/// witness's bytes rather than running the witness again (the spec's R5).
+///
+/// If it cannot be saved the entry is still held, only without the pin:
+/// nothing is sent either way, and a person opening it re-runs the witness,
+/// which is where this was before R5.
+fn hold_for_review(
+    store: &ConfigStore,
+    entry_id: Uuid,
+    session_hash: &str,
+    inputs: &str,
+    reason_label: String,
+    witnessed: crate::witness::transport::WitnessedEnvelope,
+    attested_inference: crate::witness::inference_record::InferenceAttestationRecord,
+) -> UploadDecision {
+    let artifact = super::approved_envelope::WitnessReviewArtifact::new(
+        witnessed,
+        session_hash.to_string(),
+        inputs.to_string(),
+        None,
+        None,
+        Some(attested_inference.clone()),
+    );
+    match artifact.digest() {
+        Ok(pin) if super::approved_envelope::save_witnessed(store, entry_id, &artifact).is_ok() => {
+            UploadDecision::HeldForReview {
+                reason_label,
+                pin,
+                attested_inference: Some(attested_inference),
+            }
+        }
+        _ => UploadDecision::ApprovalStale { reason_label },
+    }
+}
+
 /// Map a pipeline outcome onto a daemon decision, so the queue records a
 /// fixed label rather than pipeline internals.
-fn decision_for(outcome: SubmitOutcome) -> UploadDecision {
+fn decision_for(
+    outcome: SubmitOutcome,
+    receipt: crate::submit::ReceiptShipped,
+    witness_retry_after: Option<u32>,
+) -> UploadDecision {
     match outcome {
+        SubmitOutcome::Failed { reason_label }
+            if reason_label == crate::submit::REASON_WITNESS_SATURATED =>
+        {
+            UploadDecision::WitnessSaturated {
+                retry_after_secs: witness_retry_after.unwrap_or(
+                    trace_commons_protocol::witness_pacing::WITNESS_SATURATED_RETRY_AFTER_SECS,
+                ),
+            }
+        }
         SubmitOutcome::Refused { reason_label, .. } | SubmitOutcome::Failed { reason_label }
             if matches!(
                 reason_label.as_str(),
@@ -220,9 +281,11 @@ fn decision_for(outcome: SubmitOutcome) -> UploadDecision {
         {
             UploadDecision::ApprovalStale { reason_label }
         }
-        SubmitOutcome::Submitted { submission_id, .. } => {
-            UploadDecision::Uploaded { submission_id }
-        }
+        SubmitOutcome::Submitted { submission_id, .. } => UploadDecision::Uploaded {
+            submission_id,
+            receipt,
+            unattended_redaction: None,
+        },
         SubmitOutcome::AlreadySubmitted { submission_id, .. } => {
             UploadDecision::AlreadySubmitted { submission_id }
         }
@@ -231,6 +294,11 @@ fn decision_for(outcome: SubmitOutcome) -> UploadDecision {
         }
         SubmitOutcome::Refused { reason_label, .. } => UploadDecision::Refused { reason_label },
         SubmitOutcome::Failed { reason_label } => UploadDecision::Failed { reason_label },
+        // Turned into a decision by `Uploader::hold_for_review`, which has
+        // the entry the certified review is saved under; never reaches here.
+        SubmitOutcome::HeldForReview { reason_label, .. } => {
+            UploadDecision::ApprovalStale { reason_label }
+        }
     }
 }
 
@@ -238,6 +306,7 @@ fn decision_for(outcome: SubmitOutcome) -> UploadDecision {
 pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
     match decision {
         UploadDecision::CapReached => Some(LABEL_DAILY_CAP_REACHED),
+        UploadDecision::WitnessSaturated { .. } => Some(super::health::LABEL_WITNESS_SATURATED),
         UploadDecision::Refused { reason_label } => match reason_label.as_str() {
             "pii-filter-unavailable" => Some(LABEL_PII_FILTER_UNAVAILABLE),
             LABEL_NEAR_AI_NOTICE_PENDING => Some(LABEL_NEAR_AI_NOTICE_PENDING),
@@ -246,7 +315,19 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         },
         UploadDecision::Failed { reason_label } => match reason_label.as_str() {
             "claim-mint-failed" => Some(LABEL_CLAIM_MINT_FAILED),
-            _ => Some(LABEL_INGEST_UNREACHABLE),
+            crate::submit::REASON_TRANSIENT_REDACTION => Some(LABEL_PII_FILTER_UNAVAILABLE),
+            // A refusal the commons sent on purpose, before the catch-all
+            // that reads everything else as an outage.
+            other => match AdmissionRefusal::from_label(other) {
+                Some(AdmissionRefusal::LimitReached | AdmissionRefusal::AccountLimitReached) => {
+                    Some(LABEL_ADMISSION_LIMIT_REACHED)
+                }
+                // A lease another attempt holds, which the next retry
+                // resolves. Nothing for a contributor to be told about.
+                Some(AdmissionRefusal::InProgress) => None,
+                Some(_) => Some(LABEL_ADMISSION_REFUSED),
+                None => Some(LABEL_INGEST_UNREACHABLE),
+            },
         },
         _ => None,
     }
@@ -453,14 +534,42 @@ impl Uploader<'_, '_> {
         // pinned goes back in front of the contributor. It is never
         // silently rebuilt, because rebuilding is precisely how a
         // contributor ends up sending something they were never shown.
-        if entry
-            .previewed_envelope_digest
-            .as_deref()
-            .is_some_and(|pin| pin.starts_with("witness-sha256:"))
-        {
+        if entry.holds_witness_certificate() {
             let result = self.approved_witness_for(entry);
             match result {
                 Ok(artifact) => {
+                    if artifact.token_bundle.is_some()
+                        != self.settings.token_distributions_contribution
+                    {
+                        return Ok(UploadDecision::ApprovalStale {
+                            reason_label: "token-distribution-consent-changed".into(),
+                        });
+                    }
+                    // A pinned review is not a person's approve. A contributor
+                    // can open a review on a waiting session in an automatic
+                    // project, see a verdict that is not `low`, and close it;
+                    // the watcher then approves the entry on their behalf with
+                    // the pin still in place. The same hold as a fresh witness
+                    // run, read from the certificate `approved_witness_for`
+                    // has just validated, and before anything is handed to
+                    // the pipeline.
+                    if entry.approved_unattended
+                        && !crate::submit::verdict_is_low(artifact.response())
+                    {
+                        if let Some(pin) = entry.previewed_envelope_digest.clone() {
+                            return Ok(UploadDecision::HeldForReview {
+                                reason_label: crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED
+                                    .to_string(),
+                                pin,
+                                attested_inference: entry.attested_inference.clone(),
+                            });
+                        }
+                        return Ok(UploadDecision::ApprovalStale {
+                            reason_label: "witness-review-stale".to_string(),
+                        });
+                    }
+                    self.ctx
+                        .use_approved_token_bundle(artifact.token_bundle.clone());
                     if self
                         .ctx
                         .use_approved_witness(artifact.response().clone())
@@ -478,9 +587,20 @@ impl Uploader<'_, '_> {
                 }
             }
         } else {
+            if self.settings.token_distributions_contribution {
+                return Ok(UploadDecision::ApprovalStale {
+                    reason_label: super::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.into(),
+                });
+            }
             match self.approved_envelope_for(entry) {
                 Ok(approved) => self.ctx.use_approved_envelope(approved),
                 Err(reason_label) => return Ok(UploadDecision::ApprovalStale { reason_label }),
+            }
+            // Nobody has looked at this session. If the witness is what
+            // builds it, its verdict is the first point at which the risk is
+            // known, and one that is not `low` stops here for a person.
+            if entry.approved_unattended {
+                self.ctx.hold_witnessed_unless_low_risk();
             }
         }
 
@@ -508,7 +628,45 @@ impl Uploader<'_, '_> {
                 return Err(e);
             }
         };
-        let decision = decision_for(outcome);
+        let decision = match outcome {
+            SubmitOutcome::HeldForReview {
+                reason_label,
+                witnessed,
+                attested_inference,
+            } => hold_for_review(
+                self.store,
+                entry.entry_id,
+                &entry.session_hash,
+                &inputs_now,
+                reason_label,
+                *witnessed,
+                *attested_inference,
+            ),
+            outcome => decision_for(
+                outcome,
+                self.ctx.last_receipt_shipped(),
+                self.ctx.last_witness_retry_after(),
+            ),
+        };
+        // K6: checked on this session's own certificate, the one it was
+        // sent with, and only for a session nobody looked at.
+        let decision = match decision {
+            UploadDecision::Uploaded {
+                submission_id,
+                receipt,
+                ..
+            } if entry.approved_unattended => {
+                let (witnessed, witness) = self.ctx.last_sent_witness();
+                UploadDecision::Uploaded {
+                    submission_id,
+                    receipt,
+                    unattended_redaction: Some(super::automatic_gate::session_redaction(
+                        witnessed, witness,
+                    )),
+                }
+            }
+            other => other,
+        };
 
         match &decision {
             UploadDecision::Uploaded { .. } => {
@@ -529,6 +687,51 @@ impl Uploader<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R5: a held session keeps the certified review it was held with, so a
+    /// person opening it sees the witness's bytes without a second witness
+    /// run. The pin in the decision names exactly what was saved.
+    #[test]
+    fn a_held_session_keeps_the_certified_review_it_was_held_with() {
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let id = Uuid::new_v4();
+        let witnessed = crate::witness::transport::WitnessedEnvelope {
+            admission: None,
+            envelope_bytes: b"{}".to_vec(),
+            certificate_json: r#"{"residual_risk_verdict":"medium"}"#.into(),
+            signature_hex: format!("0x{}", "ab".repeat(65)),
+        };
+        let record = crate::witness::inference_record::InferenceAttestationRecord::uncertified(
+            crate::witness::inference_record::REASON_BODIES_WITHHELD,
+        );
+        let decision = hold_for_review(
+            &store,
+            id,
+            "sha256:aa",
+            "fp",
+            crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED.into(),
+            witnessed.clone(),
+            record.clone(),
+        );
+        let UploadDecision::HeldForReview {
+            reason_label,
+            pin,
+            attested_inference,
+        } = decision
+        else {
+            panic!("expected a hold, got {decision:?}");
+        };
+        assert_eq!(
+            reason_label,
+            crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED
+        );
+        assert_eq!(attested_inference, Some(record));
+        let saved = super::super::approved_envelope::load_witnessed(&store, id)
+            .unwrap()
+            .expect("the certified review is saved");
+        assert_eq!(saved.digest().unwrap(), pin);
+        assert_eq!(saved.response().envelope_bytes, witnessed.envelope_bytes);
+    }
     use crate::config::tests_support::temp_store;
     use crate::daemon::queue::{QueueEntry, QueueState, entry_id_for};
     use crate::source::claude_code::ClaudeCodeSource;
@@ -744,10 +947,62 @@ mod tests {
         assert_eq!(health_label_for(&d), Some(LABEL_CLAIM_MINT_FAILED));
     }
 
+    /// A refusal the commons sent deliberately is not an outage.
+    ///
+    /// Every `Failed` label except the claim one used to become
+    /// `ingest-unreachable`, so a declined contribution and a spent budget
+    /// both told the contributor the service was down, in front of a queue
+    /// that would never drain by retrying.
+    #[test]
+    fn an_admission_refusal_is_not_an_outage() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+        for refusal in AdmissionRefusal::ALL {
+            let d = UploadDecision::Failed {
+                reason_label: refusal.label().into(),
+            };
+            assert_ne!(
+                health_label_for(&d),
+                Some(LABEL_INGEST_UNREACHABLE),
+                "{} is reported as an outage",
+                refusal.label()
+            );
+        }
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::Refused.label().into(),
+            }),
+            Some(LABEL_ADMISSION_REFUSED)
+        );
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::LimitReached.label().into(),
+            }),
+            Some(LABEL_ADMISSION_LIMIT_REACHED)
+        );
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::AccountLimitReached.label().into()
+            }),
+            Some(LABEL_ADMISSION_LIMIT_REACHED),
+            "the shared allowance health condition promises no window or reset"
+        );
+        // A lease another attempt is holding is resolved by the retry that
+        // follows it. Reporting a condition for it would put a banner up for
+        // a race that clears itself.
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::InProgress.label().into(),
+            }),
+            None
+        );
+    }
+
     #[test]
     fn a_successful_upload_implies_no_health_failure() {
         let d = UploadDecision::Uploaded {
             submission_id: Uuid::nil(),
+            receipt: crate::submit::ReceiptShipped::NoCall,
+            unattended_redaction: None,
         };
         assert_eq!(health_label_for(&d), None);
     }
@@ -986,6 +1241,8 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -1044,6 +1301,113 @@ mod tests {
             "an approval must not transfer to an envelope built from different inputs"
         );
         assert_eq!(state.uploads_today, 0, "nothing may be uploaded");
+    }
+
+    /// Reviewed on #1024: an entry approved before a grant is voided is not
+    /// sent after it. Voiding stops *new* unattended approvals; what stops an
+    /// approval already made is this guard, so every change that voids a
+    /// grant is run through the uploader here, not only compared as
+    /// fingerprints. (The environment's filter reaches the same fingerprint
+    /// through `env_filter_backend`; `grant_terms`'s test covers it without
+    /// mutating the process environment.)
+    #[tokio::test]
+    async fn an_approval_taken_before_a_voiding_change_is_not_sent_after_it() {
+        use crate::config::WitnessSettings;
+        type Change = Box<dyn Fn(&mut crate::config::ContributorConfig, &mut SettingsLike)>;
+        struct SettingsLike {
+            near_ai: Option<crate::envelope::NearAiSettings>,
+            attested_bodies: bool,
+        }
+        let changes: Vec<(&str, Change)> = vec![
+            (
+                "destination",
+                Box::new(|c, _| c.ingest_url = "http://elsewhere.invalid".into()),
+            ),
+            (
+                "identity",
+                Box::new(|c, _| c.tenant_id = "tenant-other".into()),
+            ),
+            (
+                "scopes widened",
+                Box::new(|c, _| c.consent_scopes.push("model_training".into())),
+            ),
+            (
+                "privacy filter",
+                Box::new(|c, _| c.pii_filter = Some("near-ai".into())),
+            ),
+            (
+                "receipt endpoint",
+                Box::new(|c, _| c.inference_receipt_endpoint = Some("https://r.invalid".into())),
+            ),
+            (
+                "witness",
+                Box::new(|c, _| {
+                    c.witness = Some(WitnessSettings {
+                        admission_evidence: false,
+                        url: "https://witness.invalid".into(),
+                        signing_address: "0x0000000000000000000000000000000000000001".into(),
+                        expected_measurements: Vec::new(),
+                    })
+                }),
+            ),
+            (
+                "classifier",
+                Box::new(|_, s| {
+                    s.near_ai = Some(crate::envelope::NearAiSettings {
+                        api_key: "k".into(),
+                        base_url: Some("https://classifier.invalid".into()),
+                        model: Some("m".into()),
+                    })
+                }),
+            ),
+            ("attested bodies", Box::new(|_, s| s.attested_bodies = true)),
+        ];
+        for (name, change) in &changes {
+            let session = GrowingSession::new();
+            let (_d, store) = temp_store();
+            let approved_under = fixture_cfg(&store);
+            store.save_config(&approved_under).unwrap();
+            let entry = session.entry_for(&session.current_hash(), &approved_under);
+
+            let mut cfg = approved_under.clone();
+            let mut now = SettingsLike {
+                near_ai: None,
+                attested_bodies: false,
+            };
+            change(&mut cfg, &mut now);
+            store.save_config(&cfg).unwrap();
+
+            let opts = dry_run_opts();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts, now.near_ai.clone()).unwrap();
+            let mut state = DaemonState::new();
+            let mut health = HealthState::default();
+            let mut settings = settings();
+            settings.ironwire_attested_bodies = now.attested_bodies;
+            let mut up = Uploader {
+                ctx: &mut ctx,
+                store: &store,
+                settings: &settings,
+                state: &mut state,
+                health: &mut health,
+            };
+            let decision = up
+                .upload_entry(
+                    &session.source(),
+                    &session.session_ref(),
+                    &entry,
+                    at("2026-08-08T16:00:00Z"),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                decision,
+                UploadDecision::ApprovalStale {
+                    reason_label: crate::daemon::preview::REASON_INPUTS_CHANGED.to_string(),
+                },
+                "{name}: an approval from before the void must not be sent"
+            );
+            assert_eq!(state.uploads_today, 0, "{name}");
+        }
     }
 
     #[tokio::test]

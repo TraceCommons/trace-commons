@@ -101,6 +101,26 @@ pub const ERR_UNKNOWN_HARNESS: &str = "harness-unknown";
 /// question and turns the destination on, then plans again.
 pub const ERR_NO_DESTINATION: &str = "harness-no-destination";
 
+/// A connect was asked for while this contributor holds no credential for the
+/// account the destination would answer from.
+///
+/// The starting state for every contributor is "no credential", and a connect
+/// rewrites the tool's OWN config to name our loopback port. Allowing it there
+/// leaves the contributor with a coding tool pointed at a proxy that has
+/// nothing to answer with -- worse than an unexpected answer, because the tool
+/// simply stops working, and the screen that would explain it says "Off".
+///
+/// So the ordering is enforced rather than merely described: obtain a
+/// credential, then connect a tool, then the proxy is answering something. The
+/// gate is on the connect and NOT on starting the proxy, deliberately --
+/// gating the proxy would break every tool already connected, by default, on
+/// the day the credential is forgotten.
+///
+/// A destination the contributor declared and runs themselves is not gated by
+/// this: that proxy answers from an account we hold no credential for and have
+/// no business asking about. See `DaemonShared::destination_credentialed`.
+pub const ERR_NO_CREDENTIAL: &str = "harness-no-credential";
+
 /// An edit that has been worked out and not made.
 struct HeldPlan {
     id: Uuid,
@@ -374,9 +394,17 @@ pub struct PlanView {
 /// no destination, which is why disconnecting keeps working after the
 /// listener has stopped.
 ///
+/// `credentialed` says whether the destination a connect would write can be
+/// answered at all -- see [`ERR_NO_CREDENTIAL`]. Like `port` it gates a
+/// connect and is ignored for a disconnect, and for the same reason: a
+/// contributor who has forgotten their credential must still be able to take
+/// a tool back off and get it working again. Gating the disconnect would trap
+/// exactly the person the gate exists to protect.
+///
 /// # Errors
 ///
-/// [`ERR_UNKNOWN_HARNESS`] for an id nothing knows, and
+/// [`ERR_UNKNOWN_HARNESS`] for an id nothing knows,
+/// [`ERR_NO_CREDENTIAL`] for a connect with no credential, and
 /// [`ERR_NO_DESTINATION`] for a connect with no port. Every other refusal is
 /// a [`PlanOutcome`], not an error: an unparseable file and a tool that is
 /// not installed are facts about the machine a contributor needs shown, not
@@ -387,14 +415,30 @@ pub fn plan(
     tool_id: &str,
     action: HarnessAction,
     port: Option<u16>,
+    credentialed: bool,
 ) -> Result<PlanView, &'static str> {
     let rows = tools::all(catalog);
     let Some(row) = rows.iter().find(|t| t.id == tool_id) else {
         return Err(ERR_UNKNOWN_HARNESS);
     };
 
-    // Ahead of the tool's own state, deliberately.
+    // Both of the next two refusals sit ahead of the tool's own state,
+    // deliberately, and the credential comes first of the two.
     //
+    // "This contributor has nothing to answer calls with" is the honest first
+    // step -- obtain a credential, then connect a tool -- and it is decided
+    // before anything about the machine is consulted for the same reason the
+    // destination check is: so the answer does not depend on which tools
+    // happen to be installed where the code runs.
+    //
+    // As the daemon computes them the two cannot both be true at once: a
+    // missing credential is only reported for a destination this daemon
+    // hosts, and hosting one is what gives `port` a value. The order is fixed
+    // here anyway, because `plan` is public and a caller may hand it any pair.
+    if matches!(action, HarnessAction::Connect) && !credentialed {
+        return Err(ERR_NO_CREDENTIAL);
+    }
+
     // "There is nowhere to send calls" is a fact about this computer, not
     // about the tool, and it is true whatever the tool's state is. Deciding it
     // second made the refusal unreachable for any tool that is not installed:
@@ -771,8 +815,20 @@ fn path_value(path: Option<&Path>) -> serde_json::Value {
 /// The row is not stranded by this, because [`offers_disconnect`] is keyed on
 /// the same value and is true for exactly those rows: the contributor removes
 /// the stale line, and the connect becomes available once it is gone.
-fn offers_connect(row: &HarnessRow) -> bool {
-    harness_state::action_available(HarnessAction::Connect, row.installed, row.wired)
+///
+/// `credentialed` is folded in here for that same reason -- the wire must not
+/// offer an action [`plan`] will refuse -- and it is the whole of the answer
+/// to "hide the affordance, or refuse the plan". Both: a button that always
+/// refuses is a worse experience than one that is not there, and hiding alone
+/// is not a control, because a shell that never reads this row can still ask
+/// for the plan. The refusal is the enforcement and this is the courtesy.
+///
+/// What keeps the hidden button from being a dead end is that the same
+/// response carries `destination_credentialed`, so a shell says why in the
+/// place the control would have been.
+fn offers_connect(row: &HarnessRow, credentialed: bool) -> bool {
+    credentialed
+        && harness_state::action_available(HarnessAction::Connect, row.installed, row.wired)
 }
 
 /// Whether the wire offers a disconnect for this row.
@@ -780,6 +836,11 @@ fn offers_connect(row: &HarnessRow) -> bool {
 /// Deliberately `wired`, not `connected`: a line naming a stale or foreign
 /// port is still a line this app can remove, and hiding the control would
 /// strand it.
+///
+/// Deliberately not keyed on the credential either, for the same reason and a
+/// sharper one: a contributor who has forgotten or revoked their credential
+/// still has our port written into their tool's config, and taking it back out
+/// is the one action that gets that tool working again.
 ///
 /// These two are functions rather than expressions inlined into the JSON so a
 /// test can assert the value a shell actually receives. The first version of
@@ -797,6 +858,7 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
     let activity = activity_for(shared);
     let spend = spend_for(shared);
     let destination_port = shared.destination_port();
+    let credentialed = shared.destination_credentialed();
     let rows = list(&catalog, &activity, destination_port);
 
     let harnesses: Vec<serde_json::Value> = rows
@@ -822,7 +884,7 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
                         .map(|at| at.to_rfc3339()),
                     _ => None,
                 },
-                "can_connect": offers_connect(row),
+                "can_connect": offers_connect(row, credentialed),
                 "can_disconnect": offers_disconnect(row),
             })
         })
@@ -866,6 +928,11 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
             // nothing on this machine is answering model calls, which is
             // what `harness_plan` refuses a connect with.
             "destination_port": shared.destination_port(),
+            // Whether that destination can answer anything. False is the
+            // reason every `can_connect` on the list above is false, and is
+            // on the wire so a shell can say so where the control would have
+            // been rather than showing a row with nothing to press.
+            "destination_credentialed": credentialed,
         }),
     )
 }
@@ -890,6 +957,7 @@ pub fn handle_plan(shared: &DaemonShared, req: &Request) -> Response {
         id,
         action,
         shared.destination_port(),
+        shared.destination_credentialed(),
     ) {
         Ok(view) => Response::ok(
             req.id,
@@ -999,7 +1067,15 @@ mod tests {
     }
 
     fn plan_claude(store: &PlanStore, action: HarnessAction) -> PlanView {
-        plan(store, &Catalog::default(), "claude", action, Some(8463)).expect("claude is known")
+        plan(
+            store,
+            &Catalog::default(),
+            "claude",
+            action,
+            Some(8463),
+            true,
+        )
+        .expect("claude is known")
     }
 
     /// A file appearing between the plan and the commit is refused.
@@ -1193,6 +1269,7 @@ mod tests {
             "codex",
             HarnessAction::Connect,
             Some(8463),
+            true,
         )
         .expect("codex is known");
 
@@ -1413,7 +1490,7 @@ mod tests {
             "the wire must offer the removal of a stale line"
         );
         assert!(
-            !offers_connect(claude),
+            !offers_connect(claude, true),
             "and must not offer a connect the daemon would refuse as a no-op"
         );
 
@@ -1462,6 +1539,7 @@ mod tests {
             "not-a-tool",
             HarnessAction::Connect,
             Some(8463),
+            true,
         )
         .expect_err("an unknown id has no plan");
         assert_eq!(err, ERR_UNKNOWN_HARNESS);
@@ -1494,8 +1572,15 @@ mod tests {
         assert!(!tools.is_empty(), "the built-ins are always present");
 
         for tool in &tools {
-            let err = plan(&store, &catalog, &tool.id, HarnessAction::Connect, None)
-                .expect_err("nothing is answering, so there is no port to name");
+            let err = plan(
+                &store,
+                &catalog,
+                &tool.id,
+                HarnessAction::Connect,
+                None,
+                true,
+            )
+            .expect_err("nothing is answering, so there is no port to name");
             assert_eq!(
                 err, ERR_NO_DESTINATION,
                 "{} must be refused for having nowhere to send calls, \
@@ -1503,6 +1588,140 @@ mod tests {
                 tool.id
             );
         }
+    }
+
+    /// A connect by a contributor who holds no credential is refused by name,
+    /// for EVERY tool, with a destination port present.
+    ///
+    /// The port is deliberately `Some`: without it the refusal under test is
+    /// indistinguishable from [`ERR_NO_DESTINATION`], and a gate that only
+    /// fires when the connect was already going to be refused is not a gate.
+    ///
+    /// Asserted across the whole catalog for the reason
+    /// `a_connect_with_no_destination_is_refused_by_name` gives: the answer
+    /// must not depend on which of these tools happens to be installed on the
+    /// machine running the test.
+    #[test]
+    fn a_connect_with_no_credential_is_refused_by_name() {
+        // Same reason as the no-destination test: pin the config directory so
+        // a concurrent test cannot leave `CLAUDE_CONFIG_DIR` naming an
+        // already-wired file, which would make the connect unavailable and
+        // the refusal under test never happen.
+        let (_dir, _guard, _path) = claude_config("{}");
+        let store = PlanStore::default();
+        let catalog = Catalog::default();
+        let tools = tools::all(&catalog);
+        assert!(!tools.is_empty(), "the built-ins are always present");
+
+        for tool in &tools {
+            let err = plan(
+                &store,
+                &catalog,
+                &tool.id,
+                HarnessAction::Connect,
+                Some(8463),
+                false,
+            )
+            .expect_err("nothing this contributor holds can answer the calls");
+            assert_eq!(
+                err, ERR_NO_CREDENTIAL,
+                "{} must be refused for having no credential behind the \
+                 destination, whatever its own state is",
+                tool.id
+            );
+        }
+    }
+
+    /// Taking a tool back off is NOT gated on the credential.
+    ///
+    /// This is the trap the gate must not set. A contributor whose credential
+    /// is gone still has our port written into their tool's config, and the
+    /// disconnect is the one action that gets that tool working again --
+    /// gating it would strand exactly the person the connect gate protects.
+    ///
+    /// So the assertion is that a real, committable plan comes back with
+    /// `credentialed` false, not merely that the call did not error: a
+    /// disconnect that came back as `Noop` would satisfy a weaker test while
+    /// leaving the line in the file.
+    #[test]
+    fn a_disconnect_is_not_gated_on_the_credential() {
+        let (_dir, _guard, _path) =
+            claude_config(r#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8463/anthropic"}}"#);
+
+        let store = PlanStore::default();
+        let view = plan(
+            &store,
+            &Catalog::default(),
+            "claude",
+            HarnessAction::Disconnect,
+            None,
+            false,
+        )
+        .expect("a disconnect needs neither a destination nor a credential");
+
+        assert_eq!(view.outcome, PlanOutcome::Changes, "{view:?}");
+        assert!(
+            view.plan_id.is_some(),
+            "the removal must be committable: {view:?}"
+        );
+        assert!(
+            !view.changes.is_empty(),
+            "the removal must describe the line it takes out: {view:?}"
+        );
+
+        // And the wire agrees, in the place a shell actually reads.
+        let rows = list(&Catalog::default(), &FamilyActivity::default(), Some(8463));
+        let claude = rows.iter().find(|r| r.id == "claude").expect("claude row");
+        assert!(
+            offers_disconnect(claude),
+            "the control that undoes the connect must survive a lost credential"
+        );
+    }
+
+    /// The wire offers no connect while there is no credential, and the row
+    /// that would have offered one is the same row.
+    ///
+    /// Keyed on the same fact `plan` gates on, which is the rule this surface
+    /// already lives by: the wire must never offer an action the plan will
+    /// refuse. Asserted through `offers_connect` rather than
+    /// `action_available`, because that is the value a shell receives.
+    #[test]
+    fn the_wire_offers_no_connect_without_a_credential() {
+        // A hand-built row, not one read off this machine.
+        //
+        // The row that matters is the one a connect WOULD be offered for --
+        // installed and not yet wired -- and reading it from the machine makes
+        // the test say nothing wherever Claude Code is not installed: the
+        // shared table already answers false there, so the gate under test
+        // would never be consulted and the assertion would pass whether or not
+        // it exists. That is the same defect
+        // `a_connect_with_no_destination_is_refused_by_name` was rewritten to
+        // remove, in the one place a catalog sweep cannot reach.
+        let row = HarnessRow {
+            id: "claude".to_string(),
+            name: "Claude Code".to_string(),
+            installed: true,
+            connected: false,
+            wired: false,
+            config_path: None,
+            connect_command: String::new(),
+            family: Some("anthropic"),
+            state: HarnessState::NotConnected,
+        };
+
+        assert!(
+            offers_connect(&row, true),
+            "the row is one the shared table offers a connect for, or this \
+             test proves nothing"
+        );
+        assert!(
+            !offers_connect(&row, false),
+            "a connect the plan would refuse must not be offered"
+        );
+        assert!(
+            offers_disconnect(&HarnessRow { wired: true, ..row }),
+            "and the control that undoes one is never withheld"
+        );
     }
 
     #[test]

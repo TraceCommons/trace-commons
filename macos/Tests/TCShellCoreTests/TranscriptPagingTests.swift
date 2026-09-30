@@ -597,59 +597,89 @@ final class TranscriptPagingTests: XCTestCase {
     /// Moving the window is independent of how big the body is: the cost of
     /// a scroll must not grow with the trace.
     ///
-    /// Same rework as above, and the same reason. The old form asserted that
-    /// 2000 window moves over one 17.5 MB body finished within 2.0s, which a
-    /// loaded runner can miss without anything being wrong. Independence
-    /// from body size is the actual claim, so measure the same moves against
-    /// two bodies an order of magnitude apart and require the cost not to
-    /// track the difference.
+    /// Counted, not timed. Two earlier formulations of this test measured
+    /// wall clock -- first an absolute `2000 moves within 2.0s`, then a
+    /// ratio of two bodies' scroll times against a 6x bound -- and both
+    /// flaked on loaded runners. The ratio form flaked because it divides
+    /// two separately-taken measurements of a few milliseconds each: load
+    /// landing on only the second inflates it with no regression present.
+    /// Observed 10.9x and 14.3x against the 6x bound on a busy machine,
+    /// where the honest value is about 2.6x. A third timing variant would
+    /// have flaked a third time.
+    ///
+    /// `make` is called once per chunk that comes into the window and never
+    /// for one already resident, so counting `make` calls measures the claim
+    /// directly -- "a window move typesets what came into it, not a window's
+    /// worth and not a body's worth" -- and a count cannot be perturbed by
+    /// machine load.
     func testWindowMoveCostDoesNotTrackBodySize() {
-        let smallDocument = TranscriptDocument(body(bytes: 1_500_000))
-        let largeDocument = TranscriptDocument(body(bytes: 17_500_000))
+        // 300 moves, not 2000. The small body is only 371 chunks, so a
+        // 2000-move scroll runs off its end at step 371 and idles through
+        // the remaining 1629 steps while the large body keeps working --
+        // 371 chunks of layout against 2015. The old ratio compared those
+        // two unequal walks, which is most of where its "about 2.6x"
+        // actually came from; it was not the sublinear bookkeeping the
+        // previous comment here attributed it to. 300 moves is a walk both
+        // documents perform in full.
+        let moves = 300
 
-        func scroll(_ document: TranscriptDocument) -> TranscriptResidentChunks<Int> {
-            var resident = TranscriptResidentChunks<Int>()
-            resident.update(document: document, visible: 0..<1) { $0 }
-            for step in 1..<2_000 {
-                resident.update(document: document, visible: step..<(step + 1)) { $0 }
-            }
-            return resident
+        struct Cost: Equatable {
+            var makes = 0
+            var evictions = 0
+            var retainedBytes = 0
+            var residentCount = 0
         }
 
-        var retained = 0
-        let smallTime = fastest(3) { retained = scroll(smallDocument).retainedBytes }
-        let largeTime = fastest(3) { retained = scroll(largeDocument).retainedBytes }
+        func scroll(_ document: TranscriptDocument) -> Cost {
+            var cost = Cost()
+            var resident = TranscriptResidentChunks<Int>()
+            resident.update(document: document, visible: 0..<1) { cost.makes += 1; return $0 }
+            for step in 1..<moves {
+                resident.update(document: document, visible: step..<(step + 1)) {
+                    cost.makes += 1
+                    return $0
+                }
+            }
+            cost.evictions = resident.evictions
+            cost.retainedBytes = resident.retainedBytes
+            cost.residentCount = resident.residentCount
+            return cost
+        }
 
-        XCTAssertLessThanOrEqual(retained, TranscriptPaging.retainedLimitBytes)
+        let smallDocument = TranscriptDocument(body(bytes: 1_500_000))
+        let largeDocument = TranscriptDocument(body(bytes: 17_500_000))
+        let small = scroll(smallDocument)
+        let large = scroll(largeDocument)
+
+        // Guard the premise: if the two bodies ever stopped differing in
+        // size, everything below would pass while testing nothing.
         XCTAssertGreaterThan(
-            smallTime, 0,
-            "the small case was too fast to time; raise the move count rather than trusting the ratio"
+            largeDocument.chunks.count, smallDocument.chunks.count * 10,
+            "the bodies must actually differ by an order of magnitude for this to mean anything"
         )
 
-        // The bodies differ by about 12x, so scrolling that walked the body
-        // would cost about 12x more.
-        //
-        // The threshold is 6x rather than something near 1x because the
-        // measured ratio is not near 1x -- it is about 2.6x. Scrolling is
-        // not literally independent of body size: twelve times the body is
-        // twelve times the chunks, and the per-update bookkeeping over that
-        // chunk list is not free. It is sublinear, not constant, and at
-        // these absolute times (single-digit milliseconds for 2000 moves)
-        // fixed setup cost is a visible share of both measurements.
-        //
-        // So assert the claim that is actually true and actually matters:
-        // the cost must stay far short of proportional. 6x sits at half of
-        // proportional and better than twice the measured value, which
-        // leaves real margin on both sides rather than the 16% a
-        // near-1x threshold would have left -- that would have been a fresh
-        // flake dressed as a tighter test.
-        let ratio = largeTime / smallTime
-        XCTAssertLessThan(
-            ratio, 6.0,
+        XCTAssertLessThanOrEqual(large.retainedBytes, TranscriptPaging.retainedLimitBytes)
+
+        // Identical, not merely close. Twelve times the body, the same
+        // scroll, the same layout work -- to the call.
+        XCTAssertEqual(
+            large, small,
             """
-            2000 window moves cost \(ratio)x more on a 12x larger body \
-            (\(smallTime)s -> \(largeTime)s), which is close enough to \
-            proportional that the scroll is walking the trace
+            the same \(moves) window moves cost differently on a 12x larger body \
+            (\(small) -> \(large)), so the scroll is walking the trace
+            """
+        )
+
+        // And the absolute cost is about one chunk per move, not a window's
+        // worth. A regression that re-typeset the resident window on every
+        // move would keep the ratio at 1 and land here instead, at roughly
+        // `moves * residentCount`.
+        XCTAssertLessThan(
+            large.makes, moves * 2,
+            """
+            \(large.makes) chunks typeset over \(moves) window moves is more \
+            than one chunk per move, so a move is re-typesetting chunks that \
+            were already resident
             """
         )
     }

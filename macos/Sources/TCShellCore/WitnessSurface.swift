@@ -161,6 +161,17 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     /// this machine.
     public let clearNote: String
     public let appliesAtOnce: String
+    public let tokenHeading: String?
+    public let tokenDisclosure: String?
+    public let tokenCaptureNote: String?
+    public let tokenScopeNote: String?
+    public let tokenEnable: String?
+    public let tokenDisable: String?
+    public let tokenConfirm: String?
+    public let tokenCancel: String?
+    public let tokenEnabled: String?
+    public let tokenDisabled: String?
+    public let tokenSaveFailed: String?
     public let inferenceHeading: String
     public let inferenceDisclosure: String
     public let inferenceCaptureNote: String
@@ -191,6 +202,17 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
         case clear
         case clearNote = "clear_note"
         case appliesAtOnce = "applies_at_once"
+        case tokenHeading = "token_heading"
+        case tokenDisclosure = "token_disclosure"
+        case tokenCaptureNote = "token_capture_note"
+        case tokenScopeNote = "token_scope_note"
+        case tokenEnable = "token_enable"
+        case tokenDisable = "token_disable"
+        case tokenConfirm = "token_confirm"
+        case tokenCancel = "token_cancel"
+        case tokenEnabled = "token_enabled"
+        case tokenDisabled = "token_disabled"
+        case tokenSaveFailed = "token_save_failed"
         case inferenceHeading = "inference_heading"
         case inferenceDisclosure = "inference_disclosure"
         case inferenceCaptureNote = "inference_capture_note"
@@ -522,6 +544,8 @@ public struct WalletCopy: Decodable, Equatable, Sendable {
     public let cancel: String
     public let available: String
     public let unavailable: String
+    public let addressRefused: String
+    public let unreachable: String
     public let opening: String
     public let waiting: String
     public let failed: String
@@ -538,6 +562,8 @@ public struct WalletCopy: Decodable, Equatable, Sendable {
         case cancel = "cancel"
         case available = "available"
         case unavailable = "unavailable"
+        case addressRefused = "address_refused"
+        case unreachable = "unreachable"
         case opening = "opening"
         case waiting = "waiting"
         case failed = "failed"
@@ -557,6 +583,17 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
     public let working: String
     public let ready: String
     public let failed: String
+    public let failedReceiptEndpoint: String
+    public let failedReceiptEndpointInvalid: String
+    public let failedPermission: String
+    public let failedNotEnrolled: String
+    public let failedSessionUnreadable: String
+    public let failedSourceUnsupported: String
+    public let failedProxyMissing: String
+    public let failedProxyUntrusted: String
+    public let failedHostsUntrusted: String
+    public let failedBackend: String
+    public let failedTryAgain: String
     public let refusedGlyph: String
     public let refusedTone: String
     enum CodingKeys: String, CodingKey {
@@ -570,6 +607,17 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
         case working = "working"
         case ready = "ready"
         case failed = "failed"
+        case failedReceiptEndpoint = "failed_receipt_endpoint"
+        case failedReceiptEndpointInvalid = "failed_receipt_endpoint_invalid"
+        case failedPermission = "failed_permission"
+        case failedNotEnrolled = "failed_not_enrolled"
+        case failedSessionUnreadable = "failed_session_unreadable"
+        case failedSourceUnsupported = "failed_source_unsupported"
+        case failedProxyMissing = "failed_proxy_missing"
+        case failedProxyUntrusted = "failed_proxy_untrusted"
+        case failedHostsUntrusted = "failed_hosts_untrusted"
+        case failedBackend = "failed_backend"
+        case failedTryAgain = "failed_try_again"
         case refusedGlyph = "refused_glyph"
         case refusedTone = "refused_tone"
     }

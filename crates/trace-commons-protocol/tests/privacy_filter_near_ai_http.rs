@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::{
-    MAX_CLASSIFY_INPUT_TOKENS, MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY,
-    NearAiPrivacyFilterAdapter,
+    MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_INPUT_TOKENS,
+    MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY, NearAiPrivacyFilterAdapter,
 };
 
 /// Roughly the byte span of one full window for this filler, at the sparse
@@ -371,6 +371,34 @@ async fn http_5xx_is_typed_transient() {
         err.is_transient(),
         "an upstream 5xx is about the vendor, not the trace: {err}"
     );
+}
+
+/// A 429 (rate limited) or 408 (request timeout) is the classifier's load,
+/// not the trace: it is retried in-client like a 5xx, and if it outlives the
+/// retries it is typed transient so the daemon keeps the approval and paces a
+/// retry instead of refusing an unchanged session for good.
+#[tokio::test]
+async fn rate_limiting_and_request_timeout_are_retried_and_typed_transient() {
+    for status in [429, 408] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("slow down"))
+            // Retried like a 5xx, not failed fast like a 4xx.
+            .expect(MAX_CLASSIFY_ATTEMPTS as u64)
+            .mount(&server)
+            .await;
+
+        let err = adapter(server.uri())
+            .redact_text("hello world")
+            .await
+            .expect_err("a refused classification must error");
+        assert!(
+            err.is_transient(),
+            "{status} is about the classifier's load, not the trace: {err}"
+        );
+        server.verify().await;
+    }
 }
 
 #[tokio::test]

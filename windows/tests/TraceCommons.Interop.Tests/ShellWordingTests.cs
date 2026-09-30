@@ -81,7 +81,7 @@ public class ShellWordingTests
             { "TraceCommons.Interop/VerdictCopy.cs", 4 },
             { "TraceCommons.Interop/WatchCopy.cs", 8 },
             { "TraceCommons.Interop/WeekBandCopy.cs", 1 },
-            { "TraceCommons.Interop/WithdrawCopy.cs", 34 },
+            { "TraceCommons.Interop/WithdrawCopy.cs", 29 },
 
             // View models that compose a sentence rather than reading one.
             // ContributorSettingsViewModel is the file the settings-screen
@@ -90,7 +90,7 @@ public class ShellWordingTests
             // WatchCopy.cs, which is why this entry ratcheted down.
             { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 18 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
-            { "TraceCommons.App/ViewModels/MainViewModel.cs", 20 },
+            { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
             { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 6 },
             { "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs", 10 },
             { "TraceCommons.App/ViewModels/QueueGroupViewModel.cs", 1 },
@@ -108,7 +108,7 @@ public class ShellWordingTests
             { "TraceCommons.App/Controls/HistoryView.xaml", 8 },
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
             { "TraceCommons.App/Controls/SettingsView.xaml", 16 },
-            { "TraceCommons.App/MainWindow.xaml", 19 },
+            { "TraceCommons.App/MainWindow.xaml", 18 },
             { "TraceCommons.App/OnboardingWindow.xaml", 16 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },
         };

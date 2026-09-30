@@ -35,6 +35,12 @@ use crate::trace_upload_claim_allowlist::{
     AllowlistError, AllowlistSource, AllowlistSourceSpec, DenialCounter, FileAllowlistSource,
     hash_invite_code,
 };
+use trace_commons_protocol::device_invite_subject::{
+    DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS, DEVICE_INVITE_SUBJECT_NOT_INVITE_ONBOARDED,
+    DEVICE_INVITE_SUBJECT_NOT_REGISTERED, DEVICE_INVITE_SUBJECT_PATH,
+    DEVICE_INVITE_SUBJECT_REQUEST_SCHEMA_VERSION, DEVICE_INVITE_SUBJECT_REVOKED,
+    DEVICE_INVITE_SUBJECT_STALE, DeviceInviteSubjectRequest, DeviceInviteSubjectResponse,
+};
 use trace_commons_protocol::onboarding::{
     TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TRACE_ONBOARD_REQUEST_SCHEMA_VERSION,
     TraceInstanceEnrollRequest, TraceOnboardErrorCode, TraceOnboardRequest, TraceOnboardResponse,
@@ -1118,6 +1124,10 @@ fn router_from_state(
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
         .route("/v1/onboard", post(onboard_handler))
         .route("/v1/enroll", post(enroll_handler))
+        .route(
+            DEVICE_INVITE_SUBJECT_PATH,
+            post(device_invite_subject_handler),
+        )
         .with_state(state);
 
     let router = match near_legion {
@@ -1576,6 +1586,89 @@ async fn enroll_handler(
 ) -> Result<Json<TraceOnboardResponse>, IssuerError> {
     let response = state.enroll(request).await?;
     Ok(Json(response))
+}
+
+/// `POST /v1/device/invite-subject`: a device reads back the invite subject
+/// hash it was onboarded under, so it can sign the legacy invite link
+/// statement (#1066). Only its own, and only to a request signed by its own
+/// registered key over the exact body. See
+/// `trace_commons_protocol::device_invite_subject`.
+///
+/// Fail-closed: no registry refuses with 503; an unknown, revoked or
+/// invite-less device refuses by name. The log line is hash-only: the device
+/// and tenant appear as storage refs, and never the hash returned.
+async fn device_invite_subject_handler(
+    State(state): State<Arc<TraceUploadClaimIssuerState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<DeviceInviteSubjectResponse>, IssuerError> {
+    let result = state.device_invite_subject(&headers, &body).await;
+    let outcome = match &result {
+        Ok(_) => "returned",
+        Err(error) => error.message,
+    };
+    let device_ref = trimmed_header_value(&headers, TRACE_DEVICE_KEY_ID_HEADER, "")
+        .ok()
+        .flatten()
+        .map(|id| principal_storage_ref(&format!("device:{id}")));
+    tracing::info!(
+        device_ref = device_ref.as_deref().unwrap_or("none"),
+        outcome,
+        "device invite subject read"
+    );
+    result.map(Json)
+}
+
+impl TraceUploadClaimIssuerState {
+    async fn device_invite_subject(
+        &self,
+        headers: &HeaderMap,
+        body: &Bytes,
+    ) -> Result<DeviceInviteSubjectResponse, IssuerError> {
+        let auth = device_claim_auth_from_headers(headers)?
+            .ok_or_else(|| IssuerError::bad_request("device key auth requires id and signature"))?;
+        let request: DeviceInviteSubjectRequest = serde_json::from_slice(body)
+            .map_err(|_| IssuerError::bad_request("invalid device invite subject request"))?;
+        if request.schema_version != DEVICE_INVITE_SUBJECT_REQUEST_SCHEMA_VERSION {
+            return Err(IssuerError::bad_request(
+                "invalid device invite subject request",
+            ));
+        }
+        if request.device_key_id != auth.device_key_id {
+            return Err(IssuerError::bad_request("device key id mismatch"));
+        }
+        if (Utc::now().timestamp() - request.issued_at).abs()
+            > DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS
+        {
+            return Err(IssuerError::bad_request(DEVICE_INVITE_SUBJECT_STALE));
+        }
+        let tenant_id =
+            normalized_required(Some(request.tenant_id.as_str()), "tenant_id is required")?;
+        let db = self
+            .onboarding_device_key_db
+            .as_ref()
+            .ok_or_else(IssuerError::device_key_registry_not_configured)?;
+        let device_key = db
+            .get_device_key(&tenant_id, &auth.device_key_id)
+            .await
+            .map_err(|_| IssuerError::internal())?
+            .ok_or_else(|| IssuerError::forbidden(DEVICE_INVITE_SUBJECT_NOT_REGISTERED))?;
+        // The signature before anything about the record is disclosed: an
+        // unsigned caller learns only that the key is registered, which the
+        // claim route already answers the same way.
+        let public_key_bytes =
+            device_public_key_bytes(&device_key.public_key, &auth.device_key_id)?;
+        verify_device_claim_signature(&public_key_bytes, body, &auth.signature)?;
+        if device_key.revoked_at.is_some() {
+            return Err(IssuerError::forbidden(DEVICE_INVITE_SUBJECT_REVOKED));
+        }
+        let invite_subject_hash = device_key
+            .invite_subject_hash
+            .ok_or_else(|| IssuerError::forbidden(DEVICE_INVITE_SUBJECT_NOT_INVITE_ONBOARDED))?;
+        Ok(DeviceInviteSubjectResponse {
+            invite_subject_hash,
+        })
+    }
 }
 
 impl TraceUploadClaimIssuerState {
@@ -2049,7 +2142,9 @@ impl TraceUploadClaimIssuerState {
             })?;
             // The cache answers first for latency; only used to short-circuit
             // an obviously-unknown code before paying for the database
-            // round trip below.
+            // round trip below. A use in the separate ingest process may leave
+            // this entry cached, but onboard_device_key's final transaction
+            // still enforces the durable global use counter.
             match registry.lookup(&subject_hash) {
                 Ok(Some(_)) => {}
                 Ok(None) => {
@@ -2613,7 +2708,7 @@ fn audience_claim_contains(audience: Option<&serde_json::Value>, expected: &str)
     }
 }
 
-fn valid_onboard_invite_code(invite_code: &str) -> bool {
+pub fn valid_onboard_invite_code(invite_code: &str) -> bool {
     invite_code.len() == 16
         && invite_code
             .chars()
@@ -3128,7 +3223,12 @@ fn normalize_subject(raw: &str) -> Result<String, IssuerError> {
 
 pub(crate) fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
-    anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
+    // Only inspect the PEM header line for the algorithm label, never the
+    // base64-encoded key body: a body is effectively random text and can
+    // contain the literal substring "RSA" by chance for a wholly valid
+    // Ed25519 key (roughly 1-in-a-few-hundred keys).
+    let header_line = pem.lines().next().unwrap_or("");
+    anyhow::ensure!(!header_line.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
         pem.starts_with("-----BEGIN PRIVATE KEY-----"),
         "EdDSA private key must be PKCS#8 PEM"
@@ -3139,7 +3239,10 @@ pub(crate) fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String
 
 pub(crate) fn validate_eddsa_public_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
-    anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
+    // See validate_eddsa_private_key_pem: check only the header line, not the
+    // base64 body, for the algorithm label.
+    let header_line = pem.lines().next().unwrap_or("");
+    anyhow::ensure!(!header_line.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
         pem.starts_with("-----BEGIN PUBLIC KEY-----"),
         "EdDSA public key must be SPKI PEM"
@@ -6171,5 +6274,347 @@ mod tests {
             .expect("bob principal_ref");
 
         assert_ne!(p1, p2, "distinct subjects must yield distinct principals");
+    }
+
+    /// Generate real Ed25519 keypairs until one's base64 body happens to
+    /// contain the literal substring "RSA" (roughly 1-in-a-few-hundred keys),
+    /// so the validators must not reject it on that basis alone.
+    fn generate_ed25519_keypair_with_rsa_in_body() -> GeneratedUploadClaimKeypair {
+        for _ in 0..100_000 {
+            let keypair = generate_upload_claim_keypair().expect("keypair generates");
+            let private_body: String = keypair
+                .private_key_pem
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            let public_body: String = keypair
+                .public_key_pem
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            if private_body.contains("RSA") || public_body.contains("RSA") {
+                return keypair;
+            }
+        }
+        panic!("did not find an Ed25519 key with \"RSA\" in its base64 body after 100000 tries");
+    }
+
+    #[test]
+    fn validate_eddsa_private_key_pem_accepts_ed25519_key_with_rsa_in_body() {
+        let keypair = generate_ed25519_keypair_with_rsa_in_body();
+        let normalized = validate_eddsa_private_key_pem(&keypair.private_key_pem).expect(
+            "a valid Ed25519 PKCS#8 key must be accepted even if its base64 body contains \"RSA\"",
+        );
+        // Downstream acceptance: the normalized PEM still parses as a signing key.
+        EncodingKey::from_ed_pem(normalized.as_bytes()).expect("normalized key still parses");
+    }
+
+    #[test]
+    fn validate_eddsa_public_key_pem_accepts_ed25519_key_with_rsa_in_body() {
+        let keypair = generate_ed25519_keypair_with_rsa_in_body();
+        let normalized = validate_eddsa_public_key_pem(&keypair.public_key_pem).expect(
+            "a valid Ed25519 SPKI key must be accepted even if its base64 body contains \"RSA\"",
+        );
+        DecodingKey::from_ed_pem(normalized.as_bytes()).expect("normalized key still parses");
+    }
+
+    #[test]
+    fn validate_eddsa_private_key_pem_still_rejects_real_rsa_header() {
+        let rsa_pem =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n";
+        let err = validate_eddsa_private_key_pem(rsa_pem)
+            .expect_err("an actual RSA-headered key must still be rejected");
+        assert!(err.to_string().contains("RSA"));
+    }
+
+    #[test]
+    fn validate_eddsa_public_key_pem_still_rejects_real_rsa_header() {
+        let rsa_pem =
+            "-----BEGIN RSA PUBLIC KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PUBLIC KEY-----\n";
+        let err = validate_eddsa_public_key_pem(rsa_pem)
+            .expect_err("an actual RSA-headered key must still be rejected");
+        assert!(err.to_string().contains("RSA"));
+    }
+
+    // ---- A device reading its own invite subject hash ----
+
+    mod device_invite_subject {
+        use super::*;
+        use ring::signature::KeyPair;
+        use std::sync::Arc;
+        use trace_commons_protocol::device_invite_subject::{
+            DEVICE_INVITE_SUBJECT_PATH, DEVICE_INVITE_SUBJECT_REQUEST_SCHEMA_VERSION,
+        };
+        use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
+
+        const TENANT: &str = "tenant-invitee";
+        const INVITE: &str =
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+        struct Device {
+            key: ring::signature::Ed25519KeyPair,
+            id: String,
+            public_key: String,
+        }
+
+        fn device() -> Device {
+            let pkcs8 =
+                ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                    .unwrap();
+            let key = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+            let id = device_key_id_from_public_key_bytes(key.public_key().as_ref());
+            let public_key =
+                base64::engine::general_purpose::STANDARD.encode(key.public_key().as_ref());
+            Device {
+                key,
+                id,
+                public_key,
+            }
+        }
+
+        fn record(device: &Device, invite: Option<&str>, revoked: bool) -> DeviceKeyRecord {
+            DeviceKeyRecord {
+                device_key_id: device.id.clone(),
+                tenant_id: TENANT.to_string(),
+                public_key: device.public_key.clone(),
+                invite_subject_hash: invite.map(str::to_string),
+                client_info: json!({}),
+                created_at: Utc::now(),
+                revoked_at: revoked.then(Utc::now),
+            }
+        }
+
+        fn config_with(records: Vec<DeviceKeyRecord>) -> TraceUploadClaimIssuerConfig {
+            let stub = Arc::new(StubDeviceKeyDb::new());
+            for record in records {
+                stub.insert_test_device_key(
+                    &record.tenant_id.clone(),
+                    &record.device_key_id.clone(),
+                    record,
+                );
+            }
+            TraceUploadClaimIssuerConfig {
+                onboarding_device_key_db: Some(stub as Arc<dyn crate::db::Database>),
+                ..test_config()
+            }
+        }
+
+        fn body(device_key_id: &str, issued_at: i64) -> String {
+            json!({
+                "schema_version": DEVICE_INVITE_SUBJECT_REQUEST_SCHEMA_VERSION,
+                "tenant_id": TENANT,
+                "device_key_id": device_key_id,
+                "issued_at": issued_at,
+            })
+            .to_string()
+        }
+
+        fn sign(device: &Device, body: &str) -> String {
+            base64::engine::general_purpose::STANDARD
+                .encode(device.key.sign(body.as_bytes()).as_ref())
+        }
+
+        async fn post(
+            config: TraceUploadClaimIssuerConfig,
+            headers: &[(&str, &str)],
+            body: String,
+        ) -> (StatusCode, serde_json::Value) {
+            let router = trace_upload_claim_issuer_router(config).expect("router builds");
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(DEVICE_INVITE_SUBJECT_PATH)
+                .header(header::CONTENT_TYPE, "application/json");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            let response = router
+                .oneshot(request.body(Body::from(body)).expect("request builds"))
+                .await
+                .expect("request completes");
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).expect("json response"),
+            )
+        }
+
+        async fn signed(
+            config: TraceUploadClaimIssuerConfig,
+            device: &Device,
+            body: String,
+        ) -> (StatusCode, serde_json::Value) {
+            let signature = sign(device, &body);
+            post(
+                config,
+                &[
+                    (TRACE_DEVICE_KEY_ID_HEADER, device.id.as_str()),
+                    (TRACE_DEVICE_SIGNATURE_HEADER, signature.as_str()),
+                ],
+                body,
+            )
+            .await
+        }
+
+        fn error(body: &serde_json::Value) -> Option<&str> {
+            body.get("error").and_then(|v| v.as_str())
+        }
+
+        #[tokio::test]
+        async fn a_device_reads_its_own_invite_subject_hash() {
+            let d = device();
+            let (status, response) = signed(
+                config_with(vec![record(&d, Some(INVITE), false)]),
+                &d,
+                body(&d.id, Utc::now().timestamp()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response, json!({ "invite_subject_hash": INVITE }));
+        }
+
+        #[tokio::test]
+        async fn an_unsigned_request_is_refused() {
+            let d = device();
+            let (status, response) = post(
+                config_with(vec![record(&d, Some(INVITE), false)]),
+                &[],
+                body(&d.id, Utc::now().timestamp()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            assert_eq!(
+                error(&response),
+                Some("device key auth requires id and signature")
+            );
+        }
+
+        /// Another device's key cannot read this device's hash, and a body
+        /// changed after signing is not the body that was signed.
+        #[tokio::test]
+        async fn only_the_device_s_own_key_over_the_exact_body_is_accepted() {
+            let d = device();
+            let other = device();
+            let sent = body(&d.id, Utc::now().timestamp());
+            let (status, response) = post(
+                config_with(vec![record(&d, Some(INVITE), false)]),
+                &[
+                    (TRACE_DEVICE_KEY_ID_HEADER, d.id.as_str()),
+                    (TRACE_DEVICE_SIGNATURE_HEADER, sign(&other, &sent).as_str()),
+                ],
+                sent.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+            assert_eq!(error(&response), Some("invalid device key signature"));
+
+            let signature = sign(&d, &sent);
+            let tampered = sent.replace(TENANT, "tenant-other");
+            let (status, response) = post(
+                config_with(vec![record(&d, Some(INVITE), false)]),
+                &[
+                    (TRACE_DEVICE_KEY_ID_HEADER, d.id.as_str()),
+                    (TRACE_DEVICE_SIGNATURE_HEADER, signature.as_str()),
+                ],
+                tampered,
+            )
+            .await;
+            assert_ne!(status, StatusCode::OK, "{response}");
+        }
+
+        #[tokio::test]
+        async fn the_header_and_the_body_must_name_the_same_device() {
+            let d = device();
+            let other = device();
+            let (status, response) = signed(
+                config_with(vec![record(&d, Some(INVITE), false)]),
+                &d,
+                body(&other.id, Utc::now().timestamp()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            assert_eq!(error(&response), Some("device key id mismatch"));
+        }
+
+        #[tokio::test]
+        async fn an_unknown_device_is_refused_by_name() {
+            let d = device();
+            let (status, response) =
+                signed(config_with(vec![]), &d, body(&d.id, Utc::now().timestamp())).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+            assert_eq!(error(&response), Some("device_key_not_registered"));
+        }
+
+        #[tokio::test]
+        async fn a_revoked_device_is_refused_by_name() {
+            let d = device();
+            let (status, response) = signed(
+                config_with(vec![record(&d, Some(INVITE), true)]),
+                &d,
+                body(&d.id, Utc::now().timestamp()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+            assert_eq!(error(&response), Some("device_key_revoked"));
+        }
+
+        /// A NEAR or NEAR AI device redeemed no invite.
+        #[tokio::test]
+        async fn a_device_onboarded_without_an_invite_is_refused_by_name() {
+            let d = device();
+            let (status, response) = signed(
+                config_with(vec![record(&d, None, false)]),
+                &d,
+                body(&d.id, Utc::now().timestamp()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+            assert_eq!(error(&response), Some("device_not_invite_onboarded"));
+        }
+
+        #[tokio::test]
+        async fn a_stale_or_future_request_is_refused() {
+            let d = device();
+            for issued_at in [Utc::now().timestamp() - 301, Utc::now().timestamp() + 301] {
+                let (status, response) = signed(
+                    config_with(vec![record(&d, Some(INVITE), false)]),
+                    &d,
+                    body(&d.id, issued_at),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+                assert_eq!(
+                    error(&response),
+                    Some("device_invite_subject_request_stale")
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn without_a_device_registry_the_route_fails_closed() {
+            let d = device();
+            let (status, response) =
+                signed(test_config(), &d, body(&d.id, Utc::now().timestamp())).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+            assert_eq!(
+                error(&response),
+                Some("device key registry is not configured")
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unknown_field_is_refused() {
+            let d = device();
+            let mut value: serde_json::Value =
+                serde_json::from_str(&body(&d.id, Utc::now().timestamp())).unwrap();
+            value["invite_code"] = json!("SMUGGLED");
+            let (status, response) = signed(
+                config_with(vec![record(&d, Some(INVITE), false)]),
+                &d,
+                value.to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        }
     }
 }

@@ -43,6 +43,28 @@ pub const DAEMON_AUDIT_FILE: &str = "daemon-audit.jsonl";
 /// this machine the ability to read and withdraw the previous contributor's
 /// traces.
 pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
+/// This device's inference-connection state (`daemon::inference_connection`):
+/// a selection awaiting explicit installation here, and what the last
+/// installation wrote into the config. Belongs to this enrollment, so it is
+/// swept by `wipe()` with the config it describes.
+pub const DAEMON_INFERENCE_CONNECTION_FILE: &str = "daemon-inference-connection.json";
+/// The reference to the second device key a legacy invite migration stages
+/// for the NEAR AI identity it is moving to (`daemon::legacy_migration`).
+/// Swept by `wipe()`: a logout mid-migration ends the migration.
+pub const STAGED_DEVICE_KEY_FILE: &str = "device.staged.pk8";
+/// The in-progress record of a legacy invite identity switch: what to put
+/// back if it does not finish. Holds credential references and the old
+/// config, never a secret. Swept by `wipe()`.
+pub const IDENTITY_SWITCH_JOURNAL_FILE: &str = "identity-switch.json";
+/// The countersigned legacy invite link record and the migration notice
+/// (`daemon::legacy_migration`). Belongs to this enrollment; swept by
+/// `wipe()`.
+pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
+/// The subject hash of the invite this device was enrolled with, saved at
+/// invite enrollment so a later move to a NEAR AI account can name it
+/// without asking the issuer or the contributor. A hash, never the code.
+/// Swept by `wipe()`.
+pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -142,6 +164,163 @@ pub struct ContributorConfig {
     /// The witness's own `required` mode is where a refusal belongs.
     #[serde(default)]
     pub inference_receipt_check_attestation: bool,
+    /// The contributor chose `consent_scopes` themselves, through
+    /// `set_consent_scopes`, rather than holding what enrollment saved.
+    ///
+    /// R7 of the connect-and-forget design: the Flow 1 grant is refused
+    /// without it (`grant_automatic`, `automatic-grant-scopes-not-chosen`).
+    /// A scope list alone cannot say this, because `validate_scopes` always
+    /// adds the floor scope and an invite enrollment saves it with nobody
+    /// having picked it. Every enrollment path writes `false`; only
+    /// `set_consent_scopes` writes `true`, and a new enrollment starts over.
+    ///
+    /// `#[serde(default)]` is required: a config written before this field
+    /// existed has no such key, and reads as not chosen.
+    #[serde(default)]
+    pub consent_scopes_chosen: bool,
+    /// How [`Self::witness`] got here, for the disclosure screens (K11).
+    ///
+    /// Written only beside the witness it describes, by
+    /// [`Self::set_witness`] or a constructor that knows the answer, and it
+    /// names that witness by digest: a witness changed later by a path that
+    /// records nothing reads as [`WitnessOriginView::NotRecorded`] rather
+    /// than inheriting a stale answer. Absent on every config written before
+    /// it existed, which reads the same way. Never an input to anything a
+    /// session's bytes or a grant depends on (`NON_ENVELOPE_CONFIG_FIELDS`).
+    ///
+    /// Skipped when absent, so a config with no witness serializes exactly
+    /// as it did before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_origin: Option<WitnessOriginRecord>,
+}
+
+/// How a witness came to be configured on this device.
+///
+/// The spec's point 2 under "The disclosure": a NEAR AI or wallet join writes
+/// the witness the commons publishes, without asking, and that is a different
+/// fact from a witness the contributor chose by connecting inference or typed
+/// into Settings. A screen can say which only if the write says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WitnessOrigin {
+    /// Published by the commons and saved at a NEAR AI or wallet join.
+    PublishedAtJoin,
+    /// Installed by the contributor from a connected inference selection
+    /// (`inference_connection_install`).
+    ConnectedInference,
+    /// Entered in an app's Settings on this device.
+    Settings,
+    /// Read from `TRACE_COMMONS_WITNESS_*` environment variables when this
+    /// device enrolled.
+    Environment,
+}
+
+/// The stored record: an origin, and the digest of the witness it is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitnessOriginRecord {
+    pub origin: WitnessOrigin,
+    /// [`WitnessSettings::identity_sha256`] of the witness when the origin
+    /// was recorded. A digest, so the record repeats no URL or address.
+    pub witness_sha256: String,
+}
+
+impl WitnessOriginRecord {
+    /// The record for `witness`, arriving by `origin`.
+    #[must_use]
+    pub fn for_witness(witness: &WitnessSettings, origin: WitnessOrigin) -> Self {
+        Self {
+            origin,
+            witness_sha256: witness.identity_sha256(),
+        }
+    }
+}
+
+/// What a screen may say about where the configured witness came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WitnessOriginView {
+    /// The record matches the witness configured now.
+    Recorded(WitnessOrigin),
+    /// No record, or a record written for a different witness. Never
+    /// resolved to a guess.
+    NotRecorded,
+}
+
+impl WitnessOriginView {
+    /// The wire label: the origin's own name, or `not_recorded`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Recorded(WitnessOrigin::PublishedAtJoin) => "published_at_join",
+            Self::Recorded(WitnessOrigin::ConnectedInference) => "connected_inference",
+            Self::Recorded(WitnessOrigin::Settings) => "settings",
+            Self::Recorded(WitnessOrigin::Environment) => "environment",
+            Self::NotRecorded => "not_recorded",
+        }
+    }
+
+    /// The view a wire label names, or `None` for one this build does not
+    /// know. `None` rather than `NotRecorded`: an unknown label is a newer
+    /// daemon's answer, not this one's.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Some(match label {
+            "published_at_join" => Self::Recorded(WitnessOrigin::PublishedAtJoin),
+            "connected_inference" => Self::Recorded(WitnessOrigin::ConnectedInference),
+            "settings" => Self::Recorded(WitnessOrigin::Settings),
+            "environment" => Self::Recorded(WitnessOrigin::Environment),
+            "not_recorded" => Self::NotRecorded,
+            _ => return None,
+        })
+    }
+}
+
+impl Serialize for WitnessOriginView {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.label())
+    }
+}
+
+impl<'de> Deserialize<'de> for WitnessOriginView {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let label = String::deserialize(deserializer)?;
+        Self::from_label(&label).ok_or_else(|| serde::de::Error::custom("unknown witness origin"))
+    }
+}
+
+/// The origin record for a witness an enrollment read from the environment
+/// ([`witness_settings_from_env`]), or `None` when it read none.
+#[must_use]
+pub fn environment_witness_origin(
+    witness: Option<&WitnessSettings>,
+) -> Option<WitnessOriginRecord> {
+    witness.map(|w| WitnessOriginRecord::for_witness(w, WitnessOrigin::Environment))
+}
+
+impl ContributorConfig {
+    /// Configure `witness`, recording how it arrived.
+    pub fn set_witness(&mut self, witness: WitnessSettings, origin: WitnessOrigin) {
+        self.witness_origin = Some(WitnessOriginRecord::for_witness(&witness, origin));
+        self.witness = Some(witness);
+    }
+
+    /// Remove the witness and its origin record.
+    pub fn clear_witness(&mut self) {
+        self.witness = None;
+        self.witness_origin = None;
+    }
+
+    /// Where the configured witness came from, or `None` when there is no
+    /// witness to ask about.
+    #[must_use]
+    pub fn witness_origin_view(&self) -> Option<WitnessOriginView> {
+        let witness = self.witness.as_ref()?;
+        Some(match &self.witness_origin {
+            Some(record) if record.witness_sha256 == witness.identity_sha256() => {
+                WitnessOriginView::Recorded(record.origin)
+            }
+            _ => WitnessOriginView::NotRecorded,
+        })
+    }
 }
 
 /// Where the redaction witness is, and what this client will accept from it.
@@ -177,6 +356,17 @@ pub struct WitnessSettings {
 }
 
 impl WitnessSettings {
+    /// A digest of which witness this is: its URL, signing address and pins,
+    /// and not `admission_evidence`, which is a mode of the same witness.
+    #[must_use]
+    pub fn identity_sha256(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical =
+            serde_json::json!([self.url, self.signing_address, self.expected_measurements,]);
+        let digest = Sha256::digest(canonical.to_string().as_bytes());
+        format!("sha256:{}", hex::encode(digest))
+    }
+
     /// Parse the pinned measurement sets into a [`WitnessTrust`].
     ///
     /// A malformed entry is an error rather than a skipped line: a silently
@@ -247,6 +437,66 @@ pub fn inference_receipt_endpoint_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The receipt endpoint this config should start using, or `None` to leave it
+/// alone.
+///
+/// A contributor has no basis to type this URL. It names the provider that
+/// served their inference and answers `/signature/{chat_id}` for it, which is
+/// an operator's fact about a deployment rather than a preference of theirs --
+/// so it arrives the way the witness settings already arrive, published by the
+/// commons and adopted here.
+///
+/// The order is deliberate:
+///
+/// - **A saved endpoint wins over everything.** Adoption fills a hole; it
+///   never overwrites an answer somebody already gave.
+/// - **The environment outranks the published value.** An operator who set the
+///   variable on this host is making a decision about this machine, and a
+///   server must not be able to take it back.
+///
+/// An invalid environment value yields `None` rather than falling through to
+/// the published one: a typo in an operator's own variable must not quietly
+/// hand the choice back to the server.
+///
+/// # Each source is gated by its own list
+///
+/// The two allowlists are separate parameters because **the source of a value
+/// decides what may vet it**, and collapsing them is how a check becomes
+/// decorative.
+///
+/// `operator_allowlist` is the environment allowlist. It is the right gate for
+/// `from_env` and only for it: that value came from an operator, so checking
+/// it at the operator's trust level is checking it against its own author.
+///
+/// `published_allowlist` gates `published`, and must be a list derived from
+/// the origin the person chose -- the same basis on which that origin's issuer
+/// and witness are admitted. Passing the environment allowlist here would be a
+/// hole rather than a shortcut: it is permissive whenever nobody set
+/// `TRACE_COMMONS_ALLOWED_HOSTS`, which is every shipped app, and a permissive
+/// list would admit whatever host a capabilities response named.
+///
+/// Neither branch degrades to permissive. `validate_inference_receipt_endpoint`
+/// refuses a non-enforcing list outright, so an unvetted value is dropped and
+/// the caller refuses, rather than being adopted unchecked.
+pub(crate) fn receipt_endpoint_to_adopt(
+    configured: Option<&str>,
+    from_env: Option<&str>,
+    operator_allowlist: &HostAllowlist,
+    published: Option<&str>,
+    published_allowlist: &HostAllowlist,
+) -> Option<String> {
+    if configured.is_some() {
+        return None;
+    }
+    let (candidate, allowlist) = match from_env {
+        Some(value) => (value, operator_allowlist),
+        None => (published?, published_allowlist),
+    };
+    let candidate = candidate.trim();
+    validate_inference_receipt_endpoint(candidate, allowlist).ok()?;
+    Some(candidate.to_string())
+}
+
 /// Validate an explicitly configured receipt service before trust-bootstrap
 /// persistence or admission preparation. No backend-derived URL is accepted.
 pub(crate) fn validate_inference_receipt_endpoint(
@@ -296,7 +546,133 @@ pub fn allowlist_for(allowed_hosts: Option<&str>) -> HostAllowlist {
     }
 }
 
-/// A hash-only record of a submitted trace. Never contains paths or content.
+/// Resolve a root-relative `path` (which may carry a query) against the
+/// ORIGIN of `ingest_url`: its scheme, host and port, and nothing else.
+///
+/// `ingest_url` is the upload endpoint, and a configured one carries a path
+/// (`https://host/v1/traces`). Every other ingest route -- the account login
+/// page, the community roster -- is an absolute path on the same origin, so
+/// appending to the configured string produces `/v1/traces/account/login`,
+/// which 404s. The operator client already does this with `set_path`; this is
+/// the same rule for the few URLs built outside it.
+///
+/// Refuses anything that is not a plain root-relative path, and checks that
+/// the result is still on the ingest origin: `//host`, a WHATWG `/\host`, or a
+/// full URL would otherwise let the joined path name another host.
+pub fn ingest_origin_url(ingest_url: &str, path: &str) -> Result<reqwest::Url> {
+    if !path.starts_with('/') || path.starts_with("//") || path.contains('#') {
+        anyhow::bail!("ingest_path_not_root_relative");
+    }
+    let mut origin = reqwest::Url::parse(ingest_url).context("ingest_url_invalid")?;
+    if origin.cannot_be_a_base() || origin.host_str().is_none() {
+        anyhow::bail!("ingest_url_invalid");
+    }
+    origin.set_path("/");
+    origin.set_query(None);
+    origin.set_fragment(None);
+    let _ = origin.set_username("");
+    let _ = origin.set_password(None);
+    let joined = origin.join(path).context("ingest_path_not_root_relative")?;
+    if joined.origin() != origin.origin() {
+        anyhow::bail!("ingest_path_not_root_relative");
+    }
+    Ok(joined)
+}
+
+/// Shape check for a wallet tenant id: the `near-` namespace plus 64 lowercase
+/// hex characters.
+///
+/// This used to be `tenant_id == format!("near-{}", &anchor_hash[7..])`, and it
+/// stopped being true when the server salted the anchor. The tenant id is now
+/// drawn from the OS RNG and is a function of nothing -- that is the point of
+/// the change, since the old binding let anyone who knew a NEAR account name
+/// compute its tenant id offline. The client cannot re-derive it, so shape is
+/// all there is to check here; the value is authenticated by the session token
+/// issued alongside it, not by its own contents.
+///
+/// Lives here, rather than beside either caller, because a second copy of a
+/// namespace rule is how the two callers come to disagree about what a wallet
+/// tenant is.
+#[must_use]
+pub fn is_near_tenant_id(tenant_id: &str) -> bool {
+    tenant_id.strip_prefix("near-").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    })
+}
+
+/// The allowlist to enforce for calls to hosts an enrolled config already
+/// names: ingest, issuer, witness, and the inference receipt endpoint.
+///
+/// [`allowlist_for`] returns a PERMISSIVE list when neither `allowed_hosts`
+/// nor `TRACE_COMMONS_ALLOWED_HOSTS` is set, and the paths that matter refuse
+/// on a non-enforcing list -- `admission_setup`'s endpoint gate and
+/// [`validate_inference_receipt_endpoint`] both do. No shipped application
+/// sets either, and wallet signup deliberately persists `allowed_hosts: None`,
+/// so a wallet-enrolled contributor could not prepare a bound session at all.
+///
+/// The fix is not a stored list. A stored list has to be maintained, and it
+/// drifts from the config the moment a host enters the config by another
+/// route -- a witness configured in Settings, a receipt endpoint set after
+/// enrollment. Instead the list is a FUNCTION of the config:
+///
+/// 1. `cfg.allowed_hosts` when it names anything -- operator or CLI, wins.
+/// 2. Otherwise `TRACE_COMMONS_ALLOWED_HOSTS` when set -- operator, wins.
+/// 3. Otherwise exactly the hosts this config already points at.
+///
+/// # Optional fields
+///
+/// `witness` and `inference_receipt_endpoint` are `Option`, and a field that
+/// is unset is **skipped**: it contributes no host and is not an error. A
+/// contributor with no witness configured has no witness to dial, so a shorter
+/// list is the correct list. The two things deliberately NOT done here are
+/// returning a non-enforcing list (which would make an unset optional field
+/// silently authorize every host) and refusing outright (which would break
+/// paths that work today because an optional field is unset). An unparseable
+/// or host-less value is skipped for the same reason -- it names no host to
+/// authorize -- and the endpoint gates that follow still refuse it on shape.
+///
+/// So it cannot drift: a host is on the list precisely because the config
+/// names it, and a host the config does not name was never going to be
+/// dialled. It widens only when the config widens, never because a server
+/// said so. And it never degrades to permissive -- [`HostAllowlist::from_hosts`]
+/// treats an empty set as "nothing", not "everything", so a config with no
+/// parseable host refuses everything rather than allowing everything.
+///
+/// Deliberately NOT a change to [`allowlist_for`], which keeps its current
+/// meaning for `--attest-post`. That flag refuses outright when no allowlist
+/// is configured, because its target comes from the command line rather than
+/// from enrollment; a config-derived fallback there would make `is_enforcing`
+/// true and silently permit a collector that happened to equal the ingest
+/// host.
+#[must_use]
+pub fn config_allowlist(cfg: &ContributorConfig) -> HostAllowlist {
+    derive_config_allowlist(&allowlist_for(cfg.allowed_hosts.as_deref()), cfg)
+}
+
+pub(crate) fn derive_config_allowlist(
+    configured: &HostAllowlist,
+    cfg: &ContributorConfig,
+) -> HostAllowlist {
+    if configured.is_enforcing() {
+        return configured.clone();
+    }
+    let named = [
+        Some(cfg.issuer_url.as_str()),
+        Some(cfg.ingest_url.as_str()),
+        cfg.witness.as_ref().map(|witness| witness.url.as_str()),
+        cfg.inference_receipt_endpoint.as_deref(),
+    ];
+    HostAllowlist::from_hosts(named.into_iter().flatten().filter_map(|url| {
+        reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+    }))
+}
+
+/// A hash-only record of a submitted trace. Never contains paths or content./// A hash-only record of a submitted trace. Never contains paths or content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
     pub submission_id: Uuid,
@@ -382,6 +758,7 @@ fn adopt_state_dir(preferred: &Path, legacy: &Path) -> PathBuf {
 }
 
 /// Filesystem-backed store for contributor config, device key, and receipts.
+#[derive(Clone)]
 pub struct ConfigStore {
     dir: PathBuf,
 }
@@ -442,9 +819,8 @@ impl ConfigStore {
     }
 
     pub fn save_config(&self, cfg: &ContributorConfig) -> Result<()> {
-        let path = self.config_path();
         let body = serde_json::to_vec_pretty(cfg).context("serializing contributor config")?;
-        write_atomic_0600(&self.dir, &path, &body)
+        crate::daemon::commons_credentials::save_config(self, cfg, &body)
     }
 
     /// Path to the device key file. Does not imply the file exists.
@@ -453,17 +829,19 @@ impl ConfigStore {
     }
 
     pub fn save_device_key(&self, pkcs8_der: &[u8]) -> Result<()> {
-        let path = self.device_key_path();
-        write_atomic_0600(&self.dir, &path, pkcs8_der)
+        use crate::daemon::commons_credentials::{self, Kind};
+        let expected = commons_credentials::snapshot(self, Kind::Device)?;
+        if self.device_key_path().exists() {
+            anyhow::bail!("commons_device_identity_exists");
+        }
+        commons_credentials::replace(self, &expected, pkcs8_der, None)
     }
 
     pub fn load_device_key(&self) -> Result<Option<Vec<u8>>> {
-        let path = self.device_key_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(Some(bytes))
+        crate::daemon::commons_credentials::load(
+            self,
+            crate::daemon::commons_credentials::Kind::Device,
+        )
     }
 
     fn receipts_path(&self) -> PathBuf {
@@ -526,12 +904,23 @@ impl ConfigStore {
 
     /// Atomically write a daemon state file at 0600.
     pub fn write_daemon_file(&self, name: &str, body: &[u8]) -> Result<()> {
+        if name == ACCOUNT_SESSION_FILE {
+            use crate::daemon::commons_credentials::{self, Kind};
+            let expected = commons_credentials::snapshot(self, Kind::Account)?;
+            return commons_credentials::replace(self, &expected, body, None);
+        }
         let path = self.daemon_path(name);
         write_atomic_0600(&self.dir, &path, body)
     }
 
     /// Read a daemon state file, or `None` when it does not exist yet.
     pub fn read_daemon_file(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        if name == ACCOUNT_SESSION_FILE {
+            return crate::daemon::commons_credentials::load(
+                self,
+                crate::daemon::commons_credentials::Kind::Account,
+            );
+        }
         let path = self.daemon_path(name);
         match std::fs::read(&path) {
             Ok(body) => Ok(Some(body)),
@@ -542,6 +931,12 @@ impl ConfigStore {
 
     /// Remove a daemon runtime file (socket, lock). Missing is not an error.
     pub fn remove_daemon_file(&self, name: &str) -> Result<()> {
+        if name == ACCOUNT_SESSION_FILE {
+            return crate::daemon::commons_credentials::clear(
+                self,
+                &[crate::daemon::commons_credentials::Kind::Account],
+            );
+        }
         let path = self.daemon_path(name);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -580,6 +975,27 @@ impl ConfigStore {
     /// that can be left behind if the process crashes between creating the
     /// temp file and renaming it into place in `write_atomic_0600`.
     pub fn wipe(&self) -> Result<()> {
+        use crate::daemon::commons_credentials::{self, Kind};
+        commons_credentials::clear_with(self, &Kind::ALL, || self.wipe_files())?;
+        // The local state is gone even if the native service is locked. Keep
+        // its cleanup journal for retry rather than restoring either secret.
+        let _ = commons_credentials::cleanup(self);
+        Ok(())
+    }
+
+    fn wipe_files(&self) -> Result<()> {
+        // Token review payloads belong to this enrollment. Never traverse a
+        // substituted link into an agent's session directory. Remaining raw
+        // capture leases expire independently in Ironwire's bounded spool.
+        let bundles = self.dir.join("token-bundles");
+        match std::fs::symlink_metadata(&bundles) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                std::fs::remove_dir_all(&bundles).context("removing token review journal")?
+            }
+            Ok(_) => std::fs::remove_file(&bundles).context("removing token review link")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("reading token review journal"),
+        }
         for name in [
             CONFIG_FILE,
             DEVICE_KEY_FILE,
@@ -592,6 +1008,11 @@ impl ConfigStore {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
+            STAGED_DEVICE_KEY_FILE,
+            IDENTITY_SWITCH_JOURNAL_FILE,
+            LEGACY_INVITE_LINK_FILE,
+            INVITE_SUBJECT_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -611,6 +1032,11 @@ impl ConfigStore {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
+            STAGED_DEVICE_KEY_FILE,
+            IDENTITY_SWITCH_JOURNAL_FILE,
+            LEGACY_INVITE_LINK_FILE,
+            INVITE_SUBJECT_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -652,17 +1078,118 @@ impl ConfigStore {
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::ConfigStore;
+    use sha2::Digest as _;
 
     pub(crate) fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        crate::daemon::cloud_credential_test_support::install(&store);
         (dir, store)
+    }
+
+    /// A wallet account in the shape V61 leaves behind: a tenant id and an
+    /// account anchor with no arithmetic relationship to each other.
+    ///
+    /// Returns `(tenant_id, anchor)`, where `anchor` is the 64 hex characters
+    /// an admission binding carries -- the stored `anchor_hash` without its
+    /// `sha256:` prefix.
+    ///
+    /// # Why this exists, and why writing the literal instead is a bug
+    ///
+    /// Four fixtures in this workspace built `format!("near-{}", anchor)`:
+    /// `daemon::approved_envelope`, `witness::transport`,
+    /// `daemon::admission_setup`, and `daemon::account_onboarding`. That is the
+    /// shape V58's `CHECK (tenant_id = 'near-' || substring(anchor_hash from
+    /// 8))` produced; V61 made the anchor a keyed blind index and the tenant id
+    /// 32 random bytes, and V62 dropped the constraint. Since then the two are
+    /// equal for no real account.
+    ///
+    /// A fixture in the old shape is not merely unrealistic -- it is the only
+    /// world in which the retired coupling holds, so a test written against it
+    /// **cannot fail** when production code still assumes that coupling. That
+    /// is not hypothetical: `verify_admission_context` read a tenant id as an
+    /// account anchor on the live upload path and refused every
+    /// admission-bearing submission, while
+    /// `signed_admission_must_match_our_account_challenge_and_exact_receipt` --
+    /// a test named for exactly that property, with a ten-field mutation matrix
+    /// over the evidence -- passed throughout, because its fixture supplied the
+    /// coupled pair. Correcting the fixture was the whole of what made it fail.
+    ///
+    /// # What the assertion below can and cannot catch
+    ///
+    /// Two independently drawn 32-byte values are never equal in practice, so
+    /// the check never fires on the values themselves. That is not what it is
+    /// for. It fires when a maintainer later edits **this function** to derive
+    /// one side from the other -- `format!("near-{anchor}")` being the obvious
+    /// and historically attested way to do it -- which is the mutation that
+    /// would silently re-couple every caller at once.
+    ///
+    /// It is containment rather than equality, matching
+    /// `near_account_identity::tenant_id_is_independent_of_every_public_input`
+    /// on the server side, so a tenant id that merely *embeds* the anchor is
+    /// caught too.
+    ///
+    /// It still cannot catch a derivation that transforms the anchor -- a
+    /// reversed or re-encoded digest would pass. Nothing cheap can, short of
+    /// the newtype in #794 that makes the coupling unrepresentable. So the
+    /// doc comment above, which names the sites and the failure, is doing more
+    /// of the work here than the assertion is; treat it as the primary control
+    /// and the assertion as the backstop, not the other way round.
+    pub(crate) fn v61_account() -> (String, String) {
+        let anchor = hex::encode(<[u8; 32]>::from(sha2::Sha256::digest(
+            uuid::Uuid::new_v4().as_bytes(),
+        )));
+        let tenant = format!(
+            "near-{}",
+            hex::encode(<[u8; 32]>::from(sha2::Sha256::digest(
+                uuid::Uuid::new_v4().as_bytes()
+            )))
+        );
+        assert!(
+            !tenant.contains(&anchor) && !anchor.contains(tenant.trim_start_matches("near-")),
+            "v61_account derived one side from the other; the whole point of \
+             this constructor is that a tenant id and an account anchor share \
+             no value. See #794."
+        );
+        (tenant, anchor)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// The constructor is a control, so it gets a test that can go red in
+        /// CI rather than only an assertion that fires if someone edits it.
+        ///
+        /// Modelled on the server's
+        /// `tenant_id_is_independent_of_every_public_input`: draw repeatedly,
+        /// and require that no draw repeats and that neither side ever
+        /// contains the other. A `v61_account` rewritten to couple the two
+        /// fails here, with a name that says what broke.
+        #[test]
+        fn v61_account_draws_the_two_halves_independently() {
+            let mut tenants = std::collections::BTreeSet::new();
+            let mut anchors = std::collections::BTreeSet::new();
+            for _ in 0..64 {
+                let (tenant, anchor) = super::v61_account();
+                let suffix = tenant
+                    .strip_prefix("near-")
+                    .expect("a wallet tenant id keeps the namespace consumers match on");
+                assert_eq!(suffix.len(), 64, "{tenant}");
+                assert_eq!(anchor.len(), 64, "{anchor}");
+                assert_ne!(suffix, anchor, "the two halves are the same value");
+                assert!(
+                    !tenant.contains(&anchor) && !anchor.contains(suffix),
+                    "one half embeds the other"
+                );
+                assert!(tenants.insert(tenant), "a tenant id repeated across draws");
+                assert!(anchors.insert(anchor), "an anchor repeated across draws");
+            }
+        }
     }
 }
 
 /// Write `body` to `path` atomically (temp file in the same dir, then
 /// rename), setting 0600 permissions on unix.
-fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .context("destination path has no file name")?
@@ -687,7 +1214,7 @@ fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
         tmp.sync_all()
             .with_context(|| format!("syncing temp file {}", tmp_path.display()))?;
     }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
+    if let Err(e) = durable_rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e)
             .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()));
@@ -695,11 +1222,191 @@ fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
+fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+// Test-only hook so a test can observe (and act on) a retry attempt
+// deterministically instead of racing a fixed sleep against the retry
+// budget. Thread-local: `cargo test` runs each test on its own thread, so
+// setting this on the test's thread does not leak into other tests.
+#[cfg(all(windows, test))]
+thread_local! {
+    static RETRY_OBSERVER: std::cell::RefCell<Option<Box<dyn FnMut(u32)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(windows)]
+fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // Windows readers and file scanners can briefly deny replacement. Retry
+    // only lock/access errors, preserving the old file and the same synced
+    // temporary file throughout. Permanent failures remain errors.
+    for attempt in 0..=10 {
+        // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers, alive
+        // throughout this synchronous call. Write-through completes publication
+        // before an old OS credential may be retired.
+        let moved = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+        if attempt == 10 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+            return Err(error);
+        }
+        #[cfg(test)]
+        RETRY_OBSERVER.with(|observer| {
+            if let Some(on_retry) = observer.borrow_mut().as_mut() {
+                on_retry(attempt);
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    unreachable!("the last attempt returns")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// Only scheme, host and port survive from `ingest_url`: not its path,
+    /// query, fragment, or any userinfo someone put in the configured string.
+    #[test]
+    fn ingest_origin_url_keeps_only_the_origin_of_the_ingest_url() {
+        for ingest in [
+            "https://commons.example/v1/traces",
+            "https://commons.example/v1/traces/",
+            "https://commons.example/v1/traces?x=1#frag",
+            "https://user:secret@commons.example/v1/traces",
+            "https://commons.example",
+        ] {
+            assert_eq!(
+                ingest_origin_url(ingest, "/v1/community/leaderboard")
+                    .unwrap()
+                    .as_str(),
+                "https://commons.example/v1/community/leaderboard",
+                "ingest_url = {ingest}"
+            );
+        }
+        assert_eq!(
+            ingest_origin_url("https://commons.example:8443/v1/traces", "/a?b=c")
+                .unwrap()
+                .as_str(),
+            "https://commons.example:8443/a?b=c"
+        );
+        assert!(ingest_origin_url("not a url", "/a").is_err());
+        assert!(ingest_origin_url("https://commons.example", "/a#frag").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_config_write_waits_for_a_windows_reader_to_release_the_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let (dir, store) = store();
+        let path = store.daemon_path("locked-config.json");
+        std::fs::write(&path, b"original").unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+
+        // Deterministic handoff: release the reader the first time the
+        // retry loop actually observes the lock (attempt 0), instead of
+        // racing a fixed sleep against the retry budget. A prior version of
+        // this test slept 100ms on the releasing thread against a ~550ms
+        // retry budget, which is not a safe margin on a loaded CI runner.
+        let released = std::rc::Rc::new(std::cell::Cell::new(false));
+        let released_flag = released.clone();
+        let reader_cell = std::cell::RefCell::new(Some(reader));
+        RETRY_OBSERVER.with(|observer| {
+            *observer.borrow_mut() = Some(Box::new(move |_attempt| {
+                if reader_cell.borrow_mut().take().is_some() {
+                    released_flag.set(true);
+                }
+            }));
+        });
+
+        write_atomic_0600(dir.path(), &path, b"replacement").unwrap();
+        RETRY_OBSERVER.with(|observer| *observer.borrow_mut() = None);
+
+        assert!(
+            released.get(),
+            "the retry loop never observed the lock to release it"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_config_write_returns_non_transient_windows_errors_without_retrying() {
+        // Renaming a source that does not exist raises ERROR_FILE_NOT_FOUND
+        // (2), which is not one of the retried codes (5, 32, 33). The retry
+        // loop must fail on the first attempt rather than spending the full
+        // retry budget on a permanent error.
+        let dir = tempfile::tempdir().unwrap();
+        let missing_source = dir.path().join("does-not-exist.tmp");
+        let destination = dir.path().join("destination.json");
+
+        let retries = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let retries_seen = retries.clone();
+        RETRY_OBSERVER.with(|observer| {
+            *observer.borrow_mut() = Some(Box::new(move |_attempt| {
+                retries_seen.set(retries_seen.get() + 1);
+            }));
+        });
+
+        let result = durable_rename(&missing_source, &destination);
+        RETRY_OBSERVER.with(|observer| *observer.borrow_mut() = None);
+
+        assert!(result.is_err(), "renaming a missing source must fail");
+        assert_eq!(
+            retries.get(),
+            0,
+            "a non-transient Windows error must not enter the retry loop"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_config_write_preserves_old_bytes_when_a_windows_reader_stays_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let (dir, store) = store();
+        let path = store.daemon_path("locked-config.json");
+        std::fs::write(&path, b"original").unwrap();
+        let _reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+        assert!(write_atomic_0600(dir.path(), &path, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -794,6 +1501,8 @@ mod tests {
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),
@@ -839,6 +1548,15 @@ mod tests {
         let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":[]}"#;
         let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
         assert!(!cfg.inference_receipt_check_attestation);
+    }
+
+    /// R7: a config written before the scope choice was recorded holds no
+    /// choice, so the Flow 1 grant stays refused until the picker runs.
+    #[test]
+    fn a_config_that_predates_the_scope_choice_record_holds_no_choice() {
+        let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
+        let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.consent_scopes_chosen);
     }
 
     #[test]
@@ -907,6 +1625,20 @@ mod tests {
     }
 
     #[test]
+    fn wipe_removes_token_reviews_and_preserves_agent_sources() {
+        let (_d, store) = store();
+        std::fs::create_dir_all(store.dir.join("token-bundles")).unwrap();
+        std::fs::write(store.dir.join("token-bundles/review.json"), b"private").unwrap();
+        std::fs::write(store.dir.join("agent-session.jsonl"), b"original").unwrap();
+        store.wipe().unwrap();
+        assert!(!store.dir.join("token-bundles").exists());
+        assert_eq!(
+            std::fs::read(store.dir.join("agent-session.jsonl")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
     fn wipe_removes_daemon_state() {
         // Daemon state outliving a logout would hand the next person to
         // enroll on this machine the previous contributor's auto-upload
@@ -920,6 +1652,7 @@ mod tests {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();
@@ -982,6 +1715,147 @@ mod tests {
         );
     }
 
+    /// The endpoint a contributor has no basis to type arrives from the
+    /// commons, exactly as the witness already does. The environment stays
+    /// ahead of it so an operator running the daemon on a host they control
+    /// keeps the last word.
+    #[test]
+    fn an_operator_environment_endpoint_outranks_the_published_one() {
+        let operator = HostAllowlist::from_csv("receipts.example");
+        let derived = HostAllowlist::from_csv("published.example");
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                None,
+                Some("https://receipts.example/v1"),
+                &operator,
+                Some("https://published.example/v1"),
+                &derived
+            )
+            .as_deref(),
+            Some("https://receipts.example/v1")
+        );
+    }
+
+    /// The whole point: a contributor who exported nothing still ends up with
+    /// an endpoint.
+    #[test]
+    fn a_published_endpoint_is_adopted_when_the_environment_says_nothing() {
+        let derived = HostAllowlist::from_csv("published.example");
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                None,
+                None,
+                &HostAllowlist::permissive(),
+                Some("https://published.example/v1"),
+                &derived
+            )
+            .as_deref(),
+            Some("https://published.example/v1"),
+            "a published value is vetted by the list its own source derived, not by the \
+             environment list that happens to be permissive on every shipped app"
+        );
+    }
+
+    /// A saved endpoint is a decision already taken -- by an operator, or by
+    /// an earlier signup. Adoption fills a hole; it does not overwrite an
+    /// answer.
+    #[test]
+    fn an_endpoint_already_saved_is_never_replaced() {
+        let allowed = HostAllowlist::from_csv("receipts.example,published.example");
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                Some("https://receipts.example/v1"),
+                Some("https://published.example/v1"),
+                &allowed,
+                Some("https://published.example/v1"),
+                &allowed
+            ),
+            None,
+            "nothing to adopt means nothing to write"
+        );
+    }
+
+    /// The commons publishes this value and the commons is not trusted to
+    /// pick it: a published endpoint runs the same gauntlet an operator's
+    /// does, against the list its own source derived, or it is not adopted.
+    #[test]
+    fn a_published_endpoint_the_derived_list_refuses_is_not_adopted() {
+        let derived = HostAllowlist::from_csv("published.example");
+        for refused in [
+            "http://published.example/v1",
+            "https://elsewhere.example/v1",
+            "https://user:secret@published.example/v1",
+            "https://published.example/v1?token=secret",
+            "https://published.example/v1#fragment",
+            "not a URL",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                receipt_endpoint_to_adopt(
+                    None,
+                    None,
+                    &HostAllowlist::permissive(),
+                    Some(refused),
+                    &derived
+                ),
+                None,
+                "{refused} was adopted"
+            );
+        }
+    }
+
+    /// The gate that would otherwise be decorative.
+    ///
+    /// If a published endpoint were vetted by the environment allowlist, it
+    /// would be vetted by nothing on every machine where no operator set
+    /// `TRACE_COMMONS_ALLOWED_HOSTS` -- which is the default for every shipped
+    /// app. A non-enforcing list must refuse, not wave through.
+    #[test]
+    fn a_permissive_list_admits_no_endpoint_from_either_source() {
+        let permissive = HostAllowlist::permissive();
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                None,
+                None,
+                &permissive,
+                Some("https://whatever-the-server-said.example/v1"),
+                &permissive
+            ),
+            None,
+            "a capabilities response would otherwise name any host it liked"
+        );
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                None,
+                Some("https://receipts.example/v1"),
+                &permissive,
+                None,
+                &permissive
+            ),
+            None
+        );
+    }
+
+    /// An operator endpoint is validated too, and is refused rather than
+    /// silently falling through to the published one: a typo in an operator's
+    /// own variable must not quietly hand the choice back to the server.
+    #[test]
+    fn a_bad_environment_endpoint_does_not_fall_through_to_the_published_one() {
+        let operator = HostAllowlist::from_csv("receipts.example");
+        let derived = HostAllowlist::from_csv("published.example");
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                None,
+                Some("http://typo.example/v1"),
+                &operator,
+                Some("https://published.example/v1"),
+                &derived
+            ),
+            None
+        );
+    }
+
     // `inference_receipt_check_attestation_from_env` reads process-wide env;
     // serialize the mutating tests so they do not race each other.
     static ATTESTATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1019,5 +1893,153 @@ mod tests {
 
         set_attestation_env(None);
         assert!(!inference_receipt_check_attestation_from_env());
+    }
+
+    // -----------------------------------------------------------------
+    // Where the witness came from (K11 of the connect-and-forget design)
+    // -----------------------------------------------------------------
+
+    fn origin_witness(url: &str) -> WitnessSettings {
+        WitnessSettings {
+            admission_evidence: false,
+            url: url.into(),
+            signing_address: "0xab".into(),
+            expected_measurements: vec!["mrtd=aa".into()],
+        }
+    }
+
+    #[test]
+    fn no_witness_has_no_origin() {
+        assert_eq!(sample_config().witness_origin_view(), None);
+    }
+
+    #[test]
+    fn a_witness_set_with_an_origin_reports_that_origin() {
+        for origin in [
+            WitnessOrigin::PublishedAtJoin,
+            WitnessOrigin::ConnectedInference,
+            WitnessOrigin::Settings,
+            WitnessOrigin::Environment,
+        ] {
+            let mut cfg = sample_config();
+            cfg.set_witness(origin_witness("https://w.example"), origin);
+            assert_eq!(
+                cfg.witness_origin_view(),
+                Some(WitnessOriginView::Recorded(origin))
+            );
+        }
+    }
+
+    /// A config written before the record existed, or a witness written by
+    /// a path that does not record one, is not attributed to anything.
+    #[test]
+    fn a_witness_without_a_record_is_not_recorded_never_guessed() {
+        let mut cfg = sample_config();
+        cfg.witness = Some(origin_witness("https://w.example"));
+        assert_eq!(
+            cfg.witness_origin_view(),
+            Some(WitnessOriginView::NotRecorded)
+        );
+    }
+
+    /// The record names the witness it was written for. A witness changed
+    /// by a path that does not record an origin must not inherit the old
+    /// one: that would tell a contributor the commons published a witness
+    /// somebody typed in.
+    #[test]
+    fn a_witness_changed_behind_the_record_is_not_recorded() {
+        let mut cfg = sample_config();
+        cfg.set_witness(
+            origin_witness("https://w.example"),
+            WitnessOrigin::PublishedAtJoin,
+        );
+        for change in [
+            |w: &mut WitnessSettings| w.url = "https://other.example".into(),
+            |w: &mut WitnessSettings| w.signing_address = "0xcd".into(),
+            |w: &mut WitnessSettings| w.expected_measurements.push("mrtd=bb".into()),
+        ] {
+            let mut changed = cfg.clone();
+            change(changed.witness.as_mut().unwrap());
+            assert_eq!(
+                changed.witness_origin_view(),
+                Some(WitnessOriginView::NotRecorded)
+            );
+        }
+        // Admission evidence is a mode of the same witness, not a new one.
+        let mut toggled = cfg.clone();
+        toggled.witness.as_mut().unwrap().admission_evidence = true;
+        assert_eq!(
+            toggled.witness_origin_view(),
+            Some(WitnessOriginView::Recorded(WitnessOrigin::PublishedAtJoin))
+        );
+    }
+
+    #[test]
+    fn an_environment_witness_is_recorded_as_environment() {
+        assert_eq!(environment_witness_origin(None), None);
+        let witness = origin_witness("https://w.example");
+        let mut cfg = sample_config();
+        cfg.witness_origin = environment_witness_origin(Some(&witness));
+        cfg.witness = Some(witness);
+        assert_eq!(
+            cfg.witness_origin_view(),
+            Some(WitnessOriginView::Recorded(WitnessOrigin::Environment))
+        );
+    }
+
+    #[test]
+    fn origin_labels_round_trip_and_an_unknown_one_is_not_guessed() {
+        for view in [
+            WitnessOriginView::Recorded(WitnessOrigin::PublishedAtJoin),
+            WitnessOriginView::Recorded(WitnessOrigin::ConnectedInference),
+            WitnessOriginView::Recorded(WitnessOrigin::Settings),
+            WitnessOriginView::Recorded(WitnessOrigin::Environment),
+            WitnessOriginView::NotRecorded,
+        ] {
+            let wire = serde_json::to_value(view).unwrap();
+            assert_eq!(wire, serde_json::json!(view.label()));
+            assert_eq!(
+                serde_json::from_value::<WitnessOriginView>(wire).unwrap(),
+                view
+            );
+        }
+        assert_eq!(WitnessOriginView::from_label("operator"), None);
+    }
+
+    #[test]
+    fn clearing_the_witness_clears_its_origin() {
+        let mut cfg = sample_config();
+        cfg.set_witness(origin_witness("https://w.example"), WitnessOrigin::Settings);
+        cfg.clear_witness();
+        assert!(cfg.witness.is_none());
+        assert!(cfg.witness_origin.is_none());
+        assert_eq!(cfg.witness_origin_view(), None);
+    }
+
+    #[test]
+    fn the_origin_record_round_trips_and_is_absent_from_an_old_file() {
+        let (_d, store) = store();
+        let mut cfg = sample_config();
+        cfg.set_witness(
+            origin_witness("https://w.example"),
+            WitnessOrigin::ConnectedInference,
+        );
+        store.save_config(&cfg).unwrap();
+        let loaded = store.load_config().unwrap().unwrap();
+        assert_eq!(
+            loaded.witness_origin_view(),
+            Some(WitnessOriginView::Recorded(
+                WitnessOrigin::ConnectedInference
+            ))
+        );
+        // A config with no witness writes no key, so a file an older
+        // release reads is byte-for-byte what it would have written.
+        let plain = serde_json::to_value(sample_config()).unwrap();
+        assert!(plain.get("witness_origin").is_none());
+        // The record holds a digest, never the URL or signing address.
+        let value = serde_json::to_value(&cfg).unwrap();
+        let record = value["witness_origin"].to_string();
+        assert!(!record.contains("w.example"), "{record}");
+        assert!(!record.contains("0xab"), "{record}");
     }
 }

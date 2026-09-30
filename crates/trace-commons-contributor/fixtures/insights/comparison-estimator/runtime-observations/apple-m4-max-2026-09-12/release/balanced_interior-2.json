@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "case": "balanced_interior",
+  "first_total": 128,
+  "first_outcomes": [
+    43,
+    43,
+    42
+  ],
+  "second_total": 128,
+  "second_outcomes": [
+    43,
+    43,
+    42
+  ],
+  "candidate_elapsed_nanos": 11177458,
+  "evaluation": {
+    "status": "supported",
+    "contrasts": [
+      {
+        "lower_millionths": -224617,
+        "upper_millionths": 224617,
+        "width_millionths": 449234,
+        "decision": "includes_zero"
+      },
+      {
+        "lower_millionths": -224617,
+        "upper_millionths": 224617,
+        "width_millionths": 449234,
+        "decision": "includes_zero"
+      },
+      {
+        "lower_millionths": -223359,
+        "upper_millionths": 223359,
+        "width_millionths": 446718,
+        "decision": "includes_zero"
+      }
+    ]
+  }
+}

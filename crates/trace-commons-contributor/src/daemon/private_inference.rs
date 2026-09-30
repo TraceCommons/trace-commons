@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ironwire_proxy::embed::{
-    self, EmbedError, EmbedOptions, EmbeddedProxy, ExitError, StartupProbes, UpdateChecks,
+    self, CredentialFiles, EmbedError, EmbedOptions, EmbeddedProxy, ExitError, HostSecret,
+    StartupProbes, UpdateChecks,
 };
 
 /// How long a liveness probe of an existing instance may take.
@@ -391,11 +392,69 @@ pub(crate) fn effective_metadata_declaration(
 /// It is not a network kill switch and must not be described as one. A
 /// contributor who declares a backend still gets one probe per declared
 /// backend at startup, by their own choice.
-fn embed_options() -> EmbedOptions {
-    EmbedOptions::default()
+/// The credential argument is the daemon's NEAR AI inference key, or `None`
+/// when the contributor has not obtained one.
+///
+/// `None` is not "a source that answers nothing" -- it is *no source*, and
+/// the difference is the whole reason this takes an `Option` rather than
+/// always installing a closure. A source is a claim of ownership over every
+/// name, so installing one that answers nothing would leave IronWire unable
+/// to read a name it would otherwise have found for itself.
+///
+/// When a key *is* present, the closure answers exactly one name and nothing
+/// else. It cannot answer for a subscription: those are key-less by
+/// construction, a Claude Code or Codex login being a token in a file rather
+/// than a value any name-keyed source can supply.
+///
+/// Which is why the key arm also selects [`CredentialFiles::Discover`], and
+/// that pairing is the load-bearing part of this function. IronWire's
+/// `credentials` field used to be one switch governing two questions -- whose
+/// answers count for a name, *and* whether the credential files Claude Code
+/// and Codex write may be read at all -- so supplying any source turned the
+/// second off. Under that API a contributor who obtained a NEAR AI key would
+/// have had their working Claude subscription silently stop being a
+/// destination, and nothing would have announced it: the NEAR AI backend is
+/// registered unconditionally, key or no key, so the registry is never empty,
+/// `StartupReport::no_backends` never fires, and the daemon goes on reporting
+/// `running` while answering from fewer backends than the contributor has.
+/// ironwire#53 separated the two questions for exactly this case. We answer
+/// the one name we hold a key for; every login the contributor already had
+/// goes on answering for itself.
+///
+/// Selecting `Discover` is an acceptance, not a free win: a request can go to
+/// a backend registered from a login this daemon never named. That is the
+/// right trade here, because those destinations are ones the contributor set
+/// up deliberately and had before this switch existed -- taking them away is
+/// the change that would need consent, not leaving them.
+///
+/// The name half deliberately does not move with it. Under `Discover` the
+/// process environment is still not consulted, so a stray `ANTHROPIC_API_KEY`
+/// in the daemon's environment still registers nothing; only the files on
+/// disk are read.
+///
+/// Nothing here can leak the key. `HostSecret` has no `Debug` and zeroes on
+/// drop, and `EmbedOptions`' own `Debug` renders this field as "host-owned"
+/// or "discovered" and never a value.
+fn embed_options(credential: Option<HostSecret>) -> EmbedOptions {
+    let base = EmbedOptions::default()
         .with_update_checks(UpdateChecks::Off)
-        .with_startup_probes(StartupProbes::Configured)
+        .with_startup_probes(StartupProbes::Configured);
+    match credential {
+        Some(key) => base
+            .with_credentials(move |name| (name == NEAR_AI_CREDENTIAL_NAME).then(|| key.clone()))
+            .with_credential_files(CredentialFiles::Discover),
+        None => base,
+    }
 }
+
+/// The one environment name this daemon will ever answer for IronWire.
+///
+/// It is answered through the credential source rather than by setting the
+/// variable, and that is a decision rather than a preference: `set_var` is
+/// `unsafe` in Rust 2024, and a credential placed in this process's
+/// environment is readable by every other thing running in the daemon,
+/// including code we did not write.
+const NEAR_AI_CREDENTIAL_NAME: &str = "NEARAI_API_KEY";
 
 /// One daemon's private-inference instance: at most one proxy, and the state
 /// the daemon reports for it.
@@ -425,12 +484,24 @@ pub struct PrivateInference {
     /// later -- taking every one of the proxy's tasks with it while the
     /// response says `running`. That path sets this.
     runtime: Option<tokio::runtime::Handle>,
+    /// The NEAR AI inference key to answer with, when the contributor has
+    /// one. Read from settings on each reconcile pass rather than captured at
+    /// construction, because a ceremony can complete while the daemon runs.
+    /// A change takes effect at the next start: IronWire reads its
+    /// credentials once, when the registry is built.
+    credential: Option<HostSecret>,
+    token_capture_enabled: Option<bool>,
     state: PrivateInferenceState,
     /// A proxy this daemon started has ended on its own. Sticky until the
     /// switch is turned off and on again: restarting it every poll tick
     /// would hide a proxy that cannot stay up behind a state that keeps
     /// flickering back to green.
     crashed: bool,
+    /// How many proxies this instance has started, for [`Self::starts`].
+    /// Test-only: nothing in production asks, and a field written and never
+    /// read is exactly what the warnings-as-errors build refuses.
+    #[cfg(test)]
+    starts: u64,
 }
 
 /// Why a start did not produce a proxy.
@@ -463,8 +534,12 @@ impl PrivateInference {
             recovery_requested: false,
             requested_generation: None,
             runtime: None,
+            credential: None,
+            token_capture_enabled: None,
             state: PrivateInferenceState::Off,
             crashed: false,
+            #[cfg(test)]
+            starts: 0,
         }
     }
 
@@ -522,6 +597,48 @@ impl PrivateInference {
         self.runtime = runtime;
     }
 
+    /// Hand the proxy the credential it should answer `NEARAI_API_KEY` with,
+    /// or `None` when the contributor has obtained none.
+    ///
+    /// Called on every reconcile pass, from the same read of settings that
+    /// decides whether the proxy runs at all, so a ceremony that completes
+    /// mid-run is picked up without restarting the daemon. It takes effect at
+    /// the proxy's next start, because IronWire resolves its credentials once,
+    /// while building the registry.
+    ///
+    /// That next start is not left to chance. Handing the key to this
+    /// instance and stopping there is what made a completed ceremony change
+    /// nothing a contributor could see: `DaemonShared` advances the
+    /// private-inference generation when the stored credential changes, and
+    /// [`Self::accept_generation`] turns that into the stop-and-start that
+    /// actually rebuilds the registry.
+    pub fn set_token_capture(&mut self, enabled: Option<bool>) {
+        self.token_capture_enabled = enabled;
+    }
+
+    pub fn set_credential(&mut self, credential: Option<HostSecret>) {
+        self.credential = credential;
+    }
+
+    /// Whether a credential is held, for the reconcile test that proves one
+    /// reaches here from settings. Presence only; the value never leaves.
+    #[cfg(test)]
+    pub(crate) fn holds_credential(&self) -> bool {
+        self.credential.is_some()
+    }
+
+    /// How many proxies this instance has started.
+    ///
+    /// Counted unconditionally and read only by tests, because a restart is
+    /// otherwise observable only as a new ephemeral port -- and a port the
+    /// kernel happens to hand back is a test that passes by luck. The
+    /// question "did the key reach IronWire" is answerable only by "was the
+    /// registry built again", and this is that.
+    #[cfg(test)]
+    pub(crate) fn starts(&self) -> u64 {
+        self.starts
+    }
+
     /// Whether accepted settings superseded the request this instance observed.
     pub(crate) fn accept_generation(&mut self, generation: u64) -> bool {
         let changed = self
@@ -566,6 +683,30 @@ impl PrivateInference {
     #[must_use]
     pub fn state(&self) -> PrivateInferenceState {
         self.state.clone()
+    }
+
+    /// Stop, and where it is safe to, finish stopping -- so the caller's
+    /// following `apply(true)` starts a new proxy on this pass rather than
+    /// finding a shutdown in flight and declining.
+    ///
+    /// The drain is conditional and the condition is the whole point.
+    /// `apply(false)` spawns the shutdown and returns precisely so a stop
+    /// cannot park the daemon's lifecycle lock on a future with no deadline
+    /// of its own, and the future it would park on is real: a shutdown task
+    /// built over a *pending start* awaits that start first, and a start
+    /// awaits IronWire binding a port. Waiting for that here would wedge the
+    /// pass, and with it every later one.
+    ///
+    /// So this drains only when what is being stopped is a proxy that is
+    /// already running and nothing else is in flight -- a plain
+    /// `proxy.shutdown()`, which ends on its own. Every other shape falls
+    /// back to the two-pass cycle each generation change has always had.
+    pub(crate) async fn cycle(&mut self) {
+        let drainable = self.proxy.is_some() && self.starting.is_none() && self.stopping.is_none();
+        self.apply(false).await;
+        if drainable {
+            self.finish_stop().await;
+        }
     }
 
     /// Bring the instance in line with the switch. Idempotent both ways.
@@ -715,14 +856,22 @@ impl PrivateInference {
     /// A missing adopted runtime uses the caller's current runtime, as before.
     async fn start_proxy(&mut self) -> Result<EmbeddedProxy, StartRefusal> {
         if self.starting.is_none() {
+            #[cfg(test)]
+            {
+                self.starts += 1;
+            }
             let runtime = self
                 .runtime
                 .clone()
                 .unwrap_or_else(tokio::runtime::Handle::current);
             let home = self.home.clone();
             let port = self.port;
+            let credential = self.credential.clone();
+            let capture_enabled = self.token_capture_enabled;
             self.starting = Some(runtime.spawn(async move {
-                embed::start_with_options(&home, port, embed_options(), |_, _| {}).await
+                let mut options = embed_options(credential);
+                options.token_capture_enabled = capture_enabled;
+                embed::start_with_options(&home, port, options, |_, _| {}).await
             }));
         }
         // Await through the retained handle. Canceling a caller leaves the
@@ -804,6 +953,41 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Start against a home whose previous owner has released it.
+    ///
+    /// IronWire's home guard closes its lock descriptor without first calling
+    /// `flock(LOCK_UN)`, and `flock` ownership belongs to the open file
+    /// description rather than to the descriptor: `fork` duplicates it and
+    /// `O_CLOEXEC` only takes effect at the following `exec`, so a child that
+    /// any other test in this binary spawns carries a copy of that descriptor
+    /// and keeps the lock held past the release. Closing is not a release
+    /// there, and the first acquisition afterwards can see `WouldBlock` with
+    /// no owner at all.
+    ///
+    /// Retrying does not soften what is being asserted. Ownership that really
+    /// was retained is held by a live proxy and never frees, so a bounded
+    /// retry still fails; only an inherited descriptor on its way to `exec`
+    /// clears. See `HeldLock` in `compute::process` for the release this
+    /// upstream guard is missing.
+    ///
+    /// This is a workaround with an expiry condition, not a permanent shape:
+    /// nearai/ironwire#54 adds the missing `unlock` to that guard. Remove this
+    /// helper and go back to a plain `embed::start(...).unwrap()` when that
+    /// merges and the pin moves.
+    async fn start_once_the_home_is_free(home: &Path) -> EmbeddedProxy {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match embed::start(home, Some(0)).await {
+                Ok(proxy) => return proxy,
+                Err(EmbedError::Lock { port }) if tokio::time::Instant::now() < deadline => {
+                    assert_eq!(port, 0, "a live owner published a port, so it is not free");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("the released home never became startable: {error:?}"),
+            }
+        }
+    }
+
     /// Counts every event IronWire's catalog refresh emits, and nothing else.
     ///
     /// The refresh logs on both outcomes -- applied, unchanged, or skipped
@@ -833,11 +1017,65 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
+    /// Without a key of ours, IronWire must be left entirely on its own
+    /// discovery -- and with one, we must answer that one name and no other
+    /// while every destination the contributor already had keeps answering.
+    ///
+    /// The file half is the load-bearing one and the least obvious. Handing
+    /// IronWire a credential source is a claim of ownership over every name,
+    /// and it used to carry a second meaning with it: reading of the
+    /// credential files Claude Code and Codex write was turned off with it,
+    /// so obtaining a NEAR AI key would have cost a contributor their working
+    /// subscription. Nothing would have reported it, either -- the NEAR AI
+    /// backend is registered whether or not a key was found, so the registry
+    /// is never empty and the state stays `running`. `CredentialFiles`
+    /// separates the two questions; this pins that we answer them separately.
+    #[test]
+    fn no_key_of_ours_leaves_every_other_destination_alone() {
+        assert!(
+            embed_options(None).credentials.is_none(),
+            "a contributor with no key of ours must reach IronWire's own \
+             discovery, or their Claude and Codex subscriptions stop \
+             answering with nothing to say so"
+        );
+        assert_eq!(
+            embed_options(None).credential_files,
+            CredentialFiles::FollowCredentialOwner,
+            "with no source of ours, IronWire owns the names, and following \
+             that owner is what reads the files"
+        );
+
+        let options = embed_options(Some(HostSecret::from("sk-minted".to_string())));
+        assert_eq!(
+            options.credential_files,
+            CredentialFiles::Discover,
+            "holding a key of ours must not cost a contributor the Claude or \
+             Codex login they already had -- those are files, not names, and \
+             no source of ours can answer for them"
+        );
+        let source = options
+            .credentials
+            .as_ref()
+            .expect("a held key is answered for");
+        assert!(source(NEAR_AI_CREDENTIAL_NAME).is_some());
+        // Exactly one name. Answering a second would put this daemon in the
+        // path of a credential it never obtained and does not own.
+        for other in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "NEARAI_API_KEY_2",
+            "nearai_api_key",
+            "",
+        ] {
+            assert!(source(other).is_none(), "{other}");
+        }
+    }
+
     /// The choices, stated once, so a later edit that quietly widens them
     /// fails here rather than on a contributor's machine.
     #[test]
     fn the_daemon_declines_both_kinds_of_request_it_never_asked_for() {
-        let options = embed_options();
+        let options = embed_options(None);
         assert_eq!(
             options.update_checks,
             UpdateChecks::Off,
@@ -901,7 +1139,7 @@ mod tests {
         let config = home.path().join("config.toml");
         std::fs::write(&config, "[updates]\ncheck = true\n").unwrap();
 
-        let proxy = embed::start_with_options(home.path(), Some(0), embed_options(), |_, _| {})
+        let proxy = embed::start_with_options(home.path(), Some(0), embed_options(None), |_, _| {})
             .await
             .expect("start");
         assert!(
@@ -1087,7 +1325,7 @@ mod tests {
         assert!(!home.path().join("endpoint.json").exists());
         // Reusing the isolated home proves the late startup's ownership was
         // released; it cannot leave a server or home lock behind after Off.
-        let next = embed::start(home.path(), Some(0)).await.unwrap();
+        let next = start_once_the_home_is_free(home.path()).await;
         next.shutdown().await;
     }
 
@@ -1372,30 +1610,86 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         write_pointer(home.path(), listener.local_addr().unwrap().port());
+        // The child, not a clock, decides when waiting is pointless.
+        //
+        // This loop used to stop after a hard ten seconds measured from before
+        // the child was even spawned, so the budget covered process creation,
+        // the Windows loader, libtest startup over ~1700 test names and the
+        // tokio runtime build -- and only its last two seconds covered the
+        // probe being measured. On a loaded windows-latest runner the setup
+        // consumed it, the listener was dropped while the child was still
+        // starting, and the child's probe was then refused by a socket that no
+        // longer existed. The test could not tell its own timeout apart from
+        // the regression it exists to catch, and reported the regression. See
+        // #780.
+        //
+        // Waiting for the child instead is bounded without being timed: the
+        // child's probe carries PROBE_TIMEOUT, so it always exits. A slow
+        // runner keeps it alive and cannot fail this test; a child that reached
+        // a proxy instead of loopback gets an immediate refusal from
+        // 127.0.0.1:1, exits, and ends the wait at once. Nothing here needs to
+        // guess how long a runner takes to start a process.
+        //
+        // Note this removes no protection against a child that hangs forever:
+        // the parent's wait below is unbounded and always was, so the old
+        // deadline never bounded the suite's runtime. It only decided when to
+        // stop listening, which is the whole defect.
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_finished = std::sync::Arc::clone(&finished);
         let responder = std::thread::spawn(move || {
             use std::io::Write;
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                if let Ok((mut stream, _)) = listener.accept() {
+            let answer = |listener: &std::net::TcpListener| match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // A socket accepted from a non-blocking listener inherits
+                    // O_NONBLOCK on macOS and the BSDs. That made the read
+                    // timeout below inert and the read return WouldBlock the
+                    // instant the connection completed -- which is at the
+                    // handshake, before the child has put its GET on the wire.
+                    // Answering there and returning dropped the stream and
+                    // closed the connection under a request still being sent,
+                    // so the child's send() failed, existing_instance returned
+                    // None, and the test reported the regression it exists to
+                    // catch. Under load the child is slower to write and the
+                    // window widens. Blocking mode makes the timeout real, so
+                    // the request is waited for rather than raced. See #780.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
-                    let mut request = [0; 1024];
-                    let _ = stream.read(&mut request);
+                    // Answer a whole request head, not whatever happens to
+                    // have arrived: a partial read is the same race one buffer
+                    // further along.
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => request.extend_from_slice(&chunk[..read]),
+                        }
+                    }
                     stream
                         .write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         )
                         .unwrap();
+                    true
+                }
+                Err(_) => false,
+            };
+            loop {
+                if answer(&listener) {
                     return true;
                 }
-                if std::time::Instant::now() >= deadline {
-                    return false;
+                if child_finished.load(std::sync::atomic::Ordering::SeqCst) {
+                    // The kernel keeps a completed connection in the backlog
+                    // after its peer is gone, so the last poll has to happen
+                    // after the exit is observed rather than before it.
+                    return answer(&listener);
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "daemon::private_inference::tests::discovery_probe_ignores_environment_proxy_in_isolated_process", "--nocapture"])
             .env(CHILD, home.path())
             .env("HTTP_PROXY", "http://127.0.0.1:1")
@@ -1404,7 +1698,12 @@ mod tests {
             .env("all_proxy", "http://127.0.0.1:1")
             .env("NO_PROXY", "")
             .env("no_proxy", "")
-            .output().unwrap();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
         let answered = responder.join().unwrap();
         assert!(
             output.status.success(),
@@ -1452,11 +1751,25 @@ mod tests {
             PrivateInferenceState::Running { port } => port,
             other => panic!("expected Running, got {other:?}"),
         };
-        assert!(
-            reqwest::get(format!("http://127.0.0.1:{port}/_ironwire/health"))
-                .await
-                .is_ok_and(|r| r.status().is_success())
-        );
+        let http = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let health = http
+            .get(format!("http://127.0.0.1:{port}/_ironwire/health"))
+            .send()
+            .await
+            .unwrap();
+        assert!(health.status().is_success());
+        health.bytes().await.unwrap();
+        drop(http);
+        // Close the fixture's client connection before stopping the listener.
+        // Otherwise Windows may keep the accepted socket's port in TIME_WAIT
+        // even after the owner correctly joins and drops its listener.
+        #[cfg(windows)]
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        #[cfg(not(windows))]
+        tokio::task::yield_now().await;
 
         host.apply(false).await;
         assert!(host.finish_stop().await);

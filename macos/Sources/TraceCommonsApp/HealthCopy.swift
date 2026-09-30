@@ -51,6 +51,35 @@ struct HealthCopy: Equatable {
         )
     }
 
+    /// The banner for approved sessions held because the privacy witness is
+    /// busy, built from `status.witness_capacity` in the Rust's words
+    /// (`tc_witness_capacity_notice`): the title, the counted body, and the
+    /// next try in local time when the daemon gave one.
+    ///
+    /// Separate from `forLabel` for the reason `forBudget` is: the health
+    /// slot can be held by a higher label, and the sessions are still
+    /// waiting. Nil when nothing is waiting or the notice cannot be read --
+    /// the label, if it holds the slot, then falls back to `forLabel`'s
+    /// on-hold line rather than disappearing.
+    ///
+    /// `.waiting`: nothing is broken, nothing left the machine, and the
+    /// daemon retries on its own.
+    static func forWitnessCapacity(_ capacity: WitnessCapacity) -> HealthCopy? {
+        guard capacity.waiting,
+            let json = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: capacity.wireJSON),
+            let notice = WitnessCapacityNotice.decode(fromJSON: json)
+        else { return nil }
+        let detail = [notice.body, notice.nextRetryLine(for: capacity)]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+        return HealthCopy(
+            title: notice.title,
+            detail: detail,
+            severity: .waiting,
+            actionTitle: nil
+        )
+    }
+
     static func forLabel(_ label: String) -> HealthCopy {
         switch label {
         case "not-logged-in":
@@ -166,26 +195,6 @@ enum QueueStateCopy {
             This session changed after you approved it, so it was not sent. A \
             fresh copy is waiting for a new decision.
             """
-        }
-    }
-}
-
-/// Plain-English reasons for `queue_outcome_counts`. It covers entries that
-/// ARE on the queue -- it cannot explain a session the watcher discarded
-/// before an entry existed, and this UI does not claim otherwise.
-enum OutcomeCopy {
-    static func sentence(for label: String) -> String {
-        switch label {
-        case "dismissed-by-contributor": return "You said no thanks"
-        case "expired-without-decision": return "Waited too long without a decision"
-        case "session-changed-after-offer": return "Changed after it was offered"
-        case "not-logged-in": return "Waiting until you reconnect"
-        case "daily-cap-reached": return "Waiting for tomorrow's allowance"
-        case "queue-full": return "Queue was full"
-        case "ingest-unreachable", "claim-mint-failed": return "Trace Commons was unreachable"
-        case "pii-filter-unavailable": return "Waiting for the extra privacy scan"
-        case "privacy-filter-canary-failed": return "The privacy scan failed its self-test"
-        default: return "Held"
         }
     }
 }

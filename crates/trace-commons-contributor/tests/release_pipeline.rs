@@ -322,6 +322,111 @@ fn release_tags_are_checked_against_the_versions_the_binaries_report() {
     );
 }
 
+/// release-apps.yml gained the same pre-flight release-contributor.yml has
+/// had since it was written, but with its OWN credential list. Before it, a
+/// missing HOMEBREW_TAP_TOKEN first surfaced at the cask bump inside
+/// `publish` -- after a notarized DMG, a signed MSIX and two GCS buckets had
+/// already moved.
+///
+/// The list is not release-contributor's: this workflow never reads
+/// WINGET_PKGS_TOKEN, and its update manifests fetch their signing key from
+/// Secret Manager rather than from vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX.
+/// Requiring either would fail releases over configuration nothing in the
+/// file consumes, so this test asserts their ABSENCE as firmly as it asserts
+/// the presence of the rest.
+#[test]
+fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
+    let apps = read(".github/workflows/release-apps.yml");
+    assert!(
+        apps.contains("missing configuration"),
+        "release-apps.yml must refuse a tag push with missing configuration"
+    );
+
+    // Comments stripped throughout: the pre-flight's own comment names the
+    // two credentials it deliberately excludes, and a naive `contains` would
+    // read that explanation as the violation it warns against.
+    let apps_code = executable_text(&apps);
+
+    // Every secret and variable release-apps.yml actually consumes.
+    for required in [
+        "MACOS_CERTIFICATE_P12_BASE64",
+        "MACOS_CERTIFICATE_PASSWORD",
+        "MACOS_SIGNING_IDENTITY",
+        "MACOS_NOTARY_ASC_KEY_P8_BASE64",
+        "MACOS_NOTARY_ASC_KEY_ID",
+        "MACOS_NOTARY_ASC_ISSUER_ID",
+        "SPARKLE_PUBLIC_ED_KEY",
+        "AZURE_SIGNING_CLIENT_ID",
+        "AZURE_SIGNING_TENANT_ID",
+        "AZURE_SIGNING_SUBSCRIPTION_ID",
+        "AZURE_SIGNING_ENDPOINT",
+        "AZURE_SIGNING_ACCOUNT",
+        "AZURE_SIGNING_PROFILE",
+        "GCP_WIF_PROVIDER",
+        "GCP_FLATPAK_PUBLISHER_SA",
+        "HOMEBREW_TAP_TOKEN",
+    ] {
+        // Twice at minimum: once in the pre-flight's env block, once where it
+        // is spent. A name that appears only at the point of use is a
+        // credential the pre-flight does not cover.
+        assert!(
+            apps_code.matches(required).count() >= 2,
+            "release-apps.yml spends {required} but its release-config \
+             pre-flight does not check for it"
+        );
+    }
+
+    for absent in ["WINGET_PKGS_TOKEN", "TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX"] {
+        assert!(
+            !apps_code.contains(absent),
+            "release-apps.yml must not require {absent} -- nothing in this \
+             workflow reads it, and demanding it would fail releases over \
+             configuration that belongs to release-contributor.yml"
+        );
+    }
+
+    // The AZURE_SIGNING_* values are environment variables on `release`, so a
+    // pre-flight job without the environment reads them as empty and refuses
+    // every release. This is the single line that keeps the pre-flight from
+    // being a permanent outage rather than a guard.
+    //
+    // Sliced out of apps_code, not apps: the job's own comment quotes
+    // `environment: release` while explaining why it is there, so the same
+    // assertion over the raw file would hold with the declaration deleted.
+    let config_start = apps_code
+        .find("  release-config:")
+        .expect("release-apps.yml must have a release-config job");
+    let config_job = &apps_code[config_start..];
+    let config_job = &config_job[..config_job.find("\n  version:").unwrap_or(config_job.len())];
+    assert!(
+        config_job.contains("environment: release"),
+        "the release-config job must declare `environment: release` or the \
+         AZURE_SIGNING_* variables read as empty and it refuses every release"
+    );
+
+    // Every job that signs or publishes waits for it.
+    for job in [
+        "  macos:",
+        "  windows:",
+        "  windows-app:",
+        "  linux-flatpak:",
+    ] {
+        let start = apps_code
+            .find(job)
+            .unwrap_or_else(|| panic!("missing job {job}"));
+        let body = &apps_code[start..];
+        let needs_line = body
+            .lines()
+            .find(|line| line.trim_start().starts_with("needs:"))
+            .unwrap_or_else(|| panic!("{job} has no needs:"));
+        assert!(
+            needs_line.contains("release-config"),
+            "{job} signs or publishes, so it must wait for release-config; \
+             its needs line is `{needs_line}`"
+        );
+    }
+}
+
 /// The publish job's gate allows a partial run (at least one platform
 /// succeeded), so the release notes must not unconditionally describe all
 /// three platforms -- otherwise a Linux-only or macOS-only run tells
@@ -407,6 +512,74 @@ fn every_rust_toolchain_usage_pins_a_toolchain_input() {
              `toolchain:` input -- pinned to a commit SHA, the action \
              cannot infer the toolchain from the ref name"
         );
+    }
+}
+
+/// Every `toolchain: "..."` literal in the release workflows must equal the
+/// workspace `rust-version`.
+///
+/// These are deliberately literals rather than a `scripts/ci/msrv-floor.sh`
+/// derivation, and that choice is right: the floor has to be known BEFORE a
+/// toolchain is installed, and the script reads it with `cargo metadata`, so
+/// deriving here would make a signed release depend on the runner image
+/// shipping cargo. Keeping the literal is not the problem. Leaving it
+/// unchecked is, and that is what this closes.
+///
+/// Nothing else compares these values.
+/// `every_rust_toolchain_usage_pins_a_toolchain_input` is plain string
+/// counting -- it asserts a `toolchain:` input EXISTS beside every action
+/// usage and never reads what it says -- and `ci.yml`'s msrv-floor job
+/// derives the floor independently, so it goes green on the new floor while
+/// these stay on the old one. A bump therefore leaves `main` green and fails
+/// every release leg at tag time, having compiled nothing. That is the
+/// `contributor-v0.10.0` shape, which this repository has already shipped
+/// once.
+///
+/// `flatpak_manifest_bundles_a_pinned_rust_toolchain_per_arch` does redden on
+/// a bump, but it points at the flatpak manifest rather than at these lines:
+/// updating the manifest and that test is enough to get green again with
+/// every workflow literal still stale. A tripwire beside the bug rather than
+/// on it is worse than none, because the green run it produces feels earned.
+#[test]
+fn release_workflow_toolchain_literals_match_the_workspace_floor() {
+    let root = read("Cargo.toml");
+    // Comment lines mention the floor in prose ("rust-version = 1.96",
+    // unquoted), so match only a real key with a quoted value.
+    let floor = root
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .find_map(|line| line.strip_prefix("rust-version = \""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("root Cargo.toml must declare rust-version under [workspace.package]");
+
+    for path in [
+        ".github/workflows/release-apps.yml",
+        ".github/workflows/release-contributor.yml",
+    ] {
+        let workflow = read(path);
+        let needle = "toolchain: \"";
+        let literals: Vec<&str> = workflow
+            .match_indices(needle)
+            .filter_map(|(at, _)| workflow[at + needle.len()..].split('"').next())
+            .collect();
+        assert!(
+            !literals.is_empty(),
+            "{path}: expected at least one `toolchain: \"...\"` literal"
+        );
+        for literal in literals {
+            assert_eq!(
+                literal, floor,
+                "{path} pins `toolchain: \"{literal}\"`, but the workspace \
+                 declares `rust-version = \"{floor}\"` in Cargo.toml. Change \
+                 the workflow literal to \"{floor}\" (every `toolchain:` line \
+                 in both release workflows, not just this one). They are \
+                 deliberately literals rather than a msrv-floor.sh \
+                 derivation, so nothing updates them for you when the floor \
+                 moves; left stale, every release leg installs the wrong \
+                 toolchain and fails at tag time having compiled nothing."
+            );
+        }
     }
 }
 
@@ -1187,6 +1360,7 @@ fn a_scheduled_job_watches_for_unmerged_tap_bumps() {
         ".github/workflows/release-apps.yml",
         ".github/workflows/release-contributor.yml",
         ".github/workflows/ci.yml",
+        ".github/workflows/clients.yml",
     ] {
         // Checked against executable lines only: a comment pointing at the
         // backstop is useful documentation and cannot create a dependency.
@@ -1876,7 +2050,10 @@ fn windows_msix_job_is_wired_into_the_release_job_gate_and_artifacts() {
 
 #[test]
 fn ci_packages_and_validates_the_windows_app_feed_identity() {
-    let ci = read(".github/workflows/ci.yml");
+    // The windows-app job moved from ci.yml to clients.yml on 2026-09-22
+    // (client shells run on push to main and on client-path PRs, and are
+    // not required checks); the packaging flags it pins are the same.
+    let ci = read(".github/workflows/clients.yml");
     assert!(
         ci.contains("-p:TcPackaged=true"),
         "CI must opt into the packaged WinUI flavour; setting only \

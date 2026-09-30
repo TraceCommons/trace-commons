@@ -494,7 +494,9 @@ pub fn spawn(answering: TrayState) -> async_channel::Receiver<TrayRequest> {
 
     let (tx, rx) = async_channel::unbounded();
     std::thread::spawn(move || {
-        if let Err(_error) = register(tx, answering, icon_name, icon_theme_path) {
+        if let Err(_error) =
+            crate::dbus::with_runtime(|| register(tx, answering, icon_name, icon_theme_path))
+        {
             // Fixed label. No watcher (plain GNOME, most Linux desktops
             // today) and a watcher that rejects the registration both land
             // here, and neither is a bug in this application.

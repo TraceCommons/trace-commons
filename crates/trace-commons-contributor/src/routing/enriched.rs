@@ -92,11 +92,20 @@ impl TraceSource for RoutingEnrichedSource {
         // attested content this transcript never produced. Every failure
         // resolves to `None`, in keeping with this module's rule that nothing
         // here can fail a load.
-        transcript.attested_call = self.bodies_dir.as_deref().and_then(|dir| {
-            super::attested::attested_final_call(&transcript.routing, dir)
-                .ok()
-                .map(Arc::new)
-        });
+        // The refusal is kept beside the absence, not thrown away with it.
+        // This is the only place the expensive half of `attested_final_call`
+        // is paid for, and a later surface that wants to name the reason
+        // cannot afford to run it again -- see
+        // `SessionTranscript::attested_refusal`.
+        match self
+            .bodies_dir
+            .as_deref()
+            .map(|dir| super::attested::attested_final_call(&transcript.routing, dir))
+        {
+            Some(Ok(call)) => transcript.attested_call = Some(Arc::new(call)),
+            Some(Err(refusal)) => transcript.attested_refusal = Some(refusal),
+            None => {}
+        }
         Ok(transcript)
     }
 }
@@ -316,6 +325,53 @@ mod tests {
             std::sync::Arc::new(ledger),
         );
         assert!(source.load(&a_ref()).expect("loads").routing.is_empty());
+    }
+
+    /// A transcript whose final call NEAR AI passed on to another provider,
+    /// loaded through the overlay exactly as discovery loads it, must not
+    /// come out marked attested. The row is complete in every other respect
+    /// -- bodies on disk, digests matching -- so the only thing refusing it
+    /// is the identifier the answer came back under.
+    #[test]
+    fn a_transcript_whose_final_call_was_brokered_is_not_marked_attested() {
+        use sha2::{Digest as _, Sha256};
+        let request = serde_json::json!({
+            "model": "anthropic/claude-fable-5",
+            "metadata": {
+                trace_commons_protocol::admission::REQUEST_METADATA_KEY: "opaque",
+            },
+        })
+        .to_string();
+        let response = "data: [DONE]\n\n";
+        let reference = "00000000000000000007-000000";
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(format!("{reference}.req")), &request).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.res")), response).expect("res");
+        let mut brokered = row(Some("s-1"), 0);
+        brokered.requested_model = Some("anthropic/claude-fable-5".into());
+        brokered.served_model = Some("anthropic/claude-fable-5".into());
+        brokered.upstream_id = Some("msg_011CejCasYpbXmB5Zqu3fJsc".into());
+        brokered.request_sha256 = Some(hex::encode(Sha256::digest(request.as_bytes())));
+        brokered.response_sha256 = Some(hex::encode(Sha256::digest(response.as_bytes())));
+        brokered.body_ref = Some(reference.into());
+        let source = RoutingEnrichedSource::new(
+            Box::new(StubSource {
+                conversation_id: Some("s-1".into()),
+            }),
+            std::sync::Arc::new(FixedLedger::new(vec![brokered])),
+        )
+        .with_attested_bodies(Some(dir.path().to_path_buf()));
+        let t = source.load(&a_ref()).expect("loads");
+        let mark = crate::daemon::attestation_mark::evaluate(
+            &t.routing,
+            t.attested_call.as_deref(),
+            t.attested_refusal,
+        );
+        assert_ne!(
+            mark.state,
+            crate::daemon::attestation_mark::MARK_ATTESTED,
+            "a Claude session brokered through NEAR AI was marked attested"
+        );
     }
 
     #[test]

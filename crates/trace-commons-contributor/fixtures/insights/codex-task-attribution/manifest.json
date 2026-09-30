@@ -1,0 +1,68 @@
+{
+  "fixtures": [
+    {
+      "declared_model": "model-alpha",
+      "file": "codex-alpha-direct.jsonl",
+      "records": 13,
+      "sha256": "55ffa88eda7b84ffbb38297158df61af5e7dc958eba685192fec380483ab2962",
+      "turns": 1
+    },
+    {
+      "declared_model": "model-beta",
+      "file": "codex-beta-direct.jsonl",
+      "records": 22,
+      "sha256": "05ae5ba57052466c1ffd814540459e479cc1f43ca132b3a5ebf4913a21c17e93",
+      "turns": 2
+    }
+  ],
+  "observed_profile": {
+    "event_msg_payload_types": [
+      "task_started",
+      "user_message",
+      "agent_message",
+      "token_count",
+      "task_complete"
+    ],
+    "not_qualified_by_these_fixtures": [
+      "reasoning",
+      "function_call",
+      "function_call_output",
+      "custom_tool_call",
+      "custom_tool_call_output"
+    ],
+    "response_item_shapes": [
+      "message/developer/permissions.instructions",
+      "message/user/environments.environment_context",
+      "message/user/user.text",
+      "message/assistant/unknown"
+    ],
+    "session_meta": {
+      "history_mode": "legacy",
+      "originator": "codex_cli_rs",
+      "source": "exec"
+    },
+    "top_level_record_types": [
+      "session_meta",
+      "event_msg",
+      "response_item",
+      "world_state",
+      "turn_context",
+      "token_usage_record"
+    ],
+    "turn_context": {
+      "collaboration_mode": "default",
+      "multi_agent_version": "v1",
+      "realtime_active": false
+    }
+  },
+  "provenance": {
+    "build_qualification_limit": "The workspace package version is build provenance for this pinned source checkout only; it does not map the fixture to a released or production Codex version.",
+    "generator_test": "codex-core/all::suite::insights_direct_profile_writer_fixture::writes_two_direct_profile_fixtures",
+    "sanitization": "deterministic value replacement after writer flush; record order, type, field presence, and JSON value kinds preserved",
+    "transport": "localhost wiremock Responses SSE; no live provider",
+    "upstream_repository": "https://github.com/openai/codex",
+    "upstream_revision": "c4017a87aacc7558002b7cb510025e967c1d765e",
+    "workspace_package_version": "0.0.0"
+  },
+  "schema_version": 1
+}

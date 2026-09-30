@@ -266,7 +266,7 @@ enum TC {
         /// Spec `body`, 13/400. The opening prompt -- the text that actually
         /// identifies a session to the person who wrote it. Was `callout`
         /// (12pt).
-        static let body = Font.body
+        static let body = bodyText.font
         /// Spec `body.dense`, 12.5/600. The undo bar's headline. `callout`
         /// (12).
         static let bodyDense = Font.callout.weight(.semibold)
@@ -278,9 +278,9 @@ enum TC {
         static let labelControlPrimary = Font.callout.weight(.semibold)
         /// Spec `caption`, 11/400. Attribution, timestamps, agent names,
         /// supporting sentences. Was `callout` (12pt).
-        static let meta = Font.subheadline
+        static let meta = captionText.font
         /// Spec `caption`, 11/400, under the spec's own name.
-        static let caption = Font.subheadline
+        static let caption = captionText.font
         /// Spec `caption.small`, 10.5/400. The read-gate footnote. `caption2`
         /// (10).
         static let captionSmall = Font.caption2
@@ -302,12 +302,13 @@ enum TC {
         static let monoBadge = Font.system(.caption2, design: .monospaced)
             .weight(.medium)
         /// Spec `mono.code`, 11/400 mono. Search excerpts.
-        static let monoCode = Font.system(.subheadline, design: .monospaced)
+        static let monoCode = monoCodeText.font
         /// Spec `mono.transcript`, 11/400 mono. The transcript renderer's
-        /// body. Set it with `LineHeight.transcript`.
-        static let monoTranscript = Font.system(.subheadline, design: .monospaced)
+        /// body. Set it with `tcType(TC.Font_.monoTranscriptText)`, which
+        /// carries `LineHeight.transcript` with it.
+        static let monoTranscript = monoTranscriptText.font
         /// Footnotes and disclosure text.
-        static let footnote = Font.caption
+        static let footnote = footnoteText.font
 
         /// Letter-spacing, in points. Only the eyebrow is tracked; macOS
         /// widens it to 0.5, GNOME to 0.8.
@@ -326,8 +327,89 @@ enum TC {
 
             /// Extra spacing to pass to `.lineSpacing()` for `size` type set
             /// at `multiple`. Approximates the default line box as 1.2x.
+            ///
+            /// `size` is points, so it has to be the size the type is
+            /// ACTUALLY drawn at. Call sites used to write the text style's
+            /// base size as a literal -- `spacing(for: 11, ...)` beside a
+            /// `Font.subheadline` face -- which was right at the default
+            /// text size and wrong at every other one: the face grew with
+            /// the system setting and its leading did not. Prefer `Face`
+            /// and `tcType(_:)`, which resolve the size instead of naming
+            /// it; `LineHeightScalingTests` fails on a numeric literal here.
             static func spacing(for size: CGFloat, _ multiple: CGFloat) -> CGFloat {
                 max(0, size * (multiple - 1.2))
+            }
+        }
+
+        /// A face and the leading it is specified with, kept together.
+        ///
+        /// They have to travel together or they come apart. Every face here
+        /// is a text style, so it answers to the system text size; leading
+        /// is points, so it does not. There is no size literal in a `Face`
+        /// to fall out of step with the style: `resolvedSize` asks AppKit
+        /// what the style is being drawn at right now, and the font is
+        /// derived from the same `textStyle` rather than declared beside it.
+        struct Face {
+            let font: Font
+            let textStyle: Font.TextStyle
+            let lineHeight: CGFloat
+
+            /// The points this face is drawn at under the current system
+            /// text size.
+            var resolvedSize: CGFloat { Font_.pointSize(of: textStyle) }
+
+            /// The leading for this face, now.
+            ///
+            /// `size` is the environment's text size. AppKit has already
+            /// applied that same system setting to `resolvedSize`, so it is
+            /// deliberately not applied a second time here; taking it makes
+            /// this a function of the environment, which is what re-runs
+            /// `tcType(_:)` when a person changes the setting.
+            func lineSpacing(at size: DynamicTypeSize) -> CGFloat {
+                LineHeight.spacing(for: resolvedSize, lineHeight)
+            }
+        }
+
+        /// A face built from its text style, so the style is written once.
+        private static func face(
+            _ style: Font.TextStyle, _ lineHeight: CGFloat, design: Font.Design = .default
+        ) -> Face {
+            Face(font: .system(style, design: design), textStyle: style, lineHeight: lineHeight)
+        }
+
+        /// `body` set as prose: spec `body` at line-height 1.45.
+        static let bodyText = face(.body, LineHeight.body)
+        /// `caption`/`meta` set as prose: spec `caption` at line-height 1.5.
+        static let captionText = face(.subheadline, LineHeight.caption)
+        /// `footnote` set as prose. `caption` (10) rather than `subheadline`.
+        static let footnoteText = face(.caption, LineHeight.caption)
+        /// `mono.code` set as prose: search excerpts.
+        static let monoCodeText = face(.subheadline, LineHeight.caption, design: .monospaced)
+        /// `mono.transcript`: the transcript renderer's body, at 1.7.
+        static let monoTranscriptText = face(
+            .subheadline, LineHeight.transcript, design: .monospaced)
+
+        /// The points a text style is drawn at under the current system text
+        /// size. AppKit is asked rather than a table consulted, because a
+        /// table is the same literal this indirection exists to remove.
+        static func pointSize(of style: Font.TextStyle) -> CGFloat {
+            NSFont.preferredFont(forTextStyle: appKitTextStyle(style)).pointSize
+        }
+
+        private static func appKitTextStyle(_ style: Font.TextStyle) -> NSFont.TextStyle {
+            switch style {
+            case .largeTitle: return .largeTitle
+            case .title: return .title1
+            case .title2: return .title2
+            case .title3: return .title3
+            case .headline: return .headline
+            case .subheadline: return .subheadline
+            case .body: return .body
+            case .callout: return .callout
+            case .footnote: return .footnote
+            case .caption: return .caption1
+            case .caption2: return .caption2
+            @unknown default: return .body
             }
         }
     }
@@ -709,7 +791,29 @@ struct TCPrimaryButtonStyle: ButtonStyle {
     }
 }
 
+/// Applies a face and its leading in one step. Split out only because a
+/// `ViewModifier` is the way to read the environment from a modifier.
+private struct TCTypeModifier: ViewModifier {
+    let face: TC.Font_.Face
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    func body(content: Content) -> some View {
+        content
+            .font(face.font)
+            .lineSpacing(face.lineSpacing(at: dynamicTypeSize))
+    }
+}
+
 extension View {
+    /// Sets a face and the leading it is specified with, together.
+    ///
+    /// Use this wherever prose needs both. `.font(x).lineSpacing(...)` is
+    /// two decisions that have to agree about a point size, and they stopped
+    /// agreeing the moment the faces became text styles: see `Face`.
+    func tcType(_ face: TC.Font_.Face) -> some View {
+        modifier(TCTypeModifier(face: face))
+    }
+
     /// The filled primary action. Replaces `.buttonStyle(.borderedProminent)`
     /// rather than decorating it -- see `TCPrimaryButtonStyle` for why.
     func tcPrimaryAction() -> some View {

@@ -77,8 +77,92 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// silence here. See `TCShellCore.SubagentCopy` for the words.
     let subagentCount: Int?
     let subagentsDropped: Int?
+    /// Whether this session can actually be contributed, as the daemon
+    /// answered it: `eligible`, `ineligible_permanent`,
+    /// `ineligible_configuration`, `unknown`, or a label a later daemon
+    /// grew.
+    ///
+    /// **`nil` MEANS THE DAEMON SENT NO FIELD, AND THAT IS NOT `unknown`.**
+    /// An invited contributor has no eligibility question -- everything in
+    /// their queue is contributable -- and a daemon predating this contract
+    /// asks none either. Both render as the row always did. `unknown` is a
+    /// real state that arrives on the wire, for a session this build never
+    /// evaluated or one whose submission failed transiently, and it gets its
+    /// own sentence. `Decodable` keeps the two apart for free: a missing key
+    /// decodes to `nil`, a present `"unknown"` to the string.
+    let eligibility: String?
+    /// Which of the thirteen reason labels stands behind that state, or
+    /// `nil`. Absent on every `eligible` row -- there is nothing to explain
+    /// -- and on a state a daemon sent without one.
+    let eligibilityReason: String?
+    /// Whether this session carries a checkable copy of the model call that
+    /// produced it, as the daemon answered it: `attested`,
+    /// `unattested_permanent`, `unattested_configuration`, `unknown`, or a
+    /// label a later daemon grew.
+    ///
+    /// **THE DAEMON SENDS THIS ON EVERY ENTRY, INCLUDING AN INVITED
+    /// CONTRIBUTOR'S**, which is the opposite of `eligibility`'s rule.
+    /// Eligibility is a permission question and is absent when nobody is
+    /// asking; the mark is a fact about the trace and is owed to everyone.
+    /// `nil` here therefore means only one thing -- a daemon predating the
+    /// field -- and it still reaches a sentence, the unknown one, through
+    /// `attestationMark`.
+    let attestation: String?
+    /// Which of the thirteen reason labels stands behind that mark, or
+    /// `nil`.
+    ///
+    /// The thirteen are `eligibilityReason`'s thirteen and their SENTENCES
+    /// are different; the two must never be rendered through each other's
+    /// accessor. Absent on every `attested` row, present on both unattested
+    /// marks, and present on `unknown` only when a send was retracted for a
+    /// receipt the service could not supply.
+    let attestationReason: String?
+    /// Whether a witness certificate is held for the bytes this row was
+    /// pinned to. True after either witness route.
+    ///
+    /// Optional on the wire and read through `holdsCertificate` below, for
+    /// the reason every new daemon field is optional here: this app ships
+    /// separately from the daemon and routinely runs against an older one.
+    /// A non-optional property would throw on a daemon that sends no such
+    /// key, and one row's missing field would fail the WHOLE list.
+    ///
+    /// Not `attestation` above. That says whether the session carries a copy
+    /// of its last model call; this says whether a certificate
+    /// is held over the reviewed bytes. A session can have either without
+    /// the other.
+    let holdsCertificateRaw: Bool?
 
     var id: String { entryID }
+
+    /// Whether this row belongs in the certificate-held list.
+    ///
+    /// Absent reads as no, never as yes: a row from a daemon that predates
+    /// the field has established nothing, and putting it in a list that
+    /// claims a certificate is held would assert something nobody checked.
+    var holdsCertificate: Bool { holdsCertificateRaw == true }
+
+    /// The eligibility question this row carries, or none at all.
+    ///
+    /// Built ONLY from a present `eligibility`, so an absent field can never
+    /// reach a sentence. Everything the shell draws about it goes through
+    /// `EligibilitySurface` from here; nothing in this file reads the state
+    /// string.
+    var contributionEligibility: ContributionEligibility? {
+        guard let eligibility else { return nil }
+        return ContributionEligibility(state: eligibility, reason: eligibilityReason)
+    }
+
+    /// The proof mark this row carries. Always one.
+    ///
+    /// Built from the fields whether or not they arrived: an entry from a
+    /// daemon predating them carries the empty label, and the shared table
+    /// answers that with the unknown sentence rather than with silence.
+    /// Nothing in this file reads the mark string.
+    var attestationMark: AttestationMark {
+        AttestationMark(
+            mark: attestation ?? "",
+            reason: (attestationReason?.isEmpty ?? true) ? nil : attestationReason)
+    }
 
     /// The card's extent line, or `nil` when there is nothing to report.
     /// The contract makes surfacing a non-zero `subagents_dropped`
@@ -108,6 +192,11 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case attempts
         case subagentCount = "subagent_count"
         case subagentsDropped = "subagents_dropped"
+        case eligibility
+        case eligibilityReason = "eligibility_reason"
+        case attestation
+        case attestationReason = "attestation_reason"
+        case holdsCertificateRaw = "holds_certificate"
     }
 
     /// "Claude Code" / "Antigravity", never the raw source token.
@@ -127,6 +216,7 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case "codex": return "Codex"
         case "gemini-cli", "gemini_cli": return "Gemini CLI"
         case "cline": return "Cline"
+        case "opencode": return "OpenCode"
         case "antigravity": return "Antigravity"
         case "trajectory", "letta_trajectory": return "Letta trajectory"
         default:
@@ -172,6 +262,22 @@ struct DaemonStatus: Decodable, Equatable {
     /// What the daemon is seeing from the declared local proxy, in three
     /// states. Not part of `health`: none of the three is a fault.
     let routing: RoutingStatus
+    /// Grants the daemon voided that no shell has shown yet (R6). A daemon
+    /// that predates the field has voided nothing it can report.
+    let grantVoids: [GrantVoidWire]
+    /// Approved sessions held because the privacy witness is busy. A daemon
+    /// that predates the field holds nothing on it.
+    let witnessCapacity: WitnessCapacity
+    /// Armed folders whose arming wording no longer claims a model scrubs
+    /// them, not yet shown by any shell (K5). A daemon that predates the
+    /// field has reworded nothing it can report.
+    let armingRewordings: [ArmingRewordingWire]
+    /// What the automatic-contribution gate held at the last full pass. A
+    /// daemon that predates the field holds nothing.
+    let gateHeld: GateHeld
+    /// The notice after a legacy invite identity moved to a NEAR AI account.
+    /// A daemon that predates the field has nothing to show.
+    let legacyInviteMigration: LegacyMigrationWire
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -184,6 +290,11 @@ struct DaemonStatus: Decodable, Equatable {
         case health
         case dailyBudget = "daily_budget"
         case routing
+        case grantVoids = "grant_voids"
+        case witnessCapacity = "witness_capacity"
+        case armingRewordings = "arming_rewordings"
+        case gateHeld = "automatic_contribution_held"
+        case legacyInviteMigration = "legacy_invite_migration"
     }
 
     init(
@@ -196,7 +307,12 @@ struct DaemonStatus: Decodable, Equatable {
         nextDigestAt: Date?,
         health: DaemonHealth,
         dailyBudget: DailyBudget = .unknown,
-        routing: RoutingStatus = .notDeclared
+        routing: RoutingStatus = .notDeclared,
+        grantVoids: [GrantVoidWire] = [],
+        witnessCapacity: WitnessCapacity = .none,
+        armingRewordings: [ArmingRewordingWire] = [],
+        gateHeld: GateHeld = .none,
+        legacyInviteMigration: LegacyMigrationWire = .none
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -208,6 +324,11 @@ struct DaemonStatus: Decodable, Equatable {
         self.health = health
         self.dailyBudget = dailyBudget
         self.routing = routing
+        self.grantVoids = grantVoids
+        self.witnessCapacity = witnessCapacity
+        self.armingRewordings = armingRewordings
+        self.gateHeld = gateHeld
+        self.legacyInviteMigration = legacyInviteMigration
     }
 
     init(from decoder: Decoder) throws {
@@ -225,6 +346,15 @@ struct DaemonStatus: Decodable, Equatable {
         // A daemon that predates this field has declared no proxy, which is
         // exactly what the fallback says.
         routing = try c.decodeIfPresent(RoutingStatus.self, forKey: .routing) ?? .notDeclared
+        grantVoids = try c.decodeIfPresent([GrantVoidWire].self, forKey: .grantVoids) ?? []
+        witnessCapacity =
+            try c.decodeIfPresent(WitnessCapacity.self, forKey: .witnessCapacity) ?? .none
+        armingRewordings =
+            try c.decodeIfPresent([ArmingRewordingWire].self, forKey: .armingRewordings) ?? []
+        gateHeld = try c.decodeIfPresent(GateHeld.self, forKey: .gateHeld) ?? .none
+        legacyInviteMigration =
+            (try? c.decodeIfPresent(LegacyMigrationWire.self, forKey: .legacyInviteMigration))
+            .flatMap { $0 } ?? .none
     }
 
     static let unknown = DaemonStatus(
@@ -282,6 +412,7 @@ struct RoutingStatus: Decodable, Equatable {
 
 /// The socket `preview` result: summary only, never the trace body.
 struct PreviewSummary: Decodable, Equatable, Sendable {
+    var tokenDistributionSummary: String? = nil
     let wouldSendBytes: Int
     let rawSessionBytes: Int
     let eventCount: Int
@@ -310,6 +441,7 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
     var enrolled: Bool = false
 
     enum CodingKeys: String, CodingKey {
+        case tokenDistributionSummary = "token_distribution_summary"
         case wouldSendBytes = "would_send_bytes"
         case rawSessionBytes = "raw_session_bytes"
         case eventCount = "event_count"
@@ -452,6 +584,7 @@ enum WithdrawalReach: String, Decodable {
 
 /// The `withdraw` result: `withdrawn: true` plus the tier that applied.
 struct WithdrawalOutcome: Decodable, Equatable {
+    let tokenDeletionNote: String?
     let withdrawn: Bool
     /// `nil` when the daemon sent a label this build does not know. The
     /// withdrawal still happened; what cannot be stated is how far the trace
@@ -462,10 +595,12 @@ struct WithdrawalOutcome: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case withdrawn
         case distributionReach = "distribution_reach"
+        case tokenDeletionNote = "token_deletion_note"
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        tokenDeletionNote = try container.decodeIfPresent(String.self, forKey: .tokenDeletionNote)
         withdrawn = try container.decodeIfPresent(Bool.self, forKey: .withdrawn) ?? true
         let label = try container.decodeIfPresent(String.self, forKey: .distributionReach)
         distributionReach = label.flatMap(WithdrawalReach.init(rawValue:))
@@ -544,6 +679,7 @@ struct DaemonSettingsView: Decodable, Equatable {
     let codexSourceMode: String?
     let geminiSourceMode: String?
     let clineSourceMode: String?
+    var opencodeSourceMode: String? = nil
     /// The local-proxy declaration this daemon is holding, or nil for none.
     /// Nil means off, with no fallback: connecting to a loopback port
     /// because nobody said otherwise would probe a service the contributor
@@ -551,6 +687,16 @@ struct DaemonSettingsView: Decodable, Equatable {
     let ironwire: IronWireDeclarationView?
     /// Older daemons omit this independent, default-off consent.
     var admissionEvidenceRequired: Bool? = nil
+    /// Whether to offer the admission-preparation control at all.
+    ///
+    /// Not a preference: the daemon answers true for a contributor who
+    /// signed up through NEAR and false for one who came in on an invite,
+    /// so the control can only refuse an invited contributor. It is also
+    /// null when the daemon could not read its config, and absent from a
+    /// daemon that predates the key -- neither of which is a yes.
+    var admissionEvidenceOffered: Bool { admissionEvidenceRequired == true }
+    var tokenDistributionsContribution: Bool? = nil
+    var tokenStorage: TokenStorageView? = nil
     var ironwireAttestedBodies: Bool? = nil
     var inferenceEvidenceEnabled: Bool { ironwireAttestedBodies == true }
     /// Whether this daemon was asked to answer model calls itself. What was
@@ -592,8 +738,11 @@ struct DaemonSettingsView: Decodable, Equatable {
         case codexSourceMode = "codex_source_mode"
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
+        case opencodeSourceMode = "opencode_source_mode"
         case ironwire
         case admissionEvidenceRequired = "admission_evidence_required"
+        case tokenDistributionsContribution = "token_distributions_contribution"
+        case tokenStorage = "token_storage"
         case ironwireAttestedBodies = "ironwire_attested_bodies"
         case privateInference = "private_inference"
         case privateInferenceOfferSeen = "private_inference_offer_seen"
@@ -736,8 +885,56 @@ extension QueueEntry {
             reasonLabel: try c.decodeIfPresent(String.self, forKey: .reasonLabel),
             attempts: try c.decode(Int.self, forKey: .attempts),
             subagentCount: try c.decodeIfPresent(Int.self, forKey: .subagentCount),
-            subagentsDropped: try c.decodeIfPresent(Int.self, forKey: .subagentsDropped)
+            subagentsDropped: try c.decodeIfPresent(Int.self, forKey: .subagentsDropped),
+            // `decodeIfPresent` IS THE CONTRACT HERE, not a tolerance for an
+            // older daemon. A missing key must stay `nil` and must never
+            // become `"unknown"`: `unknown` is a state the daemon really
+            // sends, and an absent field is a contributor who has no
+            // eligibility question at all.
+            eligibility: try c.decodeIfPresent(String.self, forKey: .eligibility),
+            eligibilityReason: try c.decodeIfPresent(String.self, forKey: .eligibilityReason),
+            // Optional at the decoder for ONE reason only -- a daemon
+            // predating the field -- and not for the reason `eligibility` is.
+            // Every daemon that knows the field sends it on every entry, and
+            // an absent value here still draws a sentence: see
+            // `attestationMark`.
+            attestation: try c.decodeIfPresent(String.self, forKey: .attestation),
+            attestationReason: try c.decodeIfPresent(String.self, forKey: .attestationReason),
+            // Optional for the same one reason: a daemon predating the
+            // field. Absent stays nil and reads as "no certificate" at
+            // `holdsCertificate`, never as an error and never as held.
+            holdsCertificateRaw: try c.decodeIfPresent(Bool.self, forKey: .holdsCertificateRaw)
         )
+    }
+}
+
+/// How a join attempt ended.
+///
+/// The refusal carries the daemon's **control name**, not a sentence: the
+/// words are `TCNearAiEnroll`'s, from the shared table, and a model that
+/// carried prose would be a second place those ten sentences live.
+enum NearAiEnrollOutcome: Sendable, Equatable {
+    case joined(NearAiEnrollment)
+    case refused(String)
+}
+
+/// What `near_ai_account_enroll` answers when it succeeds.
+///
+/// The account is whatever the commons resolved the daemon's NEAR AI token
+/// to -- this shell never sends one and never asserts one. `enrolled` is
+/// decoded rather than assumed from the absence of an error: a success
+/// response that did not say so is not one this shell should celebrate.
+struct NearAiEnrollment: Decodable, Sendable, Equatable {
+    let enrolled: Bool
+    let tenantID: String
+    let accountID: String
+    let deviceKeyID: String
+
+    enum CodingKeys: String, CodingKey {
+        case enrolled
+        case tenantID = "tenant_id"
+        case accountID = "account_id"
+        case deviceKeyID = "device_key_id"
     }
 }
 
@@ -749,6 +946,7 @@ extension PreviewSummary {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
+            tokenDistributionSummary: try c.decodeIfPresent(String.self, forKey: .tokenDistributionSummary),
             wouldSendBytes: try c.decode(Int.self, forKey: .wouldSendBytes),
             rawSessionBytes: try c.decode(Int.self, forKey: .rawSessionBytes),
             eventCount: try c.decode(Int.self, forKey: .eventCount),
@@ -787,5 +985,26 @@ extension HistoryRecord {
             explanations: try c.decode([String].self, forKey: .explanations),
             lastRefreshedAt: try c.decodeIfPresent(Date.self, forKey: .lastRefreshedAt)
         )
+    }
+}
+
+struct TokenStorageView: Decodable, Equatable {
+    let captureEnabled: Bool?
+    let captureLabel: String?
+    let captureConfirmation: String?
+    let captureNotice: String?
+    let stateLine: String
+    let scopeNote: String
+    let cleanupLabel: String
+    let discardLabel: String
+    let discardConfirmation: String
+    let cancelLabel: String
+    let confirmLabel: String
+    let failureLine: String
+    enum CodingKeys: String, CodingKey {
+        case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
+        case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
+        case discardLabel = "discard_label", discardConfirmation = "discard_confirmation"
+        case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"
     }
 }

@@ -43,6 +43,189 @@ pub struct Status {
     /// default is the state that claims nothing.
     #[serde(default)]
     pub routing: RoutingStatus,
+    /// Grants the daemon voided that no shell has shown yet (R6 of the
+    /// connect-and-forget design). Kept as the daemon sent them: each goes
+    /// back to `consent_copy::void_notice_for_wire`, which reads `kind` and
+    /// `reasons` and returns the words, so this shell never does. Absent on
+    /// a daemon older than the field, which has voided nothing it can say.
+    #[serde(default)]
+    pub grant_voids: Vec<serde_json::Value>,
+    /// Approved sessions held because the privacy witness is busy. Read
+    /// independently of `health` for the reason `daily_budget` is: a higher
+    /// label can hold the slot while these sessions are still waiting.
+    /// Absent on a daemon older than the field, which holds nothing on it.
+    #[serde(default)]
+    pub witness_capacity: WitnessCapacity,
+    /// Armed folders whose arming wording no longer claims a model scrubs
+    /// them, not yet shown by any shell (K5). Kept as the daemon sent them:
+    /// each goes back to `consent_copy::arming_reworded_notice_for_wire`.
+    /// Absent on a daemon older than the field, which has reworded nothing.
+    #[serde(default)]
+    pub arming_rewordings: Vec<serde_json::Value>,
+    /// What the automatic-contribution gate held at the last full pass, as
+    /// the daemon sent it, for `consent_copy::gate_held_notice_for_wire`.
+    /// Absent on a daemon older than the field, which holds nothing.
+    #[serde(default)]
+    pub automatic_contribution_held: Option<serde_json::Value>,
+    /// Whether moving a legacy invite identity to a NEAR AI account is
+    /// offered, and the notice after it moved. Kept as the daemon sent it:
+    /// the notice goes back to `consent_copy::legacy_migration_notice_for_wire`,
+    /// which chooses the words. Absent on a daemon older than the field.
+    #[serde(default)]
+    pub legacy_invite_migration: serde_json::Value,
+}
+
+/// One rewording notice as the window draws it (K5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmingRewordingCard {
+    /// For `acknowledge_arming_rewordings`. An element without one is still
+    /// shown; it just cannot be acknowledged.
+    pub id: Option<u64>,
+    /// The core's words.
+    pub notice: trace_commons_contributor::consent_copy::ArmingRewordedNoticeCopy,
+    /// The project "Ask me first" switches, present only when the core
+    /// offered the button.
+    pub ask_first_project_id: Option<String>,
+}
+
+impl Status {
+    /// Every rewording, as the cards the window draws.
+    pub fn arming_rewording_notices(&self) -> Vec<ArmingRewordingCard> {
+        self.arming_rewordings
+            .iter()
+            .filter_map(|element| {
+                let notice = crate::copy::arming_reworded_notice_for_wire(element)?;
+                let ask_first_project_id = notice
+                    .ask_first_action
+                    .and_then(|_| element.get("project_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+                Some(ArmingRewordingCard {
+                    id: element.get("id").and_then(serde_json::Value::as_u64),
+                    notice,
+                    ask_first_project_id,
+                })
+            })
+            .collect()
+    }
+
+    /// The core's notice for armed folders the gate holds, or `None` when
+    /// nothing is held. Never acknowledged: it goes when the hold does.
+    pub fn gate_held_notice(
+        &self,
+    ) -> Option<trace_commons_contributor::consent_copy::GateHeldNoticeCopy> {
+        self.automatic_contribution_held
+            .as_ref()
+            .and_then(crate::copy::gate_held_notice_for_wire)
+    }
+}
+
+/// `status.witness_capacity`. A count and one timestamp; nothing identifying.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WitnessCapacity {
+    #[serde(default)]
+    pub waiting_sessions: u64,
+    /// When the first held session is tried again, rendered in local time.
+    #[serde(default)]
+    pub next_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Status {
+    /// The health banner's lines, in order: the health label's own
+    /// sentence, the spent budget, and sessions waiting on the witness.
+    ///
+    /// The label's sentence steps aside where a line below says the same
+    /// thing with real numbers: `daily-cap-reached` for the budget, and
+    /// `witness-saturated` for the witness. Both of those are drawn from
+    /// their own status objects rather than waiting for the label, because
+    /// the slot holds one label and either can be masked.
+    pub fn health_banner_lines(&self) -> Vec<String> {
+        let witness = self.witness_capacity_line();
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(label) = self.health.last_error_label.as_deref() {
+            // And `automatic-contribution-held`, whose card names the folders
+            // and says why, drawn beside the banner from its own object.
+            let shown_below = (label == "daily-cap-reached" && self.daily_budget.blocked)
+                || (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some())
+                || (label == crate::copy::GATE_HELD_LABEL && self.gate_held_notice().is_some());
+            if !shown_below {
+                lines.push(crate::copy::health_sentence(label).to_string());
+            }
+        }
+        if self.daily_budget.blocked {
+            lines.push(crate::copy::daily_cap_sentence(
+                self.daily_budget.blocked_entries,
+                self.daily_budget.resets_at,
+            ));
+        }
+        lines.extend(witness);
+        lines
+    }
+
+    /// The core's notice for sessions waiting on a busy witness, as one
+    /// banner line: its title, its counted body, and the next try in local
+    /// time when the daemon gave one. `None` when nothing is waiting.
+    fn witness_capacity_line(&self) -> Option<String> {
+        let waiting = self.witness_capacity.waiting_sessions;
+        if waiting == 0 {
+            return None;
+        }
+        let notice = crate::copy::witness_capacity_notice(waiting);
+        let mut line = format!("{}. {}", notice.title, notice.body);
+        if let Some(at) = self.witness_capacity.next_retry_at {
+            line.push_str(&format!(
+                " {}: {}.",
+                notice.next_check,
+                at.with_timezone(&chrono::Local).format("%H:%M")
+            ));
+        }
+        Some(line)
+    }
+}
+
+/// One void notice as the window draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantVoidCard {
+    /// For `acknowledge_grant_voids`. An element without one is still shown;
+    /// it just cannot be acknowledged.
+    pub id: Option<u64>,
+    /// The core's words, from `consent_copy::void_notice_for_wire`.
+    pub notice: trace_commons_contributor::consent_copy::VoidNoticeCopy,
+    /// The project "Turn back on" arms, present only when the core offered
+    /// the button -- never on the grant's notice or an unplaced one.
+    pub rearm_project_id: Option<String>,
+}
+
+impl Status {
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// in the core's words, or `None` when there is nothing to show.
+    pub fn legacy_migration_notice(&self) -> Option<crate::copy::LegacyMigrationNoticeCopy> {
+        self.legacy_invite_migration
+            .get("notice")
+            .and_then(crate::copy::legacy_migration_notice_for_wire)
+    }
+
+    /// Every void, as the cards the window draws.
+    pub fn grant_void_notices(&self) -> Vec<GrantVoidCard> {
+        self.grant_voids
+            .iter()
+            .filter_map(|element| {
+                let notice = crate::copy::void_notice_for_wire(element)?;
+                let rearm_project_id = notice
+                    .rearm_action
+                    .and_then(|_| element.get("project_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+                Some(GrantVoidCard {
+                    id: element.get("id").and_then(serde_json::Value::as_u64),
+                    notice,
+                    rearm_project_id,
+                })
+            })
+            .collect()
+    }
 }
 
 /// `status.routing`. Three states and one per-process timestamp; nothing
@@ -170,6 +353,85 @@ pub struct QueueEntry {
     pub subagent_count: u32,
     #[serde(default)]
     pub subagents_dropped: u32,
+    /// Whether this session can be contributed, as the daemon worked it out
+    /// from the cheap checks it can run without reading bodies off disk.
+    ///
+    /// `None` IS NOT `unknown`. The field is absent from the wire entirely
+    /// when the contributor was invited rather than admitted on evidence, or
+    /// when the config could not be read -- they have no eligibility
+    /// question, and a row that answered one they do not have would put a
+    /// sentence about admissibility on every card an invited contributor
+    /// owns. `unknown` is a real state that arrives as a string and gets its
+    /// own sentence. The same tri-state discipline
+    /// `Settings::destination_credentialed` follows, and `#[serde(default)]`
+    /// on an `Option` is the mechanism that keeps the two apart.
+    ///
+    /// Never matched on in this shell: it is handed to
+    /// [`crate::eligibility`], which asks the shared crate.
+    #[serde(default)]
+    pub eligibility: Option<String>,
+    /// Which `Unattestable` variant decided [`Self::eligibility`], as a
+    /// stable label. Absent on every `eligible` row, and on a daemon that
+    /// predates the field.
+    #[serde(default)]
+    pub eligibility_reason: Option<String>,
+    /// Whether this session carries a checkable copy of the model call
+    /// that produced it.
+    ///
+    /// **The opposite presence rule to [`Self::eligibility`], and this is
+    /// the field's whole point.** Eligibility asks whether this contributor
+    /// may send this session, and is absent when nobody is asking. The mark
+    /// states a fact about the trace, which every contributor is owed --
+    /// including an invited one, whose sessions send perfectly well and may
+    /// still arrive without a copy of their call. The daemon therefore
+    /// sends it on EVERY entry, unconditionally.
+    ///
+    /// `Option` here is not a tri-state, then: it is the daemon that
+    /// predates the field, and it degrades to `unknown` rather than to an
+    /// unattested mark -- a build that cannot read a label has no evidence
+    /// about anybody's session. `crate::copy::attestation_state_line`
+    /// answers the `unknown` sentence for the empty string, so the absence
+    /// needs no branch of its own.
+    ///
+    /// Never matched on in this shell: it is handed to
+    /// [`crate::attestation`], which asks the shared crate.
+    #[serde(default)]
+    pub attestation: Option<String>,
+    /// Which classification decided [`Self::attestation`], as a stable
+    /// label.
+    ///
+    /// **Presence varies WITHIN a single mark.** `attested` never carries
+    /// one; both unattested marks always do; `unknown` carries one only
+    /// when a send was refused for `receipt_unavailable`, which is a
+    /// retraction rather than a refusal because the receipt comes from a
+    /// service that can be down. A shell that suppressed the reason on
+    /// `unknown` would drop the only signal saying it may work later, so
+    /// the reason line branches on THIS KEY's presence and never on the
+    /// mark.
+    ///
+    /// The same thirteen labels [`Self::eligibility_reason`] takes, and
+    /// deliberately NOT the same sentences -- see
+    /// `crate::copy::attestation_reason_line`.
+    #[serde(default)]
+    pub attestation_reason: Option<String>,
+    /// Whether a witness certificate is held for the bytes this entry was
+    /// pinned to. True after either witness route.
+    ///
+    /// **`#[serde(default)]` here is a hazard, not a convenience**, and the
+    /// reason `certificate::view` is tested against a decode. Every field on
+    /// this struct defaults, so a daemon that did not send the key -- or a
+    /// key renamed on one side only -- decodes to `false` on every row and
+    /// renders an EMPTY LIST. An empty list is exactly what a contributor
+    /// with no certificates sees, so the failure is invisible. The empty
+    /// state says which one it is, and
+    /// `a_decoded_entry_carrying_the_key_differs_from_one_without_it` is
+    /// what keeps the key itself honest.
+    ///
+    /// Not the attestation mark above: that says whether the session carries
+    /// a copy of the model call, this says whether a certificate is held
+    /// over the reviewed bytes.
+    #[serde(default)]
+    pub holds_certificate: bool,
 }
 
 impl QueueEntry {
@@ -204,6 +466,8 @@ impl QueueEntry {
 /// `preview`, and the in-process preview the hosting shell can run.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PreviewSummary {
+    #[serde(default)]
+    pub token_distribution_summary: Option<String>,
     #[serde(default)]
     pub would_send_bytes: u64,
     #[serde(default)]
@@ -367,6 +631,24 @@ pub struct ApproveResult {
     /// contributor.
     #[serde(default)]
     pub skipped: Vec<SkippedEntry>,
+    /// How many pending entries a GROUP selector left out for being
+    /// ineligible.
+    ///
+    /// **Absent, not zero**, on a single-`entry_id` call and for an invited
+    /// contributor -- in both cases no filter ran, and zero would read as
+    /// "nothing was left out", a claim about something that did not happen.
+    /// Present-and-zero is a different and meaningful answer: the filter ran
+    /// and took everything.
+    ///
+    /// Excluded entries are NEVER in [`Self::skipped`]. They were never
+    /// selected; `skipped` stays the account of what the call was asked to
+    /// act on.
+    ///
+    /// Rendered through `copy::group_withheld_line`, which answers the empty
+    /// string for zero -- so the absent case and the took-everything case
+    /// both draw nothing without this shell branching on the count.
+    #[serde(default)]
+    pub excluded_ineligible: Option<u64>,
 }
 
 /// One entry `approve` could not send, from the `skipped` list in its
@@ -484,6 +766,24 @@ pub struct Project {
     /// contributor should read.
     #[serde(default)]
     pub is_unresolved_bucket: bool,
+    /// How many of this project's sessions are waiting. Always present.
+    #[serde(default)]
+    pub pending_count: u64,
+    /// How many of those a group-level submit would actually send.
+    ///
+    /// **Absent when eligibility does not apply**, which is an invited
+    /// contributor -- they have no "3 of 7" to be told about, and
+    /// [`Self::pending_count`] alone is their answer. Never null, and never
+    /// zero standing in for absence: zero means the daemon's filter RAN and
+    /// took nothing, which is a different and offerable-nothing answer.
+    ///
+    /// This is the daemon's own count, not one this shell re-derives. The
+    /// filter that produces it is the filter a project-wide `approve`
+    /// applies, so the button and the call cannot disagree about what
+    /// "all eligible" means -- and if that rule ever changes an arm, this
+    /// follows it without anything here being edited.
+    #[serde(default)]
+    pub contributable_count: Option<u64>,
 }
 
 /// `list_history`.
@@ -620,6 +920,10 @@ pub struct Settings {
     pub ironwire: Option<RoutingDeclaration>,
     /// Separate consent to carry captured inference bodies to the witness.
     #[serde(default)]
+    pub token_distributions_contribution: bool,
+    #[serde(default)]
+    pub token_storage: Option<TokenStorage>,
+    #[serde(default)]
     pub ironwire_attested_bodies: bool,
     #[serde(default)]
     pub admission_evidence_required: Option<bool>,
@@ -658,6 +962,47 @@ pub struct PrivateInferenceState {
     pub port: Option<u16>,
 }
 
+/// `near_ai_balance`'s answer: what is left in the account this computer
+/// answers model calls with.
+///
+/// The label is carried as the daemon's own string, for
+/// [`PrivateInferenceState`]'s reason, and handed to
+/// [`crate::balance::view`] rather than matched on here.
+///
+/// # Every amount is an `Option`, and that is the whole point
+///
+/// These figures are SIGNED -- an overdrawn account is a negative number --
+/// so absence cannot be folded onto an out-of-range integer the way the rest
+/// of this surface folds it. A bare `i64` defaulting to zero would collapse
+/// "we know we do not know" onto "the money is gone", and the collapsed
+/// value is the alarming one. `remaining_nanos` in particular is nullable
+/// even on a `known` read: that is the ordinary shape of an account nobody
+/// has capped.
+///
+/// `scale` is an `Option` for a different reason: it is the wire's own
+/// units, and a daemon that sends none leaves this shell with no way to
+/// render a figure. Defaulting it to a nine of this shell's own would print
+/// an amount wrong by a factor of a thousand rather than printing none.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NearAiBalance {
+    #[serde(default)]
+    pub state: String,
+    /// The wire's own units. Never assumed; see the type note above.
+    #[serde(default)]
+    pub scale: Option<u8>,
+    #[serde(default)]
+    pub remaining_nanos: Option<i64>,
+    #[serde(default)]
+    pub spend_limit_nanos: Option<i64>,
+    #[serde(default)]
+    pub total_spent_nanos: Option<i64>,
+    /// The DAEMON'S clock at the moment the service answered, RFC 3339 --
+    /// not the service's own `updated_at`. What a shell may say with it is
+    /// how long ago the question was put, and nothing about bookkeeping.
+    #[serde(default)]
+    pub observed_at: Option<String>,
+}
+
 /// `harness_list`'s answer: the coding tools on this computer.
 ///
 /// `catalog_present` is a fact about this build, not about the machine. With
@@ -674,6 +1019,18 @@ pub struct HarnessList {
     pub destination_port: Option<u16>,
     #[serde(default)]
     pub harnesses: Vec<Harness>,
+    /// Whether the destination this app hosts can answer anything, which is
+    /// what gates a connect.
+    ///
+    /// THREE ANSWERS, NOT TWO, and the `Option` is carrying the third. A
+    /// daemon older than the gate does not send the field at all, and that is
+    /// not the same fact as a daemon reporting no key: the first connects
+    /// tools without a sign-in and the second cannot. Defaulting it to `false`
+    /// would tell a contributor on the older build to go and get a key nothing
+    /// wants. `harness_credential_notice` is where the three are separated;
+    /// nothing here reads this as a boolean.
+    #[serde(default)]
+    pub destination_credentialed: Option<bool>,
     /// What the calls answered here have cost today, or the absence that
     /// must never be drawn as zero.
     ///
@@ -844,6 +1201,225 @@ pub fn human_when(then: Option<chrono::DateTime<chrono::Utc>>) -> String {
 mod tests {
     use super::*;
 
+    fn status_with_voids(voids: serde_json::Value) -> Status {
+        serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "health": { "last_error_label": null, "since": null },
+            "grant_voids": voids,
+        }))
+        .expect("status decodes")
+    }
+
+    /// R6's void notice: every element becomes the core's words, with the
+    /// id `acknowledge_grant_voids` takes. The shell never picks the words.
+    #[test]
+    fn each_grant_void_becomes_the_cores_notice_with_its_id() {
+        let project = serde_json::json!({
+            "id": 4, "kind": "project", "project_id": "p", "project_label": "api",
+            "reasons": ["witness-measurement-admitted"], "voided_at": "2026-09-26T12:00:00Z",
+        });
+        let grant = serde_json::json!({
+            "id": 5, "kind": "automatic_grant", "project_id": null, "project_label": null,
+            "reasons": ["destination-changed"], "voided_at": "2026-09-26T12:00:00Z",
+        });
+        let status = status_with_voids(serde_json::json!([project.clone(), grant.clone()]));
+        let notices = status.grant_void_notices();
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].id, Some(4));
+        assert_eq!(
+            notices[0].notice,
+            trace_commons_contributor::consent_copy::void_notice_for_wire(&project).unwrap()
+        );
+        assert_eq!(notices[1].id, Some(5));
+        assert_eq!(
+            notices[1].notice,
+            trace_commons_contributor::consent_copy::void_notice_for_wire(&grant).unwrap()
+        );
+        // "Turn back on" arms the project's own id, and only there: the
+        // grant's notice has no project to arm.
+        assert_eq!(notices[0].rearm_project_id.as_deref(), Some("p"));
+        assert!(notices[0].notice.rearm_action.is_some());
+        assert_eq!(notices[1].rearm_project_id, None);
+    }
+
+    /// K5: each rewording becomes the core's notice with its id, and "Ask
+    /// me first" targets the element's own project only when offered.
+    #[test]
+    fn each_arming_rewording_becomes_the_cores_notice_with_its_id() {
+        let element = serde_json::json!({
+            "id": 3, "project_id": "p", "project_label": "api",
+            "was": "model_scrubbed", "now": "patterns_only",
+        });
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "arming_rewordings": [element.clone(), { "id": 4 }],
+        }))
+        .expect("status decodes");
+        let cards = status.arming_rewording_notices();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].id, Some(3));
+        assert_eq!(
+            cards[0].notice,
+            trace_commons_contributor::consent_copy::arming_reworded_notice_for_wire(&element)
+                .unwrap()
+        );
+        assert_eq!(cards[0].ask_first_project_id.as_deref(), Some("p"));
+        assert_eq!(cards[1].ask_first_project_id, None, "no project to switch");
+        let old: Status = serde_json::from_value(serde_json::json!({ "logged_in": true }))
+            .expect("status decodes");
+        assert!(old.arming_rewording_notices().is_empty());
+        assert!(old.gate_held_notice().is_none());
+    }
+
+    /// The held notice is the core's, and the bare label steps aside for
+    /// it; with nothing held, the label's own sentence stays.
+    #[test]
+    fn what_the_gate_holds_gets_the_cores_notice_and_the_label_steps_aside() {
+        let held = serde_json::json!({
+            "held_sessions": 2,
+            "reasons": ["admission-evidence-is-per-session"],
+            "projects": [{ "project_id": "p", "project_label": "api", "held_sessions": 2 }],
+        });
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "health": { "last_error_label": "automatic-contribution-held", "since": null },
+            "automatic_contribution_held": held.clone(),
+        }))
+        .expect("status decodes");
+        assert_eq!(
+            status.gate_held_notice(),
+            trace_commons_contributor::consent_copy::gate_held_notice_for_wire(&held)
+        );
+        assert!(status.health_banner_lines().is_empty(), "the card says it");
+
+        let unheld: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "health": { "last_error_label": "automatic-contribution-held", "since": null },
+            "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] },
+        }))
+        .expect("status decodes");
+        assert!(unheld.gate_held_notice().is_none());
+        assert_eq!(
+            unheld.health_banner_lines(),
+            vec![crate::copy::health_sentence("automatic-contribution-held").to_string()]
+        );
+    }
+
+    fn status_with(health: Option<&str>, capacity: serde_json::Value) -> Status {
+        serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "health": { "last_error_label": health, "since": null },
+            "witness_capacity": capacity,
+        }))
+        .expect("status decodes")
+    }
+
+    /// Sessions held on a busy witness get the core's notice in the health
+    /// banner, counted, with the next try -- and the bare label's own line
+    /// steps aside for it.
+    #[test]
+    fn sessions_waiting_on_the_witness_get_the_cores_notice_in_the_banner() {
+        let status = status_with(
+            Some("witness-saturated"),
+            serde_json::json!({"waiting_sessions": 2, "next_retry_at": "2030-01-01T00:01:00Z"}),
+        );
+        let notice = trace_commons_contributor::consent_copy::witness_capacity_notice(2);
+        let lines = status.health_banner_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with(notice.title), "{}", lines[0]);
+        assert!(lines[0].contains(&notice.body), "{}", lines[0]);
+        assert!(lines[0].contains(notice.next_check), "{}", lines[0]);
+    }
+
+    /// A higher label holds the slot, and the waiting sessions are still told.
+    #[test]
+    fn a_higher_label_does_not_hide_sessions_waiting_on_the_witness() {
+        let status = status_with(
+            Some("queue-full"),
+            serde_json::json!({"waiting_sessions": 1, "next_retry_at": null}),
+        );
+        let lines = status.health_banner_lines();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], crate::copy::health_sentence("queue-full"));
+        assert!(
+            !lines[1]
+                .contains(trace_commons_contributor::consent_copy::WITNESS_CAPACITY_NEXT_CHECK)
+        );
+    }
+
+    /// Nothing waiting, or a daemon older than the field: no witness line.
+    #[test]
+    fn nothing_waiting_on_the_witness_adds_nothing() {
+        let old: Status = serde_json::from_value(serde_json::json!({ "logged_in": true }))
+            .expect("status decodes");
+        assert!(old.health_banner_lines().is_empty());
+        let none = status_with(
+            None,
+            serde_json::json!({"waiting_sessions": 0, "next_retry_at": null}),
+        );
+        assert!(none.health_banner_lines().is_empty());
+    }
+
+    /// The notice after a legacy invite identity moved to a NEAR AI account
+    /// is the core's, including which folders sentence to show; a daemon
+    /// older than the field, and no notice, show nothing.
+    #[test]
+    fn the_legacy_migration_notice_is_the_cores() {
+        use trace_commons_contributor::consent_copy as core;
+        let with_notice = |notice: serde_json::Value| -> Status {
+            serde_json::from_value(serde_json::json!({
+                "logged_in": true,
+                "legacy_invite_migration": { "offered": false, "notice": notice },
+            }))
+            .expect("status decodes")
+        };
+        // Compared with the core's constants, not with the function under
+        // test, so a wrong branch in either the plumbing or the core fails.
+        let kept =
+            with_notice(serde_json::json!({ "folders_kept": 1, "automatic_grant_kept": false }))
+                .legacy_migration_notice()
+                .expect("a notice");
+        assert_eq!(kept.title, core::LEGACY_MIGRATION_NOTICE_TITLE);
+        assert_eq!(kept.body, core::LEGACY_MIGRATION_NOTICE_BODY);
+        assert_eq!(kept.folders, core::LEGACY_MIGRATION_NOTICE_ARMED_KEPT);
+        assert_eq!(kept.acknowledge, core::LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE);
+        let grant_only =
+            with_notice(serde_json::json!({ "folders_kept": 0, "automatic_grant_kept": true }))
+                .legacy_migration_notice()
+                .expect("a notice");
+        assert_eq!(grant_only.folders, core::LEGACY_MIGRATION_NOTICE_ARMED_KEPT);
+        let nothing =
+            with_notice(serde_json::json!({ "folders_kept": 0, "automatic_grant_kept": false }))
+                .legacy_migration_notice()
+                .expect("a notice");
+        assert_eq!(nothing.folders, core::LEGACY_MIGRATION_NOTICE_NOTHING_ARMED);
+        let none: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "legacy_invite_migration": { "offered": true, "notice": null },
+        }))
+        .expect("status decodes");
+        assert!(none.legacy_migration_notice().is_none());
+        let old: Status = serde_json::from_value(serde_json::json!({ "logged_in": true }))
+            .expect("status decodes");
+        assert!(old.legacy_migration_notice().is_none());
+    }
+
+    /// A daemon older than the field has nothing to report; an element the
+    /// core cannot place is still shown, in the core's words.
+    #[test]
+    fn grant_voids_default_to_none_and_an_unplaced_one_is_still_shown() {
+        let old: Status = serde_json::from_value(serde_json::json!({ "logged_in": true }))
+            .expect("status decodes");
+        assert!(old.grant_void_notices().is_empty());
+
+        let odd = status_with_voids(serde_json::json!([{ "id": 7, "kind": "folder" }]));
+        let notices = odd.grant_void_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].id, Some(7));
+        assert!(!notices[0].notice.title.is_empty());
+        assert_eq!(notices[0].rearm_project_id, None, "nothing to arm");
+    }
+
     /// The defect this fixes: `ui::preview` used to call `App::offer_undo`
     /// on any `Ok` response from `approve`, ignoring `approved`. Correct
     /// while every approval succeeded; wrong once entries can be skipped,
@@ -910,6 +1486,7 @@ mod tests {
     #[test]
     fn a_receipt_with_no_redactions_says_so_rather_than_going_quiet() {
         let s = PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: 0,
             raw_session_bytes: 0,
             event_count: 0,
@@ -933,6 +1510,7 @@ mod tests {
         redactions.insert("bearer_token".to_string(), 4);
         redactions.insert("home_path".to_string(), 31);
         let s = PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: 86016,
             raw_session_bytes: 1,
             event_count: 1,
@@ -958,6 +1536,7 @@ mod tests {
         let mut redactions = std::collections::BTreeMap::new();
         redactions.insert("some_new_shape".to_string(), 2);
         let s = PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: 0,
             raw_session_bytes: 0,
             event_count: 0,
@@ -981,6 +1560,7 @@ mod tests {
         redactions.insert("generic_secret".to_string(), 1);
         redactions.insert("email".to_string(), 1);
         let s = PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: 0,
             raw_session_bytes: 0,
             event_count: 0,
@@ -1141,4 +1721,24 @@ fn routing_origin_is_only_the_reported_derived_flag() {
     assert_eq!(unknown.state, "unknown");
     assert!(!unknown.derived);
     assert!(serde_json::from_str::<RoutingStatus>(r#"{"derived":"true"}"#).is_err());
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenStorage {
+    #[serde(default)]
+    pub capture_enabled: bool,
+    #[serde(default)]
+    pub capture_label: String,
+    #[serde(default)]
+    pub capture_confirmation: String,
+    #[serde(default)]
+    pub capture_notice: String,
+    pub state_line: String,
+    pub scope_note: String,
+    pub cleanup_label: String,
+    pub discard_label: String,
+    pub discard_confirmation: String,
+    pub cancel_label: String,
+    pub confirm_label: String,
+    pub failure_line: String,
 }

@@ -74,6 +74,31 @@ pub const WITNESS_APPLIES_AT_ONCE: &str = "Changes here apply to the next sessio
 
 /// Consent to carry inference content is independent of observing a proxy's
 /// ledger, configuring a witness, and acknowledging the extra privacy scan.
+/// Metadata only: never render token bytes or alternative text in status UI.
+pub fn token_review_summary(
+    kept: usize,
+    omitted: u64,
+    alternatives: usize,
+    omitted_alternatives: u64,
+) -> String {
+    format!(
+        "Token probabilities: {kept} positions and {alternatives} alternatives included; {omitted} positions and {omitted_alternatives} alternatives removed. Restricted research data. Probabilities are not recalculated after filtering."
+    )
+}
+
+pub const WITNESS_TOKEN_HEADING: &str = "Token probabilities";
+pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in sessions you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
+pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in Ironwire for supported models. This permission does not turn on capture.";
+pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent session files stay on this device. Withdrawing a contribution is a separate action.";
+pub const WITNESS_TOKEN_ENABLE: &str = "Include token probabilities";
+pub const WITNESS_TOKEN_DISABLE: &str = "Stop including token probabilities";
+pub const WITNESS_TOKEN_CONFIRM: &str = "Allow token review";
+pub const WITNESS_TOKEN_CANCEL: &str = "Not now";
+pub const WITNESS_TOKEN_ENABLED: &str = "Token probabilities will be included in explicit witness reviews when a matching capture is available.";
+pub const WITNESS_TOKEN_DISABLED: &str = "Token probabilities are not included.";
+pub const WITNESS_TOKEN_SAVE_FAILED: &str =
+    "The change could not be confirmed. Check the saved setting before trying again.";
+
 pub const WITNESS_INFERENCE_HEADING: &str = "Include captured inference evidence";
 pub const WITNESS_INFERENCE_DISCLOSURE: &str = concat!(
     "When a contribution uses a witness, this allows the final model call's exact request ",
@@ -327,7 +352,52 @@ pub struct WitnessReviewCopy {
     pub confirm: &'static str,
     pub cancel: &'static str,
     pub working: &'static str,
+    /// The sentence for a refusal this build has no words for. Every refusal
+    /// the client actually raises is classified by
+    /// [`witness_refusal_line`]; this is what an unknown label gets, and it
+    /// is honest -- the build does not know what happened.
     pub failed: &'static str,
+    /// The reviewer's address is not on this computer's allowed list.
+    pub failed_host_not_allowed: &'static str,
+    /// No measurement is pinned, or none matched what was reported.
+    pub failed_measurement_unpinned: &'static str,
+    /// The reviewer could not be reached, or answered something unreadable.
+    /// Three causes, one move.
+    pub failed_unreachable: &'static str,
+    /// The reviewer could not prove it is what it claims -- an unverified or
+    /// replayed quote, an unexpected signer, a certificate that does not
+    /// cover or does not verify. Five causes and one move, because the
+    /// difference between them is not something a contributor can act on.
+    pub failed_unproven: &'static str,
+    /// The reviewer returned the session still carrying the model text it
+    /// was given.
+    ///
+    /// Kept apart from [`Self::failed_unproven`] even though the move is also
+    /// "stop and ask": the data consequence is different, and a sentence on
+    /// this surface has to state the data consequence.
+    pub failed_bodies_returned: &'static str,
+    /// Larger than this client will send. Refused here, before anything was
+    /// offered.
+    pub failed_too_large: &'static str,
+    /// No usable enrollment, so there is nothing to review under.
+    pub failed_not_connected: &'static str,
+    /// The reviewer declined the receipt behind an evidence-bearing request:
+    /// its signer, its model, or the size of the request it covers is outside
+    /// what that deployment accepts.
+    ///
+    /// The common refusal during a rollout, and the reason this whole family
+    /// exists: it used to arrive as the same word as a reviewer that was
+    /// simply down.
+    pub failed_receipt_declined: &'static str,
+    /// The reviewer is at capacity and judged nothing (`witness_saturated`).
+    ///
+    /// Apart from [`Self::failed_unreachable`] because it is not a fault:
+    /// the reviewer answered, on purpose, that it is busy.
+    pub failed_busy: &'static str,
+    /// The label beside the time a busy witness asked to be tried again
+    /// after, rendered by the shell in local time. Shown with
+    /// [`Self::failed_busy`] when the daemon gave a time; omitted with it.
+    pub busy_retry_at: &'static str,
     pub immutable: &'static str,
 }
 
@@ -353,6 +423,10 @@ pub struct WalletCopy {
     pub cancel: &'static str,
     pub available: &'static str,
     pub unavailable: &'static str,
+    /// The address was rejected before anything was sent.
+    pub address_refused: &'static str,
+    /// The address was dialled and did not answer.
+    pub unreachable: &'static str,
     pub opening: &'static str,
     pub waiting: &'static str,
     pub failed: &'static str,
@@ -372,6 +446,41 @@ pub struct AdmissionCopy {
     pub working: &'static str,
     pub ready: &'static str,
     pub failed: &'static str,
+    /// Said instead of [`Self::failed`] when the commons has published no
+    /// receipt service and nothing on this machine supplied one.
+    ///
+    /// Every other admission failure names something the contributor holds --
+    /// an agent, a backend, a capture permission -- so "then try again" is
+    /// real advice. This one names nothing they hold. Borrowing the generic
+    /// sentence sends them round a loop of settings that were never wrong,
+    /// and no wording of "check your settings" can end that loop.
+    ///
+    /// It names the commons rather than this app, because that is where the
+    /// value comes from, and it does not ask for a URL: a contributor has no
+    /// way to know which one is right, and this app would not take one from
+    /// them anyway.
+    pub failed_receipt_endpoint: &'static str,
+    /// A receipt endpoint is configured that this client will not call.
+    pub failed_receipt_endpoint_invalid: &'static str,
+    /// The permission that lets captured inference bodies be used has not
+    /// been given, or this session was not confirmed.
+    pub failed_permission: &'static str,
+    /// No enrolled account or device key on this computer.
+    pub failed_not_enrolled: &'static str,
+    /// The chosen session cannot be read back.
+    pub failed_session_unreadable: &'static str,
+    /// The session came from an agent this build cannot read.
+    pub failed_source_unsupported: &'static str,
+    /// IronWire is not running, or cannot capture request bodies.
+    pub failed_proxy_missing: &'static str,
+    /// IronWire is running but its control token failed a trust check.
+    pub failed_proxy_untrusted: &'static str,
+    /// The host allowlist refuses one of the addresses this step must call.
+    pub failed_hosts_untrusted: &'static str,
+    /// The named backend is not one this can prepare against.
+    pub failed_backend: &'static str,
+    /// The commons or the proxy declined this attempt, and another may work.
+    pub failed_try_again: &'static str,
     pub refused_glyph: &'static str,
     pub refused_tone: &'static str,
 }
@@ -395,6 +504,17 @@ pub struct WitnessCopy {
     pub clear: &'static str,
     pub clear_note: &'static str,
     pub applies_at_once: &'static str,
+    pub token_heading: &'static str,
+    pub token_disclosure: &'static str,
+    pub token_capture_note: &'static str,
+    pub token_scope_note: &'static str,
+    pub token_enable: &'static str,
+    pub token_disable: &'static str,
+    pub token_confirm: &'static str,
+    pub token_cancel: &'static str,
+    pub token_enabled: &'static str,
+    pub token_disabled: &'static str,
+    pub token_save_failed: &'static str,
     pub inference_heading: &'static str,
     pub inference_disclosure: &'static str,
     pub inference_capture_note: &'static str,
@@ -412,6 +532,127 @@ pub struct WitnessCopy {
     pub admission: AdmissionCopy,
 }
 
+/// The one sentence for a wallet-signup refusal, chosen from the `reason` the
+/// daemon reported.
+///
+/// One mapper for all three shells, for the reason this module exists: a shell
+/// that picks the sentence itself picks a different one. `reason` is the wire
+/// value of `daemon::account_onboarding::SignupRefusal`; anything else --
+/// absent, or a class a newer daemon added -- falls back to the general
+/// sentence rather than inventing a claim about why.
+#[must_use]
+pub fn wallet_refusal_line(reason: Option<&str>) -> &'static str {
+    let wallet = witness_copy().wallet;
+    match reason {
+        Some("address_refused") => wallet.address_refused,
+        Some("unreachable") => wallet.unreachable,
+        _ => wallet.unavailable,
+    }
+}
+
+/// A start failure is distinct from capability discovery. Native flow views
+/// carry this sentence to all three shells without rendering wire labels.
+pub fn wallet_start_refusal_line(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some(crate::daemon::account_onboarding::CEREMONY_MISMATCH) => {
+            "This commons and the app disagree about the signup details. No device proof was signed. Contact the commons operator."
+        }
+        _ => witness_copy().wallet.failed,
+    }
+}
+
+/// The sentence for one refusal.
+///
+/// Grouped by **what the person must do differently**, which is the only
+/// distinction a sentence earns. Nineteen labels reach here and several are the
+/// same situation from the person's side -- a session that is missing, one that
+/// will not parse and one whose id is unknown are all "this session cannot be
+/// read", and there is nothing a person could do with the difference. Causes
+/// with different remedies are kept apart even when they look alike in the
+/// code: a proxy that is not running is a thing to start, while a proxy whose
+/// control file failed its trust check is a thing to stop and ask about.
+///
+/// An unrecognised label is the generic sentence, which is honest -- this build
+/// does not know what went wrong, so "try again" is all it can say. Every label
+/// the daemon actually raises is classified, and
+/// `daemon::admission_setup::every_admission_label_is_classified` fails if one
+/// is not.
+///
+/// Shared rather than private to the daemon: the GTK shell reaches a refusal as
+/// a bare label string and has no `view` to read, so it maps the same label
+/// through the same function. Two mappings would drift.
+#[must_use]
+pub fn admission_refusal_line(label: Option<&str>) -> &'static str {
+    let copy = witness_copy().admission;
+    match label {
+        Some("admission_receipt_endpoint_required") => copy.failed_receipt_endpoint,
+        Some("admission_receipt_endpoint_invalid") => copy.failed_receipt_endpoint_invalid,
+        Some("admission_setup_consent_required") => copy.failed_permission,
+        Some("admission_setup_unenrolled") | Some("admission_setup_device_missing") => {
+            copy.failed_not_enrolled
+        }
+        Some("admission_setup_session_missing")
+        | Some("admission_setup_session_invalid")
+        | Some("admission_setup_session_unknown") => copy.failed_session_unreadable,
+        Some("admission_setup_source_unsupported") => copy.failed_source_unsupported,
+        Some("admission_setup_proxy_missing") | Some("admission_setup_proxy_unsupported") => {
+            copy.failed_proxy_missing
+        }
+        Some("admission_setup_proxy_untrusted") => copy.failed_proxy_untrusted,
+        Some("admission_setup_endpoint_untrusted") => copy.failed_hosts_untrusted,
+        Some("admission_setup_invalid") => copy.failed_backend,
+        Some("admission_setup_claim_expired")
+        | Some("admission_setup_state_changed")
+        | Some("admission_setup_registration_refused")
+        | Some("admission_setup_binding_invalid") => copy.failed_try_again,
+        _ => copy.failed,
+    }
+}
+
+/// The sentence for one witness-review refusal.
+///
+/// The mirror of [`admission_refusal_line`], and it exists for the same
+/// reason: fourteen labels reach here and several are the same situation from
+/// the person's side. A quote that did not verify, a quote bound to somebody
+/// else's nonce and a certificate signed by the wrong key are all "this
+/// reviewer could not prove it is the one you recorded", and there is nothing
+/// a person could do with the difference. Causes with different remedies stay
+/// apart even where the code makes them look alike -- a reviewer that did not
+/// answer is a thing to retry, while one that answered with the session still
+/// unredacted is a thing to stop and ask about.
+///
+/// An unrecognised label is [`WitnessReviewCopy::failed`], which is honest:
+/// this build does not know what went wrong.
+///
+/// Shared rather than private to the daemon, exactly as
+/// [`admission_refusal_line`] is: the GTK shell reaches a refusal as a bare
+/// label and has no `view` to read, so it maps the same label through the
+/// same function. Two mappings would drift.
+#[must_use]
+pub fn witness_refusal_line(label: Option<&str>) -> &'static str {
+    let copy = witness_copy().review;
+    match label {
+        Some("witness_host_not_allowed") => copy.failed_host_not_allowed,
+        Some(crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL) => {
+            copy.failed_measurement_unpinned
+        }
+        Some("witness_attestation_unavailable")
+        | Some("witness_collateral_unavailable")
+        | Some("witness_response_malformed") => copy.failed_unreachable,
+        Some("witness_quote_unverified")
+        | Some("witness_quote_replayed")
+        | Some("witness_signer_unexpected")
+        | Some("witness_certificate_mismatched")
+        | Some("witness_certificate_unverified") => copy.failed_unproven,
+        Some("witness_body_not_stripped") => copy.failed_bodies_returned,
+        Some("witness_payload_too_large") => copy.failed_too_large,
+        Some("witness_claim_unavailable") => copy.failed_not_connected,
+        Some("admission_evidence_refused") => copy.failed_receipt_declined,
+        Some(trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR) => copy.failed_busy,
+        _ => copy.failed,
+    }
+}
+
 /// The witness surface's fixed words.
 #[must_use]
 pub fn witness_copy() -> WitnessCopy {
@@ -427,6 +668,17 @@ pub fn witness_copy() -> WitnessCopy {
         clear: WITNESS_CLEAR,
         clear_note: WITNESS_CLEAR_NOTE,
         applies_at_once: WITNESS_APPLIES_AT_ONCE,
+        token_heading: WITNESS_TOKEN_HEADING,
+        token_disclosure: WITNESS_TOKEN_DISCLOSURE,
+        token_capture_note: WITNESS_TOKEN_CAPTURE_NOTE,
+        token_scope_note: WITNESS_TOKEN_SCOPE_NOTE,
+        token_enable: WITNESS_TOKEN_ENABLE,
+        token_disable: WITNESS_TOKEN_DISABLE,
+        token_confirm: WITNESS_TOKEN_CONFIRM,
+        token_cancel: WITNESS_TOKEN_CANCEL,
+        token_enabled: WITNESS_TOKEN_ENABLED,
+        token_disabled: WITNESS_TOKEN_DISABLED,
+        token_save_failed: WITNESS_TOKEN_SAVE_FAILED,
         inference_heading: WITNESS_INFERENCE_HEADING,
         inference_disclosure: WITNESS_INFERENCE_DISCLOSURE,
         inference_capture_note: WITNESS_INFERENCE_CAPTURE_NOTE,
@@ -446,6 +698,16 @@ pub fn witness_copy() -> WitnessCopy {
             cancel: "Not now",
             working: "Preparing your witness review. The session may already have left this device.",
             failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
+            failed_host_not_allowed: "The review could not go ahead, because the reviewer's address is not on the allowed list for this computer. Nothing left the machine. Whoever set this computer up needs to allow it.",
+            failed_measurement_unpinned: "The review could not go ahead, because this computer has nothing recorded to check the reviewer against, or what it reported did not match. Nothing was sent. Record the value your commons publishes for its reviewer, then try again.",
+            failed_unreachable: "The review could not go ahead, because the reviewer did not answer, or answered something this app could not read. Nothing has been approved and nothing has been lost. Try again in a little while.",
+            failed_unproven: "The review was refused, because the reviewer could not show it is the one you recorded. Nothing was sent onward and nothing has been approved. This is deliberate -- a reviewer that cannot prove itself does not get used. Ask whoever runs your commons before trying again.",
+            failed_bodies_returned: "The review was refused, because what came back still held the model text it was given, which a finished review never does. That session has not been approved and will not be sent. Ask whoever runs your commons about it before reviewing anything else.",
+            failed_too_large: "This session is larger than the review will carry, so nothing was offered and nothing left the machine. It cannot be contributed this way.",
+            failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this session.",
+            failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this session's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
+            failed_busy: "The review could not go ahead yet, because the privacy witness is busy checking other sessions. Nothing was sent and nothing has been approved. It will be free again soon.",
+            busy_retry_at: "Try again after",
             immutable: "Witness review uses fixed contribution content. Outcome and correction edits are unavailable here.",
         },
         wallet: WalletCopy {
@@ -457,7 +719,9 @@ pub fn witness_copy() -> WitnessCopy {
             start: "Continue in wallet",
             cancel: "Cancel connection",
             available: "This commons supports wallet signup.",
-            unavailable: "Wallet signup is unavailable for this commons. You can still use an invite.",
+            unavailable: "This commons answered, and does not offer wallet signup. You can still use an invite.",
+            address_refused: "That address was refused before anything was sent. A commons address must start with https, carry no user name, password or query, and be permitted by any host list this installation was set up with.",
+            unreachable: "That address did not answer. Check the address and your network connection, then try again.",
             opening: "Opening a wallet connection…",
             waiting: "Finish signing in your wallet. Keep this window open.",
             failed: "The wallet connection could not be confirmed. Cancel and try again.",
@@ -476,6 +740,17 @@ pub fn witness_copy() -> WitnessCopy {
             working: "Preparing this session…",
             ready: "Ready. Continue this session in your agent, then review the updated session.",
             failed: "This session could not be prepared. Check your supported agent, backend, and capture settings, then try again.",
+            failed_receipt_endpoint: "This session could not be prepared, and nothing in your settings will fix it. Your commons has not published a receipt service, so there is nowhere to collect the provider's signature for this inference. Ask the operator of your commons to publish one. You can still contribute existing history without it.",
+            failed_receipt_endpoint_invalid: "This session could not be prepared. The receipt service configured for this computer is not an address this app will call, so the provider's signature cannot be collected. Whoever set it up needs to correct it. You can still contribute existing history without it.",
+            failed_permission: "This session could not be prepared, because sending captured inference bodies has not been permitted. Open Settings and give that permission, then confirm this session again. Nothing is sent until you do.",
+            failed_not_enrolled: "This session could not be prepared, because this computer is not connected to a commons yet. Finish joining, then come back to this session.",
+            failed_session_unreadable: "This session could not be prepared, because its file could not be read back. It may have been moved, deleted, or still be in use by the agent. Pick another session, or close the agent and try again.",
+            failed_source_unsupported: "This session could not be prepared, because it was produced by an agent this app cannot read yet. Use a supported agent for the task you want to contribute. Sessions from other agents are left alone.",
+            failed_proxy_missing: "This session could not be prepared, because the local proxy that records model calls is not running or is not capturing them. Start it and turn on body capture, then confirm this session again.",
+            failed_proxy_untrusted: "This session could not be prepared, because the local proxy's control file did not pass its safety check. Nothing was sent. Restart the proxy so it writes a fresh one, and if it keeps happening, ask for help before retrying.",
+            failed_hosts_untrusted: "This session could not be prepared, because one of the addresses it must call is not on the allowed-hosts list for this computer. Whoever set this computer up needs to allow it. Nothing left the machine.",
+            failed_backend: "This session could not be prepared, because the backend name given for it cannot be used. Choose a backend from the list and confirm again.",
+            failed_try_again: "This session could not be prepared this time. Your commons or the local proxy declined the attempt, which is usually temporary. Confirm the session again in a moment.",
             refused_glyph: "⊘",
             refused_tone: "refused",
         },
@@ -736,6 +1011,167 @@ mod tests {
         );
     }
 
+    /// `AdmissionCopy` is nested, and the pin above counts only the top level,
+    /// so until now a sentence could be added here that no test had seen. That
+    /// mattered little while the struct held one failure sentence; it is about
+    /// to hold eleven, and more are coming, so it gets its own count.
+    ///
+    /// Two sentences that are identical would also mean two causes a person
+    /// must act on differently were given the same words, which is the defect
+    /// this struct exists to remove -- so they are required to be distinct.
+    #[test]
+    fn every_admission_sentence_is_counted_and_distinct() {
+        let json = serde_json::to_value(witness_copy().admission).unwrap();
+        let object = json.as_object().unwrap();
+        assert_eq!(
+            object.len(),
+            23,
+            "a field added to AdmissionCopy must be counted here, or a shell is handed \
+             a sentence no test has read"
+        );
+
+        let mut failures: Vec<&str> = object
+            .iter()
+            .filter(|(key, _)| key.starts_with("failed"))
+            .map(|(_, value)| value.as_str().expect("a sentence"))
+            .collect();
+        assert_eq!(
+            failures.len(),
+            12,
+            "every refusal sentence is a failed_* field"
+        );
+        for sentence in &failures {
+            assert!(
+                !sentence.is_empty(),
+                "a shell renders a blank and writes its own"
+            );
+        }
+        failures.sort_unstable();
+        let before = failures.len();
+        failures.dedup();
+        assert_eq!(
+            failures.len(),
+            before,
+            "two refusals share wording, so they are one sentence wearing two names"
+        );
+    }
+
+    /// The busy sentence sits above "Try again after <time>" where the daemon
+    /// gave a time, and stands alone where a shell has none (GTK). So it
+    /// names no retry interval of its own -- "in a minute or two" contradicted
+    /// the time beneath it -- and ends on a statement that reads whole either
+    /// way.
+    #[test]
+    fn the_busy_sentence_reads_alone_and_above_a_retry_time() {
+        let review = witness_copy().review;
+        assert!(
+            review.failed_busy.ends_with("It will be free again soon."),
+            "{}",
+            review.failed_busy
+        );
+        assert!(!review.failed_busy.contains("minute"));
+        assert!(!review.failed_busy.contains(review.busy_retry_at));
+        assert_eq!(review.busy_retry_at, "Try again after");
+    }
+
+    /// Every refusal this client can raise has a sentence, and no two share
+    /// one.
+    ///
+    /// The counted half is #804's rule applied here: a `failed_*` field added
+    /// without being counted is a sentence no test has read. The distinct
+    /// half is the one that matters more -- two identical sentences would
+    /// mean two causes a person must act on differently were given the same
+    /// words, which is the collapse this family exists to undo.
+    ///
+    /// The label list is `WitnessTrustError::ALL_REFUSAL_LABELS` rather than
+    /// literals, so a refusal added to the enum without a sentence here fails
+    /// rather than quietly taking the generic one.
+    #[test]
+    fn every_witness_refusal_has_its_own_sentence() {
+        let json = serde_json::to_value(witness_copy().review).unwrap();
+        let object = json.as_object().unwrap();
+        assert_eq!(
+            object.len(),
+            18,
+            "a field added to WitnessReviewCopy must be counted here"
+        );
+
+        let mut sentences: Vec<&str> = object
+            .iter()
+            .filter(|(key, _)| key.starts_with("failed_"))
+            .map(|(_, value)| value.as_str().expect("a sentence"))
+            .collect();
+        assert_eq!(
+            sentences.len(),
+            9,
+            "every refusal sentence is a failed_* field"
+        );
+        for sentence in &sentences {
+            assert!(!sentence.is_empty());
+            // A run of spaces inside a sentence is invisible to a test that
+            // checks only for empties and template markers, and one shipped
+            // in this repo -- "carries      signed proof" -- unnoticed.
+            //
+            // It was authored that way, not produced by the formatter:
+            // rustfmt does not rewrite literal contents, and `git log -S`
+            // finds the spaces in the commit that added the constant. So this
+            // guards a typo nobody would see in review, which is reason
+            // enough; it is not a defence against tooling.
+            assert!(
+                !sentence.contains("  "),
+                "a run of spaces inside a sentence: {sentence}"
+            );
+        }
+        sentences.sort_unstable();
+        let before = sentences.len();
+        sentences.dedup();
+        assert_eq!(
+            sentences.len(),
+            before,
+            "two refusals share wording, so they are one sentence wearing two names"
+        );
+
+        let generic = witness_copy().review.failed;
+        let mut selected: Vec<&str> = Vec::new();
+        for label in crate::witness::WitnessTrustError::ALL_REFUSAL_LABELS {
+            let line = witness_refusal_line(Some(label));
+            assert_ne!(
+                line, generic,
+                "{label} falls through to the sentence for a refusal nobody classified"
+            );
+            assert!(
+                !line.contains(label),
+                "{label} is rendered to a contributor as its own internal name"
+            );
+            selected.push(line);
+        }
+
+        // The partition, not the mapping. Grouping several causes onto one
+        // sentence is deliberate -- five ways of failing to prove itself are
+        // one thing to do about it -- so this cannot require fourteen
+        // distinct sentences. What it can require is that the eight written
+        // sentences are the eight reached: a label quietly folded into a
+        // neighbour's wording drops this to seven, and a sentence no label
+        // selects is one nobody will ever read.
+        //
+        // Deliberately not a table of label to field. That would be this
+        // function written twice, and the copy would agree with itself by
+        // construction.
+        selected.sort_unstable();
+        selected.dedup();
+        sentences.sort_unstable();
+        assert_eq!(
+            selected, sentences,
+            "the refusal sentences written and the refusal sentences reached are not the \
+             same set, so a cause was folded into a neighbour or a sentence is unreachable"
+        );
+        assert_eq!(witness_refusal_line(None), generic);
+        assert_eq!(
+            witness_refusal_line(Some("nothing-classifies-this")),
+            generic
+        );
+    }
+
     #[test]
     fn the_copy_call_carries_every_fixed_word() {
         let copy = witness_copy();
@@ -743,7 +1179,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            26,
+            37,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );

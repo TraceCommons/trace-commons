@@ -62,6 +62,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
+use crate::witness::inference_record::InferenceAttestationRecord;
 use crate::witness::transport::{WitnessedEnvelope, parse_witnessed_envelope, verify_certificate};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -125,9 +126,30 @@ pub struct WitnessReviewArtifact {
     verdict: Option<String>,
     correction_hash: Option<String>,
     response: WitnessedEnvelope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token_bundle: Option<crate::token_bundle::TokenBundleReview>,
+    /// Whether the witness was handed a receipt with the bodies it certified.
+    /// See `witness::inference_record`. `None` on a review written before
+    /// the record existed, and that reads as unknown -- `default` rather
+    /// than required, and never serialized when absent, so the pin digest
+    /// of every review a contributor already approved is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attested_inference: Option<InferenceAttestationRecord>,
 }
 
 const WITNESS_REVIEW_SCHEMA: &str = "trace_commons.witness_review.v1";
+
+/// What marks a queue pin as covering a witnessed preview rather than an
+/// ordinary one.
+///
+/// Produced by [`WitnessReviewArtifact::digest`] and read by
+/// [`crate::daemon::queue::QueueEntry::holds_witness_certificate`]. It was
+/// spelled as a literal in seven places, which is one definition and six
+/// chances to disagree with it.
+///
+/// An ordinary preview pin is `sha256:`, which does not start with this, so
+/// the two are distinguishable in either direction.
+pub const WITNESS_PIN_PREFIX: &str = "witness-sha256:";
 const MAX_STORED_ARTIFACT_BYTES: usize = MAX_ENVELOPE_BYTES * 2;
 
 impl WitnessReviewArtifact {
@@ -137,6 +159,7 @@ impl WitnessReviewArtifact {
         input_fingerprint: String,
         verdict: Option<&str>,
         correction: Option<&str>,
+        attested_inference: Option<InferenceAttestationRecord>,
     ) -> Self {
         Self {
             review_schema: WITNESS_REVIEW_SCHEMA.to_string(),
@@ -145,7 +168,16 @@ impl WitnessReviewArtifact {
             verdict: verdict.map(str::to_string),
             correction_hash: correction.map(correction_hash),
             response,
+            token_bundle: None,
+            attested_inference,
         }
+    }
+
+    /// What the witness was handed alongside these bytes, or `None` when the
+    /// review predates the record. `None` is not an answer; see
+    /// `witness::inference_record` for why it must not become one.
+    pub fn attested_inference(&self) -> Option<&InferenceAttestationRecord> {
+        self.attested_inference.as_ref()
     }
 
     pub fn envelope(&self) -> Result<TraceContributionEnvelope> {
@@ -157,7 +189,7 @@ impl WitnessReviewArtifact {
     pub fn digest(&self) -> Result<String> {
         let bytes =
             serde_json::to_vec(self).map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))?;
-        Ok(format!("witness-sha256:{:x}", Sha256::digest(bytes)))
+        Ok(format!("{WITNESS_PIN_PREFIX}{:x}", Sha256::digest(bytes)))
     }
 
     pub(crate) fn response(&self) -> &WitnessedEnvelope {
@@ -216,8 +248,18 @@ impl WitnessReviewArtifact {
             let evidence: trace_commons_protocol::admission::AdmissionEvidence =
                 serde_json::from_str(&headers.evidence_json)
                     .map_err(|_| anyhow::anyhow!("witness-certificate-invalid"))?;
-            if cfg.tenant_id.strip_prefix("near-") != Some(evidence.account_anchor_sha256.as_str())
-            {
+            // Shape only, deliberately. This used to require the tenant id's
+            // suffix to equal the anchor -- the client half of the coupling
+            // #785 removed from the server's `admission::anchor`. V58 held
+            // those equal; V61 made `anchor_hash` a keyed blind index and the
+            // tenant id 32 random bytes precisely so a contributor's tenant id
+            // is not computable from their NEAR account name, and the equality
+            // has since held for no real account. A client cannot re-derive
+            // its own anchor and must not try: the authorisation is the
+            // server's stored row for (tenant, principal), checked at upload
+            // by `verify_admission_evidence`, which refuses evidence bound to
+            // any other account.
+            if !trace_commons_protocol::admission::is_hash(&evidence.account_anchor_sha256) {
                 bail!("witness-certificate-invalid");
             }
         }
@@ -250,7 +292,12 @@ pub fn save_witnessed(
     if bytes.len() > MAX_STORED_ARTIFACT_BYTES {
         bail!("approved-envelope-too-large");
     }
-    store.write_daemon_file(&file_name(entry_id), &bytes)
+    crate::token_bundle::with_review_budget(
+        store.dir(),
+        &store.dir().join(file_name(entry_id)),
+        bytes.len() as u64,
+        || store.write_daemon_file(&file_name(entry_id), &bytes),
+    )
 }
 
 /// Absence/legacy local envelope is None; malformed versioned state is an error.
@@ -295,7 +342,12 @@ pub fn save(
     if body.len() > MAX_ENVELOPE_BYTES {
         bail!("approved-envelope-too-large");
     }
-    store.write_daemon_file(&file_name(entry_id), &body)
+    crate::token_bundle::with_review_budget(
+        store.dir(),
+        &store.dir().join(file_name(entry_id)),
+        body.len() as u64,
+        || store.write_daemon_file(&file_name(entry_id), &body),
+    )
 }
 
 /// Read back the envelope stored for `entry_id`, or `None` when there is
@@ -315,6 +367,12 @@ pub fn load(store: &ConfigStore, entry_id: Uuid) -> Result<Option<TraceContribut
 }
 
 pub fn remove(store: &ConfigStore, entry_id: Uuid) -> Result<()> {
+    if let Ok(Some(artifact)) = load_witnessed(store, entry_id) {
+        if let Some(bundle) = artifact.token_bundle {
+            crate::token_bundle::BundleJournal::open(&store.dir().join("token-bundles"))?
+                .abandon_review(bundle.journal_id)?;
+        }
+    }
     store.remove_daemon_file(&file_name(entry_id))
 }
 
@@ -430,7 +488,7 @@ pub fn sweep(store: &ConfigStore, keep: &HashSet<Uuid>) -> Result<()> {
             continue;
         };
         if !keep.contains(&id) {
-            let _ = store.remove_daemon_file(&name);
+            let _ = remove(store, id);
         }
     }
     Ok(())
@@ -454,7 +512,10 @@ mod tests {
         let (_dir, store) = temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let source_hash = "pre-inference-history";
-        let tenant = format!("near-{}", "ab".repeat(32));
+        // Independent tenant id and anchor, per `v61_account`'s own note: a
+        // `near-{anchor}` literal here is what kept the account check in
+        // `validate_stored` above from ever being exercised.
+        let (tenant, _anchor) = crate::config::tests_support::v61_account();
         let mut envelope = envelope().await;
         envelope.submission_id = crate::source::submission_id_for(source_hash);
         envelope.contributor.tenant_scope_ref = Some(tenant.clone());
@@ -540,6 +601,7 @@ mod tests {
             "fingerprint".into(),
             None,
             None,
+            None,
         );
         let id = Uuid::new_v4();
         save_witnessed(&store, id, &artifact).unwrap();
@@ -576,6 +638,7 @@ mod tests {
             "fingerprint".into(),
             Some("worked"),
             Some("correction"),
+            None,
         );
         let id = Uuid::new_v4();
         save_witnessed(&store, id, &artifact).unwrap();
@@ -611,6 +674,7 @@ mod tests {
             "fingerprint".into(),
             None,
             None,
+            None,
         );
         let pin = artifact.digest().unwrap();
         let mut changed = artifact.clone();
@@ -644,6 +708,8 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -892,5 +958,82 @@ mod tests {
         save(&store, id, &envelope().await).unwrap();
         store.wipe().unwrap();
         assert!(load(&store, id).unwrap().is_none());
+    }
+    #[test]
+    fn a_stored_review_that_predates_the_record_reads_as_unknown() {
+        // Absent is "we do not know", never "uncertified" and never
+        // "certified". A review written by a build before this field existed
+        // may have carried a verified receipt; nothing says either way.
+        let (response, _) = crate::witness::transport::signed_fixture(b"{}".to_vec());
+        let legacy = serde_json::json!({
+            "review_schema": WITNESS_REVIEW_SCHEMA,
+            "source_hash": "sha256:legacy",
+            "input_fingerprint": "fp",
+            "verdict": null,
+            "correction_hash": null,
+            "response": response,
+        });
+        let (_dir, store) = temp_store();
+        let id = Uuid::new_v4();
+        store
+            .write_daemon_file(&file_name(id), &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let artifact = load_witnessed(&store, id).unwrap().unwrap();
+        assert_eq!(artifact.attested_inference(), None);
+    }
+
+    #[test]
+    fn a_review_without_a_record_serializes_exactly_as_before() {
+        // Existing pins are digests over the serialized artifact. A new
+        // optional field that serialized as `null` would move every one of
+        // them and refuse every review a contributor already approved.
+        let (response, _) = crate::witness::transport::signed_fixture(b"{}".to_vec());
+        let artifact =
+            WitnessReviewArtifact::new(response, "sha256:aa".into(), "fp".into(), None, None, None);
+        let json = serde_json::to_value(&artifact).unwrap();
+        assert!(
+            json.get("attested_inference").is_none(),
+            "an absent record must not appear on the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn a_record_round_trips_and_is_covered_by_the_pin() {
+        use crate::witness::inference_record::{
+            InferenceAttestationRecord, REASON_RECEIPT_UNAVAILABLE,
+        };
+        let (response, _) = crate::witness::transport::signed_fixture(b"{}".to_vec());
+        let certified = WitnessReviewArtifact::new(
+            response.clone(),
+            "sha256:aa".into(),
+            "fp".into(),
+            None,
+            None,
+            Some(InferenceAttestationRecord::certified()),
+        );
+        let uncertified = WitnessReviewArtifact::new(
+            response,
+            "sha256:aa".into(),
+            "fp".into(),
+            None,
+            None,
+            Some(InferenceAttestationRecord::uncertified(
+                REASON_RECEIPT_UNAVAILABLE,
+            )),
+        );
+        assert_ne!(
+            certified.digest().unwrap(),
+            uncertified.digest().unwrap(),
+            "the pin must cover the record, or a file edit could promote a review"
+        );
+        let (_dir, store) = temp_store();
+        let id = Uuid::new_v4();
+        save_witnessed(&store, id, &certified).unwrap();
+        let restored = load_witnessed(&store, id).unwrap().unwrap();
+        assert_eq!(
+            restored.attested_inference(),
+            Some(&InferenceAttestationRecord::certified())
+        );
+        assert_eq!(restored.digest().unwrap(), certified.digest().unwrap());
     }
 }

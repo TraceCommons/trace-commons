@@ -239,7 +239,35 @@ pub const REDACTION_RULESET_VERSION: &str = "2";
 /// `every_config_field_is_a_deliberate_fingerprint_decision` pins the whole
 /// field set, so the addition fails that test until someone says which side
 /// of this line the new field falls on.
-const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &["display_handle", "public_bio", "public_since"];
+///
+/// `consent_scopes_chosen` is on this list too. It records only that the
+/// contributor picked `consent_scopes` through the picker, for the Flow 1
+/// grant (R7); the scopes themselves are fingerprinted, so a choice that
+/// changes them still moves the fingerprint. Confirming the scopes already
+/// saved changes no byte of any envelope, and re-asking the approved backlog
+/// for it would be a prompt with no consent content.
+///
+/// `witness_origin` records how the witness arrived, for the disclosure
+/// screens. The witness itself is fingerprinted; where it came from changes
+/// no byte of any envelope.
+///
+/// **Order matters, and `witness_origin` must stay first.** `serde_json`'s
+/// `preserve_order` feature is on in this crate's build, so the map is an
+/// `IndexMap` and `remove` is a swap-remove: removing a key moves the LAST
+/// key into its slot. `witness_origin` is the last field and is present only
+/// when a witness has a recorded origin, so if it were removed after another
+/// field, its presence would decide which key got swapped and move the
+/// fingerprint. Removed first, it is popped from the end and the remaining
+/// order is exactly that of a config without it --
+/// `the_witness_origin_does_not_move_the_fingerprint` holds this. The other
+/// entries keep their order so that no existing fingerprint moves.
+const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &[
+    "witness_origin",
+    "consent_scopes_chosen",
+    "display_handle",
+    "public_bio",
+    "public_since",
+];
 
 /// The contributor config reduced to its envelope-determining fields, as
 /// canonical bytes for [`input_fingerprint`].
@@ -249,9 +277,12 @@ const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &["display_handle", "public_bio", "p
 /// anyone remembering to come back here, and dropping one out of the
 /// fingerprint takes a deliberate entry in `NON_ENVELOPE_CONFIG_FIELDS`.
 ///
-/// `serde_json::Value`'s map is a `BTreeMap` under this crate's feature set,
-/// so the re-serialization is key-ordered and these bytes are stable for a
-/// given config.
+/// `serde_json`'s `preserve_order` feature is enabled in this crate's build
+/// (through feature unification), so `Value`'s map is an `IndexMap`: the
+/// bytes follow struct field order, with each removal swapping the last key
+/// into the removed slot. That is deterministic for a given config, which is
+/// all a fingerprint needs, but it is not key-sorted -- see the ordering note
+/// on `NON_ENVELOPE_CONFIG_FIELDS`.
 fn envelope_determining_config_bytes(cfg: &ContributorConfig) -> Vec<u8> {
     let Ok(mut value) = serde_json::to_value(cfg) else {
         return Vec::new();
@@ -297,6 +328,24 @@ pub fn input_fingerprint(
     near_ai: Option<&NearAiSettings>,
     attested_bodies: bool,
 ) -> String {
+    input_fingerprint_with_env_filter(
+        cfg,
+        near_ai,
+        attested_bodies,
+        &super::grant_terms::env_filter_backend(),
+    )
+}
+
+/// `input_fingerprint`, with the environment's privacy filter passed in
+/// (as `grant_terms::env_filter_backend` gives it) rather than read from
+/// the process environment, so a test can vary it without mutating process
+/// state.
+pub(crate) fn input_fingerprint_with_env_filter(
+    cfg: &ContributorConfig,
+    near_ai: Option<&NearAiSettings>,
+    attested_bodies: bool,
+    env_backend: &str,
+) -> String {
     let mut h = Sha256::new();
     h.update(envelope_determining_config_bytes(cfg).as_slice());
     h.update(b"\x00redactor\x00");
@@ -328,6 +377,16 @@ pub fn input_fingerprint(
     // is about. The switch is the consent-relevant fact.
     h.update(b"\x00attested_bodies\x00");
     h.update(if attested_bodies { "on" } else { "off" }.as_bytes());
+    // A privacy filter the environment attaches (`TRACE_PRIVACY_FILTER_BACKEND`)
+    // whatever the config says. Adding, changing or removing one changes who
+    // reads the prose, so an approval taken under one setting must not be
+    // sent under another. Hashed only when one is attached: a daemon without
+    // one keeps the fingerprints it already had, so an upgrade re-offers
+    // nothing.
+    if env_backend != "none" {
+        h.update(b"\x00env_filter\x00");
+        h.update(env_backend.as_bytes());
+    }
     format!("sha256:{:x}", h.finalize())
 }
 
@@ -347,6 +406,8 @@ pub const REASON_INPUTS_CHANGED: &str = "approval-inputs-changed";
 /// What preview reports to the contributor before they consent to upload.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PreviewSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_distribution_summary: Option<String>,
     pub would_send_bytes: usize,
     pub raw_session_bytes: u64,
     pub event_count: usize,
@@ -455,6 +516,7 @@ impl PreviewCardSummary {
     /// unchanged.
     fn into_summary(self, envelope_digest: String) -> PreviewSummary {
         PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: self.would_send_bytes,
             raw_session_bytes: self.raw_session_bytes,
             event_count: self.event_count,
@@ -699,10 +761,11 @@ fn summarize_envelope(
     let opening_prompt = envelope
         .events
         .iter()
-        .find(|e| e.event_type == TraceContributionEventType::UserMessage)
-        .and_then(|e| e.redacted_content.clone())
-        .unwrap_or_default();
-    let opening_prompt = truncate_chars(&opening_prompt, 200);
+        .filter(|e| e.event_type == TraceContributionEventType::UserMessage)
+        .filter_map(|e| e.redacted_content.as_deref())
+        .find_map(task_prompt)
+        .unwrap_or("No task description found.");
+    let opening_prompt = truncate_chars(opening_prompt, 200);
 
     // The redaction pipeline's own counts describe what it TOOK OUT. Nothing
     // in them can describe what it left in: `redact_trace` never runs a
@@ -750,6 +813,7 @@ fn summarize_envelope(
 #[derive(Default)]
 pub struct WitnessPreviewOptions<'a> {
     pub raw_session_confirmed: bool,
+    pub token_capture: Option<&'a crate::token_capture_client::TokenCaptureClient>,
     pub expected_session_hash: &'a str,
     pub include_inference_bodies: bool,
     pub verdict: Option<crate::envelope::ContributorVerdict>,
@@ -797,29 +861,70 @@ pub async fn build_witnessed_preview(
         remediate_quarantined: false,
         verdict: options.verdict,
     };
-    let mut context =
+    let mut context = super::run_blocking(|| {
         crate::submit::SubmitContext::new(store, cfg, &submit_options, near_ai.clone())
-            .map_err(|_| anyhow::anyhow!("witness-review-unavailable"))?;
-    let response = context
-        .prepare_witnessed_review(
-            &transcript,
-            options.correction,
-            options.include_inference_bodies,
-        )
-        .await?;
+    })
+    .map_err(|_| anyhow::anyhow!("witness-review-unavailable"))?;
+    let (response, attested_inference, token_bundle) = if let Some(control) = options.token_capture
+    {
+        if !options.include_inference_bodies
+            || options.verdict.is_some()
+            || options.correction.is_some()
+        {
+            anyhow::bail!("token-review-input-unsupported");
+        }
+        let session = super::admission_setup::exact_session_id(source.name(), &session_ref.path)?;
+        let (response, record, bundle) = context
+            .prepare_token_review(&transcript, control, &session)
+            .await?;
+        (response, record, Some(bundle))
+    } else {
+        let (response, record) = match context
+            .prepare_witnessed_review(
+                &transcript,
+                options.correction,
+                options.include_inference_bodies,
+            )
+            .await
+        {
+            Ok(reviewed) => reviewed,
+            // This route reports witness refusals as labels. A busy witness
+            // is restored to its typed error, with the delay the witness
+            // asked for, so the handler can tell the person when to try
+            // again rather than reporting a refusal.
+            Err(error)
+                if error.to_string()
+                    == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR =>
+            {
+                return Err(anyhow::Error::new(
+                    crate::witness::WitnessTrustError::WitnessSaturated {
+                        retry_after_secs: context.last_witness_retry_after().unwrap_or(
+                            trace_commons_protocol::witness_pacing::WITNESS_SATURATED_RETRY_AFTER_SECS,
+                        ),
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        (response, record, None)
+    };
+    let mut pin_guard =
+        crate::token_bundle::ReviewPinGuard::new(store.dir(), token_bundle.as_ref());
     let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), options.include_inference_bodies);
     let verdict = options.verdict.map(|verdict| match verdict {
         crate::envelope::ContributorVerdict::Worked => "worked",
         crate::envelope::ContributorVerdict::Partly => "partly",
         crate::envelope::ContributorVerdict::Failed => "failed",
     });
-    let artifact = super::approved_envelope::WitnessReviewArtifact::new(
+    let mut artifact = super::approved_envelope::WitnessReviewArtifact::new(
         response,
         transcript.session_hash.clone(),
         fingerprint.clone(),
         verdict,
         options.correction,
+        Some(attested_inference),
     );
+    artifact.token_bundle = token_bundle;
     let envelope = artifact.validate(
         cfg,
         &transcript.session_hash,
@@ -829,19 +934,28 @@ pub async fn build_witnessed_preview(
     )?;
     let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)
         .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
-    let summary = summarize_envelope(
+    let mut summary = summarize_envelope(
         &envelope,
         session_ref.size_bytes,
         &transcript,
         fingerprint,
         true,
         &redactor,
-    )?;
-    Ok(WitnessPreview {
-        summary: summary.into_summary(artifact.digest()?),
+    )?
+    .into_summary(artifact.digest()?);
+    if let Some(bundle) = &artifact.token_bundle {
+        summary.token_distribution_summary = bundle.summary_line.clone();
+        summary.would_send_bytes = summary
+            .would_send_bytes
+            .saturating_add(bundle.attachment_bytes as usize);
+    }
+    let preview = WitnessPreview {
+        summary,
         body: body_of(&envelope)?,
         artifact,
-    })
+    };
+    pin_guard.disarm();
+    Ok(preview)
 }
 
 /// Describe the certified envelope without invoking the remote redaction pipeline.
@@ -856,7 +970,7 @@ pub fn summarize_witnessed_preview(
     let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), include_inference_bodies);
     let envelope = artifact.validate_stored(cfg, &transcript.session_hash, &fingerprint)?;
     let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)?;
-    let summary = summarize_envelope(
+    let mut summary = summarize_envelope(
         &envelope,
         raw_session_bytes,
         transcript,
@@ -865,6 +979,12 @@ pub fn summarize_witnessed_preview(
         &redactor,
     )?
     .into_summary(artifact.digest()?);
+    if let Some(bundle) = &artifact.token_bundle {
+        summary.token_distribution_summary = bundle.summary_line.clone();
+        summary.would_send_bytes = summary
+            .would_send_bytes
+            .saturating_add(bundle.attachment_bytes as usize);
+    }
     Ok((summary, body_of(&envelope)?, envelope))
 }
 
@@ -1065,6 +1185,58 @@ fn wire_name<T: serde::Serialize>(value: T) -> String {
         .unwrap_or_default()
 }
 
+/// Select display text only, from already-redacted user content. Harnesses
+/// inject setup as user messages; keep it in the envelope but skip known
+/// leading wrappers in the card. Unknown prose remains visible.
+fn task_prompt(mut text: &str) -> Option<&str> {
+    loop {
+        text = text.trim();
+        if text.starts_with("# AGENTS.md instructions for ") {
+            // The title and INSTRUCTIONS block form one injected preamble.
+            let (_, rest) = text.split_once("</INSTRUCTIONS>")?;
+            text = rest;
+            continue;
+        }
+        // Claude records slash commands as user messages. Their name and
+        // display label are UI metadata, but arguments can be the task itself
+        // (for example `/review fix the login race`). Keep those arguments.
+        if let Some(args) = text.strip_prefix("<command-args>") {
+            let (args, rest) = args.split_once("</command-args>")?;
+            if !args.trim().is_empty() {
+                return Some(args.trim());
+            }
+            text = rest;
+            continue;
+        }
+        let wrapper = [
+            "INSTRUCTIONS",
+            "environment_context",
+            "environment_details",
+            "recommended_plugins",
+            "permissions instructions",
+            "collaboration_mode",
+            "skills_instructions",
+            "system-reminder",
+            "ide_opened_file",
+            "ide_selection",
+            "local-command-caveat",
+            "local-command-stdout",
+            "local-command-stderr",
+            "command-name",
+            "command-message",
+        ]
+        .into_iter()
+        .find(|tag| text.starts_with(&format!("<{tag}>")));
+        if let Some(tag) = wrapper {
+            // An incomplete setup block provides no reliable task excerpt.
+            let (_, rest) = text.split_once(&format!("</{tag}>"))?;
+            text = rest;
+            continue;
+        }
+        return (!text.is_empty()).then_some(text);
+    }
+}
+
 /// Truncate to at most `max_chars` characters, always on a char boundary.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
@@ -1146,6 +1318,8 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -1613,6 +1787,159 @@ mod tests {
         );
     }
 
+    #[test]
+    fn task_prompt_skips_setup_but_preserves_requests() {
+        for setup in [
+            "# AGENTS.md instructions for <PRIVATE_LOCAL_PATH_1>\n<INSTRUCTIONS>\n# Example project\nRules\n</INSTRUCTIONS>",
+            "<recommended_plugins>Available plugins</recommended_plugins>",
+            "<environment_context>cwd</environment_context>",
+        ] {
+            assert_eq!(task_prompt(setup), None);
+            assert_eq!(
+                task_prompt(&format!("{setup}\n\nFix the login refresh bug.")),
+                Some("Fix the login refresh bug.")
+            );
+        }
+        assert_eq!(task_prompt("<recommended_plugins>truncated"), None);
+        assert_eq!(task_prompt("  "), None);
+        assert_eq!(
+            task_prompt("Update AGENTS.md and <recommended_plugins> handling."),
+            Some("Update AGENTS.md and <recommended_plugins> handling.")
+        );
+        assert_eq!(
+            task_prompt(
+                "<environment_context>cwd</environment_context>\n<INSTRUCTIONS>rules</INSTRUCTIONS>\nBuild a dashboard."
+            ),
+            Some("Build a dashboard.")
+        );
+    }
+
+    #[test]
+    fn task_prompt_skips_claude_command_metadata_and_preserves_arguments() {
+        let clear = "<command-name>/clear</command-name>\n    <command-message>clear</command-message>\n    <command-args></command-args>";
+        assert_eq!(task_prompt(clear), None);
+        assert_eq!(
+            task_prompt(&format!("{clear}\nFix the login refresh bug.")),
+            Some("Fix the login refresh bug.")
+        );
+        assert_eq!(
+            task_prompt(
+                "<command-message>review</command-message><command-name>/review</command-name><command-args>Fix the login race</command-args>"
+            ),
+            Some("Fix the login race")
+        );
+        assert_eq!(task_prompt("<command-args> \n </command-args>"), None);
+        assert_eq!(task_prompt("<command-name>/clear"), None);
+        assert_eq!(
+            task_prompt("Explain how /clear works."),
+            Some("Explain how /clear works.")
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_selects_redacted_task_after_claude_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("example-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let messages = [
+            "<local-command-caveat>Local commands are not user requests.</local-command-caveat>",
+            "<command-name>/clear</command-name>\n    <command-message>clear</command-message>\n    <command-args></command-args>",
+            "<local-command-stdout></local-command-stdout>",
+            "<system-reminder>Contents of CLAUDE.md: Project rules</system-reminder>",
+            "<local-command-caveat>Local command output</local-command-caveat><local-command-stdout>Ready</local-command-stdout>",
+            "<ide_opened_file>The user opened a file.</ide_opened_file>\nFix login refresh in /Users/test/project/login.rs",
+        ];
+        let records: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .map(|(i, message)| {
+                serde_json::json!({
+                    "type": "user", "message": {"role": "user", "content": message},
+                    "cwd": "/Users/test/project", "timestamp": "2026-08-08T10:00:00Z",
+                    "sessionId": "11111111-1111-1111-1111-111111111111", "uuid": format!("u{i}")
+                })
+                .to_string()
+            })
+            .collect();
+        std::fs::write(
+            project.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            records.join("\n"),
+        )
+        .unwrap();
+        let source = ClaudeCodeSource::new(root);
+        let reference = source.discover().unwrap().remove(0);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, body, _) = build_preview(&store, Some(&cfg), None, &source, &reference)
+            .await
+            .unwrap();
+        assert!(summary.opening_prompt.starts_with("Fix login refresh in "));
+        assert!(!summary.opening_prompt.contains("/Users/test"));
+        assert!(body.contains("Project rules"));
+        assert!(
+            body.contains("/clear"),
+            "command records stay in the transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_selects_redacted_task_after_codex_setup() {
+        use crate::source::TraceSource;
+        use crate::source::codex::CodexSource;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-preview.jsonl");
+        let setup = "# AGENTS.md instructions for /Users/test/project\n<INSTRUCTIONS>Project rules</INSTRUCTIONS>";
+        let mut records = vec![serde_json::json!({
+            "type": "session_meta",
+            "payload": {"id": "preview-test", "cwd": "/Users/test/project"}
+        })];
+        for message in [
+            setup,
+            "<recommended_plugins>Available plugins</recommended_plugins>",
+            "",
+            "Fix login refresh in /Users/test/project/login.rs",
+        ] {
+            records.push(serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": message}]}
+            }));
+        }
+        let write_records = |records: &[serde_json::Value]| {
+            std::fs::write(
+                &path,
+                records
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .unwrap();
+        };
+        write_records(&records);
+        let source = CodexSource::new(dir.path().to_path_buf());
+        let reference = source.discover().unwrap().remove(0);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, body, envelope) =
+            build_preview(&store, Some(&cfg), None, &source, &reference)
+                .await
+                .unwrap();
+        assert!(summary.opening_prompt.starts_with("Fix login refresh in "));
+        assert!(!summary.opening_prompt.contains("/Users/test"));
+        assert!(body.contains("Project rules"));
+        assert_eq!(summary.event_count, envelope.events.len());
+
+        records.pop();
+        write_records(&records);
+        let (summary, _, _) = build_preview(&store, Some(&cfg), None, &source, &reference)
+            .await
+            .unwrap();
+        assert_eq!(summary.opening_prompt, "No task description found.");
+    }
+
     #[tokio::test]
     async fn preview_opening_prompt_is_truncated() {
         // 200 chars, so a huge first message cannot dominate a queue row.
@@ -1981,7 +2308,17 @@ mod tests {
         // safe answer -- and the default if they simply drop it into the
         // list below -- is that it does.
         let (_sd, store) = crate::config::tests_support::temp_store();
-        let cfg = sample_cfg(&store);
+        let mut cfg = sample_cfg(&store);
+        // With a witness, so the optional origin record is serialized too.
+        cfg.set_witness(
+            crate::config::WitnessSettings {
+                admission_evidence: false,
+                url: "https://witness.invalid".into(),
+                signing_address: "0xab".into(),
+                expected_measurements: vec!["mrtd=aa".into()],
+            },
+            crate::config::WitnessOrigin::Settings,
+        );
         let value = serde_json::to_value(&cfg).unwrap();
         let mut all: Vec<&str> = value
             .as_object()
@@ -1996,6 +2333,8 @@ mod tests {
                 "allowed_hosts",
                 "audience",
                 "consent_scopes",
+                // Not fingerprinted: see NON_ENVELOPE_CONFIG_FIELDS.
+                "consent_scopes_chosen",
                 "device_key_id",
                 "display_handle",
                 // Fingerprinted, deliberately, for the same reason as
@@ -2033,6 +2372,8 @@ mod tests {
                 // invalidating re-asks; under-invalidating sends something
                 // the contributor did not approve.
                 "witness",
+                // Not fingerprinted: see NON_ENVELOPE_CONFIG_FIELDS.
+                "witness_origin",
             ],
             "a new ContributorConfig field must be classified: leave it out of \
              NON_ENVELOPE_CONFIG_FIELDS to fingerprint it, or add it there with a reason"
@@ -2046,6 +2387,27 @@ mod tests {
                 "NON_ENVELOPE_CONFIG_FIELDS names {field}, which is not a config field"
             );
         }
+    }
+
+    /// Where a witness came from is disclosure, not an input: recording it
+    /// changes no byte of an envelope and must not re-ask an approval.
+    #[test]
+    fn the_witness_origin_does_not_move_the_fingerprint() {
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let witness = crate::config::WitnessSettings {
+            admission_evidence: false,
+            url: "https://witness.invalid".into(),
+            signing_address: "0xab".into(),
+            expected_measurements: vec!["mrtd=aa".into()],
+        };
+        let mut unrecorded = sample_cfg(&store);
+        unrecorded.witness = Some(witness.clone());
+        let mut recorded = unrecorded.clone();
+        recorded.set_witness(witness, crate::config::WitnessOrigin::PublishedAtJoin);
+        assert_eq!(
+            input_fingerprint_with_env_filter(&unrecorded, None, false, "none"),
+            input_fingerprint_with_env_filter(&recorded, None, false, "none")
+        );
     }
 
     #[tokio::test]

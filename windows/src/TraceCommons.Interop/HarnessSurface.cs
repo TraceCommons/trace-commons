@@ -196,6 +196,28 @@ public sealed record HarnessListing
     [JsonPropertyName("catalog_present")]
     public bool CatalogPresent { get; init; }
 
+    /// <summary>
+    /// Whether the destination this app would send calls to has a credential
+    /// behind it, or null where the daemon did not say.
+    /// </summary>
+    /// <remarks>
+    /// THREE ANSWERS, NOT TWO. False means this app hosts the answering and
+    /// holds no key, so a connect is refused; true means either a key is here
+    /// or the destination is one the contributor runs themselves, which this
+    /// gate has no business asking about; NULL means the daemon does not gate
+    /// connects at all, and a shell that read it as false would tell somebody
+    /// to sign in before connecting a tool they can connect right now.
+    /// </remarks>
+    [JsonPropertyName("destination_credentialed")]
+    public bool? DestinationCredentialed { get; init; }
+
+    /// <summary>
+    /// That tri-state in the encoding the shared sentence takes: negative for
+    /// an absent field, 0 for false, 1 for true.
+    /// </summary>
+    public int CredentialedAbiValue =>
+        DestinationCredentialed is { } credentialed ? (credentialed ? 1 : 0) : -1;
+
     /// <summary>The port this computer answers model calls on, or null.</summary>
     [JsonPropertyName("destination_port")]
     public ushort? DestinationPort { get; init; }
@@ -378,6 +400,11 @@ public static class HarnessSurface
             return new HarnessListing
             {
                 CatalogPresent = ReadBool(root, "catalog_present") ?? false,
+                // Read as a tri-state and kept as one: ReadBool already
+                // answers null for both an absent field and one this build
+                // could not read, which are the two shapes that must not
+                // become "no key here".
+                DestinationCredentialed = ReadBool(root, "destination_credentialed"),
                 DestinationPort = ReadPort(root),
                 Harnesses = rows,
                 ActivityReadable =
@@ -623,6 +650,23 @@ public static class HarnessSurface
     /// The scope sentence -- <c>HarnessesSpendScope</c> -- is drawn beside
     /// this one and only when this one is non-empty.
     /// </remarks>
+    /// <summary>
+    /// Why a connect is not on offer, or the empty string.
+    /// </summary>
+    /// <remarks>
+    /// Drawn ONCE, beside the connect controls, rather than once per row: the
+    /// fact is about the destination and not about any one tool. The branch
+    /// crosses the ABI so that the absent case cannot be flattened into the
+    /// false one on the way.
+    /// </remarks>
+    public static string CredentialNotice(HarnessListing listing)
+    {
+        ArgumentNullException.ThrowIfNull(listing);
+        return NativeMethods.TakeOwnedString(
+                NativeMethods.tc_harness_credential_notice(listing.CredentialedAbiValue))
+            ?? string.Empty;
+    }
+
     public static string SpendSentence(HarnessListing listing) =>
         NativeMethods.TakeOwnedString(
             NativeMethods.tc_harness_spend_line(listing.SpendAbiValue))

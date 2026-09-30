@@ -34,6 +34,19 @@ public static class DaemonProtocol
     {
         public const string Hello = "hello";
         public const string Status = "status";
+
+        /// <summary>
+        /// K11: what leaves this machine, to whom, and what this client
+        /// checked. Read-only, no network. Words come from
+        /// <see cref="RouteDisclosureSurface"/>, never from here.
+        /// </summary>
+        public const string RouteDisclosure = "route_disclosure";
+
+        /// <summary>
+        /// The held certificate's claims for one pending entry whose
+        /// <c>holds_certificate</c> is true.
+        /// </summary>
+        public const string CertificateDetail = "certificate_detail";
         public const string ListPending = "list_pending";
 
         /// <summary>
@@ -81,6 +94,26 @@ public static class DaemonProtocol
         public const string SetProjectMode = "set_project_mode";
         public const string ListAudit = "list_audit";
         public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
+
+        /// <summary>
+        /// Records that the void notices with these ids were shown. Takes
+        /// only the ids actually drawn: there is no "all", so a void raised
+        /// after the window drew is never cleared unseen. Re-arms nothing.
+        /// </summary>
+        public const string AcknowledgeGrantVoids = "acknowledge_grant_voids";
+
+        /// <summary>
+        /// Records that the notice after a legacy invite migration was
+        /// shown. Changes nothing else.
+        /// </summary>
+        public const string AcknowledgeLegacyInviteMigration = "acknowledge_legacy_invite_migration";
+
+        /// <summary>
+        /// Records that the rewording notices with these ids were shown (K5).
+        /// Only the ids actually drawn, with no "all". Changes nothing about
+        /// the folders.
+        /// </summary>
+        public const string AcknowledgeArmingRewordings = "acknowledge_arming_rewordings";
 
         /// <summary>
         /// Asks IronWire which tools on this machine are set to send through
@@ -138,6 +171,67 @@ public static class DaemonProtocol
         /// single-use and expires.
         /// </remarks>
         public const string HarnessCommit = "harness_commit";
+
+        // The NEAR AI credential. Four methods, all four already in the
+        // daemon's pinned METHODS array, so naming them here adds nothing to
+        // the protocol -- the gap was that no shell asked.
+
+        /// <summary>
+        /// Begins the sign-in ceremony and hands back where to open the
+        /// browser.
+        /// </summary>
+        /// <remarks>
+        /// THE BROWSER URL COMES FROM HERE AND NOWHERE ELSE. No poll re-serves
+        /// it, so a shell that dropped it has to start a second ceremony to
+        /// get another -- which is a second browser tab in front of somebody
+        /// who is already looking at one.
+        /// </remarks>
+        public const string NearAiCredentialStart = "near_ai_credential_start";
+
+        /// <summary>
+        /// What this machine holds, and -- for a caller that can name the
+        /// attempt -- how that attempt is going.
+        /// </summary>
+        /// <remarks>
+        /// Always answers, and the resting <c>state</c> is always present.
+        /// <c>attempt_id</c> and <c>attempt_status</c> are echoed only to a
+        /// caller that already knew the id.
+        /// </remarks>
+        public const string NearAiCredentialStatus = "near_ai_credential_status";
+
+        /// <summary>Stops waiting on the browser. Requires the attempt id.</summary>
+        public const string NearAiCredentialCancel = "near_ai_credential_cancel";
+
+        /// <summary>
+        /// Removes the stored key from this machine.
+        /// </summary>
+        /// <remarks>
+        /// Answers <c>revoked: false</c>, and that is not a placeholder:
+        /// forgetting is local, and the key stays valid at the service until
+        /// the contributor removes it in their own account.
+        /// </remarks>
+        public const string NearAiCredentialForget = "near_ai_credential_forget";
+
+        /// <summary>
+        /// What is left in the account this machine's key belongs to.
+        /// </summary>
+        /// <remarks>
+        /// NEVER AN IPC ERROR. The daemon answers a named state in every
+        /// outcome -- no session, a refused one, no organization, a read that
+        /// did not land, or a figure -- precisely so that a shell has four
+        /// different sentences to render rather than one shrug. An error
+        /// frame therefore means the call itself failed, and this shell reads
+        /// that as unreported: a daemon too old to answer, not an empty
+        /// account.
+        ///
+        /// <para>
+        /// This name is dispatched by the daemon but is NOT in its pinned
+        /// METHODS array, so <c>hello</c> does not advertise it. Nothing here
+        /// consults that array before calling, and an older daemon's refusal
+        /// lands on the same unreported path as any other failed read.
+        /// </para>
+        /// </remarks>
+        public const string NearAiBalance = "near_ai_balance";
 
         // History and withdrawal. Like the onboarding block above, every one
         // of these was already in the daemon's pinned METHODS array before
@@ -448,6 +542,111 @@ public sealed class QueueEntry
     /// </summary>
     [JsonPropertyName("subagents_dropped")]
     public int SubagentsDropped { get; set; }
+
+    /// <summary>
+    /// Whether this session can actually be contributed: <c>eligible</c>,
+    /// <c>ineligible_permanent</c>, <c>ineligible_configuration</c> or
+    /// <c>unknown</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>NULL MEANS THE KEY WAS ABSENT, AND ABSENT IS NOT <c>unknown</c>.</b>
+    /// The daemon omits this field entirely when the contributor was invited
+    /// rather than admitted on evidence, or when the setting could not be
+    /// read: they have no eligibility question, and a row answering one they
+    /// do not have puts a caveat on work that carries none. Such a row
+    /// renders exactly as it did before this field existed.
+    ///
+    /// <para>
+    /// <c>unknown</c> is a real state that arrives on the wire -- a row this
+    /// build never evaluated, or one whose submission failed transiently --
+    /// and it is rendered, with its own sentence and no send control. Never
+    /// collapse the two. Every decision that follows from this value is made
+    /// in <see cref="ContributionEligibilitySurface"/>, which asks the shared
+    /// crate; nothing here or above it branches on the string.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("eligibility")]
+    public string? Eligibility { get; set; }
+
+    /// <summary>
+    /// A stable label naming why, or null. Absent on every <c>eligible</c>
+    /// row, and on a daemon that reported no eligibility at all.
+    /// </summary>
+    /// <remarks>
+    /// Rendered only through
+    /// <see cref="ContributionEligibilitySurface.ReasonLine"/>, which answers
+    /// nothing at all for a label this build does not know -- deliberately
+    /// unlike the state line's fallback. An unknown state still has to say
+    /// something; an unknown reason has nothing honest to say.
+    /// </remarks>
+    [JsonPropertyName("eligibility_reason")]
+    public string? EligibilityReason { get; set; }
+
+    /// <summary>
+    /// Whether this session carries proof of its last model call:
+    /// <c>attested</c>, <c>unattested_permanent</c>,
+    /// <c>unattested_configuration</c> or <c>unknown</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>ALWAYS SENT, AND THAT IS THE OPPOSITE RULE TO
+    /// <see cref="Eligibility"/>.</b> Eligibility asks whether this
+    /// contributor may send this session, and says nothing at all when nobody
+    /// asked. The mark states a fact about the trace, which is owed to
+    /// everybody -- an invited contributor's queue carries marks even though
+    /// it carries no eligibility.
+    ///
+    /// <para>
+    /// So there is no "absent" case to render here. A null means a daemon
+    /// predating the field, and the shared table answers <c>unknown</c> for
+    /// it: not being told is not evidence that a session carries no proof.
+    /// Every decision that follows from this value is made in
+    /// <see cref="AttestationMarkSurface"/>; nothing here or above it
+    /// branches on the string.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("attestation")]
+    public string? Attestation { get; set; }
+
+    /// <summary>
+    /// A stable label naming why, or null. The same thirteen labels
+    /// <see cref="EligibilityReason"/> takes, with <b>different sentences</b>.
+    /// </summary>
+    /// <remarks>
+    /// <b>ITS PRESENCE VARIES WITHIN A SINGLE MARK.</b> <c>attested</c> never
+    /// carries one and both unattested marks always do, so a shell can look
+    /// right while deciding from the mark. <c>unknown</c> is where that
+    /// breaks: absent when the row was never evaluated, and
+    /// <c>receipt_unavailable</c> when a send was refused because the receipt
+    /// service was down -- a retraction rather than a refusal, and the only
+    /// signal saying the session may attest later. Branch on the key, never
+    /// on the mark.
+    /// </remarks>
+    [JsonPropertyName("attestation_reason")]
+    public string? AttestationReason { get; set; }
+
+    /// <summary>
+    /// Whether a witness certificate is held for the bytes this row was
+    /// pinned to. True after either witness route.
+    /// </summary>
+    /// <remarks>
+    /// <b>A missing key is silently false here</b>, because System.Text.Json
+    /// defaults it -- so a daemon that stopped sending it, or a key renamed
+    /// on one side only, yields an EMPTY certificate-held section, which is
+    /// exactly what a contributor with no certificates sees. The section's
+    /// empty sentence is what tells those two apart, and
+    /// <c>CertificateSurfaceTests</c> pins that the key decodes.
+    ///
+    /// The three shells disagree about an absent field and each is pinned
+    /// separately: GTK defaults it, this defaults it, and macOS would throw
+    /// and fail the whole list. They agree because they are each held to it,
+    /// not because they share a mechanism.
+    ///
+    /// Not <see cref="Attestation"/>. That says whether the session carries a
+    /// copy of its last model call; this says whether a
+    /// certificate is held over the reviewed bytes.
+    /// </remarks>
+    [JsonPropertyName("holds_certificate")]
+    public bool HoldsCertificate { get; set; }
 }
 
 /// <summary>
@@ -513,6 +712,57 @@ public sealed class DaemonStatus
     /// the daemon said nothing about it.
     /// </summary>
     public bool BudgetIsBlocking => DailyBudget?.Blocked == true;
+
+    /// <summary>
+    /// Grants the daemon voided that no shell has shown yet (R6 of the
+    /// connect-and-forget design), each kept as the daemon sent it so it can
+    /// go back to the ABI for its words. Null from a daemon older than the
+    /// field, which has voided nothing it can report.
+    /// </summary>
+    [JsonPropertyName("grant_voids")]
+    public List<JsonElement>? GrantVoids { get; set; }
+
+    /// <summary>
+    /// Whether moving a legacy invite identity to a NEAR AI account is
+    /// offered, and the notice after it moved, kept as the daemon sent it so
+    /// the notice can go back to the ABI for its words. Null from a daemon
+    /// older than the field.
+    /// </summary>
+    [JsonPropertyName("legacy_invite_migration")]
+    public JsonElement? LegacyInviteMigration { get; set; }
+
+    /// <summary>
+    /// Approved sessions held because the privacy witness is busy, and when
+    /// the first is tried again.
+    /// </summary>
+    /// <remarks>
+    /// Read independently of <see cref="Health"/> for the reason
+    /// <see cref="DailyBudget"/> is: the daemon sets a
+    /// <c>witness-saturated</c> label too, but a higher label can hold the
+    /// single slot while these sessions are still waiting. Null from a daemon
+    /// that predates the field, which holds nothing on the witness.
+    /// </remarks>
+    [JsonPropertyName("witness_capacity")]
+    public WitnessCapacity? WitnessCapacity { get; set; }
+
+    /// <summary>
+    /// Armed folders whose arming wording no longer claims a model scrubs
+    /// them, not yet shown by any shell (K5), each kept as the daemon sent it
+    /// so it can go back to the ABI for its words. Null from a daemon older
+    /// than the field.
+    /// </summary>
+    [JsonPropertyName("arming_rewordings")]
+    public List<JsonElement>? ArmingRewordings { get; set; }
+
+    /// <summary>
+    /// What the automatic-contribution gate held at the daemon's last full
+    /// pass, kept as the daemon sent it for the ABI to word. Read
+    /// independently of <see cref="Health"/>: a higher label can hold the
+    /// slot while armed folders are held. Null from a daemon older than the
+    /// field, which holds nothing.
+    /// </summary>
+    [JsonPropertyName("automatic_contribution_held")]
+    public JsonElement? AutomaticContributionHeld { get; set; }
 
     /// <summary>
     /// Whether there is nothing to report.
@@ -599,6 +849,44 @@ public sealed class DailyBudget
     public DateTimeOffset? ResetsAtUtc =>
         DateTimeOffset.TryParse(
             ResetsAt,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+                | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out var parsed)
+            ? parsed
+            : null;
+}
+
+/// <summary>
+/// <c>status.witness_capacity</c>: approved sessions held on a busy privacy
+/// witness. A count and one timestamp; nothing identifying can appear here.
+/// </summary>
+public sealed class WitnessCapacity
+{
+    [JsonPropertyName("waiting_sessions")]
+    public long WaitingSessions { get; set; }
+
+    /// <summary>When the first held session is tried again, as the daemon reported it.</summary>
+    [JsonPropertyName("next_retry_at")]
+    public string? NextRetryAt { get; set; }
+
+    /// <summary>Whether any approved session is waiting on the witness.</summary>
+    public bool Waiting => WaitingSessions > 0;
+
+    /// <summary>
+    /// The object handed to the Rust, which words the notice. The count is
+    /// all the words depend on, so it is all that crosses.
+    /// </summary>
+    public string WireJson =>
+        JsonSerializer.Serialize(new Dictionary<string, long>
+        {
+            ["waiting_sessions"] = Math.Max(0, WaitingSessions),
+        });
+
+    /// <summary><see cref="NextRetryAt"/> parsed, or null when absent or unreadable.</summary>
+    public DateTimeOffset? NextRetryAtUtc =>
+        DateTimeOffset.TryParse(
+            NextRetryAt,
             System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.AdjustToUniversal
                 | System.Globalization.DateTimeStyles.AssumeUniversal,

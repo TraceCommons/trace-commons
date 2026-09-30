@@ -90,6 +90,11 @@
 // verbatim, not Rust naming conventions.
 #![allow(non_camel_case_types)]
 
+mod insights;
+pub use insights::{tc_insights_call, tc_insights_copy_json};
+mod mission_drafts;
+pub use mission_drafts::tc_mission_drafts_call;
+
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::UnwindSafe;
@@ -97,6 +102,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use trace_commons_contributor::config::ConfigStore;
+use trace_commons_contributor::daemon::attached::{AttachError, AttachedDaemon};
 use trace_commons_contributor::daemon::ipc::{self, ERR_BAD_PARAMS, Response};
 use trace_commons_contributor::daemon::settings::{
     DaemonSettings, apply_settings_object, roots_declared,
@@ -440,6 +446,21 @@ struct RunningDaemon {
 /// function that does, and must not race a call still using the handle.
 pub struct tc_handle {
     rt: tokio::runtime::Runtime,
+    /// Set when this handle reaches a daemon in ANOTHER process over the
+    /// socket, instead of owning one in this one.
+    ///
+    /// The two backings are exclusive: `running` is always `None` on an
+    /// attached handle and `attached` is always `None` on an embedded one.
+    /// Every function that reads the daemon checks this first, because an
+    /// attached handle has no `DaemonShared` to borrow -- `shared_of` would
+    /// report it as stopped, which is the exact false statement this whole
+    /// path exists to stop making.
+    ///
+    /// An attached handle still owns `rt`: nothing in it needs a runtime,
+    /// but `tc_handle_free`'s contract is written around a handle owning
+    /// one, and a handle that sometimes did not would make that contract
+    /// conditional for no gain.
+    attached: Option<Arc<AttachedDaemon>>,
     /// `None` once the daemon has been claimed for teardown -- by
     /// `tc_daemon_stop`, or implicitly by `tc_handle_free` tearing it down
     /// before freeing. Deliberately a plain `Option` and not a
@@ -466,6 +487,11 @@ pub struct tc_handle {
 /// reporting a healthy daemon. An undetectable zombie. Reading the flag
 /// here, rather than special-casing `"shutdown"` in `tc_call`, keeps one
 /// definition of "stopped" for all three entry points.
+/// The attached daemon behind this handle, if it has one.
+fn attached_of(handle: &tc_handle) -> Option<Arc<AttachedDaemon>> {
+    handle.attached.as_ref().map(Arc::clone)
+}
+
 fn shared_of(handle: &tc_handle) -> Option<Arc<ipc::DaemonShared>> {
     let running = handle.running.lock().unwrap_or_else(|p| p.into_inner());
     let shared = running.as_ref().map(|r| Arc::clone(&r.embedded.shared))?;
@@ -514,6 +540,7 @@ fn start_daemon_handle(store: ConfigStore) -> anyhow::Result<tc_handle> {
     ));
     Ok(tc_handle {
         rt,
+        attached: None,
         running: Mutex::new(Some(RunningDaemon {
             embedded,
             supervisor,
@@ -597,6 +624,133 @@ pub unsafe extern "C" fn tc_daemon_start(
     })
 }
 
+/// The fixed label `tc_daemon_attach` reports when nothing is listening on
+/// the state directory's endpoint -- no daemon was ever started, or a
+/// crashed one left the socket file behind with nothing behind it.
+///
+/// Deliberately distinct from `ERR_ALREADY_RUNNING`'s mirror image: a host
+/// that just got `already-running` from a start and then this from an attach
+/// is looking at a daemon that exited in between, which is a different
+/// sentence from either failure alone.
+/// The error-frame code and label for a stop asked of an attached handle.
+const ERR_REFUSED: &str = "refused";
+const ERR_ATTACHED_STOP_REFUSED: &str = "attached-stop-refused";
+/// The label `tc_preview_open` reports on an attached handle: the redacted
+/// body is the in-process content exemption and the socket does not carry it.
+const ERR_PREVIEW_REQUIRES_EMBEDDED: &str = "preview-requires-embedded";
+
+const ERR_NO_DAEMON_LISTENING: &str = "no-daemon-listening";
+
+/// The fixed label for an attach that reached the endpoint and could not
+/// hold it.
+const ERR_ATTACH_FAILED: &str = "attach-failed";
+
+/// The fixed label for a platform whose daemon endpoint cannot be attached
+/// to at all. Windows today: its named pipe is a synchronous handle and a
+/// held-open connection deadlocks on the first round trip. See
+/// `daemon::attached`'s module doc.
+///
+/// Distinct from `ERR_ATTACH_FAILED` because nothing about the machine or
+/// the daemon is wrong, and retrying will never help.
+const ERR_ATTACH_UNSUPPORTED: &str = "attach-unsupported";
+
+/// Attach to a daemon ALREADY RUNNING in another process, over its socket.
+///
+/// This is the answer to `tc_daemon_start` reporting `already-running`.
+/// That label means another process holds `daemon.lock`, which the header
+/// documents as "not an error to repair: the daemon the contributor wants is
+/// already up" -- and until this existed a host had no way to act on that,
+/// so every shell that hit it told the contributor their watcher was not
+/// running while it was running.
+///
+/// The returned handle is a `tc_handle*` in every respect that matters to a
+/// caller: `tc_call`, `tc_subscribe`, `tc_unsubscribe` and `tc_handle_free`
+/// all take it, and `tc_handle_free` is still the only thing that frees it.
+/// Three deliberate differences from a started handle, each reported rather
+/// than silently degraded:
+///
+///   - `tc_daemon_stop` does NOT stop the daemon. The process on the other
+///     end may be a service-managed daemon or another window, and a shell
+///     that did not start it does not get to end it. Stop closes this
+///     connection instead. `tc_call(h, "shutdown", ...)` is refused with
+///     `"attached-stop-refused"` for the same reason.
+///   - `tc_preview_open` is refused with `"preview-requires-embedded"`.
+///     Previewing a redacted BODY is this ABI's in-process content
+///     exemption; the socket's `preview` returns the summary only, and
+///     answering with a summary where a body was asked for would be a
+///     content promise this path cannot keep.
+///   - Events arrive over the socket, so a subscriber gets the `snapshot`
+///     frame the daemon sends a client that just subscribed -- which the
+///     in-process `tc_subscribe` path never receives.
+///
+/// Returns NULL and sets `*err` to a fixed label on failure:
+/// `"no-daemon-listening"` (nothing is there) or `"attach-failed"`.
+///
+/// # Safety
+/// `config_dir` must be a valid, NUL-terminated UTF-8 C string (or NULL).
+/// `err`, if non-null, must point to writable `*mut c_char` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_daemon_attach(
+    config_dir: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut tc_handle {
+    guarded_scalar(err, std::ptr::null_mut(), || {
+        let fail = |label: &'static str| -> *mut tc_handle {
+            set_last_error(label);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(label) };
+            }
+            std::ptr::null_mut()
+        };
+
+        let store = {
+            let opened: anyhow::Result<ConfigStore> = (|| {
+                let dir = unsafe { borrow_str(config_dir) }?;
+                ConfigStore::open(std::path::PathBuf::from(dir))
+            })();
+            match opened {
+                Ok(store) => store,
+                // Same rule as every other start path: the anyhow context
+                // behind this embeds the state-directory path, so the label
+                // is fixed and the error text never crosses.
+                Err(_) => return Ok(fail(ERR_STATE_DIR_NOT_WRITABLE)),
+            }
+        };
+
+        let attached = match AttachedDaemon::connect(&store) {
+            Ok(attached) => attached,
+            Err(AttachError::NotListening) => return Ok(fail(ERR_NO_DAEMON_LISTENING)),
+            Err(AttachError::UnsupportedTransport) => {
+                return Ok(fail(ERR_ATTACH_UNSUPPORTED));
+            }
+            Err(_) => return Ok(fail(ERR_ATTACH_FAILED)),
+        };
+
+        // One worker is enough: an attached handle runs no daemon loops and
+        // spawns no tasks. It owns a runtime only so `tc_handle_free`'s
+        // contract stays unconditional -- see `tc_handle::attached`.
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return Ok(fail(ERR_ATTACH_FAILED)),
+        };
+
+        let handle = tc_handle {
+            rt,
+            attached: Some(Arc::new(attached)),
+            running: Mutex::new(None),
+            subscriptions: Mutex::new(HashMap::new()),
+            next_subscription: AtomicU64::new(1),
+        };
+        let raw = Box::into_raw(Box::new(handle));
+        registry_insert(raw as usize, AllocKind::Handle);
+        Ok(raw)
+    })
+}
+
 /// Fixed labels `tc_daemon_start_with_settings` can report via `*err` /
 /// `tc_last_error` for a failure specific to `settings_json`, distinct from
 /// `ERR_DAEMON_START_FAILED` (which stays opaque for the reason stated on
@@ -636,7 +790,8 @@ unsafe fn apply_pre_start_settings(
     }
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|_| ERR_SETTINGS_INVALID_JSON)?;
-    let mut settings = DaemonSettings::load(store).map_err(|_| ERR_SETTINGS_LOAD_FAILED)?;
+    let mut settings =
+        DaemonSettings::load_for_preferences(store).map_err(|_| ERR_SETTINGS_LOAD_FAILED)?;
     let changed = apply_settings_object(&mut settings, &value)?;
     if changed {
         settings
@@ -791,6 +946,16 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
 /// call `tc_handle_free` concurrently with `tc_daemon_stop`. Both are
 /// stated in the header.
 fn stop_embedded(handle: &tc_handle) {
+    // An attached handle does not own the daemon, so "stop" can only mean
+    // "stop listening to it". Dropping the sink ends event delivery; the
+    // connection itself closes when the handle is freed. Stopping the daemon
+    // here would let any window tear down a service-managed daemon, which is
+    // the thing `AttachedDaemon` refuses on the wire -- this is the same
+    // refusal at the other end of the same handle.
+    if let Some(attached) = attached_of(handle) {
+        attached.clear_sink();
+        return;
+    }
     let running = handle
         .running
         .lock()
@@ -1019,6 +1184,36 @@ pub unsafe extern "C" fn tc_call(
                 Ok(v) => v,
                 Err(_) => return error_frame(ERR_BAD_PARAMS, "invalid-params-json"),
             };
+            // An attached handle has no `DaemonShared` to borrow: the
+            // daemon is in another process. Checked before `shared_of`,
+            // which would otherwise report a perfectly healthy attached
+            // handle as a stopped daemon.
+            if let Some(attached) = attached_of(handle) {
+                return match attached.call(method, &params) {
+                    Ok(response) => serde_json::to_string(&response)
+                        .unwrap_or_else(|_| error_frame("unavailable", "serialize-failed")),
+                    Err(AttachError::StopRefused) => {
+                        error_frame(ERR_REFUSED, ERR_ATTACHED_STOP_REFUSED)
+                    }
+                    Err(AttachError::NotListening)
+                    | Err(AttachError::Disconnected)
+                    | Err(AttachError::TimedOut)
+                    // Unreachable: a handle only becomes attached by a
+                    // successful `connect`, and on a platform that refuses
+                    // one there is never an attached handle to call. Matched
+                    // rather than left to a catch-all so that a new variant
+                    // is still a compile error here.
+                    | Err(AttachError::UnsupportedTransport) => {
+                        error_frame("unavailable", "daemon-disconnected")
+                    }
+                    Err(AttachError::Transport(_)) => {
+                        // The transport error carries an OS message that can
+                        // name the socket path. Fixed label, as everywhere
+                        // else on this boundary.
+                        error_frame("unavailable", "attached-transport-failed")
+                    }
+                };
+            }
             let Some(shared) = shared_of(handle) else {
                 return error_frame("unavailable", "daemon-stopped");
             };
@@ -1131,15 +1326,40 @@ pub unsafe extern "C" fn tc_subscribe(
             set_last_error(ERR_NULL_CALLBACK);
             return Ok(0u64);
         };
-        let Some(shared) = shared_of(handle_ref) else {
-            set_last_error(ERR_DAEMON_NOT_RUNNING);
-            return Ok(0u64);
-        };
         // Raw pointers are not `Send`; `ctx` is a caller-supplied opaque
         // token the caller promised (per this function's safety contract)
         // stays valid, so it is sound to hand across the spawned task.
         struct SendPtr(*mut c_void);
         unsafe impl Send for SendPtr {}
+
+        // Attached first, for the same reason as `tc_call`: there is no
+        // `DaemonShared` here and `shared_of` would refuse a healthy handle.
+        // Events come off the socket, so the subscriber also receives the
+        // `snapshot` frame the daemon sends whoever just subscribed -- the
+        // courtesy the in-process path below never gets.
+        if let Some(attached) = attached_of(handle_ref) {
+            let ctx = SendPtr(ctx);
+            let token = handle_ref.next_subscription.fetch_add(1, Ordering::Relaxed);
+            if attached
+                .subscribe(move |event| {
+                    let ctx = &ctx;
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    if let Ok(c) = CString::new(json) {
+                        cb(c.as_ptr(), ctx.0);
+                    }
+                })
+                .is_err()
+            {
+                set_last_error(ERR_DAEMON_NOT_RUNNING);
+                return Ok(0u64);
+            }
+            return Ok(token);
+        }
+
+        let Some(shared) = shared_of(handle_ref) else {
+            set_last_error(ERR_DAEMON_NOT_RUNNING);
+            return Ok(0u64);
+        };
         let ctx = SendPtr(ctx);
 
         // Subscribed here, synchronously, rather than inside the spawned
@@ -1247,6 +1467,17 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
     if token == 0 {
         return;
     }
+    {
+        // Attached handles keep no task per token -- there is one socket and
+        // one sink -- so unsubscribing is dropping that sink. Done before the
+        // runtime-context refusal below, which guards a join this path does
+        // not perform.
+        let handle_ref = unsafe { &*handle };
+        if let Some(attached) = attached_of(handle_ref) {
+            attached.clear_sink();
+            return;
+        }
+    }
     if tokio::runtime::Handle::try_current().is_ok() {
         // Refuse without touching `subscriptions`: a callback calling
         // `tc_unsubscribe` on its own token from inside itself would
@@ -1335,6 +1566,15 @@ pub unsafe extern "C" fn tc_preview_open(
             anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
         }
         let handle = unsafe { &*handle };
+        // The redacted body is this ABI's in-process content exemption:
+        // the socket's `preview` answers with the summary only. Refusing
+        // is the honest outcome -- a summary where a body was asked for
+        // would be a content promise this path cannot keep, and falling
+        // through to `shared_of` would report a healthy attached handle
+        // as a stopped daemon.
+        if handle.attached.is_some() {
+            anyhow::bail!("{ERR_PREVIEW_REQUIRES_EMBEDDED}");
+        }
         let entry_id = unsafe { borrow_str(entry_id) }?;
         // Inferred as `uuid::Uuid` from `ipc::open_preview`'s signature
         // below -- the `uuid` crate is a transitive dependency (via
@@ -1453,6 +1693,15 @@ pub unsafe extern "C" fn tc_preview_turns_json(
             anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
         }
         let handle = unsafe { &*handle };
+        // The redacted body is this ABI's in-process content exemption:
+        // the socket's `preview` answers with the summary only. Refusing
+        // is the honest outcome -- a summary where a body was asked for
+        // would be a content promise this path cannot keep, and falling
+        // through to `shared_of` would report a healthy attached handle
+        // as a stopped daemon.
+        if handle.attached.is_some() {
+            anyhow::bail!("{ERR_PREVIEW_REQUIRES_EMBEDDED}");
+        }
         let entry_id = unsafe { borrow_str(entry_id) }?;
         let digest = unsafe { borrow_str(body_digest) }?.to_string();
         let id = entry_id
@@ -2175,10 +2424,11 @@ pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_
 /// Returns an owned JSON object whose keys are `ConsentCopy`'s fields; free
 /// it with [`tc_string_free`].
 ///
-/// ONE CALL, NOT ONE PER SENTENCE. Three sentences is not three exports: a
-/// per-sentence export would let a shell take two of them and hand-write the
-/// third, and one of the three is the claim about what leaves this machine
-/// that a contributor reads immediately above an irreversible button.
+/// ONE CALL, NOT ONE PER SENTENCE. Six sentences is not six exports: a
+/// per-sentence export would let a shell take some of them and hand-write the
+/// rest, and `gate_statement` and the `auto_*` three are claims about what
+/// leaves this machine that a contributor reads immediately above an
+/// irreversible button.
 ///
 /// Returns NULL only on a caught panic.
 #[unsafe(no_mangle)]
@@ -2538,6 +2788,23 @@ pub const TC_PRIVATE_INFERENCE_TONE_CLEAR: i32 = 22;
 pub const TC_PRIVATE_INFERENCE_TONE_ATTENTION: i32 = 23;
 pub const TC_PRIVATE_INFERENCE_TONE_REFUSED: i32 = 24;
 
+/// Every fixed word for a watcher another process is already running, as
+/// one owned JSON object. Free it with [`tc_string_free`].
+///
+/// This is the surface a host renders after `tc_daemon_start` answers
+/// `already-running` and `tc_daemon_attach` succeeds: the banner saying the
+/// window is driving somebody else's watcher, plus a sentence for each fixed
+/// start-failure label the ABI names. Needs no handle because it describes
+/// the build. Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_attach_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::attach_copy::attach_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// Every fixed word on the private-inference offer and settings surface, in
 /// one call.
 ///
@@ -2559,6 +2826,164 @@ pub extern "C" fn tc_private_inference_copy() -> *mut c_char {
         let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
         let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
         Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Every fixed word on the owned session-detail and reviewed-publication
+/// surface, as one owned JSON object. Free it with [`tc_string_free`].
+///
+/// Needs no handle because it describes the build. Returns NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_public_run_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::public_run::public_run_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Every fixed word on the correction-derived skill surface, as one owned
+/// JSON object. Free it with [`tc_string_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_skill_learning_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::skill_loop::skill_learning_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Validate a native skill editor payload through the Rust skill contract.
+/// Returns only validity, a fixed error label, exact Rust character counts,
+/// and display limits. The draft text is never echoed across the ABI.
+///
+/// # Safety
+/// `input_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_skill_draft_validate(input_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let draft = if input_json.is_null() {
+            None
+        } else {
+            unsafe { borrow_str(input_json) }.ok().and_then(|input| {
+                serde_json::from_str::<trace_commons_contributor::skill_loop::SkillDraft>(input)
+                    .ok()
+            })
+        };
+        let (valid, error, name_chars, description_chars, procedure_chars) = match draft {
+            Some(draft) => {
+                let error = trace_commons_contributor::skill_loop::validate_draft(&draft)
+                    .err()
+                    .map(|error| error.label());
+                (
+                    error.is_none(),
+                    error,
+                    draft.name.chars().count(),
+                    draft.description.chars().count(),
+                    draft.procedure.chars().count(),
+                )
+            }
+            None => (false, Some("skill-draft-invalid"), 0, 0, 0),
+        };
+        let validation = serde_json::json!({
+            "valid": valid,
+            "error": error,
+            "name_chars": name_chars,
+            "description_chars": description_chars,
+            "procedure_chars": procedure_chars,
+            "name_max_chars": trace_commons_contributor::skill_loop::SKILL_NAME_MAX_CHARS,
+            "description_max_chars": trace_commons_contributor::skill_loop::SKILL_DESCRIPTION_MAX_CHARS,
+            "procedure_max_chars": trace_commons_contributor::skill_loop::SKILL_PROCEDURE_MAX_CHARS,
+        });
+        let json = serde_json::to_string(&validation).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Validate and normalize one loose native publication editor payload through
+/// the shared Rust protocol. Returns an owned JSON validation result.
+///
+/// # Safety
+/// `input_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_public_run_validate_editor(input_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let input = if input_json.is_null() {
+            None
+        } else {
+            unsafe { borrow_str(input_json) }.ok().and_then(|input| {
+                serde_json::from_str::<trace_commons_contributor::public_run::PublicRunEditorInput>(
+                    input,
+                )
+                .ok()
+            })
+        };
+        let validation = match input {
+            Some(input) => trace_commons_contributor::public_run::validate_public_run_editor(input),
+            None => trace_commons_contributor::public_run::PublicRunEditorValidation {
+                draft: None,
+                error: Some(
+                    trace_commons_contributor::public_run::public_run_copy().publication_invalid,
+                ),
+            },
+        };
+        let json = serde_json::to_string(&validation).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// The contributor-facing sentence for one session-detail error label.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_session_detail_error_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::public_run::session_detail_error_line(label),
+        ))
+    })
+}
+
+/// The contributor-facing sentence for one publication error label.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_public_run_error_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::public_run::publication_error_line(label),
+        ))
+    })
+}
+
+/// The contributor-facing sentence for one tested-skill error label.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_skill_learning_error_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::skill_loop::skill_learning_error_line(label),
+        ))
     })
 }
 
@@ -2608,6 +3033,267 @@ pub extern "C" fn tc_consent_gate_help(pinned: i32) -> *mut c_char {
     guarded_string_no_err(|| {
         let line = trace_commons_contributor::consent_copy::gate_help(pinned == 1);
         Ok(to_owned_cstring(line))
+    })
+}
+
+/// The notice for one void R6 made, from one element of `status`'s
+/// `grant_voids` list, passed as the JSON object the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `VoidNoticeCopy`'s fields --
+/// `title`, `body`, `reasons_heading`, `reasons` (a list of sentences),
+/// `rearm`, `acknowledge`, and `rearm_action` / `rearm_failed`, which are
+/// `null` except on a project void carrying a `project_id` -- free it with
+/// [`tc_string_free`].
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS. The choice between the project
+/// and the automatic-grant wording, and each reason label's sentence, are
+/// made in `consent_copy`; a shell passes the wire object through and does
+/// not read `kind` or `reasons` to pick words itself.
+///
+/// A `kind` this build does not know, or a project void without a label,
+/// gets a notice that says automatic contributing stopped without saying for
+/// what, so no shell writes its own fallback. Returns NULL only for a NULL,
+/// non-UTF-8 or unparseable argument, one that is not a JSON object, and on
+/// a caught panic.
+///
+/// # Safety
+/// `void_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_grant_void_notice(void_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if void_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(void_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) = trace_commons_contributor::consent_copy::void_notice_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// The notice after a legacy invite identity moved to the contributor's NEAR
+/// AI account, from `status`'s `legacy_invite_migration.notice` object,
+/// passed as the JSON the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `LegacyMigrationNoticeCopy`'s
+/// fields -- `title`, `body`, `folders` (whether automatic folders were kept,
+/// already chosen) and `acknowledge` -- free it with [`tc_string_free`]. Once
+/// shown, a shell calls `acknowledge_legacy_invite_migration`.
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS: the choice of the `folders`
+/// sentence is made in `consent_copy`, and a shell does not read
+/// `folders_kept` to pick one. Returns NULL for a NULL, non-UTF-8 or
+/// unparseable argument, JSON `null` (nothing to show), anything that is not
+/// an object, and on a caught panic.
+///
+/// # Safety
+/// `notice_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_legacy_migration_notice(notice_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if notice_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(notice_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) =
+            trace_commons_contributor::consent_copy::legacy_migration_notice_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// The notice for approved sessions held because the privacy witness is
+/// busy, from `status`'s `witness_capacity` object, passed as the JSON the
+/// daemon sent.
+///
+/// Returns an owned JSON object whose keys are `WitnessCapacityCopy`'s
+/// fields -- `title`, `body` (counted, and agreeing in number), and
+/// `next_check`, the label a shell puts beside `next_retry_at` rendered in
+/// local time -- free it with [`tc_string_free`].
+///
+/// NULL when nothing is waiting (`waiting_sessions` absent, not a
+/// non-negative integer, or zero), for a NULL, non-UTF-8 or unparseable
+/// argument, and on a caught panic: a shell shows nothing then, and never
+/// writes its own sentence.
+///
+/// # Safety
+/// `capacity_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_witness_capacity_notice(capacity_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if capacity_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(capacity_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) =
+            trace_commons_contributor::consent_copy::witness_capacity_notice_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// K11: what leaves this machine, to whom, and what this client checked.
+///
+/// `facts_json` is the daemon's `route_disclosure` result, passed through as
+/// sent. Returns an owned JSON object `{"facts": .., "copy": ..}`: the facts,
+/// canonicalised, and `RouteDisclosureCopy`'s words for exactly those facts
+/// -- `title`, `route`, `witness` (with `check`, `classifier`, `origin` and
+/// labels, or null), `local_filter`, `receipts`, `attested_bodies` (each a
+/// sentence or null) and `session` (the per-session labels and lines). Free
+/// it with [`tc_string_free`].
+///
+/// THE BRANCH CROSSES: a block is present only when it is true of the route,
+/// so a shell renders what is there and decides nothing.
+///
+/// NULL for a NULL, non-UTF-8 or unparseable argument, for a shape this build
+/// cannot read (an unknown `route` or `origin` is a newer daemon's answer,
+/// never rendered as the nearest one), and on a caught panic. A shell shows
+/// that it could not be read then, and writes no sentence of its own.
+///
+/// # Safety
+/// `facts_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_route_disclosure_copy(facts_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if facts_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(facts_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(payload) =
+            trace_commons_contributor::consent_copy::route_disclosure_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(&payload.to_string()))
+    })
+}
+
+/// What a disclosure surface says when [`tc_route_disclosure_copy`] answers
+/// NULL: `title`, `panel` and `session`. Owned JSON; free it with [`tc_string_free`].
+/// NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_route_disclosure_unreadable_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::disclosure_unreadable_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// The labels for the daemon's `certificate_detail`: `heading`,
+/// `measurement_label`, `signer_label` and `verified_at_review` (the sentence
+/// for the one verification the daemon reports). Owned JSON; free it with
+/// [`tc_string_free`]. NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_certificate_detail_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::certificate_detail_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Parse `arg` as JSON and hand it to `build`, returning its answer as an
+/// owned JSON string, or NULL for a NULL, non-UTF-8 or unparseable argument
+/// and whenever `build` answers `None`.
+///
+/// # Safety
+/// `arg`, if non-null, must point to a valid, NUL-terminated C string.
+unsafe fn notice_from_wire(
+    arg: *const c_char,
+    build: impl FnOnce(&serde_json::Value) -> Option<serde_json::Value>,
+) -> *mut c_char {
+    if arg.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Ok(text) = (unsafe { borrow_str(arg) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return std::ptr::null_mut();
+    };
+    let Some(notice) = build(&value) else {
+        return std::ptr::null_mut();
+    };
+    let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+    to_owned_cstring(&json)
+}
+
+/// The notice for one armed folder whose arming wording no longer claims a
+/// model scrubs its sessions (K5), from one element of `status`'s
+/// `arming_rewordings` list, passed as the JSON object the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `ArmingRewordedNoticeCopy`'s
+/// fields; free it with [`tc_string_free`]. NULL only for a NULL, non-UTF-8
+/// or unparseable argument, one that is not a JSON object, and on a caught
+/// panic.
+///
+/// # Safety
+/// `rewording_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_arming_reworded_notice(rewording_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(unsafe {
+            notice_from_wire(rewording_json, |v| {
+                trace_commons_contributor::consent_copy::arming_reworded_notice_for_wire(v)
+                    .and_then(|n| serde_json::to_value(n).ok())
+            })
+        })
+    })
+}
+
+/// The notice for armed folders the automatic-contribution gate is holding,
+/// from `status`'s `automatic_contribution_held` object, passed as the JSON
+/// the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `GateHeldNoticeCopy`'s
+/// fields; free it with [`tc_string_free`]. NULL when nothing is held, for a
+/// NULL, non-UTF-8 or unparseable argument, and on a caught panic: a shell
+/// shows nothing then, and never writes its own sentence.
+///
+/// # Safety
+/// `held_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_gate_held_notice(held_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(unsafe {
+            notice_from_wire(held_json, |v| {
+                trace_commons_contributor::consent_copy::gate_held_notice_for_wire(v)
+                    .and_then(|n| serde_json::to_value(n).ok())
+            })
+        })
     })
 }
 
@@ -2676,6 +3362,895 @@ pub unsafe extern "C" fn tc_private_inference_state_tone(state: *const c_char) -
         )
     })
     .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// What a shell may offer for one credential state.
+///
+/// A range of its own, disjoint from every tone range for the reason those
+/// ranges are disjoint from each other: a shell that cross-wired an action
+/// onto a tone mapper would draw a button from a colour. There is no failure
+/// value -- an unreadable label, a NULL pointer and a caught panic all answer
+/// `TC_CREDENTIAL_ACTION_NONE`, which offers nothing.
+///
+/// `NONE` is the safe direction here, and not by analogy: `OBTAIN` opens a
+/// browser and mints a key at a third party, so drawing it for a state
+/// nobody could read is how a contributor ends up holding a second key their
+/// own account lists and this app never mentions.
+pub const TC_CREDENTIAL_ACTION_NONE: i32 = 30;
+pub const TC_CREDENTIAL_ACTION_OBTAIN: i32 = 31;
+pub const TC_CREDENTIAL_ACTION_CANCEL: i32 = 32;
+pub const TC_CREDENTIAL_ACTION_FORGET: i32 = 33;
+/// Copy a sign-in an earlier build kept in the macOS login keychain into the
+/// store this build uses: the `near_ai_credential_migrate` method. Offered
+/// only for `migration_available`, which only macOS produces.
+pub const TC_CREDENTIAL_ACTION_MIGRATE: i32 = 34;
+
+/// Why a connect control is not on offer, or the empty string.
+///
+/// `credentialed` is `harness_list`'s `destination_credentialed` as a
+/// tri-state: any negative value means the field was absent, `0` false, `1`
+/// true -- the encoding [`tc_private_inference_write_confirmed`] uses for the
+/// same reason.
+///
+/// AN ABSENT FIELD IS NOT A REFUSED CONNECT. A daemon that predates the
+/// credential gate answers the empty string, because telling somebody to sign
+/// in before connecting a tool they can connect right now would be false.
+///
+/// Drawn once, beside the connect controls: the fact is about the destination
+/// and not about any one tool. A destination the contributor runs themselves
+/// reports credentialed and gets no sentence.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_harness_credential_notice(credentialed: i32) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let credentialed = match credentialed {
+            0 => Some(false),
+            v if v > 0 => Some(true),
+            _ => None,
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::harness_credential_notice(
+                credentialed,
+            ),
+        ))
+    })
+}
+
+/// The sentence for one `near_ai_credential_status` state label.
+///
+/// `state` is that method's `state` field: `absent`, `obtaining`, `failed`,
+/// `cancelled` or `present`.
+///
+/// An empty, NULL or non-UTF-8 label reports that this daemon does not
+/// answer the question. An unfamiliar nonempty label reports that the state
+/// could not be read. NEITHER SAYS THAT NO KEY IS KEPT HERE: that is a claim
+/// about the machine, and a shell that made it up would invite a second
+/// sign-in.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_credential_state_line(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::credential_state_line(state),
+        ))
+    })
+}
+
+/// How firmly the sentence [`tc_near_ai_credential_state_line`] returned
+/// reads: one of the `TC_PRIVATE_INFERENCE_TONE_*` values.
+///
+/// The same five values as the state row above it, because a shell maps
+/// those onto colours once and a second enum with the same five meanings is
+/// a second mapping to keep in agreement.
+///
+/// `present` is the only label that answers `_CLEAR`. Everything else --
+/// including a label this build has never heard of, a NULL or non-UTF-8
+/// `state`, and a caught panic -- answers `TC_PRIVATE_INFERENCE_TONE_NEUTRAL`.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_credential_state_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::credential_state_tone(state) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// The one action a shell may offer for a credential state: one of the
+/// `TC_CREDENTIAL_ACTION_*` values.
+///
+/// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each deciding
+/// which button belongs beside which state is three chances to draw "Sign in"
+/// next to a key that is already here, or next to a state nobody could read.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_credential_action(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::CredentialAction;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::credential_action(state) {
+                CredentialAction::None => TC_CREDENTIAL_ACTION_NONE,
+                CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
+                CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
+                CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+                CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
+            },
+        )
+    })
+    .unwrap_or(TC_CREDENTIAL_ACTION_NONE)
+}
+
+/// What a shell may offer for one queue entry's eligibility state.
+///
+/// Distinct from the `TC_CREDENTIAL_ACTION_*` block above it despite both
+/// having a "nothing" member: these govern different controls, and one
+/// numbering shared between them is one renumbering away from drawing a
+/// sign-in button on a queue row.
+pub const TC_CONTRIBUTION_CONTROL_NONE: i32 = 50;
+pub const TC_CONTRIBUTION_CONTROL_CONTRIBUTE: i32 = 51;
+
+/// What the outcome list says about a contribution the commons refused.
+///
+/// **The empty string means "not one of these" and is the caller's signal to
+/// use its own outcome table**, not a failure. Five labels are answered here;
+/// everything else on that surface is still each shell's own, pending the
+/// rest of `queue_outcome_counts` moving into the crate.
+///
+/// The one thing a caller must not do with a non-empty answer is combine it
+/// with a sentence saying nothing was sent. On this path the envelope WAS
+/// transmitted and the gate declined it after receiving it, which is why the
+/// shells' defaults are wrong here -- "Held" is vague and "Nothing was sent."
+/// is false. See #810.
+///
+/// `label` is the queue entry's `reason_label` in the server's own spelling,
+/// with underscores. The hyphenated constants in `daemon::health` name the
+/// same events for the health banner and are NOT what arrives here.
+///
+/// Returns an owned string; free it with `tc_string_free`. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_outcome_refusal_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::outcome_refusal_line(label)
+                .unwrap_or(""),
+        ))
+    })
+}
+
+/// Shared queue outcome sentence, including a neutral unknown-label fallback.
+/// Returns an owned string; free with `tc_string_free`. NULL on panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_queue_outcome_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::queue_outcome_line(label),
+        ))
+    })
+}
+
+/// The sentence for one NEAR AI login-enrolment control name.
+///
+/// Ten labels, each with its own sentence, and anything else -- including a
+/// label from a newer daemon -- reaching the generic one. **Never the empty
+/// string**: a refusal this build cannot name is still a refusal a
+/// contributor has to be told about, unlike an attestation reason, where
+/// silence is honest.
+///
+/// The three that refuse before anything is spent must not be collapsed by a
+/// caller: `no_session` means sign in first, `commons_unreachable` means the
+/// network, and `commons_unsupported` means this commons does not offer the
+/// path at all. A contributor told the wrong one debugs the wrong thing.
+///
+/// Returns an owned string; free it with `tc_string_free`. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_enroll_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::near_ai_enroll_line(label),
+        ))
+    })
+}
+
+/// How firmly that sentence reads: one of the `TC_PRIVATE_INFERENCE_TONE_*`
+/// values.
+///
+/// `no_session` is `_ATTENTION` -- there is a step the contributor can take,
+/// and the surface should point at it rather than paint a wall.
+/// `already_enrolled` is `_CLEAR`, because nothing was refused: the device is
+/// joined, which is the outcome they wanted. Everything else, including an
+/// unknown label and a caught panic, is `_REFUSED`.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_enroll_tone(label: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::near_ai_enroll_tone(label) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    // A caught panic reads as refused rather than neutral, matching the
+    // generic sentence the line falls back to. Neutral would paint "not
+    // available right now" as though nothing were wrong.
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_REFUSED)
+}
+
+/// The sentence for one row of the certificate-held list.
+///
+/// `evidence_admitted` is the daemon's `admission_evidence_required`
+/// **verbatim, never its negation**. That flag is true for a contributor who
+/// signed up through NEAR and therefore has NO invite, and false for one
+/// enrolled on an invite. So a non-zero argument returns the CANDIDATE
+/// reading -- "you can put this forward" -- and zero returns the ATTESTED
+/// one. It looks backwards until you know which way the flag points, which
+/// is exactly why the choice is here and not in each shell.
+///
+/// Three shells each writing `flag ? candidate : attested` would be three
+/// chances to swap the two, and a swapped reading tells a contributor with
+/// no invite that their session carries cryptographic proof when nothing has
+/// attested it. There is one implementation and every shell passes the flag
+/// through.
+///
+/// Any non-zero value is the flag set, so a shell may widen a native bool
+/// however its language does. **A negative value is a caller error and
+/// resolves to the CANDIDATE reading, the one that claims less.** Nothing
+/// should send one -- a widened bool is 0 or 1 -- but the two arms are not
+/// equally safe when something does: candidate says a session can be put
+/// forward, attested asserts a security property, and a malformed argument
+/// must not be able to produce the claim.
+///
+/// Returns an owned string; free it with `tc_string_free`. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_certificate_row_line(evidence_admitted: i32) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::certificate_row_line(
+                evidence_admitted != 0,
+            ),
+        ))
+    })
+}
+
+/// The heading over that list, on the same split as
+/// [`tc_certificate_row_line`] and with the same argument.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_certificate_list_title(evidence_admitted: i32) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::certificate_list_title(
+                evidence_admitted != 0,
+            ),
+        ))
+    })
+}
+
+/// The sentence for one queue entry's `eligibility` label.
+///
+/// `state` is that field from a `list_pending` entry: `eligible`,
+/// `ineligible_permanent`, `ineligible_configuration` or `unknown`.
+///
+/// **A shell that received NO `eligibility` field must not call this.** An
+/// absent field means the contributor was invited and has no eligibility
+/// question; answering one they do not have puts a caveat on work that
+/// carries none. Absent is not `unknown`.
+///
+/// An empty, NULL, non-UTF-8 or unfamiliar `state` reports that the answer
+/// has not been worked out. IT NEVER REPORTS AN INELIGIBILITY: a state this
+/// build cannot read is not evidence about a contributor's session, and
+/// saying it is would stop them offering work that is fine.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_eligibility_line(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::eligibility_state_line(state),
+        ))
+    })
+}
+
+/// How firmly the sentence [`tc_contribution_eligibility_line`] returned
+/// reads: one of the `TC_PRIVATE_INFERENCE_TONE_*` values.
+///
+/// `eligible` is `_CLEAR` and `ineligible_configuration` is `_ATTENTION` --
+/// the one state with something to do about it. Everything else, including a
+/// state this build has never heard of, a NULL or non-UTF-8 `state` and a
+/// caught panic, is `TC_PRIVATE_INFERENCE_TONE_NEUTRAL`. A permanent
+/// ineligibility is deliberately NOT `_REFUSED`: nothing was refused and
+/// nothing went wrong, and painting a contributor's ordinary older work as a
+/// failure is a judgement this surface has no business making.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_eligibility_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::eligibility_state_tone(state) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// The one control a shell may offer for an eligibility state: one of the
+/// `TC_CONTRIBUTION_CONTROL_*` values.
+///
+/// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each deciding
+/// which rows get a send button is three chances to offer one beside a
+/// session the server will refuse -- which is the defect this whole surface
+/// exists to remove, and it is worse than an inert button: pressing it sends
+/// a contributor's work and has it turned away.
+///
+/// `TC_CONTRIBUTION_CONTROL_NONE` is not "hide the row". Every session is
+/// shown, because hiding a contributor's own work is its own dishonesty. The
+/// row is present, unoffered, and carries its sentence.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_eligibility_control(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::ContributionControl;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::eligibility_control(state) {
+                ContributionControl::None => TC_CONTRIBUTION_CONTROL_NONE,
+                ContributionControl::Contribute => TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+            },
+        )
+    })
+    .unwrap_or(TC_CONTRIBUTION_CONTROL_NONE)
+}
+
+/// The sentence for one queue entry's `eligibility_reason` label.
+///
+/// **The EMPTY STRING for an absent, NULL, non-UTF-8 or unfamiliar reason**,
+/// and a shell renders nothing for it. That is not the hedge the state line
+/// makes: the state sentence has already said what is true, and a second
+/// sentence guessing at a reason this build does not know would add a detail
+/// nobody established. An `eligible` entry carries no reason at all.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `reason`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_eligibility_reason_line(
+    reason: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let reason = if reason.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(reason) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::eligibility_reason_line(reason),
+        ))
+    })
+}
+
+/// The sentence for one queue entry's `attestation` label.
+///
+/// `mark` is that field from a `list_pending` entry: `attested`,
+/// `unattested_permanent`, `unattested_configuration` or `unknown`.
+///
+/// **EVERY SHELL CALLS THIS FOR EVERY ROW.** The opposite rule to
+/// [`tc_contribution_eligibility_line`], which must not be called when the
+/// wire carried no `eligibility` field. That field answers whether this
+/// contributor may send this session -- a question only an evidence-admitted
+/// contributor has. This one answers whether the session carries a checkable
+/// copy of its last model call, which is a fact about the trace,
+/// and the field is always present.
+///
+/// **The positive case is the interesting one here.** A session that IS
+/// attested says so. A surface that only speaks up to explain what is missing
+/// teaches a contributor that the mark means bad news.
+///
+/// An empty, NULL, non-UTF-8 or unfamiliar `mark` reports that the answer has
+/// not been worked out. IT NEVER REPORTS AN UNATTESTED SESSION: a mark this
+/// build cannot read is not evidence about a contributor's work.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `mark`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_attestation_line(mark: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let mark = if mark.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(mark) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::attestation_state_line(mark),
+        ))
+    })
+}
+
+/// How firmly the sentence [`tc_contribution_attestation_line`] returned
+/// reads: one of the `TC_PRIVATE_INFERENCE_TONE_*` values.
+///
+/// `attested` is `_CLEAR` -- the one mark on this surface that is good news --
+/// and `unattested_configuration` is `_ATTENTION`, the one with something to
+/// do about it. Everything else, including a mark this build has never heard
+/// of, a NULL or non-UTF-8 `mark` and a caught panic, is
+/// `TC_PRIVATE_INFERENCE_TONE_NEUTRAL`.
+///
+/// A permanently unattested session is deliberately NOT `_REFUSED`. Nothing
+/// was refused and nothing went wrong: most of a contributor's history was
+/// recorded before anything was keeping copies, and painting all of it as a
+/// failure -- on a surface they cannot act on -- is a judgement this has no
+/// business making.
+///
+/// # Safety
+/// `mark`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_attestation_tone(mark: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let mark = if mark.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(mark) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::attestation_state_tone(mark) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// The sentence for one queue entry's `attestation_reason` label.
+///
+/// **The EMPTY STRING for an absent, NULL, non-UTF-8 or unfamiliar reason**,
+/// and a shell renders nothing for it -- the same rule
+/// [`tc_contribution_eligibility_reason_line`] follows. An `attested` entry
+/// carries no reason at all: there is nothing to explain.
+///
+/// The reason labels are the SAME THIRTEEN the eligibility reason line takes,
+/// because a reason names a fact about the session rather than an answer to
+/// either question. **The sentences are not the same**, and a shell must not
+/// substitute one call for the other: five of the eligibility sentences say
+/// the session cannot be sent, which is true for an evidence-admitted
+/// contributor and false for an invited one, whose session sends perfectly
+/// well and merely arrives without a copy of its call.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `reason`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_attestation_reason_line(
+    reason: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let reason = if reason.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(reason) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::attestation_reason_line(reason),
+        ))
+    })
+}
+
+/// Whether a group's submit control may be offered: one of the
+/// `TC_CONTRIBUTION_CONTROL_*` values.
+///
+/// `pending` is a `list_projects` row's `pending_count`. `contributable` is
+/// its `contributable_count`, or **any negative value when that key was
+/// ABSENT** -- an invited contributor, for whom every pending session is
+/// sendable.
+///
+/// ABSENT IS NOT ZERO, and this is the distinction most likely to be got
+/// wrong. `contributable = 0` means the question applies and nothing in this
+/// group can be sent, so nothing is offered. A negative `contributable` means
+/// the question does not apply, and the control is offered on `pending`
+/// alone. A shell that passed `0` for an absent field would refuse a control
+/// to somebody whose sessions are all perfectly sendable.
+///
+/// A header offering "Submit all" on a group where nothing is eligible is a
+/// press with no visible consequence -- the row-level rule ("shown, not
+/// offered") applied one level up, and it crosses this ABI for the reason
+/// [`tc_contribution_eligibility_control`] does.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_group_control(pending: i64, contributable: i64) -> i32 {
+    use trace_commons_contributor::private_inference_copy::ContributionControl;
+    guard(|| {
+        let pending = u64::try_from(pending).unwrap_or(0);
+        let contributable = u64::try_from(contributable).ok();
+        Ok(
+            match trace_commons_contributor::private_inference_copy::group_control(
+                pending,
+                contributable,
+            ) {
+                ContributionControl::None => TC_CONTRIBUTION_CONTROL_NONE,
+                ContributionControl::Contribute => TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+            },
+        )
+    })
+    .unwrap_or(TC_CONTRIBUTION_CONTROL_NONE)
+}
+
+/// How many sessions a group submit is leaving behind, as a sentence.
+///
+/// `withheld` is `approve`'s `excluded_ineligible`, or the difference between
+/// a project row's `pending_count` and its `contributable_count`.
+///
+/// **The EMPTY STRING for zero**, and for a negative value, which no honest
+/// caller produces. Render nothing: there is no gap to explain, and a line
+/// reading "0 sessions are not being sent" invents a caveat where none
+/// exists.
+///
+/// The sentence says how many and NOT why. The reason a particular session
+/// cannot be sent is that row's own sentence, one level in; a summary here
+/// would stand for up to thirteen different reasons and would say nothing
+/// true about any of them. Assembled on the Rust side for the reason on
+/// [`tc_routing_token_line`]: three shells writing this sentence is three
+/// chances for one of them to name a reason.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::group_withheld_line(
+                u64::try_from(withheld).unwrap_or(0),
+            ),
+        ))
+    })
+}
+
+/// The sentence for one `near_ai_balance` `state`.
+///
+/// `state` is the `state` field of a `near_ai_balance` answer. A NULL or
+/// non-UTF-8 pointer is treated as a missing state and gets the "this daemon
+/// does not report a balance" sentence; a state this build has never heard of
+/// gets its own sentence and BORROWS NOBODY'S. Neither may degrade to the
+/// "no sign-in is kept here" sentence, which is a claim about this machine.
+///
+/// `known` answers the EMPTY STRING: that state's row is figures, and a
+/// sentence above them announcing the read succeeded is this app narrating
+/// itself.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_balance_state_line(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::balance_state_line(state),
+        ))
+    })
+}
+
+/// How firmly the balance row reads: one of the `TC_PRIVATE_INFERENCE_TONE_*`
+/// values.
+///
+/// `known` is the only state that answers `_CLEAR`, and it means THE READ
+/// SUCCEEDED, not that the balance is healthy. Nothing across this ABI judges
+/// an amount. A shell that painted a low figure red would be inventing a
+/// threshold nobody set, on an account whose ceiling may not exist at all.
+///
+/// Everything else -- including a state this build has never heard of, a NULL
+/// or non-UTF-8 `state`, and a caught panic -- answers
+/// `TC_PRIVATE_INFERENCE_TONE_NEUTRAL`, except the two states with a settled
+/// meaning of their own.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_balance_state_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::balance_state_tone(state) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// The one action a shell may offer beside a balance state: one of the
+/// `TC_CREDENTIAL_ACTION_*` values.
+///
+/// The sign-in row's enum and not a second one, because the only action this
+/// row has ever needed is that row's `OBTAIN`.
+///
+/// `no_session` and `session_expired` answer `TC_CREDENTIAL_ACTION_OBTAIN`,
+/// and those two only. A refused session gets it WITHOUT a forget first: the
+/// ceremony overwrites both records, and forgetting would throw away a
+/// working key to fix an unrelated sign-in. Everything else answers
+/// `TC_CREDENTIAL_ACTION_NONE`.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_balance_action(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::CredentialAction;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::balance_action(state) {
+                CredentialAction::None => TC_CREDENTIAL_ACTION_NONE,
+                CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
+                CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
+                CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+                CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
+            },
+        )
+    })
+    .unwrap_or(TC_CREDENTIAL_ACTION_NONE)
+}
+
+/// Turn a `near_ai_balance` integer into money, once, for all three shells.
+///
+/// `scale` IS THE WIRE'S OWN `scale` FIELD, not a constant. It is on the wire
+/// because a daemon may change it, and a shell dividing by 1000000000 of its
+/// own would then be wrong by a factor of a thousand. Pass what arrived.
+///
+/// # `present` is a separate argument, deliberately
+///
+/// Every other money export here encodes absence as an out-of-range integer.
+/// This one cannot: these amounts are SIGNED, an overdrawn account is a
+/// negative figure, and folding "null" onto "negative" would render a real
+/// debt as no figure at all. So `present` is `0` for the wire's `null` and
+/// non-zero otherwise, and a `0` gives the EMPTY STRING.
+///
+/// **An empty string is never `$0.00`.** A `null` on this wire means "we know
+/// we do not know"; zero is a real balance and means the money is gone.
+///
+/// The rounding is DOWN, toward minus infinity, so a figure printed here is
+/// never larger than the figure that arrived. Half-up would let 9.996 dollars
+/// print as "$10.00", which is this ABI inventing somebody else's money. A
+/// nonzero amount under a cent is "less than $0.01" rather than "$0.00", for
+/// the same reason `tc_harness_spend_line` does it.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_amount(present: i32, nanos: i64, scale: u8) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let text = if present == 0 {
+            String::new()
+        } else {
+            trace_commons_contributor::private_inference_copy::format_amount(nanos, scale)
+        };
+        Ok(to_owned_cstring(&text))
+    })
+}
+
+/// What is left, as a finished sentence.
+///
+/// `present`, `nanos` and `scale` are [`tc_near_ai_balance_amount`]'s, from
+/// `remaining_nanos` and `scale`.
+///
+/// **`present == 0` DOES NOT GIVE THE EMPTY STRING HERE.** It gives the
+/// sentence for an account with no spending limit set, because
+/// `remaining_nanos` is nullable even when `state` is `known` -- the ordinary
+/// case for an account nobody has capped -- and that contributor must not be
+/// told they have $0.00 left.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_remaining_line(
+    present: i32,
+    nanos: i64,
+    scale: u8,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let nanos = (present != 0).then_some(nanos);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::balance_remaining_line(
+                nanos, scale,
+            ),
+        ))
+    })
+}
+
+/// The configured ceiling, as a finished sentence, or the empty string.
+///
+/// From `spend_limit_nanos`. `present == 0` gives the EMPTY STRING and not a
+/// sentence: [`tc_near_ai_balance_remaining_line`] has already said the part
+/// that matters about an uncapped account, and saying it twice is once too
+/// many.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_limit_line(
+    present: i32,
+    nanos: i64,
+    scale: u8,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let nanos = (present != 0).then_some(nanos);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::balance_limit_line(nanos, scale),
+        ))
+    })
+}
+
+/// What the account has spent, as a finished sentence, or the empty string.
+///
+/// From `total_spent_nanos`. `present == 0` gives the empty string, drawn as
+/// no line at all. A zero is NOT that: an account that has spent nothing
+/// renders "$0.00", which is true.
+///
+/// The figure is the WHOLE ACCOUNT, not this computer -- the payload's
+/// `balance_what` says so, and it belongs beside this sentence.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_spent_line(
+    present: i32,
+    nanos: i64,
+    scale: u8,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let nanos = (present != 0).then_some(nanos);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::balance_spent_line(nanos, scale),
+        ))
+    })
+}
+
+/// How long ago THIS COMPUTER asked, assembled.
+///
+/// `seconds_ago` is now minus the answer's `observed_at`. ABSENCE IS AN
+/// OUT-OF-RANGE INTEGER, the convention [`tc_harness_last_call_line`] uses:
+/// any negative value -- which is what a shell passes for a `null`
+/// `observed_at` -- gives the empty string.
+///
+/// `observed_at` is the DAEMON'S clock at the moment the service answered,
+/// not the service's own `updated_at`, so the sentence says when the question
+/// was put and never that anything was updated then.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_observed_line(seconds_ago: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let seconds = u64::try_from(seconds_ago).ok();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::balance_observed_line(seconds),
+        ))
+    })
 }
 
 /// The reported local port, assembled without a readiness claim.
@@ -3172,7 +4747,11 @@ pub unsafe extern "C" fn tc_witness_configure(
             }
         }
 
-        cfg.witness = Some(settings);
+        // Recorded as entered in Settings, for the disclosure screens (K11).
+        cfg.set_witness(
+            settings,
+            trace_commons_contributor::config::WitnessOrigin::Settings,
+        );
         if store.save_config(&cfg).is_err() {
             witness_fail(ERR_WITNESS_CONFIG_WRITE_FAILED, err);
             return Ok(-1);
@@ -3213,7 +4792,7 @@ pub unsafe extern "C" fn tc_witness_clear(config_dir: *const c_char, err: *mut *
         if cfg.witness.is_none() {
             return Ok(0);
         }
-        cfg.witness = None;
+        cfg.clear_witness();
         if store.save_config(&cfg).is_err() {
             witness_fail(ERR_WITNESS_CONFIG_WRITE_FAILED, err);
             return Ok(-1);
@@ -3431,6 +5010,17 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
         let copy = trace_commons_contributor::onboarding_copy::onboarding_copy();
         Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
+}
+
+/// Can this process reach the Cloud credential store?
+///
+/// Exists so a release pipeline can ask a *signed bundle* the question, which
+/// no unit test can answer: entitlements are a property of the code signature
+/// and `cargo test` never has one. Returns 0 reachable, 1 unentitled, 2
+/// otherwise. Reads nothing and writes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_credential_store_self_check() -> i32 {
+    trace_commons_contributor::daemon::credential_store_self_check()
 }
 
 #[cfg(test)]

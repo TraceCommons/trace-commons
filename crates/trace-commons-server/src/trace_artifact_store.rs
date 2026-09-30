@@ -164,12 +164,20 @@ pub enum TraceArtifactInvalidationReason {
 #[serde(rename_all = "snake_case")]
 pub enum TraceArtifactKind {
     ContributionEnvelope,
+    TokenDistribution,
+    ContributionBundleManifest,
     ReplayExportManifest,
     ReplayDatasetExport,
     BenchmarkConversion,
     RankerTrainingExport,
     VectorPayload,
     AuditSnapshot,
+    /// A NEAR wallet account name sealed for read-back at pepper-rotation time
+    /// (`near_account_identity`). Not an object-store artifact: nothing under
+    /// this kind is ever written to the object store, and the segment exists so
+    /// the sealed name gets its own `KekContext` binding rather than sharing
+    /// one with a real artifact.
+    NearAccountName,
     Other,
 }
 
@@ -181,12 +189,15 @@ impl TraceArtifactKind {
     pub fn as_path_segment(&self) -> &'static str {
         match self {
             Self::ContributionEnvelope => "contribution_envelope",
+            Self::TokenDistribution => "token_distribution",
+            Self::ContributionBundleManifest => "contribution_bundle_manifest",
             Self::ReplayExportManifest => "replay_export_manifest",
             Self::ReplayDatasetExport => "replay_dataset_export",
             Self::BenchmarkConversion => "benchmark_conversion",
             Self::RankerTrainingExport => "ranker_training_export",
             Self::VectorPayload => "vector_payload",
             Self::AuditSnapshot => "audit_snapshot",
+            Self::NearAccountName => "near_account_name",
             Self::Other => "other",
         }
     }
@@ -208,7 +219,107 @@ pub struct EncryptedTraceArtifact {
     pub wrapped_dek: Option<crate::trace_artifact_kek::WrappedDek>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PreparedBundleArtifact {
+    pub object_ref: TraceArtifactObjectRef,
+    pub artifact: EncryptedTraceArtifact,
+}
+
+/// A serialized-JSON artifact encrypted but not yet written
+/// (`TraceArtifactStore::prepare_serialized_json`). Its receipt names the
+/// exact object `publish_serialized_json` writes -- the object key and the
+/// ciphertext hash -- so a caller can record both durably before any
+/// content is stored, and delete the object by that record if the caller
+/// fails after the write. Only a store builds one, so the receipt always
+/// matches the artifact it carries. It has no public constructor on
+/// purpose: a store outside this module implements
+/// `prepare_serialized_json` and `publish_serialized_json` by delegating to
+/// a built-in store.
+#[derive(Clone)]
+pub struct PreparedSerializedJsonArtifact {
+    receipt: EncryptedTraceArtifactReceipt,
+    artifact: EncryptedTraceArtifact,
+}
+
+impl PreparedSerializedJsonArtifact {
+    /// The receipt `publish_serialized_json` returns for this artifact.
+    pub fn receipt(&self) -> &EncryptedTraceArtifactReceipt {
+        &self.receipt
+    }
+}
+
 pub trait TraceArtifactStore: Send + Sync {
+    /// Encrypts `serialized_json` for `object_id` without writing it: the
+    /// first half of `put_serialized_json`. A store that cannot split its
+    /// write refuses with `serialized_json_prepare_unavailable` (the
+    /// default), so a caller that must record an object before writing it
+    /// fails closed instead of writing an untracked one.
+    fn prepare_serialized_json(
+        &self,
+        _tenant_storage_ref: &str,
+        _artifact_kind: TraceArtifactKind,
+        _object_id: &str,
+        _serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        anyhow::bail!("serialized_json_prepare_unavailable")
+    }
+
+    /// Writes a prepared artifact: the second half of `put_serialized_json`.
+    /// Returns the prepared receipt. The default refuses with
+    /// `serialized_json_publish_unavailable`.
+    fn publish_serialized_json(
+        &self,
+        _prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        anyhow::bail!("serialized_json_publish_unavailable")
+    }
+
+    /// Binary bundle support is explicit; legacy stores cannot claim it.
+    fn supports_bundle_bytes(&self) -> bool {
+        false
+    }
+
+    fn prepare_bundle_bytes(
+        &self,
+        _scope: &TraceArtifactScope,
+        _kind: TraceArtifactKind,
+        _object_id: &str,
+        _bytes: &[u8],
+    ) -> anyhow::Result<PreparedBundleArtifact> {
+        anyhow::bail!("bundle-byte-storage-unavailable")
+    }
+    fn publish_bundle_bytes(
+        &self,
+        _scope: &TraceArtifactScope,
+        _prepared: &PreparedBundleArtifact,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("bundle-byte-storage-unavailable")
+    }
+
+    fn put_bundle_bytes(
+        &self,
+        _scope: &TraceArtifactScope,
+        _kind: TraceArtifactKind,
+        _object_id: &str,
+        _bytes: &[u8],
+    ) -> anyhow::Result<TraceArtifactPutReceipt> {
+        anyhow::bail!("bundle-byte-storage-unavailable")
+    }
+    fn read_bundle_bytes(
+        &self,
+        _scope: &TraceArtifactScope,
+        _object: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("bundle-byte-storage-unavailable")
+    }
+    fn delete_bundle_bytes(
+        &self,
+        _scope: &TraceArtifactScope,
+        _object: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("bundle-byte-storage-unavailable")
+    }
+
     fn put_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -250,6 +361,20 @@ pub trait TraceArtifactStore: Send + Sync {
     ) -> anyhow::Result<bool> {
         anyhow::bail!("trace artifact store does not support restore-after-delete")
     }
+
+    /// Whether an object is stored at `object_key`: `Some(true)` present,
+    /// `Some(false)` absent, `None` when this store cannot tell. Presence
+    /// says nothing about whether the object verifies; an absent answer is
+    /// only ever used to treat a delete as already done.
+    fn artifact_present_by_object_key(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _expected_artifact_kind: TraceArtifactKind,
+        _object_key: &str,
+        _expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +414,15 @@ pub trait RemoteTraceArtifactProvider: Send + Sync {
         _object_ref: &TraceArtifactObjectRef,
     ) -> anyhow::Result<bool> {
         anyhow::bail!("remote trace artifact provider does not support restore-after-delete")
+    }
+
+    /// Whether an object is stored under `object_ref`'s key: `Some(true)`
+    /// present, `Some(false)` absent, `None` when the provider cannot tell.
+    fn encrypted_artifact_present(
+        &self,
+        _object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(None)
     }
 }
 
@@ -427,6 +561,13 @@ impl FileRemoteTraceArtifactProvider {
 }
 
 impl RemoteTraceArtifactProvider for FileRemoteTraceArtifactProvider {
+    fn encrypted_artifact_present(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(Some(self.object_path(object_ref)?.exists()))
+    }
+
     fn put_encrypted_artifact(
         &self,
         object_ref: TraceArtifactObjectRef,
@@ -557,11 +698,37 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<TraceArtifactPutReceipt> {
+        serde_json::from_slice::<serde_json::Value>(serialized_json)
+            .context("failed to parse serialized trace artifact")?;
+        self.put_scoped_bytes(scope, artifact_kind, object_id, serialized_json)
+    }
+
+    pub fn put_scoped_bytes(
+        &self,
+        scope: &TraceArtifactScope,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<TraceArtifactPutReceipt> {
+        let prepared =
+            self.prepare_scoped_bytes(scope, artifact_kind, object_id, serialized_json)?;
+        self.provider
+            .put_encrypted_artifact(prepared.object_ref.clone(), prepared.artifact.clone())?;
+        Ok(TraceArtifactPutReceipt {
+            object_ref: prepared.object_ref,
+            encrypted_at: prepared.artifact.receipt.encrypted_at,
+        })
+    }
+    fn prepare_scoped_bytes(
+        &self,
+        scope: &TraceArtifactScope,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedBundleArtifact> {
         self.validate_remote_config()?;
         scope.validate()?;
         validate_non_empty_ref("trace artifact object id", object_id)?;
-        serde_json::from_slice::<serde_json::Value>(serialized_json)
-            .context("failed to parse serialized trace artifact")?;
         // v2 envelope: wrap a freshly generated DEK with the configured KEK
         // and AES-256-GCM-encrypt the plaintext directly under that DEK.
         let dek = generate_dek();
@@ -605,11 +772,9 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
             ciphertext_sha256,
         };
         validate_remote_object_ref(scope, &self.config, &object_ref)?;
-        self.provider
-            .put_encrypted_artifact(object_ref.clone(), artifact)?;
-        Ok(TraceArtifactPutReceipt {
+        Ok(PreparedBundleArtifact {
             object_ref,
-            encrypted_at,
+            artifact,
         })
     }
 
@@ -707,6 +872,97 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
 impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
     for ServiceOwnedTraceArtifactStore<P, K>
 {
+    fn prepare_bundle_bytes(
+        &self,
+        scope: &TraceArtifactScope,
+        kind: TraceArtifactKind,
+        object_id: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<PreparedBundleArtifact> {
+        anyhow::ensure!(
+            matches!(
+                kind,
+                TraceArtifactKind::TokenDistribution
+                    | TraceArtifactKind::ContributionBundleManifest
+                    | TraceArtifactKind::ContributionEnvelope
+            ),
+            "invalid-bundle-artifact-kind"
+        );
+        anyhow::ensure!(bytes.len() <= 8 * 1024 * 1024, "bundle-artifact-limit");
+        self.prepare_scoped_bytes(scope, kind, object_id, bytes)
+    }
+    fn publish_bundle_bytes(
+        &self,
+        scope: &TraceArtifactScope,
+        prepared: &PreparedBundleArtifact,
+    ) -> anyhow::Result<()> {
+        validate_remote_object_ref(scope, &self.config, &prepared.object_ref)?;
+        verify_encrypted_artifact(
+            &prepared.artifact,
+            &scope.tenant_storage_ref,
+            &prepared.object_ref.artifact_kind,
+            &prepared.object_ref.object_key,
+            &prepared.object_ref.ciphertext_sha256,
+        )?;
+        self.provider
+            .put_encrypted_artifact(prepared.object_ref.clone(), prepared.artifact.clone())
+    }
+    fn supports_bundle_bytes(&self) -> bool {
+        true
+    }
+    fn put_bundle_bytes(
+        &self,
+        scope: &TraceArtifactScope,
+        kind: TraceArtifactKind,
+        object_id: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<TraceArtifactPutReceipt> {
+        anyhow::ensure!(
+            matches!(
+                kind,
+                TraceArtifactKind::TokenDistribution
+                    | TraceArtifactKind::ContributionBundleManifest
+                    | TraceArtifactKind::ContributionEnvelope
+            ),
+            "invalid-bundle-artifact-kind"
+        );
+        anyhow::ensure!(bytes.len() <= 8 * 1024 * 1024, "bundle-artifact-limit");
+        self.put_scoped_bytes(scope, kind, object_id, bytes)
+    }
+    fn read_bundle_bytes(
+        &self,
+        scope: &TraceArtifactScope,
+        object: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Vec<u8>> {
+        let artifact = self.read_scoped_artifact(scope, object)?;
+        anyhow::ensure!(
+            artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2,
+            "bundle-v2-encryption-required"
+        );
+        let wrapped = artifact
+            .wrapped_dek
+            .as_ref()
+            .context("bundle-key-unavailable")?;
+        let ctx = KekContext {
+            tenant_storage_ref: scope.tenant_storage_ref.clone(),
+            artifact_kind: object.artifact_kind.clone(),
+        };
+        let dek = self.kek.unwrap_dek(wrapped, &ctx)?;
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(artifact.ciphertext_base64.as_bytes())?;
+        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        anyhow::ensure!(plaintext.len() <= 8 * 1024 * 1024, "bundle-artifact-limit");
+        Ok(plaintext)
+    }
+    fn delete_bundle_bytes(
+        &self,
+        scope: &TraceArtifactScope,
+        object: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<bool> {
+        self.delete_scoped_artifact(scope, object)
+            .map(|receipt| receipt.deleted)
+    }
+
     fn put_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -724,6 +980,49 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
             ciphertext_sha256: receipt.object_ref.ciphertext_sha256,
             encrypted_at: receipt.encrypted_at,
         })
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        serde_json::from_slice::<serde_json::Value>(serialized_json)
+            .context("failed to parse serialized trace artifact")?;
+        let scope = legacy_trace_artifact_scope(tenant_storage_ref);
+        let prepared =
+            self.prepare_scoped_bytes(&scope, artifact_kind, object_id, serialized_json)?;
+        Ok(PreparedSerializedJsonArtifact {
+            receipt: EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: prepared.object_ref.tenant_storage_ref,
+                artifact_kind: prepared.object_ref.artifact_kind,
+                object_key: prepared.object_ref.object_key,
+                ciphertext_sha256: prepared.object_ref.ciphertext_sha256,
+                encrypted_at: prepared.artifact.receipt.encrypted_at,
+            },
+            artifact: prepared.artifact,
+        })
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let receipt = &prepared.receipt;
+        let scope = legacy_trace_artifact_scope(&receipt.tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_receipt(&self.config, &scope, receipt)?;
+        verify_encrypted_artifact(
+            &prepared.artifact,
+            &scope.tenant_storage_ref,
+            &object_ref.artifact_kind,
+            &object_ref.object_key,
+            &object_ref.ciphertext_sha256,
+        )?;
+        self.provider
+            .put_encrypted_artifact(object_ref, prepared.artifact.clone())?;
+        Ok(receipt.clone())
     }
 
     fn read_artifact(
@@ -771,6 +1070,25 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
             expected_ciphertext_sha256,
         )?;
         self.read_scoped_json(&scope, &object_ref)
+    }
+
+    fn artifact_present_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        let scope = legacy_trace_artifact_scope(expected_tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_object_key(
+            &self.config,
+            &scope,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )?;
+        validate_remote_object_ref(&scope, &self.config, &object_ref)?;
+        self.provider.encrypted_artifact_present(&object_ref)
     }
 
     fn delete_artifact(
@@ -834,6 +1152,25 @@ impl LocalEncryptedTraceArtifactStore {
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let prepared = self.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )?;
+        self.publish_serialized_json(&prepared)
+    }
+
+    /// Encrypts `serialized_json` for `object_id` without writing it. The
+    /// artifact path is resolved here too, so a prepared artifact always
+    /// names a key this store can write.
+    pub fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
         serde_json::from_slice::<serde_json::Value>(serialized_json)
             .context("failed to parse serialized trace artifact")?;
         let (ciphertext, salt) = self
@@ -849,6 +1186,7 @@ impl LocalEncryptedTraceArtifactStore {
             ciphertext_sha256,
             encrypted_at: Utc::now(),
         };
+        self.artifact_path(&receipt.tenant_storage_ref, &receipt.object_key)?;
         let artifact = EncryptedTraceArtifact {
             schema_version: TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION.to_string(),
             receipt: receipt.clone(),
@@ -856,11 +1194,22 @@ impl LocalEncryptedTraceArtifactStore {
             ciphertext_base64: base64::engine::general_purpose::STANDARD.encode(ciphertext),
             wrapped_dek: None,
         };
+        Ok(PreparedSerializedJsonArtifact { receipt, artifact })
+    }
+
+    /// Writes an artifact `prepare_serialized_json` prepared.
+    pub fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
         write_json_file(
-            &self.artifact_path(&receipt.tenant_storage_ref, &receipt.object_key)?,
-            &artifact,
+            &self.artifact_path(
+                &prepared.receipt.tenant_storage_ref,
+                &prepared.receipt.object_key,
+            )?,
+            &prepared.artifact,
         )?;
-        Ok(receipt)
+        Ok(prepared.receipt.clone())
     }
 
     pub fn get_json<T: DeserializeOwned>(
@@ -1040,6 +1389,29 @@ impl TraceArtifactStore for LocalEncryptedTraceArtifactStore {
         )
     }
 
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        Self::prepare_serialized_json(
+            self,
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::publish_serialized_json(self, prepared)
+    }
+
     fn read_artifact(
         &self,
         expected_tenant_storage_ref: &str,
@@ -1078,6 +1450,19 @@ impl TraceArtifactStore for LocalEncryptedTraceArtifactStore {
         receipt: &EncryptedTraceArtifactReceipt,
     ) -> anyhow::Result<bool> {
         Self::delete_artifact(self, expected_tenant_storage_ref, receipt)
+    }
+
+    fn artifact_present_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        _expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        _expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(Some(
+            self.artifact_path(expected_tenant_storage_ref, object_key)?
+                .exists(),
+        ))
     }
 }
 
@@ -1179,7 +1564,10 @@ fn verify_kek_binding(
 /// Returns a `Zeroizing` wrapper so the raw key bytes are cleared from the
 /// stack automatically on drop, reducing the window during which plaintext
 /// key material could appear in core dumps or stack traces.
-fn generate_dek() -> Zeroizing<[u8; 32]> {
+/// `pub(crate)` so `near_account_identity` can seal an account name under the
+/// same per-row DEK envelope the artifact store uses, rather than growing a
+/// second key-generation path.
+pub(crate) fn generate_dek() -> Zeroizing<[u8; 32]> {
     let mut dek = Zeroizing::new([0u8; 32]);
     rand::RngCore::fill_bytes(&mut aes_gcm::aead::OsRng, dek.as_mut());
     dek
@@ -1599,6 +1987,17 @@ struct InMemoryRemoteTraceArtifactRecord {
 
 #[cfg(test)]
 impl RemoteTraceArtifactProvider for InMemoryRemoteTraceArtifactProvider {
+    fn encrypted_artifact_present(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Option<bool>> {
+        let objects = self
+            .objects
+            .read()
+            .map_err(|_| anyhow::anyhow!("remote trace artifact provider lock poisoned"))?;
+        Ok(Some(objects.contains_key(&object_ref.object_key)))
+    }
+
     fn put_encrypted_artifact(
         &self,
         object_ref: TraceArtifactObjectRef,
@@ -1720,6 +2119,59 @@ mod tests {
         )
     }
 
+    #[test]
+    fn bundle_bytes_replay_preserves_ciphertext_and_tenant_scope() {
+        let store = test_remote_store();
+        let scope = TraceArtifactScope {
+            tenant_storage_ref: "tenant-a".into(),
+            submission_storage_ref: "submission-a".into(),
+        };
+        let bytes = [0, 255, 128, 13, 10];
+        let prepared = store
+            .prepare_bundle_bytes(
+                &scope,
+                TraceArtifactKind::TokenDistribution,
+                "tokens",
+                &bytes,
+            )
+            .unwrap();
+        let encoded = serde_json::to_vec(&prepared).unwrap();
+        let recovered: PreparedBundleArtifact = serde_json::from_slice(&encoded).unwrap();
+        store.publish_bundle_bytes(&scope, &prepared).unwrap();
+        store.publish_bundle_bytes(&scope, &recovered).unwrap();
+        assert_eq!(
+            store
+                .read_bundle_bytes(&scope, &prepared.object_ref)
+                .unwrap(),
+            bytes
+        );
+        let other = TraceArtifactScope {
+            tenant_storage_ref: "tenant-b".into(),
+            submission_storage_ref: "submission-a".into(),
+        };
+        assert!(
+            store
+                .read_bundle_bytes(&other, &prepared.object_ref)
+                .is_err()
+        );
+        assert!(
+            store
+                .delete_bundle_bytes(&other, &prepared.object_ref)
+                .is_err()
+        );
+        store
+            .delete_bundle_bytes(&scope, &prepared.object_ref)
+            .unwrap();
+        assert!(
+            store
+                .read_bundle_bytes(&scope, &prepared.object_ref)
+                .is_err()
+        );
+        store
+            .delete_bundle_bytes(&scope, &prepared.object_ref)
+            .unwrap();
+    }
+
     fn assert_trace_artifact_store_contract(store: &dyn TraceArtifactStore) {
         let payload = json!({"safe": true, "summary": "<redacted>"});
         let serialized_payload = serde_json::to_vec(&payload).expect("payload serializes");
@@ -1756,6 +2208,46 @@ mod tests {
             store
                 .delete_artifact("tenant:sha256:trait", &receipt)
                 .expect("artifact deletes through trait")
+        );
+
+        // Prepare names the object and its ciphertext before anything is
+        // stored; publish writes exactly that object.
+        let prepared = store
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "trait-contract-prepared",
+                &serialized_payload,
+            )
+            .expect("artifact prepares through trait");
+        assert!(
+            store
+                .read_artifact("tenant:sha256:trait", prepared.receipt())
+                .is_err(),
+            "a prepared artifact is not stored"
+        );
+        assert!(
+            !store
+                .delete_artifact("tenant:sha256:trait", prepared.receipt())
+                .expect("deleting an unwritten artifact succeeds")
+        );
+        let published = store
+            .publish_serialized_json(&prepared)
+            .expect("artifact publishes through trait");
+        assert!(published.matches_identity(prepared.receipt()));
+        let prepared_round_trip: serde_json::Value = store
+            .read_json_by_object_key(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                &prepared.receipt().object_key,
+                &prepared.receipt().ciphertext_sha256,
+            )
+            .expect("published artifact reads by the prepared key and hash");
+        assert_eq!(prepared_round_trip, payload);
+        assert!(
+            store
+                .delete_artifact("tenant:sha256:trait", prepared.receipt())
+                .expect("published artifact deletes by the prepared receipt")
         );
     }
 
@@ -1864,6 +2356,84 @@ mod tests {
             TraceArtifactStore::read_json(&store, "tenant:sha256:alpha", &drifted)
                 .expect("remote read tolerates encrypted_at drift");
         assert_eq!(round_trip, payload);
+    }
+
+    /// A store that implements only the required methods.
+    struct UnsplitStore;
+
+    impl TraceArtifactStore for UnsplitStore {
+        fn put_serialized_json(
+            &self,
+            _tenant_storage_ref: &str,
+            _artifact_kind: TraceArtifactKind,
+            _object_id: &str,
+            _serialized_json: &[u8],
+        ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_artifact(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<EncryptedTraceArtifact> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_json(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<serde_json::Value> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_json_by_object_key(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _expected_artifact_kind: TraceArtifactKind,
+            _object_key: &str,
+            _expected_ciphertext_sha256: &str,
+        ) -> anyhow::Result<serde_json::Value> {
+            anyhow::bail!("unused")
+        }
+
+        fn delete_artifact(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<bool> {
+            anyhow::bail!("unused")
+        }
+    }
+
+    /// A store that cannot split its write refuses both halves with a label.
+    #[test]
+    fn an_unsplit_store_refuses_prepare_and_publish_with_labels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let prepared = test_store(&temp)
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "unsplit",
+                b"{}",
+            )
+            .expect("the local store prepares");
+        let store = UnsplitStore;
+        let prepare = store
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "unsplit",
+                b"{}",
+            )
+            .err()
+            .expect("prepare refuses");
+        assert_eq!(prepare.to_string(), "serialized_json_prepare_unavailable");
+        let publish = store
+            .publish_serialized_json(&prepared)
+            .expect_err("publish refuses");
+        assert_eq!(publish.to_string(), "serialized_json_publish_unavailable");
     }
 
     #[test]

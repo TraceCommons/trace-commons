@@ -62,6 +62,22 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// Whether this row is the bucket for sessions whose working directory
     /// had no usable final segment. Reported by the daemon, never derived.
     public let isUnresolvedBucket: Bool
+    /// How many `Pending` entries this project holds.
+    ///
+    /// The contract says always present; optional here on the rule every
+    /// other field follows, because this app ships separately from the
+    /// daemon and routinely runs against an older one.
+    public let pendingCount: Int?
+    /// How many of those a group-level `approve` would act on.
+    ///
+    /// **ABSENT WHEN ELIGIBILITY DOES NOT APPLY**, on the same rule as an
+    /// entry's `eligibility` field: an invited contributor has no "3 of 7"
+    /// to be told about, and `pendingCount` alone is their answer. Test for
+    /// the key -- it is never null and never zero-as-absent.
+    ///
+    /// A count, not a promise. Entries move between this call and the
+    /// approve, and the expensive checks still run at submit.
+    public let contributableCount: Int?
 
     public var id: String { projectId }
 
@@ -72,7 +88,9 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         mode: ProjectMode,
         addedAt: Date? = nil,
         configured: Bool = false,
-        isUnresolvedBucket: Bool = false
+        isUnresolvedBucket: Bool = false,
+        pendingCount: Int? = nil,
+        contributableCount: Int? = nil
     ) {
         self.projectId = projectId
         self.projectLabel = projectLabel
@@ -81,6 +99,8 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.addedAt = addedAt
         self.configured = configured
         self.isUnresolvedBucket = isUnresolvedBucket
+        self.pendingCount = pendingCount
+        self.contributableCount = contributableCount
     }
 
     public enum CodingKeys: String, CodingKey {
@@ -91,6 +111,8 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case addedAt = "added_at"
         case configured
         case isUnresolvedBucket = "is_unresolved_bucket"
+        case pendingCount = "pending_count"
+        case contributableCount = "contributable_count"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -109,6 +131,12 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         // contributed automatically would be a lie about the contributor's
         // own repository.
         isUnresolvedBucket = try c.decodeIfPresent(Bool.self, forKey: .isUnresolvedBucket) ?? false
+        pendingCount = try c.decodeIfPresent(Int.self, forKey: .pendingCount)
+        // `decodeIfPresent` IS THE CONTRACT HERE, not a tolerance for an
+        // older daemon: absent means eligibility does not apply to this
+        // contributor, and collapsing that into 0 would draw no control on
+        // a folder that submits whole.
+        contributableCount = try c.decodeIfPresent(Int.self, forKey: .contributableCount)
     }
 
     /// Whether this project could ever be armed to contribute without asking.

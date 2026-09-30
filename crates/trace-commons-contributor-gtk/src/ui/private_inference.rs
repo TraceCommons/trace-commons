@@ -26,12 +26,10 @@
 //! `ui/mod.rs`), so the tray entry beside this is only ever a shortcut in:
 //! nothing on this screen may be reachable only from there.
 //!
-//! # The list leads, and the switch does not
+//! # Sign-in comes first
 //!
-//! A tool is the unit a contributor can decide about. "Answer model calls at
-//! all" is a consequence of connecting one, not a question to settle first,
-//! so the tools on this computer are the first thing on the screen and the
-//! switch below them is the kill switch.
+//! Account setup precedes connecting tools. The same credential section
+//! shows account controls after sign-in, followed by tools and the kill switch.
 //!
 //! # Nothing is written that was not shown first
 //!
@@ -77,6 +75,18 @@ pub struct PrivateInferenceView {
     /// shown, so a tool that rewrote its own settings file corrects itself
     /// rather than leaving a claim on screen that stopped being true.
     harnesses: gtk::Box,
+    /// Whether a key this computer can answer with is kept here, and the one
+    /// thing that may be done about it.
+    ///
+    /// Before the tools, so the account needed to connect them is visible first.
+    pub credential: super::credential::CredentialView,
+    /// What is left in the account that key spends from.
+    ///
+    /// Directly under the sign-in, because it is the other half of the same
+    /// fact: the key says whether this computer can answer a call, and the
+    /// balance says how many more it can pay for.
+    pub balance: super::balance::BalanceSection,
+    pub funding: crate::ui::funding::FundingSection,
     /// What was asked for. Insensitive until the daemon's own answer has
     /// arrived, so a press cannot write a value nothing confirmed.
     switch: gtk::Switch,
@@ -112,13 +122,28 @@ impl PrivateInferenceView {
         content.append(&style::section(copy::PRIVATE_INFERENCE_TITLE));
         style::append_body(&content, copy::PRIVATE_INFERENCE_SUBTITLE);
 
-        // The list first, and the switch below it. See the module note.
-        content.append(&style::section(copy::HARNESSES_TITLE));
-        style::append_body(&content, copy::HARNESSES_WHAT);
+        let credential = super::credential::CredentialView::new();
+        content.append(&credential.root);
+        let balance = super::balance::BalanceSection::new();
+        content.append(&balance.root);
+        let funding = crate::ui::funding::FundingSection::default();
+        content.append(&funding.root);
+
+        let tools = style::card(gtk::Orientation::Vertical, space::M);
+        // Tools follow account setup; the kill switch stays below both.
+        let tools_title = gtk::Label::builder()
+            .label(copy::HARNESSES_TITLE)
+            .xalign(0.0)
+            .build();
+        tools_title.add_css_class("tc-screen-title");
+        tools.append(&tools_title);
+        style::append_body(&tools, copy::HARNESSES_WHAT);
         let spend = gtk::Box::new(gtk::Orientation::Vertical, space::S);
-        content.append(&spend);
+        tools.append(&spend);
         let harnesses = gtk::Box::new(gtk::Orientation::Vertical, space::M);
-        content.append(&harnesses);
+        tools.append(&harnesses);
+
+        content.append(&tools);
 
         let card = style::card(gtk::Orientation::Vertical, space::M);
         style::append_body(&card, copy::PRIVATE_INFERENCE_OFFER_WHAT);
@@ -161,9 +186,16 @@ impl PrivateInferenceView {
             copy::PRIVATE_INFERENCE_STATE_UNKNOWN,
             Tone::Neutral,
         ));
-        card.append(&status);
+
         style::append_caveat(&card, copy::PRIVATE_INFERENCE_APPLIES_AT_ONCE);
-        content.append(&card);
+        let service = style::card(gtk::Orientation::Vertical, space::M);
+        let expander = gtk::Expander::builder()
+            .label(copy::PRIVATE_INFERENCE_TITLE)
+            .child(&card)
+            .build();
+        service.append(&expander);
+        service.append(&status);
+        content.append(&service);
 
         let clamp = adw::Clamp::builder()
             .maximum_size(COLUMN_MAX)
@@ -183,6 +215,9 @@ impl PrivateInferenceView {
             root,
             spend,
             harnesses,
+            credential,
+            balance,
+            funding,
             switch,
             status,
             filling: std::cell::Cell::new(false),
@@ -197,7 +232,11 @@ impl PrivateInferenceView {
 /// A local copy of the shape Settings uses rather than a shared helper: the
 /// two screens are free to diverge, and the three lines here are not worth
 /// coupling them over.
-fn tone_row(label: &str, tone: Tone) -> gtk::Box {
+///
+/// The credential section beside this one DOES use it, because it is not a
+/// second screen: it renders onto this one, and a row there that looked
+/// different from a row here would read as a different kind of statement.
+pub(super) fn tone_row(label: &str, tone: Tone) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
     let glyph = gtk::Label::new(Some(tone.glyph()));
     glyph.add_css_class(tone.css());
@@ -225,7 +264,7 @@ fn tone_row(label: &str, tone: Tone) -> gtk::Box {
 /// must fail to compile rather than fall through to something that reads as
 /// working. `indicator_reads_as_working` pins the other half of that rule:
 /// `Tone::Clear` comes out of here for `Clear` and for nothing else.
-fn indicator_tone(tone: copy::PrivateInferenceTone) -> Tone {
+pub(super) fn indicator_tone(tone: copy::PrivateInferenceTone) -> Tone {
     match tone {
         copy::PrivateInferenceTone::Neutral => Tone::Neutral,
         copy::PrivateInferenceTone::Held => Tone::Held,
@@ -316,7 +355,14 @@ pub fn render_harnesses(app: &Rc<App>) {
             return;
         };
         let view = &app.private_inference;
+        // Keep expanded details open when the daemon refreshes the list.
+        let mut expanded = std::collections::HashSet::new();
         while let Some(child) = view.harnesses.first_child() {
+            if let Some(details) = child.last_child().and_downcast::<gtk::Expander>() {
+                if details.is_expanded() {
+                    expanded.insert(child.widget_name().to_string());
+                }
+            }
             view.harnesses.remove(&child);
         }
         while let Some(child) = view.spend.first_child() {
@@ -331,6 +377,18 @@ pub fn render_harnesses(app: &Rc<App>) {
             style::append_body(&view.spend, &spend);
             style::append_meta(&view.spend, copy::HARNESSES_SPEND_SCOPE);
         }
+        // Once, above the list, because the fact is about the destination
+        // this app hosts and not about any one tool. THREE ANSWERS: a daemon
+        // that reports no key draws it, a daemon that has a key -- or a
+        // destination the contributor runs themselves -- draws nothing, and a
+        // daemon that does not gate connects at all draws nothing either. The
+        // shared function separates the three; reading the field as a boolean
+        // here would tell somebody on an older build to go and get a key
+        // nothing wants.
+        let notice = copy::harness_credential_notice(list.destination_credentialed);
+        if !notice.is_empty() {
+            style::append_body(&view.harnesses, notice);
+        }
         if list.harnesses.is_empty() {
             // An empty list that explains nothing cannot be told apart from
             // a broken one, so the shared sentence says what was looked for.
@@ -339,6 +397,9 @@ pub fn render_harnesses(app: &Rc<App>) {
         }
         for row in &list.harnesses {
             let card = harness_card(app, row);
+            if let Some(details) = card.last_child().and_downcast::<gtk::Expander>() {
+                details.set_expanded(expanded.contains(&row.id));
+            }
             app.private_inference.harnesses.append(&card);
         }
     });
@@ -373,7 +434,14 @@ fn listener_on(app: &Rc<App>) -> bool {
 /// is selectable: doing it by hand instead is always available, and this
 /// window is the only place a GNOME contributor can find it.
 fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
-    let card = style::card(gtk::Orientation::Vertical, space::S);
+    let card = style::card(gtk::Orientation::Vertical, space::M);
+    card.add_css_class("tc-tool-card");
+    card.set_widget_name(&row.id);
+    let heading = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    let icon = gtk::Image::from_icon_name("utilities-terminal-symbolic");
+    icon.add_css_class("tc-tool-icon");
+    icon.set_pixel_size(24);
+    heading.append(&icon);
 
     let name = gtk::Label::builder()
         .label(&row.name)
@@ -381,7 +449,9 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
         .wrap(true)
         .build();
     name.add_css_class("tc-card-title");
-    card.append(&name);
+    name.set_hexpand(true);
+    heading.append(&name);
+    card.append(&heading);
 
     // Three of the five states have a sentence and two deliberately do not.
     // An empty sentence is drawn as no row at all, never as a blank one at
@@ -414,19 +484,31 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
     if !last_call.is_empty() {
         style::append_meta(&card, last_call);
     }
-    if let Some(path) = row.config_path.as_deref() {
-        style::append_meta(&card, path);
-    }
-    if !row.connect_command.is_empty() {
-        let command = gtk::Label::builder()
-            .label(&row.connect_command)
+    let details = gtk::Expander::builder()
+        .label(copy::HARNESS_PREVIEW_TITLE)
+        .expanded(false)
+        .build();
+    let settings = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+    settings.set_margin_top(space::S);
+    for text in row
+        .config_path
+        .iter()
+        .chain(std::iter::once(&row.connect_command))
+    {
+        if text.is_empty() {
+            continue;
+        }
+        let label = gtk::Label::builder()
+            .label(text)
             .xalign(0.0)
             .wrap(true)
             .selectable(true)
             .build();
-        command.add_css_class("tc-mono");
-        card.append(&command);
+        label.add_css_class("tc-mono");
+        label.add_css_class("tc-meta");
+        settings.append(&label);
     }
+    details.set_child(Some(&settings));
 
     // Chosen from the daemon's answer, not from `connected`.
     //
@@ -448,7 +530,11 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
     } else {
         copy::HARNESS_DISCONNECT
     });
-    button.set_halign(gtk::Align::Start);
+    button.set_halign(gtk::Align::End);
+    button.set_valign(gtk::Align::Center);
+    if connecting {
+        button.add_css_class("suggested-action");
+    }
     // The daemon's own answer to whether the action may be offered, rather
     // than this shell re-deriving it: a tool that is gone can still be
     // disconnected, because uninstalling it did not remove the line we put
@@ -476,7 +562,8 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
         }
         plan_harness(&app, &id, action);
     });
-    card.append(&button);
+    heading.append(&button);
+    card.append(&details);
 
     card
 }
@@ -673,6 +760,10 @@ pub fn refresh(app: &Rc<App>) {
     // on this computer and what has arrived from them are facts about other
     // programs' files and about the ledger, not about this app's settings.
     render_harnesses(app);
+    // And a third, for the same reason: a key can be minted or removed
+    // without this process doing anything, because the ceremony finishes in a
+    // browser.
+    super::credential::refresh(app);
 }
 
 /// The switch, and what actually happened underneath it.
@@ -1110,6 +1201,78 @@ mod tests {
                     "{literal:?} is a sentence written in {opening} rather than read from copy"
                 );
             }
+        }
+    }
+
+    /// The connect notice is drawn for the one answer that means it, and the
+    /// other two draw nothing.
+    ///
+    /// Fed through the real deserializer, because the `Option` is the whole
+    /// mechanism and a hand-built value would skip the part that can go
+    /// wrong: `#[serde(default)]` on an `Option<bool>` gives `None` for an
+    /// absent field, and a `bool` with the same default would give `false` --
+    /// which draws the notice on every daemon older than the gate and sends
+    /// somebody to get a key nothing wants.
+    ///
+    /// `Some(true)` covers a destination the contributor declared and runs
+    /// themselves as well as a key kept here; neither is ours to comment on.
+    #[test]
+    fn the_connect_notice_is_drawn_for_a_reported_missing_key_and_nothing_else() {
+        use trace_commons_contributor::private_inference_copy::private_inference_copy;
+        let notice_for = |body: serde_json::Value| {
+            let list: crate::model::HarnessList =
+                serde_json::from_value(body).expect("the list parses");
+            copy::harness_credential_notice(list.destination_credentialed)
+        };
+        let shared = private_inference_copy();
+        assert_eq!(
+            notice_for(serde_json::json!({ "destination_credentialed": false })),
+            shared.harness_needs_credential,
+            "a daemon reporting no key draws nothing to explain the missing control"
+        );
+        assert_eq!(
+            notice_for(serde_json::json!({ "destination_credentialed": true })),
+            ""
+        );
+        assert_eq!(
+            notice_for(serde_json::json!({})),
+            "",
+            "an absent field is not a refused connect"
+        );
+        // And the drawn sentence is not empty, so the assertion above is
+        // distinguishing two real values rather than two blanks.
+        assert!(!shared.harness_needs_credential.trim().is_empty());
+    }
+
+    /// The three answers stay three in this shell.
+    ///
+    /// The one-character change that breaks it -- `Option<bool>` to `bool`, or
+    /// an `unwrap_or(false)` on the way to the notice -- compiles, passes
+    /// every rendering test, and silently collapses "this daemon does not gate
+    /// connects" into "this daemon has no key".
+    #[test]
+    fn the_notice_is_never_reduced_to_a_boolean_in_this_shell() {
+        let body = SOURCE
+            .split("pub fn render_harnesses(")
+            .nth(1)
+            .expect("render_harnesses is in this file")
+            .split("\n}\n")
+            .next()
+            .expect("render_harnesses closes");
+        assert!(
+            body.contains("copy::harness_credential_notice(list.destination_credentialed)"),
+            "the notice stopped being read from the shared table"
+        );
+        for collapsed in [
+            "destination_credentialed.unwrap_or",
+            "destination_credentialed ==",
+            "destination_credentialed.is_some",
+            "!list.destination_credentialed",
+        ] {
+            assert!(
+                !body.contains(collapsed),
+                "the field is read as a boolean in this shell: {collapsed}"
+            );
         }
     }
 

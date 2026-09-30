@@ -129,6 +129,167 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     /// </remarks>
     public bool WasTrimmed => _entry.SubagentsDropped > 0;
 
+    /// <summary>
+    /// Whether this session can actually be contributed, and everything the
+    /// row draws about it: the sentence, its tone, and whether a send control
+    /// may be offered at all.
+    /// </summary>
+    /// <remarks>
+    /// Resolved once, through the shared crate. NOTHING BELOW BRANCHES ON THE
+    /// STATE STRING -- three shells each deciding which rows get a send button
+    /// is three chances to offer one beside a session the server will refuse,
+    /// which is the defect this surface exists to remove.
+    ///
+    /// <para>
+    /// A load-time fact on the entry, exactly as <see cref="WasTrimmed"/> is,
+    /// so it is as true while the card still reads "Loading preview…" as
+    /// after one lands. A row must not be able to reach a send through a card
+    /// that never got a preview.
+    /// </para>
+    /// </remarks>
+    private ContributionEligibilityDecision Eligibility =>
+        ContributionEligibilitySurface.Decide(_entry);
+
+    /// <summary>
+    /// Whether a send control may be drawn for this row.
+    /// </summary>
+    /// <remarks>
+    /// True for a row the daemon never asked the question of -- an invited
+    /// contributor has no eligibility question, and this slice must not take
+    /// an offer away from a queue that was never in doubt.
+    /// </remarks>
+    public bool CanContribute => Eligibility.OffersContribute;
+
+    /// <summary>
+    /// Whether this row carries a sentence about its eligibility. False for
+    /// every row of an invited contributor's queue: absent is not a state,
+    /// and a caveat on work that carries no question is a caveat invented
+    /// here.
+    /// </summary>
+    public bool HasEligibilityText => Eligibility.HasStateLine;
+
+    /// <summary>The sentence itself, from the shared crate.</summary>
+    public string EligibilityText => Eligibility.StateLine ?? string.Empty;
+
+    /// <summary>
+    /// The one state with something to do about it: a setting decides
+    /// whether future sessions are contributable.
+    /// </summary>
+    public bool EligibilityIsAttention =>
+        HasEligibilityText && Eligibility.Tone == PrivateInferenceTone.Attention;
+
+    /// <summary>This session has what a contribution needs.</summary>
+    public bool EligibilityIsClear =>
+        HasEligibilityText && Eligibility.Tone == PrivateInferenceTone.Clear;
+
+    /// <summary>
+    /// Everything else, drawn in the ordinary ink.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the COMPLEMENT of the other two rather than a test for
+    /// <see cref="PrivateInferenceTone.Neutral"/>. A permanent ineligibility
+    /// is neutral today, and a later ABI answering a tone this build does not
+    /// draw an arm for would otherwise leave the row silent -- which is the
+    /// one outcome forbidden here, because the row is being shown either way
+    /// and has to say why it carries no send control.
+    /// </remarks>
+    public bool EligibilityIsPlain =>
+        HasEligibilityText && !EligibilityIsAttention && !EligibilityIsClear;
+
+    /// <summary>
+    /// Whether a second sentence naming the reason belongs under it.
+    /// </summary>
+    /// <remarks>
+    /// Absent on every eligible row, and on a reason label this build does
+    /// not know -- for which the shared crate answers nothing rather than
+    /// guessing, and the row draws nothing rather than adding a detail nobody
+    /// established.
+    /// </remarks>
+    public bool HasEligibilityReason => Eligibility.HasReasonLine;
+
+    /// <summary>That sentence, from the shared crate.</summary>
+    public string EligibilityReasonText => Eligibility.ReasonLine ?? string.Empty;
+
+    /// <summary>
+    /// Whether this session carries proof of its last model call,
+    /// and everything the row draws about it: the sentence, and its tone.
+    /// </summary>
+    /// <remarks>
+    /// <b>ANSWERED FOR EVERY ROW, unlike <see cref="Eligibility"/>.</b> The
+    /// two sentences sit together and read as siblings, which makes it
+    /// natural to hang this off the eligibility line's presence. Doing so
+    /// would blank it for exactly the contributors it was added for: an
+    /// invited contributor has no eligibility question, so their rows carry
+    /// no eligibility line at all, and the mark is the fact about their trace
+    /// that the credit it earns will turn on.
+    ///
+    /// <para>
+    /// Resolved through the shared crate, and a load-time fact on the entry
+    /// exactly as <see cref="Eligibility"/> is, so it is as true while the
+    /// card still reads "Loading preview..." as after one lands.
+    /// </para>
+    /// </remarks>
+    private AttestationMarkDecision Attestation =>
+        AttestationMarkSurface.Decide(_entry);
+
+    /// <summary>The sentence itself, from the shared crate.</summary>
+    public string AttestationText => Attestation.MarkLine;
+
+    /// <summary>
+    /// Whether a witness certificate is held for the bytes this row was
+    /// pinned to, true after either witness route.
+    /// </summary>
+    /// <remarks>
+    /// The row's own answer, straight off the entry. Not the attestation
+    /// mark above: that says whether the session carries a copy of the model
+    /// call that produced it, this says whether a certificate is held over
+    /// the reviewed bytes.
+    /// </remarks>
+    public bool HoldsCertificate => _entry.HoldsCertificate;
+
+    /// <summary>
+    /// The one mark with something to do about it: a setting decides whether
+    /// future sessions carry proof.
+    /// </summary>
+    public bool AttestationIsAttention =>
+        Attestation.HasMarkLine && Attestation.Tone == PrivateInferenceTone.Attention;
+
+    /// <summary>This session carries a checkable copy of its last model call.</summary>
+    public bool AttestationIsClear =>
+        Attestation.HasMarkLine && Attestation.Tone == PrivateInferenceTone.Clear;
+
+    /// <summary>
+    /// Everything else, drawn in the ordinary ink.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the COMPLEMENT of the other two rather than a test for
+    /// <see cref="PrivateInferenceTone.Neutral"/>, for the reason
+    /// <see cref="EligibilityIsPlain"/> is: a later ABI answering a tone this
+    /// build draws no arm for would otherwise leave the row saying nothing
+    /// about a question every row is supposed to answer.
+    /// </remarks>
+    public bool AttestationIsPlain =>
+        Attestation.HasMarkLine && !AttestationIsAttention && !AttestationIsClear;
+
+    /// <summary>
+    /// Whether a second sentence naming the reason belongs under it.
+    /// </summary>
+    /// <remarks>
+    /// THE KEY'S PRESENCE DECIDES THIS, NOT THE MARK. An attested session
+    /// never carries a reason and both unattested marks always do, so
+    /// deciding from the mark looks right until <c>unknown</c>: it carries
+    /// none when the row was never evaluated, and carries one when a send was
+    /// refused because the receipt service was down. The shared crate answers
+    /// nothing for an absent or unfamiliar label, so asking it is the branch.
+    /// </remarks>
+    public bool HasAttestationReason => Attestation.HasReasonLine;
+
+    /// <summary>
+    /// That sentence, from the shared crate. Never the eligibility reason
+    /// sentence for the same label, which says a request was refused.
+    /// </summary>
+    public string AttestationReasonText => Attestation.ReasonLine ?? string.Empty;
+
     private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
     /// <summary>The daemon's identifier for this entry; used to open a preview.</summary>
@@ -205,11 +366,14 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     public string State => string.IsNullOrWhiteSpace(_entry.State) ? "—" : _entry.State!;
 
     /// <summary>
-    /// Why the entry is in its state. Already written to be read by a
-    /// contributor, so it is shown verbatim rather than remapped here -- a
-    /// second vocabulary in the UI would drift from the daemon's.
+    /// Why the entry is in its state, in words. The daemon sends a wire label
+    /// (<c>privacy-filter-transient</c>, say), not a sentence, so it goes
+    /// through the shared queue outcome copy that the history view and the
+    /// other shells use -- one vocabulary, drawn from the core, and never the
+    /// raw label.
     /// </summary>
-    public string? ReasonLabel => _entry.ReasonLabel;
+    public string? ReasonLabel =>
+        HasReason ? QueueOutcomeSurface.Line(_entry.ReasonLabel) : null;
 
     public bool HasReason => !string.IsNullOrWhiteSpace(_entry.ReasonLabel);
 

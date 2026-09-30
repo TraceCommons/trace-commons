@@ -137,6 +137,42 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public ObservableCollection<ConnectionStatusViewModel> ConnectionRows { get; } = new();
 
+    /// <summary>
+    /// K11: what leaves this machine, to whom, and where the witness came
+    /// from, as rows. Every row is <see cref="RouteDisclosureSurface"/>'s,
+    /// which is the Rust's words for the daemon's <c>route_disclosure</c>.
+    /// </summary>
+    public ObservableCollection<DisclosureRow> DisclosureRows { get; } = new();
+
+    private string _disclosureTitle = string.Empty;
+
+    /// <summary>The section title, from the Rust, whether or not the route could be read.</summary>
+    public string DisclosureTitle => _disclosureTitle;
+
+    /// <summary>
+    /// Ask the daemon what leaves this machine and lay out the Rust's words
+    /// for it. A failed call or an unreadable answer is said as such and is
+    /// never drawn as some other route.
+    /// </summary>
+    public async Task RefreshDisclosureAsync()
+    {
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.RouteDisclosure)
+            .ConfigureAwait(true);
+        RouteDisclosure? disclosure = response.IsError || response.Result is null
+            ? null
+            : RouteDisclosureSurface.ForFacts(response.Result.Value.GetRawText());
+        RouteDisclosureUnreadable? unreadable = disclosure is null ? RouteDisclosureSurface.Unreadable() : null;
+        DisclosureRows.Clear();
+        foreach (DisclosureRow row in RouteDisclosureSurface.PanelRows(disclosure, unreadable))
+        {
+            DisclosureRows.Add(row);
+        }
+
+        _disclosureTitle = RouteDisclosureSurface.PanelTitle(disclosure, unreadable);
+        Raise(nameof(DisclosureTitle));
+    }
+
     public ObservableCollection<ConsentScopeViewModel> AlwaysIncluded { get; } = new();
 
     public ObservableCollection<ConsentScopeViewModel> OptionalScopes { get; } = new();
@@ -700,6 +736,108 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    // Inference-body export consent is independent of witness configuration.
+    private bool _tokenContributionEnabled;
+    private bool _tokenContributionSupported;
+    public bool TokenContributionControlsEnabled => WitnessControlsEnabled && _tokenContributionSupported && !string.IsNullOrEmpty(_witnessCopy?.TokenHeading);
+    private string _tokenContributionNotice = string.Empty;
+    public bool TokenContributionEnabled => _tokenContributionEnabled;
+    public string TokenContributionHeading => _witnessCopy?.TokenHeading ?? string.Empty;
+    public string TokenContributionDisclosure => _witnessCopy?.TokenDisclosure ?? string.Empty;
+    public string TokenContributionCaptureNote => _witnessCopy?.TokenCaptureNote ?? string.Empty;
+    public string TokenContributionScopeNote => _witnessCopy?.TokenScopeNote ?? string.Empty;
+    public string TokenContributionConfirm => _witnessCopy?.TokenConfirm ?? string.Empty;
+    public string TokenContributionCancel => _witnessCopy?.TokenCancel ?? string.Empty;
+    public string TokenContributionEnable => _witnessCopy?.TokenEnable ?? string.Empty;
+    public string TokenContributionDisable => _witnessCopy?.TokenDisable ?? string.Empty;
+    public string TokenContributionState => !_tokenContributionSupported
+        ? string.Empty
+        : (_tokenContributionEnabled ? _witnessCopy?.TokenEnabled : _witnessCopy?.TokenDisabled)
+          ?? string.Empty;
+    public string TokenContributionNotice => _tokenContributionNotice;
+    public string TokenContributionNoticeGlyph => _tokenContributionNotice.Length > 0 ? _witnessCopy?.Wallet?.RefusedGlyph ?? "" : "";
+
+    public ProbabilityStorageView? ProbabilityStorage { get; private set; }
+    public async Task SetLocalProbabilityCaptureAsync(bool enabled) {
+        if (IsBusy || ProbabilityStorage is null) return;
+        IsBusy = true;
+        try {
+            var response = await _host.CallAsync("set_settings", enabled ? "{\"token_capture_enabled\":true}" : "{\"token_capture_enabled\":false}").ConfigureAwait(true);
+            if (response.IsError || response.ResultAs<DaemonSettingsSnapshot>() is not { } settings) throw new InvalidOperationException();
+            FillTokenContribution(settings);
+        } catch {
+            _tokenContributionNotice = ProbabilityStorage?.FailureLine ?? "";
+            Raise(nameof(TokenContributionNotice));
+        } finally { IsBusy = false; }
+    }
+    public async Task CleanProbabilityStorageAsync(bool discard) {
+        if (IsBusy || ProbabilityStorage is null) return;
+        IsBusy = true;
+        try {
+            var response = await _host.CallAsync(discard ? "discard_token_reviews" : "remove_token_local_copies", "{\"confirmed\":true}").ConfigureAwait(true);
+            if (response.IsError) throw new InvalidOperationException();
+            ProbabilityStorage = response.ResultAs<ProbabilityStorageView>();
+            Raise(nameof(ProbabilityStorage));
+        } catch {
+            _tokenContributionNotice = ProbabilityStorage?.FailureLine ?? "";
+            Raise(nameof(TokenContributionNotice));
+        } finally { IsBusy = false; }
+    }
+    private void FillTokenContribution(DaemonSettingsSnapshot settings)
+    {
+        ProbabilityStorage = settings.ProbabilityStorage;
+        Raise(nameof(ProbabilityStorage));
+        _tokenContributionEnabled = settings.ProbabilityContributionEnabled;
+        _tokenContributionSupported = settings.ProbabilityContributionAllowed.HasValue;
+        Raise(nameof(TokenContributionControlsEnabled));
+        Raise(nameof(TokenContributionEnabled));
+        Raise(nameof(TokenContributionState));
+    }
+
+    public async Task SetTokenContributionAsync(bool enabled, bool disclosureConfirmed = false)
+    {
+        if (!IsLoaded || IsBusy || _witnessCopy is null || (enabled && !_tokenContributionSupported))
+        {
+            return;
+        }
+        IsBusy = true;
+        _tokenContributionNotice = string.Empty;
+        try
+        {
+            string payload = TokenContributionConsent.Serialize(enabled, disclosureConfirmed);
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.SetSettings, payload)
+                .ConfigureAwait(true);
+            DaemonSettingsSnapshot? settings = response.ResultAs<DaemonSettingsSnapshot>();
+            if (response.IsError || !TokenContributionConsent.ConfirmsWrite(settings, enabled))
+            {
+                _tokenContributionNotice = _witnessCopy.TokenSaveFailed;
+            }
+            else
+            {
+                FillTokenContribution(settings!);
+            }
+        }
+        catch
+        {
+            _tokenContributionNotice = _witnessCopy.TokenSaveFailed;
+        }
+        finally
+        {
+            if (_tokenContributionNotice.Length > 0)
+            {
+                _tokenContributionSupported = false;
+                try {
+                    var authoritative = await _host.CallAsync(DaemonProtocol.Methods.GetSettings).ConfigureAwait(true);
+                    if (authoritative.ResultAs<DaemonSettingsSnapshot>() is { } settings) FillTokenContribution(settings);
+                } catch { }
+                Raise(nameof(TokenContributionState));
+            }
+            Raise(nameof(TokenContributionNotice)); Raise(nameof(TokenContributionNoticeGlyph));
+            IsBusy = false;
+        }
+    }
+
     // Answering model calls on this computer. The switch, the exposure
     // sentence and the line saying what the listener actually did all live on
     // the model-calls destination now -- PrivateInferenceViewModel owns them,
@@ -871,6 +1009,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             // calls take no handle, and this card has to be able to say what
             // would happen to a session even where nothing is running.
             RefreshWitness();
+            await RefreshDisclosureAsync().ConfigureAwait(true);
 
             DaemonResponse optionsResponse = await _host
                 .CallAsync(DaemonProtocol.Methods.ConsentOptions)
@@ -977,6 +1116,19 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Moves one project to its next manual mode.
+    /// </summary>
+    /// <remarks>
+    /// The rows are rebuilt from a fresh list_projects rather than from the
+    /// mode that was sent: what this screen shows about a consent field has
+    /// to be what the daemon stores, and a write that was refused or that
+    /// stored something else is invisible to a shell that believes its own
+    /// request. The re-read runs on the failure path too -- that is the path
+    /// where the two can disagree, and a refused toggle that still flips the
+    /// row is a lie the contributor then acts on. Onboarding's list was
+    /// fixed the same way and reads the same notice table.
+    /// </remarks>
     public async Task ToggleProjectAsync(ProjectSettingViewModel project)
     {
         ArgumentNullException.ThrowIfNull(project);
@@ -990,32 +1142,47 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         {
             return;
         }
+
+        // Held separately because the row object this was called with does
+        // not survive the re-read: LoadProjectsAsync rebuilds the collection.
+        string projectId = project.ProjectId;
         string payload = JsonSerializer.Serialize(
             new Dictionary<string, string>
             {
-                ["project_id"] = project.ProjectId,
+                ["project_id"] = projectId,
                 ["mode"] = next,
             });
 
         IsBusy = true;
+        project.IsPending = true;
         try
         {
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
                 .ConfigureAwait(true);
 
-            Notice = response.IsError
-                ? WatchCopy.WriteFailed
-                : string.Empty;
-            if (!response.IsError)
-            {
-                project.SetMode(next);
-            }
+            await LoadProjectsAsync().ConfigureAwait(true);
+            Notice = ProjectManualMode.NoticeFor(
+                response.IsError, next, FindProject(projectId)?.Mode);
         }
         finally
         {
+            project.IsPending = false;
             IsBusy = false;
         }
+    }
+
+    private ProjectSettingViewModel? FindProject(string projectId)
+    {
+        foreach (ProjectSettingViewModel candidate in Projects)
+        {
+            if (string.Equals(candidate.ProjectId, projectId, StringComparison.Ordinal))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     public async Task SaveBehaviorAsync(BehaviorSetting setting, double displayedValue)
@@ -1102,6 +1269,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         if (settings is not null)
         {
             FillInferenceEvidence(settings);
+            FillTokenContribution(settings);
         }
         ConnectionRows.Clear();
         if (settings is null)
@@ -1410,6 +1578,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             Notice = result.Code == 0 ? string.Empty : WriteFailedNotice;
             RefreshWitness();
+            await RefreshDisclosureAsync().ConfigureAwait(true);
         }
         finally
         {
@@ -1446,6 +1615,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             Notice = result.Code < 0 ? WriteFailedNotice : string.Empty;
             RefreshWitness();
+            await RefreshDisclosureAsync().ConfigureAwait(true);
         }
         finally
         {
@@ -1591,6 +1761,16 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private async void OnDaemonStatusChanged()
     {
         await RefreshRoutingAsync().ConfigureAwait(true);
+
+        // The route disclosure too, as GTK does on every status event: a
+        // witness pinned, refused or cleared elsewhere changes where
+        // sessions go, and this section must not keep saying the old route.
+        // Nothing here is a knob the contributor is holding, so it is not
+        // skipped while a write is in flight.
+        if (IsLoaded)
+        {
+            await RefreshDisclosureAsync().ConfigureAwait(true);
+        }
     }
 
     /// <summary>
@@ -1850,7 +2030,8 @@ public sealed class ConnectionStatusViewModel
 
 public sealed class ProjectSettingViewModel : INotifyPropertyChanged
 {
-    private string _mode;
+    private readonly string _mode;
+    private bool _isPending;
 
     public ProjectSettingViewModel(ProjectSetting project)
     {
@@ -1919,21 +2100,27 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
     /// </summary>
     public string ActionText => WatchCopy.ActionFor(_mode) ?? WatchCopy.IgnoreAction;
 
-    public bool CanToggle => ProjectManualMode.Next(_mode) is not null;
+    public bool CanToggle => !_isPending && ProjectManualMode.Next(_mode) is not null;
 
-    public void SetMode(string mode)
+    /// <summary>
+    /// Set while this row's write is in flight, so the button that started it
+    /// cannot be pressed again before the stored answer has been read back.
+    /// </summary>
+    public bool IsPending
     {
-        if (_mode == mode)
+        get => _isPending;
+        set
         {
-            return;
+            _isPending = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsPending)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanToggle)));
         }
-
-        _mode = mode;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Mode)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StateText)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ActionText)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanToggle)));
     }
+
+    // There is deliberately no mode setter here, for the reason onboarding's
+    // row has none: a row's mode arrives from list_projects and nowhere else.
+    // The one caller this class had set it from the value the shell had just
+    // sent, which is the optimism the re-read in ToggleProjectAsync replaced.
 }
 
 /// <summary>

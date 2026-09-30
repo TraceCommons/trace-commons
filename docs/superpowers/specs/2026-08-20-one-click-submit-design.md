@@ -102,7 +102,7 @@ product does not get to be careless about that sentence in particular.
 count of zero is a fact the contributor is owed, not an absence to omit.
 
 > `0`  ->  **Scrubbing matched nothing.**
-> `n`  ->  **Scrubbing removed {n}.**
+> `n`  ->  **{n} redactions applied.** (singular: **1 redaction applied.**)
 
 Sum the values of the `redactions` map. Do not name categories in the toast --
 the preview sheet is where a contributor sees which detector fired.
@@ -133,9 +133,9 @@ so the next submit rebuilds.
 
 Worked examples:
 
-> Approved. Scrubbing removed 4. 1 flagged.
-> Approved 47. Scrubbing removed 213. 3 flagged.
-> Approved 44. Scrubbing removed 213. 3 flagged, 3 not approved: too large to send.
+> Approved. 4 redactions applied. 1 flagged.
+> Approved 47. 213 redactions applied. 3 flagged.
+> Approved 44. 213 redactions applied. 3 flagged, 3 not approved: too large to send.
 > Nothing approved. Scrubbing matched nothing. 2 not approved: already decided.
 
 **Submit is not the primary action.** `Look inside` stays the row's default and

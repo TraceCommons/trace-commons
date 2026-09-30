@@ -12,14 +12,33 @@ import XCTest
 /// key, so a drift here is a silent no-write rather than an error anybody
 /// would see.
 private final class RecordingDaemon: DaemonCalling {
-    private(set) var calls: [(method: String, params: String)] = []
+    /// One write fans out into several `Task.detached` calls, so this
+    /// double is called from more than one thread at once while the test
+    /// reads `calls` from the main actor. An unsynchronised `Array.append`
+    /// under that corrupts the buffer's refcount and segfaults the test
+    /// process. See CredentialCancelTests for the crash this prevents.
+    private let lock = NSLock()
+    private var recorded: [(method: String, params: String)] = []
+
+    var calls: [(method: String, params: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
     /// Answers by method, so one client can be driven through a write and
     /// both probes in the order the card issues them.
-    var responses: [String: String] = [:]
+    private var responseTable: [String: String] = [:]
+
+    var responses: [String: String] {
+        get { lock.lock(); defer { lock.unlock() }; return responseTable }
+        set { lock.lock(); defer { lock.unlock() }; responseTable = newValue }
+    }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        calls.append((method: method, params: paramsJSON))
-        return responses[method] ?? #"{"id":1,"result":{}}"#
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append((method: method, params: paramsJSON))
+        return responseTable[method] ?? #"{"id":1,"result":{}}"#
     }
 
     /// Never called by these tests. Nil is the honest answer for a

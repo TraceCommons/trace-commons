@@ -9,40 +9,33 @@ import XCTest
 /// a fake that reproduced the real mapping would let this suite pass while
 /// the shell had stopped asking the shared table at all.
 final class PrivateInferenceSurfaceTests: XCTestCase {
-    private let payload = """
-        {"destination":"DESTINATION","subtitle":"SUBTITLE",
-         "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE",
-         "offer_no_repoint":"NO-REPOINT","offer_accept":"ACCEPT",
-         "offer_decline":"DECLINE","offer_asked_once":"ONCE",
-         "settings_title":"S-TITLE","settings_toggle":"S-TOGGLE",
-         "settings_applies_at_once":"S-AT-ONCE","state_off":"S-OFF","state_unknown":"S-UNKNOWN","state_unreported":"S-UNREPORTED","state_stopping":"S-STOPPING",
-         "state_running":"S-RUNNING","state_running_no_backends":"S-NO-BACKENDS","state_running_answered_elsewhere":"S-ELSEWHERE","state_running_destination_unknown":"S-DEST-UNKNOWN",
-         "state_running_elsewhere":"S-ELSEWHERE","state_port_in_use":"S-PORT",
-         "state_start_failed":"S-FAILED","state_crashed":"S-CRASHED",
-         "quit_also_stops":"QUIT","write_unconfirmed":"UNCONFIRMED","settings_moved":"MOVED","tray_turn_off":"TRAYOFF","tray_open_to_turn_on":"TRAYON",
-         "harnesses_title":"H-TITLE","harnesses_what":"H-WHAT",
-         "harnesses_spend_scope":"H-SPEND-SCOPE",
-         "harness_not_connected":"H-NOT-CONNECTED",
-         "harness_connected_nothing_seen":"H-NOTHING-SEEN",
-         "harness_answering":"H-ANSWERING","harness_connect":"H-CONNECT",
-         "harness_disconnect":"H-DISCONNECT",
-         "harness_preview_title":"H-PREVIEW","harness_preview_confirm":"H-CONFIRM",
-         "harness_preview_cancel":"H-CANCEL","harness_slot_taken":"H-TAKEN",
-         "harness_needs_restart":"H-RESTART","harnesses_none_found":"H-NONE",
-         "harness_unreadable_config":"H-UNREADABLE",
-         "harness_not_installed":"H-NOT-INSTALLED",
-         "harness_plan_nothing_to_change":"H-NOTHING-TO-CHANGE",
-         "harness_plan_entry_unusable":"H-ENTRY-UNUSABLE",
-         "harness_plan_no_config_path":"H-NO-CONFIG-PATH"}
-        """
+    /// The shared complete payload; see `PrivateInferenceCopyFixture`.
+    /// A new required property is one edit there, not five here.
+    private let payload = PrivateInferenceCopyFixture.complete
 
-    private func copy() -> PrivateInferenceCopy {
-        guard let copy = PrivateInferenceCopy.decode(fromJSON: payload) else {
-            XCTFail("the fixture payload must decode")
-            fatalError("unreachable")
-        }
-        return copy
+    /// Decoded once, in `setUpWithError`, so a fixture that stops decoding
+    /// fails THIS TEST and lets the rest of the bundle run.
+    ///
+    /// It used to be `XCTFail` followed by `fatalError("unreachable")`, which
+    /// aborted the whole XCTest process at the first fixture failure: every
+    /// remaining test in every target simply never ran, no total was printed,
+    /// and the log carried one error line no matter how much was broken. A
+    /// red `macOS app tests` job was unreadable for that reason -- it looked
+    /// far emptier than a normal failing run, and its failure count was
+    /// always about one.
+    ///
+    /// A throw from `setUpWithError` is reported against each test in this
+    /// class in turn, which is honest: every one of them needs this payload.
+    private var decodedCopy: PrivateInferenceCopy!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        decodedCopy = try XCTUnwrap(
+            PrivateInferenceCopy.decode(fromJSON: payload),
+            "the fixture payload must decode")
     }
+
+    private func copy() -> PrivateInferenceCopy { decodedCopy }
 
     private func calls(
         line: @escaping @Sendable (String) -> String? = { "LINE:\($0)" },

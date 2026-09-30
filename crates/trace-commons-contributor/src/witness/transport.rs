@@ -308,6 +308,23 @@ pub async fn witness_contribution(
         offered
             .events
             .push(crate::routing::attested::attested_exchange_event(call));
+        // The declaration describes what is offered, and what is offered has
+        // just changed: the exchange carries the request and the response
+        // bodies, which is `tool_payloads` content by the same rule the
+        // envelope builder applies. Recomputed here because this is where the
+        // event list stops changing -- the caller built its declaration over
+        // a list this function then appended to, and on the admission profile
+        // that list was empty, so every flag would otherwise read `false`
+        // beside the prompt and the completion.
+        //
+        // Derived rather than asserted, and derived from the same function
+        // the builder uses, so the two cannot drift. Nothing here can lower a
+        // flag: the events are a superset of the ones the caller declared
+        // over.
+        let presence = crate::envelope::declared_content_presence(&offered.events);
+        offered.consent.message_text_included = presence.message_text;
+        offered.consent.tool_payloads_included = presence.tool_payloads;
+        offered.consent.routing_metadata_included = presence.routing_metadata;
     }
 
     let body = witness_request_body(
@@ -361,7 +378,7 @@ fn verify_admission_context(
 ) -> Result<(), WitnessTrustError> {
     use trace_commons_attestation::receipt::{ReceiptAlgo, verify_receipt};
     use trace_commons_protocol::admission::{
-        AdmissionBinding, AdmissionEvidence, REQUEST_METADATA_KEY, receipt_identity,
+        AdmissionBinding, AdmissionEvidence, REQUEST_METADATA_KEY, is_hash, receipt_identity,
     };
     let Some(headers) = &response.admission else {
         return Ok(());
@@ -369,9 +386,41 @@ fn verify_admission_context(
     let refused = || WitnessTrustError::WitnessCertificateMismatched;
     let evidence: AdmissionEvidence =
         serde_json::from_str(&headers.evidence_json).map_err(|_| refused())?;
-    let anchor = tenant
+    // The tenant id is NOT the account anchor and has not been since V61.
+    //
+    // This used to read `tenant.strip_prefix("near-")` and compare that
+    // suffix to both anchors below. V58 held the two equal by database
+    // constraint -- `CHECK (tenant_id = 'near-' || substring(anchor_hash
+    // from 8))` -- so the comparison restated a server invariant rather than
+    // checking anything this client independently knew. V61 made the anchor a
+    // keyed blind index and the tenant id 32 random bytes, precisely so a
+    // contributor's tenant id is not computable from their NEAR account name
+    // (#716, #783, #785), and from that point the comparison was false for
+    // every real account: it refused every admission-bearing submission here,
+    // on the upload path, before ingest ever saw one.
+    //
+    // What replaces it is a check with two genuinely independent inputs,
+    // which the tenant comparison never had. `binding.account_anchor_sha256`
+    // arrives from the proxy's challenge; `evidence.account_anchor_sha256`
+    // comes back from the witness. Requiring those to agree is what the old
+    // comparison was standing in for, and unlike it, it can fail honestly: a
+    // witness that bound this artifact to some other account is caught here.
+    //
+    // The account's *authorisation* is not this client's to check and never
+    // was. The server resolves the anchor from its stored row for the
+    // authenticated (tenant, principal) and refuses evidence bound to any
+    // other account in `verify_admission_evidence`. See `is_near_tenant_id`
+    // in `daemon::account_onboarding`, which reached the same conclusion.
+    // The namespace still has to be right -- admission evidence on a
+    // non-wallet tenant is nonsense -- but the suffix is checked for shape
+    // only, and is never read as an anchor. `is_hash` is the same predicate
+    // the server applies to the `near-` suffix in `admission::anchor`.
+    if !tenant
         .and_then(|value| value.strip_prefix("near-"))
-        .ok_or_else(refused)?;
+        .is_some_and(is_hash)
+    {
+        return Err(refused());
+    }
     let attested = attested.ok_or_else(refused)?;
     let receipt = attested.receipt.ok_or_else(refused)?;
     let request: serde_json::Value =
@@ -400,8 +449,8 @@ fn verify_admission_context(
     )
     .map_err(|_| refused())?;
     if verified.signing_algo != ReceiptAlgo::Ed25519
-        || binding.account_anchor_sha256 != anchor
-        || evidence.account_anchor_sha256 != anchor
+        || !is_hash(&binding.account_anchor_sha256)
+        || evidence.account_anchor_sha256 != binding.account_anchor_sha256
         || evidence.challenge_sha256 != binding.digest().map_err(|_| refused())?
         || evidence.expires_at != binding.expires_at
         || evidence.provider_signer != verified.signing_address
@@ -612,6 +661,54 @@ pub fn verify_certificate(
     Ok(())
 }
 
+/// The redaction pipeline a certificate certifies, read only once
+/// [`verify_certificate`] has accepted it against `pinned_address`.
+///
+/// This is the witness's `redaction_pipeline_version()` alias -- the value
+/// `FULL_REDACTION_PIPELINE_VERSIONS` lists -- which the witness signs as
+/// `redaction_policy_version` in both the v1 and the v2 preimage. Never
+/// read that field any other way: an unverified copy of it is a claim, and
+/// is exactly what a certificate over some other artifact, or from some
+/// other key, would carry.
+///
+/// Returned as the exact string signed. Nothing here trims, lowercases or
+/// otherwise normalises it; a caller comparing it must compare exactly.
+pub fn certified_redaction_pipeline_version(
+    response: &WitnessedEnvelope,
+    pinned_address: &str,
+) -> Result<String, WitnessTrustError> {
+    verify_certificate(response, pinned_address)?;
+    let certificate: serde_json::Value = serde_json::from_str(&response.certificate_json)
+        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+    certificate
+        .get("redaction_policy_version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or(WitnessTrustError::WitnessResponseMalformed)
+}
+
+/// Recover the signer from a stored certificate without exposing its raw
+/// signature or certificate JSON to a shell.
+///
+/// A review artifact is written only after [`verify_certificate`] succeeds.
+/// This accessor gives a detail surface the public signer identity that was
+/// actually recovered from the response, rather than re-reading a current
+/// configuration value that may have changed since review.
+pub(crate) fn recover_certificate_signer(
+    response: &WitnessedEnvelope,
+) -> Result<String, WitnessTrustError> {
+    let certificate: serde_json::Value = serde_json::from_str(&response.certificate_json)
+        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+    let signing_bytes = certificate_signing_bytes(&certificate)
+        .ok_or(WitnessTrustError::WitnessResponseMalformed)?;
+    let recovered = trace_commons_attestation::eip191::recover_eip191_signer(
+        &signing_bytes,
+        &response.signature_hex,
+    )
+    .map_err(|_| WitnessTrustError::WitnessCertificateUnverified)?;
+    Ok(format!("0x{}", hex::encode(recovered)))
+}
+
 /// Rebuild the certificate's signing preimage from its wire fields.
 ///
 /// **Length-prefixed, never JSON.** The server's `WitnessCertificate` has
@@ -654,6 +751,30 @@ fn certificate_signing_bytes(certificate: &serde_json::Value) -> Option<Vec<u8>>
         _ => return None,
     };
 
+    let object = certificate.as_object()?;
+    match object.get("version") {
+        None if object.len() == 5 && !object.contains_key("inference_provenance") => {}
+        Some(serde_json::Value::Number(version))
+            if version.as_u64() == Some(2) && object.len() == 7 =>
+        {
+            let provenance: trace_commons_protocol::witness_provenance::InferenceProvenance =
+                serde_json::from_value(object.get("inference_provenance")?.clone()).ok()?;
+            return Some(
+                trace_commons_protocol::witness_provenance::witness_certificate_v2_signing_bytes(
+                    trace_commons_protocol::witness_provenance::WitnessCertificateV2Base {
+                        redacted_sha256: digest,
+                        redaction_policy_version: policy,
+                        witness_measurement: measurement,
+                        residual_risk_tag: verdict_tag,
+                        timestamp,
+                    },
+                    &provenance,
+                ),
+            );
+        }
+        _ => return None,
+    }
+
     let mut bytes = Vec::new();
     bytes.extend_from_slice(SIGNING_DOMAIN);
     for field in [digest, policy, measurement] {
@@ -672,6 +793,32 @@ pub struct HttpWitnessTransport {
     collateral_url: String,
     allowlist: Arc<HostAllowlist>,
     admission_evidence: bool,
+    /// Whether this transport's witness POSTs declare the background
+    /// workload. See [`Self::with_background_workload`].
+    background_workload: bool,
+}
+
+/// The longest a witness's `Retry-After` may hold a session, in seconds. One
+/// answer from a witness -- mistaken or hostile -- must not park a session
+/// for longer than an hour; the daemon asks again after that.
+pub const MAX_WITNESS_RETRY_AFTER_SECS: u32 = 3_600;
+
+/// Read the delay a saturated witness asked for.
+///
+/// Only a positive integer number of seconds is honoured, capped at
+/// [`MAX_WITNESS_RETRY_AFTER_SECS`]. Anything else -- absent, zero, an HTTP
+/// date, text -- is the contract's published default, never "retry now":
+/// a client that retried immediately on an unreadable header is exactly
+/// the hammering the contract exists to stop.
+fn saturation_retry_after(headers: &reqwest::header::HeaderMap) -> u32 {
+    use trace_commons_protocol::witness_pacing::WITNESS_SATURATED_RETRY_AFTER_SECS;
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(|secs| secs.min(u64::from(MAX_WITNESS_RETRY_AFTER_SECS)) as u32)
+        .unwrap_or(WITNESS_SATURATED_RETRY_AFTER_SECS)
 }
 
 impl HttpWitnessTransport {
@@ -696,12 +843,26 @@ impl HttpWitnessTransport {
             collateral_url: collateral_url.into(),
             allowlist,
             admission_evidence: false,
+            background_workload: false,
         })
     }
 
     /// Select the distinct evidence route only for an explicitly configured profile.
     pub fn with_admission_evidence(mut self, enabled: bool) -> Self {
         self.admission_evidence = enabled;
+        self
+    }
+
+    /// Declare this transport's witness requests as unattended background
+    /// work (`x-trace-witness-workload: background`), so a witness that
+    /// reserves capacity for people waiting on a review can refuse this
+    /// work first.
+    ///
+    /// For the daemon's upload pass only. A review a person asked for sends
+    /// no header. The header carries no identity and proves nothing; it is
+    /// the cooperative half of #1014's reservation.
+    pub fn with_background_workload(mut self, enabled: bool) -> Self {
+        self.background_workload = enabled;
         self
     }
 
@@ -784,6 +945,50 @@ impl WitnessTransport for HttpWitnessTransport {
         witness: &VerifiedWitness,
         body: &[u8],
     ) -> Result<WitnessedEnvelope, WitnessTrustError> {
+        /// Read a non-success witness answer as the refusal it names.
+        ///
+        /// The status alone cannot separate "declined your receipt" from
+        /// "answered nonsense", and those are opposite instructions to a
+        /// contributor. The body is attacker-influenceable, so it selects
+        /// nothing: it is matched against the protocol's closed set, must
+        /// agree with the status, and anything else -- an unknown label, a
+        /// body that is not JSON, no body at all -- keeps the answer this
+        /// client gave before.
+        ///
+        /// Only the head of the body is read. A refusal envelope is a few
+        /// dozen bytes, and a witness that answers a refusal with megabytes
+        /// is not one whose body should be buffered whole.
+        async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
+            const REFUSAL_BODY_BOUND: usize = 4096;
+            let status = response.status().as_u16();
+            let retry_after_secs = saturation_retry_after(response.headers());
+            let Ok(body) = response.bytes().await else {
+                return WitnessTrustError::WitnessResponseMalformed;
+            };
+            let head = &body[..body.len().min(REFUSAL_BODY_BOUND)];
+            let label = serde_json::from_slice::<serde_json::Value>(head)
+                .ok()
+                .and_then(|value| value.get("error")?.as_str().map(str::to_string));
+            // Capacity first, and only on the exact pair: a witness that is
+            // busy judged nothing, so this is the one refusal a session is
+            // held through rather than refused on.
+            if label.as_deref().is_some_and(|label| {
+                trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
+            }) {
+                return WitnessTrustError::WitnessSaturated { retry_after_secs };
+            }
+            match label.as_deref().and_then(|label| {
+                trace_commons_protocol::admission::AdmissionRefusal::from_response(status, label)
+            }) {
+                Some(trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused) => {
+                    WitnessTrustError::WitnessAdmissionEvidenceRefused
+                }
+                // Every other refusal in that set belongs to the ingest gate,
+                // which is not what answered here.
+                _ => WitnessTrustError::WitnessResponseMalformed,
+            }
+        }
+
         let base = self.allowed(witness.url())?;
         let url = base
             .join(if self.admission_evidence {
@@ -792,16 +997,23 @@ impl WitnessTransport for HttpWitnessTransport {
                 "/v1/witness"
             })
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
-        let response = self
+        let mut request = self
             .http
             .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        if self.background_workload {
+            use trace_commons_protocol::witness_pacing::{
+                WITNESS_BACKGROUND_WORKLOAD, WITNESS_WORKLOAD_HEADER,
+            };
+            request = request.header(WITNESS_WORKLOAD_HEADER, WITNESS_BACKGROUND_WORKLOAD);
+        }
+        let response = request
             .body(body.to_vec())
             .send()
             .await
             .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
         if !response.status().is_success() {
-            return Err(WitnessTrustError::WitnessResponseMalformed);
+            return Err(refusal_from(response).await);
         }
         let headers = response.headers().clone();
         let read = |name: &str| {
@@ -856,6 +1068,206 @@ pub(crate) fn signed_fixture(bytes: Vec<u8>) -> (WitnessedEnvelope, String) {
     tests::signed_fixture(bytes)
 }
 
+/// [`signed_fixture`] with the certificate's `residual_risk_verdict` set to
+/// `verdict`, signed by the same test-only key.
+#[cfg(test)]
+pub(crate) fn signed_fixture_with_verdict(
+    bytes: Vec<u8>,
+    verdict: &str,
+) -> (WitnessedEnvelope, String) {
+    tests::signed_fixture_with_verdict(bytes, verdict)
+}
+
+#[cfg(test)]
+pub(crate) fn signed_admission_fixture(bytes: Vec<u8>, account: &str) -> WitnessedEnvelope {
+    tests::signed_admission_fixture(bytes, account)
+}
+
+/// [`signed_fixture`] with the certificate's `redaction_policy_version` set
+/// to `policy`, signed by the same test-only key.
+#[cfg(test)]
+pub(crate) fn signed_fixture_with_policy(
+    bytes: Vec<u8>,
+    policy: &str,
+) -> (WitnessedEnvelope, String) {
+    tests::signed_fixture_with_policy(bytes, policy)
+}
+
+/// Explicit token-bundle request, bound to a separately acquired capture lease.
+pub struct TokenBundleRequest {
+    pub capture_store_id: String,
+    pub capture_id: String,
+    pub bundle_revision: String,
+    pub restricted_token_consent: bool,
+}
+
+/// Read a non-success token-bundle answer.
+///
+/// The exact `503 witness_saturated` pair is the one refusal that judged
+/// nothing: the witness is busy, and a person who asked for this review can
+/// try again after the witness's own (bounded) delay. Everything else keeps
+/// this route's fail-closed reading, the witness declining the evidence.
+/// Only the head of the body is read, as on the ordinary route.
+async fn token_review_refusal(response: reqwest::Response) -> WitnessTrustError {
+    const REFUSAL_BODY_BOUND: usize = 4096;
+    let status = response.status().as_u16();
+    let retry_after_secs = saturation_retry_after(response.headers());
+    let saturated = match response.bytes().await {
+        Ok(body) => {
+            serde_json::from_slice::<serde_json::Value>(&body[..body.len().min(REFUSAL_BODY_BOUND)])
+                .ok()
+                .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+                .is_some_and(|label| {
+                    trace_commons_protocol::witness_pacing::is_witness_saturation(status, &label)
+                })
+        }
+        Err(_) => false,
+    };
+    if saturated {
+        WitnessTrustError::WitnessSaturated { retry_after_secs }
+    } else {
+        WitnessTrustError::WitnessAdmissionEvidenceRefused
+    }
+}
+
+impl HttpWitnessTransport {
+    /// The verified witness type enforces attestation before raw bytes leave.
+    pub async fn witness_token_contribution(
+        &self,
+        witness: &VerifiedWitness,
+        mut raw: RawTraceContribution,
+        attested: AttestedInference<'_>,
+        granted: &GrantedConsent,
+        options: TokenBundleRequest,
+    ) -> Result<crate::token_bundle::CertifiedBundleUpload, WitnessTrustError> {
+        if !options.restricted_token_consent || attested.receipt.is_none() {
+            return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
+        }
+        if !raw.events.is_empty() {
+            return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
+        }
+        raw.events
+            .push(crate::routing::attested::attested_exchange_event(
+                attested.call,
+            ));
+        let presence = crate::envelope::declared_content_presence(&raw.events);
+        raw.consent.message_text_included = presence.message_text;
+        raw.consent.tool_payloads_included = presence.tool_payloads;
+        raw.consent.routing_metadata_included = presence.routing_metadata;
+        raw_contribution_size_ok(&raw).map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
+        let contribution: serde_json::Value =
+            serde_json::from_slice(&witness_request_body(&raw, granted, attested.receipt)?)
+                .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        let body = serde_json::to_vec(&serde_json::json!({"contribution":contribution,"capture_store_id":options.capture_store_id,"capture_id":options.capture_id,"bundle_revision":options.bundle_revision,"restricted_token_consent":true})).map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        if body.len() > MAX_WITNESS_REQUEST_BYTES {
+            return Err(WitnessTrustError::WitnessPayloadTooLarge);
+        }
+        let url = self
+            .allowed(witness.url())?
+            .join("/v1/witness/token-bundle")
+            .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
+        let mut response = self
+            .http
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+        if !response.status().is_success() {
+            return Err(token_review_refusal(response).await);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?
+        {
+            if bytes.len().saturating_add(chunk.len()) > 64 * 1024 * 1024 {
+                return Err(WitnessTrustError::WitnessPayloadTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Response {
+            envelope_bytes: Vec<u8>,
+            envelope_certificate: serde_json::Value,
+            envelope_signature_hex: String,
+            manifest_bytes: Vec<u8>,
+            attachment_bytes: Vec<u8>,
+            certificate: serde_json::Value,
+            signature_hex: String,
+            admission: Option<(trace_commons_protocol::admission::AdmissionEvidence, String)>,
+        }
+        let response: Response = serde_json::from_slice(&bytes)
+            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        let encode = |value: &serde_json::Value| {
+            serde_json::to_string(value).map_err(|_| WitnessTrustError::WitnessResponseMalformed)
+        };
+        let admission = response
+            .admission
+            .map(|(evidence, signature_hex)| {
+                Ok::<_, WitnessTrustError>(AdmissionHeaders {
+                    evidence_json: serde_json::to_string(&evidence)
+                        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?,
+                    signature_hex,
+                })
+            })
+            .transpose()?;
+        let envelope = WitnessedEnvelope {
+            envelope_bytes: response.envelope_bytes,
+            certificate_json: encode(&response.envelope_certificate)?,
+            signature_hex: response.envelope_signature_hex,
+            admission,
+        };
+        if envelope.envelope_bytes.len() > MAX_ENVELOPE_BYTES {
+            return Err(WitnessTrustError::WitnessPayloadTooLarge);
+        }
+        if artifact_still_carries(&envelope.envelope_bytes, attested.call) {
+            return Err(WitnessTrustError::WitnessBodyNotStripped);
+        }
+        verify_certificate(&envelope, witness.signing_address())?;
+        verify_admission_context(
+            &envelope,
+            raw.contributor.tenant_scope_ref.as_deref(),
+            Some(attested),
+        )?;
+        let manifest = WitnessedEnvelope {
+            envelope_bytes: response.manifest_bytes,
+            certificate_json: encode(&response.certificate)?,
+            signature_hex: response.signature_hex,
+            admission: None,
+        };
+        verify_certificate(&manifest, witness.signing_address())?;
+        let decoded =
+            trace_commons_protocol::token_distribution::ContributionBundleManifest::decode(
+                &manifest.envelope_bytes,
+            )
+            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        if decoded.attachments.len() != 1
+            || !decoded.envelope_digest.matches(&envelope.envelope_bytes)
+        {
+            return Err(WitnessTrustError::WitnessCertificateMismatched);
+        }
+        decoded
+            .verify_attachment(
+                &decoded.attachments[0].artifact_id,
+                &response.attachment_bytes,
+            )
+            .map_err(|_| WitnessTrustError::WitnessCertificateMismatched)?;
+        Ok(crate::token_bundle::CertifiedBundleUpload {
+            pinned_witness_address: witness.signing_address().into(),
+            envelope,
+            manifest,
+            attachments: std::collections::BTreeMap::from([(
+                decoded.attachments[0].artifact_id.clone(),
+                response.attachment_bytes,
+            )]),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,6 +1305,9 @@ mod tests {
         attestation: Option<serde_json::Value>,
         collateral: Option<String>,
         witness: Option<(String, String, Vec<u8>)>,
+        /// A status and an `{"error": ...}` label the witness answers with
+        /// instead of certifying. Takes precedence over `witness`.
+        witness_refusal: Option<(u16, &'static str)>,
     }
 
     struct LocalWitness {
@@ -930,6 +1345,7 @@ mod tests {
         let collateral = answers.collateral.clone();
         let witness_seen = seen.clone();
         let witness = answers.witness.clone();
+        let witness_refusal = answers.witness_refusal;
 
         let app = Router::new()
             .route(
@@ -987,7 +1403,14 @@ mod tests {
                             seen.routes.push("witness".to_string());
                             seen.witness_bodies.push(bytes.to_vec());
                         }
-                        witness_answer(answer)
+                        match witness_refusal {
+                            Some((status, label)) => (
+                                StatusCode::from_u16(status).expect("a legal status"),
+                                axum::Json(serde_json::json!({ "error": label })),
+                            )
+                                .into_response(),
+                            None => witness_answer(answer),
+                        }
                     }
                 }),
             );
@@ -1227,6 +1650,89 @@ mod tests {
         )
     }
 
+    pub(crate) fn signed_fixture_with_verdict(
+        bytes: Vec<u8>,
+        verdict: &str,
+    ) -> (WitnessedEnvelope, String) {
+        let key = test_signer("witness-review-test-only");
+        let mut certificate: serde_json::Value =
+            serde_json::from_str(&certificate_json_for(&bytes)).unwrap();
+        certificate["residual_risk_verdict"] = serde_json::json!(verdict);
+        let signing_bytes = certificate_signing_bytes(&certificate)
+            .expect("the fixture certificate is well formed");
+        (
+            WitnessedEnvelope {
+                envelope_bytes: bytes,
+                admission: None,
+                certificate_json: certificate.to_string(),
+                signature_hex: sign_eip191(&key, &signing_bytes),
+            },
+            address_of(&key),
+        )
+    }
+
+    pub(crate) fn signed_fixture_with_policy(
+        bytes: Vec<u8>,
+        policy: &str,
+    ) -> (WitnessedEnvelope, String) {
+        let key = test_signer("witness-review-test-only");
+        let mut certificate: serde_json::Value =
+            serde_json::from_str(&certificate_json_for(&bytes)).unwrap();
+        certificate["redaction_policy_version"] = serde_json::json!(policy);
+        let signing_bytes = certificate_signing_bytes(&certificate)
+            .expect("the fixture certificate is well formed");
+        (
+            WitnessedEnvelope {
+                envelope_bytes: bytes,
+                admission: None,
+                certificate_json: certificate.to_string(),
+                signature_hex: sign_eip191(&key, &signing_bytes),
+            },
+            address_of(&key),
+        )
+    }
+
+    // Signature/approval fixture only: not provider or enclave qualification.
+    pub(crate) fn signed_admission_fixture(bytes: Vec<u8>, account: &str) -> WitnessedEnvelope {
+        use trace_commons_protocol::admission::{AdmissionEvidence, EVIDENCE_DOMAIN, hash_hex};
+        let (mut response, _) = signed_fixture(bytes);
+        let key = test_signer("witness-review-test-only");
+        let evidence = AdmissionEvidence {
+            profile: EVIDENCE_DOMAIN.into(),
+            account_anchor_sha256: account.into(),
+            challenge_sha256: "22".repeat(32),
+            provider_signer: "33".repeat(32),
+            // The kind the witness checked is part of the signed statement.
+            // A fixture has to say which one; these exercise signature and
+            // approval, not provider qualification, so the attested kind is
+            // the one that changes nothing about what they assert.
+            signature_kind: trace_commons_protocol::admission::AdmissionSignatureKind::ProviderTee,
+            model: "test-model".into(),
+            request_bytes: 1,
+            request_sha256: "44".repeat(32),
+            response_sha256: "55".repeat(32),
+            receipt_sha256: "66".repeat(32),
+            artifact_sha256: hash_hex(&response.envelope_bytes),
+            witness_measurement: "aa".repeat(48),
+            redaction_policy_version: "deterministic-v1".into(),
+            // Long expired, deliberately. Nothing on the client reloads an
+            // approved artifact and re-judges this window:
+            // `WitnessReviewArtifact::validate_stored` checks the account
+            // anchor and the certificate, and the queue digest pin catches
+            // stored tampering, so the window is the operator's to enforce at
+            // upload against a clock this process does not own. Epoch-2
+            // timestamps are here so a client-side expiry check added later
+            // shows up as these tests failing rather than as silence.
+            issued_at: 1,
+            expires_at: 2,
+        };
+        response.admission = Some(AdmissionHeaders {
+            evidence_json: serde_json::to_string(&evidence).unwrap(),
+            signature_hex: sign_eip191(&key, &evidence.signing_bytes().unwrap()),
+        });
+        response
+    }
+
     #[test]
     fn admission_evidence_is_bound_to_artifact_policy_and_pinned_witness() {
         use trace_commons_protocol::admission::{AdmissionEvidence, EVIDENCE_DOMAIN, hash_hex};
@@ -1237,6 +1743,11 @@ mod tests {
             account_anchor_sha256: "11".repeat(32),
             challenge_sha256: "22".repeat(32),
             provider_signer: "33".repeat(32),
+            // The kind the witness checked is part of the signed statement.
+            // A fixture has to say which one; these exercise signature and
+            // approval, not provider qualification, so the attested kind is
+            // the one that changes nothing about what they assert.
+            signature_kind: trace_commons_protocol::admission::AdmissionSignatureKind::ProviderTee,
             model: "test-model".into(),
             request_bytes: 1,
             request_sha256: "44".repeat(32),
@@ -1302,6 +1813,11 @@ mod tests {
             account_anchor_sha256: binding.account_anchor_sha256.clone(),
             challenge_sha256: binding.digest().unwrap(),
             provider_signer: receipt.signing_address.clone(),
+            // The kind the witness checked is part of the signed statement.
+            // A fixture has to say which one; these exercise signature and
+            // approval, not provider qualification, so the attested kind is
+            // the one that changes nothing about what they assert.
+            signature_kind: trace_commons_protocol::admission::AdmissionSignatureKind::ProviderTee,
             model: "Qwen/Qwen3.6-27B-FP8".into(),
             request_bytes: request.len() as u64,
             request_sha256: hash_hex(request.as_bytes()),
@@ -1318,7 +1834,16 @@ mod tests {
             issued_at: 1,
             expires_at: 200,
         };
-        let tenant = format!("near-{}", binding.account_anchor_sha256);
+        // This fixture used to be `format!("near-{}",
+        // binding.account_anchor_sha256)`, and while it read that way the
+        // "valid" case below could not fail for a real V61 account. See
+        // `v61_account`, which names this site.
+        let (tenant, _anchor) = crate::config::tests_support::v61_account();
+        assert_ne!(
+            tenant.strip_prefix("near-"),
+            Some(binding.account_anchor_sha256.as_str()),
+            "the fixture drifted back to the pre-V61 shape"
+        );
         let attested = Some(AttestedInference {
             call: &call,
             receipt: Some(&receipt),
@@ -1477,6 +2002,7 @@ mod tests {
             })),
             collateral: Some(COLLATERAL.to_string()),
             witness: Some(signed_answer(&signer, &envelope_bytes())),
+            witness_refusal: None,
         })
         .await;
         let transport = transport_for(&server.base, permissive());
@@ -1519,6 +2045,7 @@ mod tests {
             })),
             collateral: Some(COLLATERAL.to_string()),
             witness: Some(signed_answer(&signer, &envelope_bytes())),
+            witness_refusal: None,
         })
         .await;
         let transport = transport_for(&server.base, permissive());
@@ -1580,6 +2107,73 @@ mod tests {
         );
     }
 
+    /// A witness that declines a receipt is not a witness that answered
+    /// nonsense.
+    ///
+    /// The trust configuration this refusal comes from -- which signers,
+    /// which models, which minimum request size -- is exactly what changes
+    /// during a rollout, so this is the common refusal on that path and it
+    /// was reported as a malformed response, which every shell renders as a
+    /// failed review. Indistinguishable from the witness being down.
+    #[tokio::test]
+    async fn a_declined_receipt_is_not_a_malformed_response() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+        let signer = test_signer("witness");
+        let refusal = AdmissionRefusal::EvidenceRefused;
+        let server = local_witness(Answers {
+            witness_refusal: Some((refusal.status(), refusal.label())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+            .await
+            .expect_err("a declined receipt is still a refusal");
+        assert_ne!(
+            err,
+            WitnessTrustError::WitnessResponseMalformed,
+            "a deliberate refusal is still reported as a broken witness"
+        );
+        assert_eq!(err.refusal_label(), refusal.label());
+    }
+
+    /// The fail-closed half: a non-2xx that carries no label this client
+    /// knows is still what it always was.
+    #[tokio::test]
+    async fn an_unlabelled_failure_is_still_a_malformed_response() {
+        let signer = test_signer("witness");
+        for answer in [
+            // No body at all.
+            None,
+            // A label on a status it is never sent with.
+            Some((500, "admission_evidence_refused")),
+            Some((403, "something_else_entirely")),
+        ] {
+            let server = local_witness(Answers {
+                witness_refusal: answer,
+                ..Answers::default()
+            })
+            .await;
+            let transport = transport_for(&server.base, permissive());
+            let witness = crate::witness::verify::verified_witness_for_test(
+                &server.base,
+                &address_of(&signer),
+            );
+            let err =
+                witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+                    .await
+                    .expect_err("a failed witness call is a refusal");
+            assert_eq!(
+                err,
+                WitnessTrustError::WitnessResponseMalformed,
+                "{answer:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn an_artifact_the_certificate_does_not_cover_is_refused() {
         // Only the client can catch this. The server would check the same
@@ -1626,6 +2220,147 @@ mod tests {
             .await
             .expect_err("a certificate from an unpinned key is worth nothing");
         assert_eq!(err, WitnessTrustError::WitnessCertificateUnverified);
+    }
+
+    /// A witness answering on `/v1/witness` with `reply`, recording the
+    /// workload header of every request it receives (`None` for absent).
+    async fn capacity_witness(
+        reply: fn() -> Response,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<Option<String>>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let app = Router::new().route(
+            "/v1/witness",
+            post(move |headers: HeaderMap| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().unwrap().push(
+                        headers
+                            .get(trace_commons_protocol::witness_pacing::WITNESS_WORKLOAD_HEADER)
+                            .map(|v| v.to_str().unwrap().to_string()),
+                    );
+                    reply()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, seen, task)
+    }
+
+    fn saturated_with(retry_after: Option<&'static str>) -> Response {
+        let mut response = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "witness_saturated"})),
+        )
+            .into_response();
+        if let Some(value) = retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static(value));
+        }
+        response
+    }
+
+    /// Z5's pacing contract: the exact `503 witness_saturated` pair is a
+    /// capacity refusal carrying the witness's own delay, not a broken
+    /// witness. Read as `WitnessResponseMalformed` it was a terminal refusal
+    /// and the daemon dropped the session.
+    #[tokio::test]
+    async fn a_saturated_witness_is_a_capacity_refusal_with_its_own_delay() {
+        let cases: [(fn() -> Response, u32); 6] = [
+            (|| saturated_with(Some("45")), 45),
+            // Absent, unparseable, zero, or an HTTP date: the contract's
+            // published default, never an immediate retry.
+            (|| saturated_with(None), 30),
+            (|| saturated_with(Some("soon")), 30),
+            (|| saturated_with(Some("0")), 30),
+            (|| saturated_with(Some("Wed, 21 Oct 2015 07:28:00 GMT")), 30),
+            // A hostile or mistaken delay is capped, so one answer cannot
+            // park a session for a year.
+            (|| saturated_with(Some("99999999")), 3600),
+        ];
+        for (reply, expected) in cases {
+            let (url, _seen, task) = capacity_witness(reply).await;
+            let transport = transport_for(&url, permissive());
+            let key = test_signer("capacity");
+            let witness =
+                crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+            let err =
+                witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+                    .await
+                    .expect_err("a saturated witness certifies nothing");
+            assert_eq!(
+                err,
+                WitnessTrustError::WitnessSaturated {
+                    retry_after_secs: expected
+                }
+            );
+            assert_eq!(err.refusal_label(), "witness_saturated");
+            task.abort();
+        }
+    }
+
+    /// Only the exact pair is saturation. A 503 with another label, and the
+    /// saturation label on another status, keep the fail-closed reading.
+    #[tokio::test]
+    async fn only_the_exact_saturation_pair_is_a_capacity_refusal() {
+        let replies: [fn() -> Response; 2] = [
+            || {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({"error": "something_else"})),
+                )
+                    .into_response()
+            },
+            || {
+                (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({"error": "witness_saturated"})),
+                )
+                    .into_response()
+            },
+        ];
+        for reply in replies {
+            let (url, _seen, task) = capacity_witness(reply).await;
+            let transport = transport_for(&url, permissive());
+            let key = test_signer("capacity");
+            let witness =
+                crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+            let err =
+                witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+                    .await
+                    .expect_err("a refusal");
+            assert_eq!(err, WitnessTrustError::WitnessResponseMalformed);
+            task.abort();
+        }
+    }
+
+    /// Unattended work declares itself so the witness can keep a slot for a
+    /// person waiting on a review; interactive requests send nothing.
+    #[tokio::test]
+    async fn only_a_background_transport_declares_the_background_workload() {
+        let (url, seen, task) = capacity_witness(|| saturated_with(None)).await;
+        let key = test_signer("capacity");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let interactive = transport_for(&url, permissive());
+        let background = transport_for(&url, permissive()).with_background_workload(true);
+        let _ =
+            witness_contribution(&interactive, &witness, raw_with_secret(), None, &granted()).await;
+        let _ =
+            witness_contribution(&background, &witness, raw_with_secret(), None, &granted()).await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None, Some("background".to_string())]
+        );
+        task.abort();
     }
 
     #[tokio::test]
@@ -2176,6 +2911,369 @@ mod tests {
     /// mock on loopback cannot be fetched from, and a receipt is only
     /// verifiable against a signer this test does not have. It is shaped like
     /// one and carried like one, which is what the wire assertion needs.
+    #[tokio::test]
+    async fn admission_wire_contains_only_the_isolated_call_and_never_retries_ordinary() {
+        let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+        let captured = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen = captured.clone();
+        let ordinary = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ordinary_count = ordinary.clone();
+        let app = Router::new().route(
+            "/v1/witness/admission",
+            post(move |request: Request| {
+                let seen = seen.clone();
+                async move {
+                    let body = axum::body::to_bytes(request.into_body(), MAX_WITNESS_REQUEST_BYTES)
+                        .await
+                        .unwrap();
+                    seen.lock().unwrap().push(body.to_vec());
+                    StatusCode::BAD_REQUEST
+                }
+            }),
+        );
+        let app = app.route(
+            "/v1/witness",
+            post(move || {
+                let count = ordinary_count.clone();
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let transport = transport_for(&url, permissive()).with_admission_evidence(true);
+        let key = test_signer("isolated-call");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let cfg = crate::commands::unenrolled_preview_config();
+        let mut raw = raw_with_secret();
+        raw.outcome.human_correction = Some("UNBOUND-CORRECTION".into());
+        let isolated = crate::submit::witness_input_for_profile(raw, &cfg, true);
+        let receipt = offered_receipt();
+        let call = transcript.attested_call.as_deref().unwrap();
+        assert!(
+            witness_contribution(
+                &transport,
+                &witness,
+                isolated,
+                Some(AttestedInference {
+                    call,
+                    receipt: Some(&receipt)
+                }),
+                &granted()
+            )
+            .await
+            .is_err()
+        );
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(ordinary.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let body: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        let events = body["raw_contribution"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]["structured_payload"]["request"]["body"],
+            CAPTURED_REQUEST
+        );
+        assert_eq!(events[0]["content"], CAPTURED_RESPONSE);
+        let serialized = String::from_utf8(bodies[0].clone()).unwrap();
+        assert!(!serialized.contains(SECRET));
+        assert!(!serialized.contains("UNBOUND-CORRECTION"));
+        assert_eq!(body["raw_contribution"]["replay"]["replayable"], false);
+        assert_eq!(
+            body["raw_contribution"]["consent"]["tool_payloads_included"],
+            serde_json::json!(true),
+            "the declaration must describe the bodies this request carries"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn token_wire_contains_only_the_isolated_call_and_never_retries_ordinary() {
+        let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+        let captured = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen = captured.clone();
+        let ordinary = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ordinary_count = ordinary.clone();
+        let app = Router::new().route(
+            "/v1/witness/token-bundle",
+            post(move |request: Request| {
+                let seen = seen.clone();
+                async move {
+                    let body = axum::body::to_bytes(request.into_body(), MAX_WITNESS_REQUEST_BYTES)
+                        .await
+                        .unwrap();
+                    seen.lock().unwrap().push(body.to_vec());
+                    StatusCode::BAD_REQUEST
+                }
+            }),
+        );
+        let app = app.route(
+            "/v1/witness",
+            post(move || {
+                let count = ordinary_count.clone();
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let transport = transport_for(&url, permissive()).with_admission_evidence(true);
+        let key = test_signer("isolated-call");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let cfg = crate::commands::unenrolled_preview_config();
+        let mut raw = raw_with_secret();
+        raw.outcome.human_correction = Some("UNBOUND-CORRECTION".into());
+        let isolated = crate::submit::witness_input_for_profile(raw, &cfg, true);
+        let receipt = offered_receipt();
+        let call = transcript.attested_call.as_deref().unwrap();
+        assert!(
+            transport
+                .witness_token_contribution(
+                    &witness,
+                    isolated,
+                    AttestedInference {
+                        call,
+                        receipt: Some(&receipt)
+                    },
+                    &granted(),
+                    TokenBundleRequest {
+                        capture_store_id: "1".repeat(32),
+                        capture_id: "2".repeat(32),
+                        bundle_revision: "r1".into(),
+                        restricted_token_consent: true
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(ordinary.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let wrapped: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        let body = &wrapped["contribution"];
+        let events = body["raw_contribution"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]["structured_payload"]["request"]["body"],
+            CAPTURED_REQUEST
+        );
+        assert_eq!(events[0]["content"], CAPTURED_RESPONSE);
+        let serialized = String::from_utf8(bodies[0].clone()).unwrap();
+        assert!(!serialized.contains(SECRET));
+        assert!(!serialized.contains("UNBOUND-CORRECTION"));
+        assert_eq!(body["raw_contribution"]["replay"]["replayable"], false);
+        assert_eq!(
+            body["raw_contribution"]["consent"]["tool_payloads_included"],
+            serde_json::json!(true),
+            "the declaration must describe the bodies this request carries"
+        );
+        task.abort();
+    }
+
+    /// A review a person asked for meets a busy witness as a busy witness.
+    ///
+    /// The token-bundle route read every non-2xx as the witness declining the
+    /// receipt, so a person was told their evidence was refused when the
+    /// witness had judged nothing. The exact `503 witness_saturated` pair is
+    /// the capacity refusal with the witness's own delay, as on the upload
+    /// path; anything else keeps the old reading. The request never declares
+    /// the background workload, even on a transport built with it: a person
+    /// is waiting on this one.
+    #[tokio::test]
+    async fn a_busy_witness_is_busy_on_the_token_review_route_too() {
+        async fn token_attempt(
+            reply: fn() -> Response,
+        ) -> (WitnessTrustError, Vec<Option<String>>) {
+            let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let recorded = seen.clone();
+            let app = Router::new().route(
+                "/v1/witness/token-bundle",
+                post(move |headers: HeaderMap| {
+                    let recorded = recorded.clone();
+                    async move {
+                        recorded.lock().unwrap().push(
+                            headers
+                                .get(
+                                    trace_commons_protocol::witness_pacing::WITNESS_WORKLOAD_HEADER,
+                                )
+                                .map(|v| v.to_str().unwrap().to_string()),
+                        );
+                        reply()
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let transport = transport_for(&url, permissive())
+                .with_admission_evidence(true)
+                .with_background_workload(true);
+            let key = test_signer("busy-token-review");
+            let witness =
+                crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+            let cfg = crate::commands::unenrolled_preview_config();
+            let isolated = crate::submit::witness_input_for_profile(raw_with_secret(), &cfg, true);
+            let receipt = offered_receipt();
+            let err = transport
+                .witness_token_contribution(
+                    &witness,
+                    isolated,
+                    AttestedInference {
+                        call: transcript.attested_call.as_deref().unwrap(),
+                        receipt: Some(&receipt),
+                    },
+                    &granted(),
+                    TokenBundleRequest {
+                        capture_store_id: "1".repeat(32),
+                        capture_id: "2".repeat(32),
+                        bundle_revision: "r1".into(),
+                        restricted_token_consent: true,
+                    },
+                )
+                .await
+                .err()
+                .expect("a refusal certifies nothing");
+            task.abort();
+            let headers = seen.lock().unwrap().clone();
+            (err, headers)
+        }
+
+        let (err, headers) = token_attempt(|| saturated_with(Some("45"))).await;
+        assert_eq!(
+            err,
+            WitnessTrustError::WitnessSaturated {
+                retry_after_secs: 45
+            }
+        );
+        assert_eq!(headers, vec![None], "a person asked; no background header");
+        let (err, _) = token_attempt(|| saturated_with(None)).await;
+        assert_eq!(
+            err,
+            WitnessTrustError::WitnessSaturated {
+                retry_after_secs: 30
+            }
+        );
+        // Not the exact pair: the old reading stands.
+        let (err, _) = token_attempt(|| {
+            (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({"error": "witness_saturated"})),
+            )
+                .into_response()
+        })
+        .await;
+        assert_eq!(err, WitnessTrustError::WitnessAdmissionEvidenceRefused);
+        let (err, _) = token_attempt(|| StatusCode::SERVICE_UNAVAILABLE.into_response()).await;
+        assert_eq!(err, WitnessTrustError::WitnessAdmissionEvidenceRefused);
+    }
+
+    /// The declaration follows the payload, in both directions.
+    ///
+    /// An admission projection carries no events, so it declares no content --
+    /// right up to the moment the transport appends the attested exchange,
+    /// whose `content` is the completion and whose structured payload is the
+    /// prompt. The second half is what a blanket `true` would fail: the same
+    /// projection offered without bodies must still declare `false`.
+    #[tokio::test]
+    async fn the_offered_declaration_follows_the_appended_bodies() {
+        let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+        let captured = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen = captured.clone();
+        let app = Router::new().route(
+            "/v1/witness/admission",
+            post(move |request: Request| {
+                let seen = seen.clone();
+                async move {
+                    let body = axum::body::to_bytes(request.into_body(), MAX_WITNESS_REQUEST_BYTES)
+                        .await
+                        .unwrap();
+                    seen.lock().unwrap().push(body.to_vec());
+                    StatusCode::BAD_REQUEST
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let transport = transport_for(&url, permissive()).with_admission_evidence(true);
+        let key = test_signer("declaration");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let cfg = crate::commands::unenrolled_preview_config();
+        let isolated = crate::submit::witness_input_for_profile(raw_with_secret(), &cfg, true);
+        assert!(
+            !isolated.consent.tool_payloads_included,
+            "the projection itself declares nothing; the append is what changes it"
+        );
+        let receipt = offered_receipt();
+        let call = transcript.attested_call.as_deref().unwrap();
+
+        assert!(
+            witness_contribution(
+                &transport,
+                &witness,
+                isolated.clone(),
+                Some(AttestedInference {
+                    call,
+                    receipt: Some(&receipt)
+                }),
+                &granted()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            witness_contribution(&transport, &witness, isolated, None, &granted())
+                .await
+                .is_err()
+        );
+
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        let with_bodies: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        let without: serde_json::Value = serde_json::from_slice(&bodies[1]).unwrap();
+        assert_eq!(
+            with_bodies["raw_contribution"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            with_bodies["raw_contribution"]["consent"]["tool_payloads_included"],
+            serde_json::json!(true),
+            "an offered prompt and completion must be declared"
+        );
+        assert_eq!(
+            with_bodies["raw_contribution"]["consent"]["message_text_included"],
+            serde_json::json!(false),
+            "an exchange is tool-payload content, and raising the other flags with it \
+             would declare conversation this request does not carry"
+        );
+        assert!(
+            without["raw_contribution"]["events"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            without["raw_contribution"]["consent"]["tool_payloads_included"],
+            serde_json::json!(false),
+            "declaring content that is not there is the same defect the other way round"
+        );
+        assert_eq!(
+            without["raw_contribution"]["consent"]["message_text_included"],
+            serde_json::json!(false)
+        );
+        task.abort();
+    }
+
     #[tokio::test]
     async fn a_declared_bodies_directory_reaches_the_witness_through_the_daemon_source_roots() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;

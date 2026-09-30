@@ -16,8 +16,12 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 
-use crate::backend::{Backend, DaemonEvent};
+use crate::backend::{Backend, DaemonEvent, DaemonFailure};
 use crate::model::PreviewSummary;
+
+#[cfg(test)]
+#[path = "../tests/support/worker_startup_tests.rs"]
+mod startup_tests;
 
 pub enum Job {
     Call {
@@ -36,7 +40,9 @@ pub enum Job {
 }
 
 pub enum Outcome {
-    Call(Result<serde_json::Value, String>),
+    /// The daemon's answer, or its failure with any payload the daemon sent
+    /// beside the label -- see [`DaemonFailure`].
+    Call(Result<serde_json::Value, DaemonFailure>),
     /// The summary, and the redacted body when this deployment can serve
     /// one. `None` for the body is "not available here", never "empty".
     Preview(Result<(PreviewSummary, Option<String>), String>),
@@ -66,22 +72,60 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn start(dir: std::path::PathBuf) -> Result<Self> {
+    /// Channels for widget tests; no daemon or credential store is opened.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn fixture(
+        dir: std::path::PathBuf,
+    ) -> (
+        Self,
+        mpsc::Receiver<(u64, Job)>,
+        async_channel::Sender<(u64, Outcome)>,
+    ) {
+        let (jobs, requests) = mpsc::channel();
+        let (responses, results) = async_channel::unbounded();
+        let (_, events) = async_channel::unbounded();
+        (
+            Self {
+                jobs,
+                results,
+                events,
+                hosts_the_loop: false,
+                next_id: std::cell::Cell::new(1),
+                dir,
+            },
+            requests,
+            responses,
+        )
+    }
+
+    pub async fn start(dir: std::path::PathBuf) -> Result<Self> {
+        Self::start_with(dir, Backend::open).await
+    }
+
+    async fn start_with(
+        dir: std::path::PathBuf,
+        open: impl FnOnce(std::path::PathBuf) -> Result<Backend> + Send + 'static,
+    ) -> Result<Self> {
         let (job_tx, job_rx) = mpsc::channel::<(u64, Job)>();
         let (result_tx, results) = async_channel::unbounded();
         let (event_tx, events) = async_channel::unbounded();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<bool, String>>();
+        let (ready_tx, ready_rx) = async_channel::bounded::<Result<bool, String>>(1);
         let held = dir.clone();
 
         std::thread::spawn(move || {
-            let backend = match Backend::open(dir) {
+            let backend = match open(dir) {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = ready_tx.send(Err(e.to_string()));
+                    let _ = ready_tx.send_blocking(Err(e.to_string()));
                     return;
                 }
             };
-            let _ = ready_tx.send(Ok(backend.hosts_the_loop()));
+            if ready_tx
+                .send_blocking(Ok(backend.hosts_the_loop()))
+                .is_err()
+            {
+                return;
+            }
 
             if let Ok(mut stream) = backend.events() {
                 std::thread::spawn(move || {
@@ -95,9 +139,11 @@ impl Worker {
 
             for (id, job) in job_rx {
                 let outcome = match job {
-                    Job::Call { method, params } => {
-                        Outcome::Call(backend.call(&method, params).map_err(|e| e.to_string()))
-                    }
+                    Job::Call { method, params } => Outcome::Call(
+                        backend
+                            .call(&method, params)
+                            .map_err(DaemonFailure::from_error),
+                    ),
                     Job::Preview { entry_id } => {
                         Outcome::Preview(backend.preview(&entry_id).map_err(|e| e.to_string()))
                     }
@@ -113,6 +159,7 @@ impl Worker {
 
         let hosts_the_loop = ready_rx
             .recv()
+            .await
             .map_err(|_| anyhow::anyhow!("the daemon worker stopped before it started"))?
             .map_err(|label| anyhow::anyhow!("{label}"))?;
 

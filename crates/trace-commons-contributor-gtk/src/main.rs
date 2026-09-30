@@ -12,6 +12,10 @@
 use adw::prelude::*;
 use trace_commons_contributor_gtk::{ui, worker::Worker};
 
+#[cfg(test)]
+#[path = "../tests/support/main_startup_tests.rs"]
+mod startup_tests;
+
 fn main() -> anyhow::Result<()> {
     // Answered before anything is initialised, so a person can identify the
     // build they installed without a display or a daemon. Same ad hoc argument
@@ -66,8 +70,9 @@ fn main() -> anyhow::Result<()> {
         Some(i) => std::env::args()
             .nth(i + 1)
             .map(std::path::PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("--state-dir needs a directory"))?,
-        None => trace_commons_contributor_gtk::state_dir()?,
+            .ok_or_else(|| anyhow::anyhow!("--state-dir needs a directory"))
+            .map(Some)?,
+        None => None,
     };
 
     // The `x-scheme-handler/tracecommons` registration in the desktop entry
@@ -111,13 +116,86 @@ fn main() -> anyhow::Result<()> {
         show_toast,
     });
 
-    application.connect_activate(move |application| {
-        start_or_ask(application, dir.clone(), drivers.clone());
-    });
+    if local_start(&drivers) {
+        connect_local_startup(&application, dir, drivers);
+    } else {
+        let dir = match dir {
+            Some(dir) => dir,
+            None => trace_commons_contributor_gtk::state_dir()?,
+        };
+        connect_startup(&application, dir, drivers);
+    }
 
     // GTK's own argument parsing would choke on the flags above.
     application.run_with_args::<&str>(&[]);
     Ok(())
+}
+
+fn local_start(drivers: &Drivers) -> bool {
+    drivers.start_page.as_deref() == Some("insights")
+        || (!drivers.exit_after_realize
+            && drivers.start_page.is_none()
+            && drivers.onboarding_page.is_none())
+}
+
+fn connect_local_startup(
+    application: &adw::Application,
+    dir: Option<std::path::PathBuf>,
+    drivers: std::rc::Rc<Drivers>,
+) {
+    let startup = std::rc::Rc::new(std::cell::Cell::new(StartupState::Idle));
+    let stopped = startup.clone();
+    application.connect_shutdown(move |_| stopped.set(StartupState::Stopped));
+    application.connect_activate(move |application| {
+        if let Some(window) = application.active_window() {
+            window.present();
+            return;
+        }
+        let next = application.clone();
+        let dir = dir.clone();
+        let next_drivers = drivers.clone();
+        let startup = startup.clone();
+        ui::insights::present_local(application, move || {
+            let dir = match dir
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(trace_commons_contributor_gtk::state_dir)
+            {
+                Ok(dir) => dir,
+                Err(_) => {
+                    eprintln!("contributor-state-unavailable");
+                    return;
+                }
+            };
+            start_or_ask(&next, dir, next_drivers.clone(), startup.clone());
+        });
+        if drivers.exit_after_realize {
+            let app = application.clone();
+            gtk::glib::timeout_add_seconds_local(drivers.realize_seconds, move || {
+                app.quit();
+                gtk::glib::ControlFlow::Break
+            });
+        }
+    });
+}
+
+fn connect_startup(
+    application: &adw::Application,
+    dir: std::path::PathBuf,
+    drivers: std::rc::Rc<Drivers>,
+) -> std::rc::Rc<std::cell::Cell<StartupState>> {
+    let startup = std::rc::Rc::new(std::cell::Cell::new(StartupState::Idle));
+    application.connect_shutdown({
+        let startup = startup.clone();
+        move |_| startup.set(StartupState::Stopped)
+    });
+    application.connect_activate({
+        let startup = startup.clone();
+        move |application| {
+            start_or_ask(application, dir.clone(), drivers.clone(), startup.clone());
+        }
+    });
+    startup
 }
 
 /// The headless-run drivers, carried together so the start path can be
@@ -131,6 +209,14 @@ struct Drivers {
     start_page: Option<String>,
     onboarding_page: Option<String>,
     show_toast: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartupState {
+    Idle,
+    Starting,
+    Running,
+    Stopped,
 }
 
 /// Start the shell, or ask which folders it may watch and then start it.
@@ -149,8 +235,52 @@ fn start_or_ask(
     application: &adw::Application,
     dir: std::path::PathBuf,
     drivers: std::rc::Rc<Drivers>,
+    startup: std::rc::Rc<std::cell::Cell<StartupState>>,
 ) {
-    let worker = match Worker::start(dir.clone()) {
+    if startup.get() == StartupState::Running {
+        if let Some(window) = application
+            .windows()
+            .into_iter()
+            .find(|window| window.widget_name() == "contributions-window")
+        {
+            window.present();
+            return;
+        }
+        // The contribution window was closed while local Insights stayed open.
+        startup.set(StartupState::Idle);
+    }
+    if startup.get() != StartupState::Idle {
+        return;
+    }
+    startup.set(StartupState::Starting);
+    let application = application.clone();
+    // Keep the application alive before its first window without blocking
+    // its event loop on a system credential prompt.
+    let hold = application.hold();
+    gtk::glib::spawn_future_local(async move {
+        let result = Worker::start(dir.clone()).await;
+        if startup.get() != StartupState::Stopped {
+            startup.set(if result.is_ok() {
+                StartupState::Running
+            } else {
+                StartupState::Idle
+            });
+            finish_start(&application, dir, drivers, startup, result);
+        }
+        // An unadopted worker drops its job sender; its owning thread then
+        // retires the backend, including a daemon that finished after Quit.
+        drop(hold);
+    });
+}
+
+fn finish_start(
+    application: &adw::Application,
+    dir: std::path::PathBuf,
+    drivers: std::rc::Rc<Drivers>,
+    startup: std::rc::Rc<std::cell::Cell<StartupState>>,
+    result: anyhow::Result<Worker>,
+) {
+    let worker = match result {
         Ok(worker) => worker,
         Err(error)
             if error.to_string()
@@ -176,7 +306,7 @@ fn start_or_ask(
                 // is on disk now, so this is an ordinary start, and the
                 // second refusal that cannot happen would still be handled
                 // the same way if it did.
-                start_or_ask(&reentry, ask_dir.clone(), drivers.clone());
+                start_or_ask(&reentry, ask_dir.clone(), drivers.clone(), startup.clone());
             });
             return;
         }
@@ -254,5 +384,75 @@ fn start_or_ask(
             application.quit();
             gtk::glib::ControlFlow::Break
         });
+    }
+}
+
+#[cfg(test)]
+mod insights_startup_tests {
+    use super::*;
+    fn drivers() -> std::rc::Rc<Drivers> {
+        std::rc::Rc::new(Drivers {
+            exit_after_realize: false,
+            realize_seconds: 0,
+            open_preview: false,
+            search_term: None,
+            preview_tab: None,
+            start_page: None,
+            onboarding_page: None,
+            show_toast: false,
+        })
+    }
+    #[test]
+    fn ordinary_start_opens_local_insights_and_explicit_contribution_driver_keeps_existing_route() {
+        let mut d = drivers();
+        assert!(local_start(&d));
+        std::rc::Rc::get_mut(&mut d).unwrap().start_page = Some("queue".into());
+        assert!(!local_start(&d));
+        std::rc::Rc::get_mut(&mut d).unwrap().start_page = Some("insights".into());
+        assert!(local_start(&d));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn first_run_local_window_does_not_create_contributor_state() {
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let dir =
+            std::env::temp_dir().join(format!("tc-insights-first-run-{}", uuid::Uuid::new_v4()));
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.InsightsFirstRunTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        connect_local_startup(&application, Some(dir.clone()), drivers());
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = observed.clone();
+        let check_dir = dir.clone();
+        application.connect_activate(move |app| {
+            assert!(!check_dir.exists());
+            assert_eq!(app.windows().len(), 1);
+            let contribution = adw::ApplicationWindow::builder().application(app).build();
+            contribution.set_widget_name("contributions-window");
+            let startup = std::rc::Rc::new(std::cell::Cell::new(StartupState::Running));
+            for _ in 0..3 {
+                start_or_ask(app, check_dir.clone(), drivers(), startup.clone());
+                assert!(startup.get() == StartupState::Running);
+                assert_eq!(
+                    app.windows().len(),
+                    2,
+                    "repeat entry must present the adopted window"
+                );
+                assert!(
+                    !check_dir.exists(),
+                    "repeat entry must not start a new Worker"
+                );
+            }
+            flag.set(true);
+            let app = app.clone();
+            gtk::glib::idle_add_local_once(move || app.quit());
+        });
+        application.run_with_args::<&str>(&[]);
+        assert!(observed.get());
+        assert!(!dir.exists());
     }
 }

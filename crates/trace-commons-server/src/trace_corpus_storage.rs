@@ -11,10 +11,179 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use trace_commons_protocol::trace_contribution::ResidualRiskCondition;
+use trace_commons_protocol::witness_provenance::{AttestationClass, InferenceProvenance};
 use uuid::Uuid;
 
 use crate::error::DatabaseError;
+use crate::redaction_witness::request::{CERTIFICATE_HEADER, SIGNATURE_HEADER};
+use crate::redaction_witness::verification::VerifiedWitnessCertificate;
+
+/// Private exact-byte evidence. The only constructor requires the completed
+/// signature, freshness, pin and raw-body verification result. The original
+/// headers are compared to that result before they can be persisted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TraceWitnessCertificateEvidenceWrite {
+    pub(crate) tenant_id: String,
+    pub(crate) submission_id: Uuid,
+    pub(crate) certificate_json: Vec<u8>,
+    pub(crate) signature_header: Vec<u8>,
+    pub(crate) raw_body_sha256: String,
+    pub(crate) artifact_sha256: String,
+    pub(crate) certificate_version: i16,
+    pub(crate) inference_class: AttestationClass,
+    pub(crate) bound_model: Option<String>,
+    pub(crate) receipt_signer: Option<String>,
+    pub(crate) issued_at: DateTime<Utc>,
+}
+
+impl TraceWitnessCertificateEvidenceWrite {
+    pub fn from_verified(
+        tenant_id: &str,
+        submission_id: Uuid,
+        verified: &VerifiedWitnessCertificate,
+        headers: &axum::http::HeaderMap,
+        raw_body: &[u8],
+        artifact_sha256: &str,
+    ) -> Result<Self, DatabaseError> {
+        let raw_body_sha256 = hex::encode(Sha256::digest(raw_body));
+        if !verified.matches_received_headers(headers)
+            || !verified
+                .redacted_sha256()
+                .eq_ignore_ascii_case(&raw_body_sha256)
+            || artifact_sha256.len() != 64
+            || !artifact_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceBindingMismatch".into(),
+            ));
+        }
+        let issued_at = DateTime::<Utc>::from_timestamp(verified.issued_at_unix_seconds(), 0)
+            .ok_or_else(|| DatabaseError::Query("WitnessEvidenceTimestampInvalid".into()))?;
+        let certificate_json = headers
+            .get(CERTIFICATE_HEADER)
+            .expect("matched verified headers have certificate")
+            .as_bytes()
+            .to_vec();
+        let signature_header = headers
+            .get(SIGNATURE_HEADER)
+            .expect("matched verified headers have signature")
+            .as_bytes()
+            .to_vec();
+        // A v1 certificate carries no provenance claim (`None`); it is stored
+        // as unattested and `certificate_version = 1` keeps it distinguishable
+        // from a signed v2 unattested statement.
+        let (inference_class, bound_model, receipt_signer) = match verified.inference_provenance() {
+            None | Some(InferenceProvenance::Unattested) => {
+                (AttestationClass::Unattested, None, None)
+            }
+            Some(InferenceProvenance::Attested(call)) => (
+                call.class(),
+                call.model().map(str::to_string),
+                Some(call.receipt_signer().to_string()),
+            ),
+        };
+        Ok(Self {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            certificate_json,
+            signature_header,
+            raw_body_sha256,
+            artifact_sha256: artifact_sha256.to_string(),
+            certificate_version: verified.certificate_version(),
+            inference_class,
+            bound_model,
+            receipt_signer,
+            issued_at,
+        })
+    }
+
+    pub fn raw_body_sha256(&self) -> &str {
+        &self.raw_body_sha256
+    }
+
+    pub fn certificate_version(&self) -> i16 {
+        self.certificate_version
+    }
+}
+
+/// A policy-facing read never carries private certificate or signature bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceWitnessEvidenceCoverage {
+    Missing,
+    LegacyV1,
+    ExplicitUnattested,
+    Inactive,
+    ArtifactMismatch,
+    VerifiedV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceWitnessEvidenceClaim {
+    pub class: AttestationClass,
+    pub coverage: TraceWitnessEvidenceCoverage,
+    pub raw_body_sha256: Option<String>,
+}
+
+/// Verified witness provenance reduced to a label, for the surfaces that
+/// report it: exports, the reviewer trace list and credit events (#1059).
+///
+/// A label, never a weight. In v1 provenance earns no account trust and
+/// multiplies no volume or amount (#1061, earned-trust decision 5), so nothing
+/// that gates, scores or prices a trace may read this.
+///
+/// Derived only from a current-object claim, so it names an attested class
+/// only where a verified v2 certificate still covers the current accepted
+/// artifact (R4). Every other state -- no evidence, an explicit unattested
+/// statement, an inactive submission, a changed artifact -- is `Unattested`.
+/// `LegacyV1` is a v1 certificate, which carries no provenance statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceWitnessProvenanceClass {
+    ProviderTeeFinalCall,
+    GatewayFinalCall,
+    Unattested,
+    LegacyV1,
+}
+
+impl TraceWitnessProvenanceClass {
+    pub fn from_claim(claim: &TraceWitnessEvidenceClaim) -> Self {
+        match claim.coverage {
+            TraceWitnessEvidenceCoverage::VerifiedV2 => match claim.class {
+                AttestationClass::ProviderTeeFinalCall => Self::ProviderTeeFinalCall,
+                AttestationClass::GatewayFinalCall => Self::GatewayFinalCall,
+                AttestationClass::Unattested => Self::Unattested,
+            },
+            TraceWitnessEvidenceCoverage::LegacyV1 => Self::LegacyV1,
+            TraceWitnessEvidenceCoverage::Missing
+            | TraceWitnessEvidenceCoverage::ExplicitUnattested
+            | TraceWitnessEvidenceCoverage::Inactive
+            | TraceWitnessEvidenceCoverage::ArtifactMismatch => Self::Unattested,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderTeeFinalCall => "provider_tee_final_call",
+            Self::GatewayFinalCall => "gateway_final_call",
+            Self::Unattested => "unattested",
+            Self::LegacyV1 => "legacy_v1",
+        }
+    }
+
+    pub fn from_storage(label: &str) -> Option<Self> {
+        match label {
+            "provider_tee_final_call" => Some(Self::ProviderTeeFinalCall),
+            "gateway_final_call" => Some(Self::GatewayFinalCall),
+            "unattested" => Some(Self::Unattested),
+            "legacy_v1" => Some(Self::LegacyV1),
+            _ => None,
+        }
+    }
+}
 
 fn default_trace_ranking_min_label_source_count() -> u32 {
     1
@@ -1468,6 +1637,11 @@ pub struct TraceCreditEventWrite {
     pub actor_principal_ref: String,
     pub actor_role: String,
     pub settlement_state: TraceCreditSettlementState,
+    /// Witness provenance of the credited trace when the event was written, a
+    /// label for later analysis only (#1059). It never changes `points_delta`.
+    /// `None` is "not recorded": events written before V89, or where the
+    /// lookup was unavailable.
+    pub witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1485,6 +1659,8 @@ pub struct TraceCreditEventRecord {
     pub actor_role: String,
     pub settlement_state: TraceCreditSettlementState,
     pub occurred_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1936,6 +2112,16 @@ pub struct TraceGateDecisionRow {
     /// or calibration will read every unmeasured row as the worst possible
     /// observation.
     pub qualifying_token_fraction_micros: Option<i64>,
+    /// Per-author perplexity (migration V73). Shadow mode. All five are
+    /// `None` when nothing was attributed -- pre-V73 rows and backends that
+    /// report no token lengths. A `*_perplexity_micros` is also `None` when
+    /// that author had no attributed tokens. Readers MUST NOT default any of
+    /// them.
+    pub agent_prose_perplexity_micros: Option<i64>,
+    pub agent_prose_tokens: Option<i64>,
+    pub tool_result_perplexity_micros: Option<i64>,
+    pub tool_result_tokens: Option<i64>,
+    pub attributed_token_fraction_micros: Option<i64>,
     /// The composite credit-quality score `q` * 1e6 as computed at scoring
     /// time under the calibration active then (migration V53, #199).
     ///
@@ -1992,6 +2178,9 @@ pub struct GateWorkItem {
 /// Numeric inputs for shadow credit-quality scoring of one decision row, read
 /// cross-tenant through the narrow `trace_gate_driver` pool (no tenant GUC).
 /// The peak/novelty are stored micros; NULLs map to 0 (below-floor -> q 0).
+/// Only decisions the gate actually scored are inputs: a row with perplexity 0
+/// (the skip-duplicate branch) is never enumerated, so its credit quality
+/// stays NULL, as the inline path leaves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateCreditInput {
     pub tenant_id: String,
@@ -1999,6 +2188,11 @@ pub struct GateCreditInput {
     pub perplexity_micros: i64,
     pub peak_perplexity_micros: i64,
     pub novelty_score_micros: i64,
+    /// When the decision was made. Selects the calibration: a calibration
+    /// belongs to a scorer model, and the batch pass must score each row with
+    /// the constants in force when it was decided
+    /// (`credit_quality::constants_at`), not with whatever is newest.
+    pub decided_at: DateTime<Utc>,
 }
 
 /// Cross-trace dedup cluster signal for one decision row (migration V40),
@@ -2020,23 +2214,56 @@ pub struct DedupSignalRow {
     pub dedup_signal_version: Option<String>,
 }
 
+/// Decode a stored `dedup_signal_version`. `NULL` (and an empty string,
+/// which is a `NULL` that survived a round trip through a text column) reads
+/// as [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`], never as
+/// "unknown": an unknown would have to cluster either with everything or
+/// with nothing, and both are wrong.
+///
+/// This is the ONE place a stored `NULL` is decoded; the two row types that
+/// carry the column both go through it. A caller that decoded it for itself
+/// would be a second answer to the question, free to drift from this one.
+fn effective_dedup_signal_version(stored: Option<&str>) -> &str {
+    match stored {
+        Some(v) if !v.is_empty() => v,
+        _ => crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+    }
+}
+
 impl DedupSignalRow {
-    /// The version this row's `dedup_simhash` was derived under. `NULL` (and
-    /// an empty string, which is a `NULL` that survived a round trip through
-    /// a text column) reads as
-    /// [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`], never as
-    /// "unknown": an unknown would have to cluster either with everything or
-    /// with nothing, and both are wrong.
-    ///
-    /// This is the ONE place a stored `NULL` is decoded, and it sits on the
-    /// row because that is where the `Option` originates. A caller that
-    /// decoded it for itself would be a second answer to the question, free
-    /// to drift from this one.
+    /// The version this row's `dedup_simhash` was derived under; see
+    /// [`effective_dedup_signal_version`].
     pub fn effective_signal_version(&self) -> &str {
-        match self.dedup_signal_version.as_deref() {
-            Some(v) if !v.is_empty() => v,
-            _ => crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
-        }
+        effective_dedup_signal_version(self.dedup_signal_version.as_deref())
+    }
+}
+
+/// One decision row as the dedup re-derivation pass enumerates it (through
+/// the narrow `trace_gate_driver` pool, no tenant GUC, every column granted
+/// by V45 and V57). Carries what the pass needs to decide whether to reuse
+/// the stored value or re-derive it (`dedup_simhash`, `dedup_signal_version`),
+/// what to load if it must (`tenant_id`, `submission_id`), and what is stored
+/// so it can write only rows that changed (`dedup_cluster_id`,
+/// `dedup_cluster_size`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupRederiveRow {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub decision_id: Uuid,
+    pub decided_at: DateTime<Utc>,
+    pub dedup_simhash: Option<i64>,
+    pub dedup_cluster_id: Option<Uuid>,
+    pub dedup_cluster_size: Option<i32>,
+    /// The stored stamp (V57); `None` for a row recorded before the column
+    /// existed. Read through [`Self::effective_signal_version`].
+    pub dedup_signal_version: Option<String>,
+}
+
+impl DedupRederiveRow {
+    /// The version this row's `dedup_simhash` was derived under; see
+    /// [`effective_dedup_signal_version`].
+    pub fn effective_signal_version(&self) -> &str {
+        effective_dedup_signal_version(self.dedup_signal_version.as_deref())
     }
 }
 
@@ -2140,11 +2367,51 @@ pub struct OwnSubmissionScoreRow {
     pub score: Option<TraceScoreBySubmissionRow>,
 }
 
+/// The credit-bearing slice of a submission's latest gate decision, as the
+/// contributor status surface presents it in place of the submit-time
+/// estimate. Read tenant-scoped by `list_latest_gate_credit_decisions`.
+///
+/// `credit_quality_micros` is `None` on a cost-control decision (a
+/// `skipped_duplicate` or `cached` row, told apart from a genuine unscored
+/// decision by `credit_withheld_reason`) and on the rare decision whose
+/// inline credit-quality write failed. Chunk columns keep
+/// `TraceGateDecisionRow`'s NULL semantics: `chunk_count` NULL reads as 1,
+/// `chunks_capped` NULL as false, `total_chunk_count` NULL as unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceGateCreditDecisionRow {
+    pub submission_id: Uuid,
+    pub credit_quality_micros: Option<i64>,
+    pub credit_quality_calibration_version: Option<i32>,
+    pub credit_withheld_reason: Option<String>,
+    pub chunk_count: Option<i32>,
+    pub total_chunk_count: Option<i32>,
+    pub chunks_capped: Option<bool>,
+}
+
 /// Safe, label-only missing-control name returned when a storage backend has
 /// no real withdrawal implementation. Withdrawal deletes content and reports a
 /// distribution tier; a backend that cannot do either must refuse rather than
 /// degrade.
 pub const TRACE_WITHDRAWAL_BACKEND_MISSING: &str = "TraceWithdrawalBackendMissing";
+
+/// The kind of the operator audit-chain repair's own audit event, and the
+/// `Maintenance` surface of its DB row. The only row
+/// [`TraceCorpusStore::append_trace_audit_chain_resume_event`] accepts
+/// carries it.
+pub const TRACE_AUDIT_CHAIN_REPAIR_KIND: &str = "audit_chain_repair";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceSourceSessionStatus {
+    Active,
+    Withdrawn,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceSourceSessionWithdrawal {
+    pub withdrawn_at: DateTime<Utc>,
+    pub affected_submission_ids: Vec<Uuid>,
+    pub requested_tombstone: TraceWithdrawalRecord,
+}
 
 /// The retained withdrawal tombstone (migration V43). Hash-only/label-only by
 /// construction: there is no content, no object path, and no contributor
@@ -2170,10 +2437,233 @@ pub struct TraceArtifactInvalidationCounts {
 
 #[async_trait]
 pub trait TraceCorpusStore: Send + Sync {
+    async fn claim_trace_source_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _session_digest: &[u8; 32],
+        _submission_id: Uuid,
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.into(),
+        ))
+    }
+
+    async fn get_trace_source_session_status(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _session_digest: &[u8; 32],
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.into(),
+        ))
+    }
+
+    async fn withdraw_trace_source_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _submission_id: Uuid,
+        _withdrawn_at: DateTime<Utc>,
+    ) -> Result<Option<TraceSourceSessionWithdrawal>, DatabaseError> {
+        // A legacy-only backend has no source mappings. New-account ingest
+        // still fails closed because `claim_trace_source_session` refuses.
+        Ok(None)
+    }
+    fn supports_token_bundles(&self) -> bool {
+        false
+    }
+    async fn publish_token_object(
+        &self,
+        _tenant: &str,
+        _submission: Uuid,
+        _revision: &str,
+        _owner: &str,
+        _artifact: &str,
+        _store: &dyn crate::trace_artifact_store::TraceArtifactStore,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn get_token_bundle_for_export(
+        &self,
+        _tenant: &str,
+        _submission: Uuid,
+        _revision: &str,
+    ) -> Result<Option<crate::token_bundle_store::StoredTokenBundle>, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn process_token_bundles(
+        &self,
+        _tenant: &str,
+        _store: &dyn crate::trace_artifact_store::TraceArtifactStore,
+    ) -> Result<usize, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn query_token_bundles(
+        &self,
+        _tenant: &str,
+        _owner: Option<&str>,
+        _query: &crate::token_bundle_store::TokenBundleQuery,
+    ) -> Result<Vec<crate::token_bundle_store::TokenBundleIndexEntry>, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn delete_token_objects(
+        &self,
+        _tenant: &str,
+        _submission: Uuid,
+        _revision: &str,
+        _held_policies: &[String],
+        _store: &dyn crate::trace_artifact_store::TraceArtifactStore,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn begin_token_bundle(
+        &self,
+        _bundle: crate::token_bundle_store::StoredTokenBundle,
+    ) -> Result<crate::token_bundle_store::StoredTokenBundle, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn get_token_bundle(
+        &self,
+        _tenant: &str,
+        _submission: Uuid,
+        _revision: &str,
+        _owner: &str,
+    ) -> Result<Option<crate::token_bundle_store::StoredTokenBundle>, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn stage_token_object(
+        &self,
+        _tenant: &str,
+        _submission: Uuid,
+        _revision: &str,
+        _owner: &str,
+        _object: crate::token_bundle_store::StoredTokenObject,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn commit_token_bundle(
+        &self,
+        _tenant: &str,
+        _submission: Uuid,
+        _revision: &str,
+        _owner: &str,
+        _receipt: trace_commons_protocol::token_distribution::DurableBundleReceipt,
+    ) -> Result<trace_commons_protocol::token_distribution::DurableBundleReceipt, DatabaseError>
+    {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn pending_token_bundle_deletions(
+        &self,
+        _tenant: &str,
+        _submission: Option<Uuid>,
+    ) -> Result<Vec<crate::token_bundle_store::StoredTokenBundle>, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn mark_token_object_deleted(
+        &self,
+        _tenant: &str,
+        _submission: Uuid,
+        _revision: &str,
+        _artifact: &str,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
     async fn upsert_trace_submission(
         &self,
         submission: TraceSubmissionWrite,
     ) -> Result<TraceSubmissionRecord, DatabaseError>;
+
+    /// Commit submission metadata and its optional verified witness evidence
+    /// together. Stores lacking this transaction must refuse evidence writes.
+    async fn upsert_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        if evidence.is_some() {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceStorageUnavailable".into(),
+            ));
+        }
+        self.upsert_trace_submission(submission).await
+    }
+
+    /// Quarantine remediation: a re-POST replaces a quarantined submission's
+    /// body under the same id, so any evidence for the prior body no longer
+    /// describes the submission. In the same transaction as the submission
+    /// update, a store removes the prior evidence of a submission whose stored
+    /// status is `quarantined` and records `evidence` (if any) for the new
+    /// body. Evidence of a submission in any other state is never removed, so
+    /// offering different evidence for it conflicts exactly as
+    /// [`Self::upsert_trace_submission_with_witness`] does.
+    async fn remediate_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        // Stores without evidence storage hold no prior evidence to replace.
+        self.upsert_trace_submission_with_witness(submission, evidence)
+            .await
+    }
+
+    /// Low-level diagnostic lookup. Its caller-provided digest is not an
+    /// authorization boundary; policy consumers use the current-object read
+    /// below, which obtains the object reference from the database itself.
+    async fn get_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _current_artifact_sha256: &str,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// Policy read with the current submitted object selected by the database
+    /// in the same tenant transaction as evidence and active submission state.
+    async fn get_current_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// [`Self::get_current_verified_witness_evidence`] for many submissions of
+    /// one tenant, in one tenant transaction, for the surfaces that label a
+    /// page of traces (#1059). A submission the tenant does not hold has no
+    /// entry.
+    async fn list_current_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_ids: &[Uuid],
+    ) -> Result<BTreeMap<Uuid, TraceWitnessEvidenceClaim>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// Compare an idempotent retry to exact signed-source bytes already stored.
+    /// `None` means no durable evidence exists for this submission; `Some(false)`
+    /// is a conflict. Both witness headers may be omitted for an exact-body
+    /// receipt read, but a partial pair or changed offered evidence conflicts.
+    async fn witness_retry_identity_matches(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _certificate_json: Option<&[u8]>,
+        _signature_header: Option<&[u8]>,
+        _raw_body: &[u8],
+    ) -> Result<Option<bool>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
 
     async fn get_trace_submission(
         &self,
@@ -2301,6 +2791,29 @@ pub trait TraceCorpusStore: Send + Sync {
         reason: Option<&str>,
     ) -> Result<(), DatabaseError>;
 
+    /// As [`Self::update_trace_submission_status`], without the store's own
+    /// audit row. For a caller that mirrors the file audit log's event for
+    /// this change itself, so the DB audit table holds that event and no row
+    /// the file log lacks. The default delegates, which suits stores that
+    /// keep no audit rows of their own.
+    async fn update_trace_submission_status_without_audit(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await
+    }
+
     async fn claim_trace_review_lease(
         &self,
         tenant_id: &str,
@@ -2392,6 +2905,29 @@ pub trait TraceCorpusStore: Send + Sync {
             tenant_id,
             submission_id,
             TraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+    }
+
+    /// As [`Self::release_pii_backstop_hold`], without the store's own audit
+    /// row: the status flip and the invalidation stay one all-or-nothing
+    /// operation, and the caller mirrors the file audit log's event for the
+    /// change itself. The default delegates, which suits stores that keep no
+    /// audit rows of their own.
+    async fn release_pii_backstop_hold_without_audit(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        self.release_pii_backstop_hold(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
         )
         .await
     }
@@ -2574,7 +3110,8 @@ pub trait TraceCorpusStore: Send + Sync {
     /// `distribution_reach` never drift across retries. Implementations MUST
     /// also move the submission row out of consumer reach (status `revoked`,
     /// `withdrawn_at` set, `purged_at` set because the content is gone) in the
-    /// same transaction as the tombstone insert.
+    /// same transaction as the tombstone insert. Any active reviewed public
+    /// excerpt for the submission must be unpublished in that transaction too.
     async fn record_trace_withdrawal(
         &self,
         _tenant_id: &str,
@@ -2647,6 +3184,32 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         audit_event: TraceAuditEventWrite,
     ) -> Result<(), DatabaseError>;
+
+    /// Appends a hashed audit row that resumes the tenant's DB audit chain
+    /// across a legacy segment, where the file log ran ahead through rows
+    /// written without chain fields. Unlike
+    /// [`Self::append_trace_audit_event`], the row's `previous_event_hash` is
+    /// the file log's head, not the DB's latest hashed row. The row must name
+    /// that latest row's hash as its `decision_inputs_hash`, and it is
+    /// refused unless `resumes_from_event_hash` is still the latest hashed
+    /// row. Only the operator audit-chain repair calls this, and the row must
+    /// be its `audit_chain_repair` row ([`TRACE_AUDIT_CHAIN_REPAIR_KIND`]).
+    ///
+    /// `append_file_line` runs after the row is inserted and before the
+    /// transaction commits, under the tenant's audit advisory lock: the
+    /// caller appends the row's file log line there, so a repair whose DB
+    /// head has moved fails before it touches the file, and overlapping
+    /// repairs cannot both write one. If it fails, nothing commits.
+    async fn append_trace_audit_chain_resume_event(
+        &self,
+        _audit_event: TraceAuditEventWrite,
+        _resumes_from_event_hash: &str,
+        _append_file_line: &(dyn Fn() -> Result<(), String> + Send + Sync),
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "trace audit chain resume is not supported by this backend".to_string(),
+        ))
+    }
 
     async fn list_trace_audit_events(
         &self,
@@ -2953,6 +3516,32 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(())
     }
 
+    /// Write ONLY the five per-author perplexity columns (migration V73) on
+    /// the latest decision row for `submission_id`, in migration order:
+    /// agent-prose perplexity, agent-prose tokens, tool-result perplexity,
+    /// tool-result tokens, attributed fraction. Every other column --
+    /// including `perplexity_micros`, `peak_perplexity_micros` and
+    /// `perplexity_passed` -- is left untouched, so a backfill scored by a
+    /// different model than the row was gated under cannot rewrite gating
+    /// history. Implementations MUST scope the update by `tenant_id`.
+    ///
+    /// Defaults to a log-once warning + no-op, as
+    /// `update_trace_gate_decision_perplexity` does and for the same reason.
+    async fn update_trace_gate_decision_author_perplexity(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _columns: [Option<i64>; 5],
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_author_perplexity called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
     /// Update ONLY the credit-quality columns for the decision row identified by
     /// `(tenant_id, decision_id)`. Perplexity, novelty, tail-fraction, vector,
     /// gate status, and credit are left untouched. Implementations MUST scope by
@@ -3213,6 +3802,32 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(None)
     }
 
+    /// For each of `submission_ids` that has at least one gate decision
+    /// under `tenant_id`, return the credit-bearing slice of its LATEST
+    /// decision (by `decided_at`, then `decision_id`). Ids with no decision
+    /// yet are simply absent: the contributor status surface reads that
+    /// absence as "not scored yet" and keeps showing the submit-time
+    /// estimate.
+    ///
+    /// Tenant-scoped through the forced-RLS trace pool, not the cross-tenant
+    /// gate-driver pool: the two columns this read needs beyond the
+    /// attestation surface (`credit_quality_calibration_version`,
+    /// `credit_withheld_reason`) are not in the gate-driver role's
+    /// column grants, and the callers already hold an authenticated tenant
+    /// context. Callers pass only ids the requesting principal can already
+    /// see; the id list narrows, it never widens.
+    ///
+    /// Default: empty (test doubles / backends without the decision table),
+    /// which degrades to "scoring in progress" rather than failing the
+    /// status read.
+    async fn list_latest_gate_credit_decisions(
+        &self,
+        _tenant_id: &str,
+        _submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceGateCreditDecisionRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
     /// Paginated scan over `trace_gate_decisions` for the replay binary.
     /// Filters to rows with `vector_entry_id IS NOT NULL` (i.e. rows that
     /// actually produced a vector-index insert) and orders by `decided_at
@@ -3404,5 +4019,87 @@ mod dedup_signal_version_tests {
             row(Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION)).effective_signal_version(),
             row(None).effective_signal_version()
         );
+    }
+}
+
+#[cfg(test)]
+mod witness_provenance_class_tests {
+    use super::{
+        TraceWitnessEvidenceClaim, TraceWitnessEvidenceCoverage as Coverage,
+        TraceWitnessProvenanceClass as Class,
+    };
+    use trace_commons_protocol::witness_provenance::AttestationClass;
+
+    fn claim(class: AttestationClass, coverage: Coverage) -> TraceWitnessEvidenceClaim {
+        TraceWitnessEvidenceClaim {
+            class,
+            coverage,
+            raw_body_sha256: None,
+        }
+    }
+
+    #[test]
+    fn only_a_verified_v2_claim_carries_an_attested_class() {
+        assert_eq!(
+            Class::from_claim(&claim(
+                AttestationClass::ProviderTeeFinalCall,
+                Coverage::VerifiedV2
+            )),
+            Class::ProviderTeeFinalCall
+        );
+        assert_eq!(
+            Class::from_claim(&claim(
+                AttestationClass::GatewayFinalCall,
+                Coverage::VerifiedV2
+            )),
+            Class::GatewayFinalCall
+        );
+        assert_eq!(
+            Class::from_claim(&claim(AttestationClass::Unattested, Coverage::VerifiedV2)),
+            Class::Unattested
+        );
+        // Every other coverage says nothing is currently supported, whatever
+        // class a stale row names.
+        for coverage in [
+            Coverage::Missing,
+            Coverage::ExplicitUnattested,
+            Coverage::Inactive,
+            Coverage::ArtifactMismatch,
+        ] {
+            for class in [
+                AttestationClass::ProviderTeeFinalCall,
+                AttestationClass::GatewayFinalCall,
+                AttestationClass::Unattested,
+            ] {
+                assert_eq!(
+                    Class::from_claim(&claim(class, coverage)),
+                    Class::Unattested,
+                    "{coverage:?} {class:?}"
+                );
+            }
+        }
+        assert_eq!(
+            Class::from_claim(&claim(AttestationClass::Unattested, Coverage::LegacyV1)),
+            Class::LegacyV1
+        );
+    }
+
+    #[test]
+    fn labels_round_trip_through_storage_and_serde() {
+        for (class, label) in [
+            (Class::ProviderTeeFinalCall, "provider_tee_final_call"),
+            (Class::GatewayFinalCall, "gateway_final_call"),
+            (Class::Unattested, "unattested"),
+            (Class::LegacyV1, "legacy_v1"),
+        ] {
+            assert_eq!(class.as_str(), label);
+            assert_eq!(Class::from_storage(label), Some(class));
+            assert_eq!(
+                serde_json::to_value(class).unwrap(),
+                serde_json::json!(label)
+            );
+        }
+        assert_eq!(Class::from_storage("verified"), None);
+        assert_eq!(Class::from_storage(""), None);
     }
 }

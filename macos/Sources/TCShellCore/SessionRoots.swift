@@ -64,6 +64,7 @@ extension SourceKind {
         case .codex: return "codex_source"
         case .geminiCli: return "gemini_source"
         case .cline: return "cline_source"
+        case .opencode: return "opencode_source"
         }
     }
 }
@@ -81,17 +82,20 @@ public struct SessionRoots: Equatable, Sendable {
     public var codex: SourceChoice
     public var gemini: SourceChoice
     public var cline: SourceChoice
+    public var opencode: SourceChoice
 
     public init(
         claude: SourceChoice = .undecided,
         codex: SourceChoice = .undecided,
         gemini: SourceChoice = .undecided,
-        cline: SourceChoice = .undecided
+        cline: SourceChoice = .undecided,
+        opencode: SourceChoice = .undecided
     ) {
         self.claude = claude
         self.codex = codex
         self.gemini = gemini
         self.cline = cline
+        self.opencode = opencode
     }
 
     /// Exhaustive on purpose. The binary form this replaced -- `kind ==
@@ -106,6 +110,7 @@ public struct SessionRoots: Equatable, Sendable {
             case .codex: return codex
             case .geminiCli: return gemini
             case .cline: return cline
+            case .opencode: return opencode
             }
         }
         set {
@@ -114,6 +119,7 @@ public struct SessionRoots: Equatable, Sendable {
             case .codex: codex = newValue
             case .geminiCli: gemini = newValue
             case .cline: cline = newValue
+            case .opencode: opencode = newValue
             }
         }
     }
@@ -171,6 +177,10 @@ public struct SessionRoots: Equatable, Sendable {
         if let clineDeclaration = cline.declaration {
             object[SourceKind.cline.settingsKey] = clineDeclaration
         }
+        if let declaration = opencode.declaration {
+            object[SourceKind.opencode.settingsKey] = declaration
+        }
+
         guard let data = try? JSONSerialization.data(withJSONObject: object),
             let json = String(data: data, encoding: .utf8)
         else { return nil }

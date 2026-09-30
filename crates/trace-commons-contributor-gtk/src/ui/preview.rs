@@ -119,6 +119,13 @@ struct Sheet {
     pinned: Cell<bool>,
 
     contribute: gtk::Button,
+    /// Why `Contribute` is off, when eligibility is what turned it off.
+    ///
+    /// A dark button with no sentence beside it is the same defect one
+    /// click deeper: the contributor is left to guess. Hidden entirely for
+    /// an entry with no eligibility field, and for an eligible one -- there
+    /// is nothing to explain about a control that works.
+    eligibility_note: gtk::Label,
     /// The redacted body for the entry currently shown, when this
     /// deployment can serve one. See `backend`.
     body: RefCell<Option<String>>,
@@ -445,6 +452,17 @@ impl Sheet {
         gate_statement.add_css_class("tc-caveat");
         gate_statement.add_css_class("tc-tertiary");
 
+        // The daemon's answer about this session, in the shared crate's
+        // words. Empty and hidden until `sync_contribute` fills it, which
+        // is also the one place the button's state is decided -- so the
+        // sentence and the button cannot disagree about why.
+        let eligibility_note = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .visible(false)
+            .build();
+        eligibility_note.add_css_class("tc-caveat");
+
         // The concession, on the footer rather than on a tab, so it is on
         // screen at the moment of the decision whichever tab is open. See
         // `copy::RESIDUAL_RISK`.
@@ -583,6 +601,7 @@ impl Sheet {
             .build();
         footer.append(&residual_risk);
         footer.append(&gate_statement);
+        footer.append(&eligibility_note);
         let immutable_note = gtk::Label::builder()
             .label(
                 trace_commons_contributor::witness_copy::witness_copy()
@@ -659,6 +678,7 @@ impl Sheet {
             permissions,
             pinned: Cell::new(false),
             contribute: contribute.clone(),
+            eligibility_note: eligibility_note.clone(),
             body: RefCell::new(None),
             verdict_buttons: verdict_buttons.clone(),
             verdict: RefCell::new(None),
@@ -670,15 +690,9 @@ impl Sheet {
         admission_button.connect_clicked(move |_| admission_sheet.confirm_admission());
         let admission_sheet = Rc::clone(&sheet);
         app.call("get_settings", serde_json::json!({}), move |_, result| {
-            admission_sheet.admission_required.set(
-                result
-                    .ok()
-                    .and_then(|v| {
-                        v.get("admission_evidence_required")
-                            .and_then(|v| v.as_bool())
-                    })
-                    .unwrap_or(false),
-            );
+            admission_sheet
+                .admission_required
+                .set(result.as_ref().is_ok_and(admission_required_by_settings));
             admission_sheet.sync_witness();
         });
         let witness_sheet = Rc::clone(&sheet);
@@ -794,6 +808,45 @@ impl Sheet {
         self.pending.get(*self.index.borrow())
     }
 
+    /// The entry now showing, resolved against the LIVE queue by id.
+    ///
+    /// **`self.pending` is a copy, taken when the sheet opened.** That is
+    /// right for everything the sheet displays -- a transcript must not
+    /// rearrange itself under somebody reading it -- and wrong for exactly
+    /// one thing: whether this session may still be sent.
+    ///
+    /// A submit-time failure writes its reason back into the row (Decision 1
+    /// of the eligibility design), so a row CAN be downgraded to
+    /// `ineligible_permanent` while a sheet sits open on it. Nothing undoes
+    /// the gate in that case; the gate goes on reading a copy that stopped
+    /// being true, and offers `Contribute` for a session the server will
+    /// refuse. Recomputing faithfully from a stale snapshot recomputes the
+    /// same wrong answer forever.
+    ///
+    /// Only the gate and its sentence read this. What an approval actually
+    /// covers still goes through the pinned entry -- the same id either way
+    /// -- so nothing a contributor started moves under them mid-read.
+    ///
+    /// It reads the queue rather than assuming the worst: an entry that has
+    /// become eligible arms the control, the same as one that stopped being
+    /// eligible disarms it.
+    ///
+    /// Falls back to the held copy when the id is not in the live queue at
+    /// all. That is not staleness -- there is no newer answer to read -- and
+    /// inventing an ineligibility from an absence would disarm a control on
+    /// no evidence.
+    fn current_live(&self) -> Option<crate::model::QueueEntry> {
+        let held = self.current()?;
+        let live = self
+            .app
+            .entries
+            .borrow()
+            .iter()
+            .find(|e| e.entry_id == held.entry_id)
+            .cloned();
+        Some(live.unwrap_or_else(|| held.clone()))
+    }
+
     /// Fetch the preview for the entry now showing.
     ///
     /// Deliberately re-previewed rather than read from the row cache: a
@@ -802,9 +855,11 @@ impl Sheet {
     /// summary fetched minutes ago would be approving something the daemon
     /// is no longer holding.
     fn sync_witness(&self) {
-        self.admission_button.set_visible(
-            self.admission_required.get() && self.admission_supported.get() && !self.pinned.get(),
-        );
+        self.admission_button.set_visible(admission_control_visible(
+            self.admission_required.get(),
+            self.admission_supported.get(),
+            self.pinned.get(),
+        ));
         self.admission_button
             .set_sensitive(!self.admission_busy.get() && !self.witness_busy.get());
         let configured = super::settings::witness_read(&self.app.worker.dir).state
@@ -855,12 +910,12 @@ impl Sheet {
             let result_sheet = sheet.clone();
             let prepared_entry = entry.entry_id.clone();
             sheet.app.call("prepare_admission_session", serde_json::json!({"entry_id":entry.entry_id,"backend":backend.text().trim(),"confirmed":true}), move |_, result| {
-                let ready = result.ok().is_some_and(|v| admission_ready(&v));
+                let (ready, text) = admission_outcome(&result);
                 result_sheet.admission_busy.set(false);
                 if result_sheet.current().is_none_or(|entry| entry.entry_id != prepared_entry) { result_sheet.sync_witness(); return; }
-                let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
-                if ready { result_sheet.admission_message.remove_css_class("tc-refused"); result_sheet.admission_message.set_label(copy.ready); }
-                else { result_sheet.admission_message.add_css_class("tc-refused"); result_sheet.admission_message.set_label(&format!("{} {}",copy.refused_glyph,copy.failed)); }
+                if ready { result_sheet.admission_message.remove_css_class("tc-refused"); }
+                else { result_sheet.admission_message.add_css_class("tc-refused"); }
+                result_sheet.admission_message.set_label(&text);
                 result_sheet.sync_witness();
             });
         });
@@ -898,7 +953,9 @@ impl Sheet {
             sheet.search_summary.set_text(copy.working);
             sheet.transcript.show_sentence(copy.working);
             let result_sheet = Rc::clone(&sheet);
-            sheet.app.call(
+            // `call_with_failure`: a busy witness sends the time to try again
+            // in the `result` beside its error label.
+            sheet.app.call_with_failure(
                 "witness_preview_request",
                 serde_json::json!({
                     "entry_id": entry.entry_id, "raw_session_confirmed": true
@@ -913,7 +970,10 @@ impl Sheet {
                             result_sheet.load()
                         }
                         Ok(_) => result_sheet.fill_failure("witness-review-incomplete"),
-                        Err(label) => result_sheet.fill_failure(&label),
+                        Err(failure) => result_sheet.fill_failure_with(
+                            &failure.label,
+                            crate::copy::witness_busy_retry_line(failure.result.as_ref()),
+                        ),
                     }
                     result_sheet.sync_witness();
                 },
@@ -1006,8 +1066,50 @@ impl Sheet {
     ///
     /// Still one function, called from every place the pin can change, so
     /// no path sets the button sensitive on its own.
+    ///
+    /// The second condition is this surface's: a row the daemon says cannot
+    /// be sent must not be sendable from the sheet either. Gating the card's
+    /// `Submit` and leaving `Contribute` armed one click deeper would move
+    /// the defect rather than remove it -- the contributor still presses,
+    /// and the server still refuses. An entry with no eligibility field
+    /// answers `true` and nothing changes for it.
     fn sync_contribute(&self) {
-        self.contribute.set_sensitive(self.pinned.get());
+        // The LIVE row, not the copy this sheet opened with -- see
+        // `current_live`. A gate computed once from a snapshot recomputes
+        // the same stale answer for as long as the sheet stays open.
+        let view = self
+            .current_live()
+            .as_ref()
+            .and_then(crate::eligibility::view);
+        let sendable =
+            view.is_none_or(|view| view.control == crate::copy::ContributionControl::Contribute);
+        self.contribute.set_sensitive(self.pinned.get() && sendable);
+
+        // The sentence beside the control it explains. Drawn only where it
+        // says something: an entry with no eligibility field has no
+        // sentence, and an eligible one has nothing to explain.
+        let note = view.filter(|_| !sendable);
+        self.eligibility_note.set_visible(note.is_some());
+        if let Some(view) = note {
+            let text = if view.reason_line.is_empty() {
+                view.state_line.to_string()
+            } else {
+                // Two sentences the shared crate authored, joined by a
+                // space. This shell adds no words of its own to either.
+                format!("{} {}", view.state_line, view.reason_line)
+            };
+            self.eligibility_note.set_label(&text);
+            // The whole class set is REPLACED rather than the previous tone
+            // removed by name. A hand-written list of tones to strip is a
+            // second enumeration of `Tone`, and the arm it gets wrong is the
+            // one added after it was written: a tone this code has never
+            // heard of would be left stacked on top of the last one. Setting
+            // the set is exhaustive by construction.
+            self.eligibility_note.set_css_classes(&[
+                "tc-caveat",
+                super::private_inference::indicator_tone(view.tone).css(),
+            ]);
+        }
     }
 
     /// The removed-summary panel: one row per redaction family, and -- only
@@ -1112,7 +1214,57 @@ impl Sheet {
         // same sentence in a strictly better place: the footer is on screen
         // on every tab, so it cannot be the one thing a person happened not
         // to be looking at when they decided. See `copy::RESIDUAL_RISK`.
+        if let Some(summary) = &summary.token_distribution_summary {
+            let label = gtk::Label::builder()
+                .label(summary)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            detail.append(&label);
+        }
         self.whats_in_it.append(&detail);
+
+        // K11: what leaves this computer for this session, before and
+        // after redaction, and what its witness was checked against. Filled
+        // when the daemon answers; dropped if the sheet has moved on.
+        let disclosure = style::card(gtk::Orientation::Vertical, space::S);
+        self.whats_in_it.append(&disclosure);
+        if let Some(entry) = self.current() {
+            let entry_id = entry.entry_id.clone();
+            let held = entry.holds_certificate;
+            let raw = human_bytes(summary.raw_session_bytes);
+            let would_send = human_bytes(summary.would_send_bytes);
+            let sheet = Rc::clone(self);
+            let asked = entry_id.clone();
+            self.app.call(
+                "route_disclosure",
+                serde_json::json!({}),
+                move |app, facts| {
+                    let facts = facts.ok();
+                    let draw = move |certificate: Option<serde_json::Value>| {
+                        if sheet.current().is_none_or(|e| e.entry_id != entry_id) {
+                            return;
+                        }
+                        let rows = crate::disclosure::session(
+                            facts.as_ref(),
+                            &raw,
+                            &would_send,
+                            certificate.as_ref(),
+                        );
+                        super::fill_disclosure_rows(&disclosure, &rows);
+                    };
+                    if held {
+                        app.call(
+                            "certificate_detail",
+                            serde_json::json!({ "entry_id": asked }),
+                            move |_, detail| draw(detail.ok()),
+                        );
+                    } else {
+                        draw(None);
+                    }
+                },
+            );
+        }
 
         if !summary.enrolled {
             let unenrolled = style::card(gtk::Orientation::Vertical, space::S);
@@ -1160,13 +1312,26 @@ impl Sheet {
     }
 
     fn fill_failure(self: &Rc<Self>, label: &str) {
+        self.fill_failure_with(label, None);
+    }
+
+    /// [`Self::fill_failure`], with a second line under the sentence: when a
+    /// busy witness asked to be tried again. Shown only for a review the
+    /// person asked for, the one path that line can describe.
+    fn fill_failure_with(self: &Rc<Self>, label: &str, retry_line: Option<String>) {
         self.pinned.set(false);
         self.sync_contribute();
         self.sync_witness();
         let sentence = if self.witness_requested.get() {
-            trace_commons_contributor::witness_copy::witness_copy()
-                .review
-                .failed
+            // The same function the daemon selects with for the other two
+            // shells. GTK reaches it directly because it is Rust and has no
+            // `view` to read -- two mappings would drift, which is what
+            // `witness_refusal_line`'s own doc says it is shared to avoid.
+            //
+            // Before this the label was discarded here, so a reviewer that
+            // declined a receipt and a reviewer that was simply down were the
+            // same sentence.
+            trace_commons_contributor::witness_copy::witness_refusal_line(Some(label))
         } else {
             match label {
                 "preview-failed" | "unavailable" => {
@@ -1182,9 +1347,13 @@ impl Sheet {
                 _ => "Something went wrong working out what would be sent. Nothing has been sent.",
             }
         };
+        let text = match retry_line {
+            Some(retry) if self.witness_requested.get() => format!("{sentence}\n{retry}"),
+            _ => sentence.to_string(),
+        };
         self.copy_all.set_sensitive(false);
-        self.transcript.show_sentence(sentence);
-        self.search_summary.set_text(sentence);
+        self.transcript.show_sentence(&text);
+        self.search_summary.set_text(&text);
     }
 
     fn set_summary_tone(&self, tone: Tone) {
@@ -1433,6 +1602,27 @@ impl Sheet {
         let Some(entry) = self.current() else { return };
         let entry_id = entry.entry_id.clone();
         let project_label = entry.project_label.clone();
+        // Checked again HERE, against the live queue, and not only when the
+        // button was drawn.
+        //
+        // Nothing tells this sheet the queue changed -- it holds no
+        // subscription -- so `sync_contribute` runs only at the moments
+        // listed beside it. Between two of them a row can be downgraded
+        // under an armed button, and the press is what would send it. The
+        // gate at draw time decides what is OFFERED; this decides what is
+        // SENT, and only the second one is load-bearing.
+        //
+        // Repaints on the way out, so a contributor who presses a button
+        // that has stopped being valid sees it disarm and reads why, rather
+        // than pressing something that silently does nothing.
+        if !self
+            .current_live()
+            .as_ref()
+            .is_none_or(crate::eligibility::offers_send)
+        {
+            self.sync_contribute();
+            return;
+        }
         self.contribute.set_sensitive(false);
         let sheet = Rc::clone(self);
         // No selection is a valid, expected answer -- `approve_params`
@@ -1460,7 +1650,11 @@ impl Sheet {
                     // correction away from them along with the chance to
                     // act on the advice.
                     if approve.was_refused_for_a_correction_credential() {
-                        sheet.contribute.set_sensitive(true);
+                        // Through the one function, never straight at the
+                        // widget: re-arming here directly would put the
+                        // button back on a session eligibility says cannot
+                        // be sent.
+                        sheet.sync_contribute();
                         sheet.show_correction_credential_refusal();
                         app.refresh();
                         return;
@@ -2135,6 +2329,71 @@ fn context_around(body: &str, byte_start: usize, byte_end: usize) -> Excerpt {
     }
 }
 
+/// Whether this contributor's enrolment admits evidence-bearing
+/// contribution, read out of a `get_settings` reply.
+///
+/// `admission_evidence_required` is the daemon's own answer, and it is not a
+/// preference: it is true for a contributor who signed up through NEAR and
+/// false for one who came in on an invite. Anything but an explicit `true` is
+/// a no -- the daemon answers null when it could not read the config, and an
+/// older daemon does not answer at all.
+fn admission_required_by_settings(settings: &serde_json::Value) -> bool {
+    settings
+        .get("admission_evidence_required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Whether the preparation control belongs on the sheet at all.
+///
+/// Withheld rather than shown refused, which is what macOS does: it omits
+/// `AdmissionPreparationView` outright for a contributor whose enrolment
+/// cannot use it. A disabled button with nothing beside it to say why is
+/// worse than no button.
+fn admission_control_visible(required: bool, supported: bool, pinned: bool) -> bool {
+    // `required` is the enrolment, `supported` the daemon advertising the
+    // method, `pinned` this sheet having already committed the bytes -- after
+    // which there is nothing left to prepare.
+    required && supported && !pinned
+}
+
+/// The sentence for a refused preparation.
+///
+/// This shell reaches a refusal as a bare label string -- `Backend::call`
+/// turns `error.message` into the `Err` side, and the daemon's `view` object
+/// does not survive that -- so it maps the label itself rather than reading
+/// `view.message` the way the macOS shell does. Same function, same words:
+/// a second mapping here would drift from the one the daemon uses.
+///
+/// The label is a fixed string by IPC contract, which is what makes forwarding
+/// it safe; it is used to *choose* a sentence and is never displayed.
+/// What the sheet should say about one preparation attempt, and whether it
+/// succeeded.
+///
+/// The whole decision, so the widget callback has nothing left to get wrong.
+/// It previously chose the refusal sentence inline, which meant the choice
+/// could only be checked by running GTK -- and it was choosing one fixed
+/// sentence for every cause.
+///
+/// This shell reaches a refusal as a bare label string: `Backend::call` turns
+/// `error.message` into the `Err` side and the daemon's `view` object does not
+/// survive that, so the label is mapped here rather than read from
+/// `view.message` as the macOS shell does. Same function, same words -- a
+/// second mapping would drift from the daemon's.
+///
+/// The label is a fixed string by IPC contract, which is what makes using it
+/// safe. It selects a sentence and is never shown.
+fn admission_outcome(result: &Result<serde_json::Value, String>) -> (bool, String) {
+    let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
+    if result.as_ref().ok().is_some_and(admission_ready) {
+        return (true, copy.ready.to_string());
+    }
+    let line = trace_commons_contributor::witness_copy::admission_refusal_line(
+        result.as_ref().err().map(String::as_str),
+    );
+    (false, format!("{} {}", copy.refused_glyph, line))
+}
+
 fn admission_ready(value: &serde_json::Value) -> bool {
     value
         .get("view")
@@ -2145,6 +2404,91 @@ fn admission_ready(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The control that prepares an evidence-bearing session is offered on
+    /// the strength of `admission_evidence_required` -- a consequence of how
+    /// the contributor enrolled, not a preference anyone sets. A contributor
+    /// who came in on an invite cannot use it, and must not be shown it: the
+    /// only thing pressing it could do is refuse them. This is the condition
+    /// macOS reads at `PreviewSheet.swift`, and the daemon's own answer at
+    /// `add_admission_setting`.
+    ///
+    /// Both directions, because a test that only proves the control appears
+    /// for an eligible contributor says nothing about the bug.
+    #[test]
+    fn admission_preparation_is_offered_only_where_the_enrolment_allows_it() {
+        assert!(super::admission_required_by_settings(
+            &serde_json::json!({"admission_evidence_required": true})
+        ));
+        assert!(!super::admission_required_by_settings(
+            &serde_json::json!({"admission_evidence_required": false})
+        ));
+
+        // `add_admission_setting` answers null when it could not read the
+        // config, and an older daemon does not answer at all. Neither is a
+        // yes.
+        for value in [
+            serde_json::json!({"admission_evidence_required": serde_json::Value::Null}),
+            serde_json::json!({}),
+            serde_json::json!({"admission_evidence_required": "true"}),
+            serde_json::json!({"admission_evidence_required": 1}),
+        ] {
+            assert!(
+                !super::admission_required_by_settings(&value),
+                "an unreadable answer was read as eligibility: {value}"
+            );
+        }
+    }
+
+    /// The three conditions the sheet actually multiplies together, held
+    /// apart so each one can be shown to matter on its own. `supported` is
+    /// the daemon advertising the method; `pinned` is this sheet having
+    /// already committed the bytes, after which there is nothing left to
+    /// prepare.
+    #[test]
+    fn every_condition_on_the_admission_control_can_withhold_it() {
+        assert!(super::admission_control_visible(true, true, false));
+        assert!(!super::admission_control_visible(false, true, false));
+        assert!(!super::admission_control_visible(true, false, false));
+        assert!(!super::admission_control_visible(true, true, true));
+    }
+
+    /// This shell renders the refusal it chooses, so choosing wrongly here is
+    /// invisible everywhere else: the daemon can classify perfectly and Linux
+    /// still shows one sentence. That was the state before this change.
+    #[test]
+    fn a_refusal_says_what_the_daemon_classified_rather_than_one_sentence() {
+        let generic = trace_commons_contributor::witness_copy::witness_copy()
+            .admission
+            .failed;
+        let refusal = |label: &str| {
+            let (ready, text) =
+                super::admission_outcome(&Err::<serde_json::Value, String>(label.to_string()));
+            assert!(!ready, "{label} is a refusal");
+            text
+        };
+
+        assert!(
+            refusal("admission_setup_unavailable").ends_with(generic),
+            "an unclassified failure still says the generic sentence"
+        );
+
+        let mut seen = Vec::new();
+        for label in [
+            "admission_setup_consent_required",
+            "admission_setup_proxy_missing",
+            "admission_setup_source_unsupported",
+            "admission_receipt_endpoint_required",
+        ] {
+            let line = refusal(label);
+            assert_ne!(line, generic, "{label} is rendered as the generic sentence");
+            seen.push(line);
+        }
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "two causes were given the same words");
+    }
+
     #[test]
     fn admission_preparation_requires_fresh_explicit_success() {
         let future = chrono::Utc::now().timestamp() + 600;

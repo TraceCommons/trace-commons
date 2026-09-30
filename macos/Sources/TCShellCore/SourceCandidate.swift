@@ -11,6 +11,7 @@ public enum SourceKind: String, CaseIterable, Equatable, Sendable {
     case codex
     case geminiCli = "gemini-cli"
     case cline
+    case opencode
 
     public var displayName: String {
         switch self {
@@ -18,6 +19,7 @@ public enum SourceKind: String, CaseIterable, Equatable, Sendable {
         case .codex: return "Codex"
         case .geminiCli: return "Gemini CLI"
         case .cline: return "Cline"
+        case .opencode: return "OpenCode"
         }
     }
 }

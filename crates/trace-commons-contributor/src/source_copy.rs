@@ -49,7 +49,7 @@
 
 use crate::routing_copy::{TOOL_CLAUDE, TOOL_CLINE, TOOL_CODEX, TOOL_GEMINI};
 use crate::source::{
-    SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI,
+    SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI, SOURCE_OPENCODE,
     undeclared_scans_conventional,
 };
 
@@ -64,6 +64,7 @@ pub enum SourceTool {
     Codex,
     Gemini,
     Cline,
+    OpenCode,
 }
 
 impl SourceTool {
@@ -75,6 +76,7 @@ impl SourceTool {
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
             "cline" => Some(Self::Cline),
+            "opencode" => Some(Self::OpenCode),
             _ => None,
         }
     }
@@ -87,6 +89,7 @@ impl SourceTool {
             Self::Codex => TOOL_CODEX,
             Self::Gemini => TOOL_GEMINI,
             Self::Cline => TOOL_CLINE,
+            Self::OpenCode => "OpenCode",
         }
     }
 
@@ -100,6 +103,7 @@ impl SourceTool {
             Self::Codex => SOURCE_CODEX,
             Self::Gemini => SOURCE_GEMINI_CLI,
             Self::Cline => SOURCE_CLINE,
+            Self::OpenCode => SOURCE_OPENCODE,
         }
     }
 }
@@ -156,6 +160,15 @@ impl SourceTool {
 #[must_use]
 pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     let name = tool.name();
+    if tool == SourceTool::OpenCode {
+        return match source_mode {
+            "watch" => "OpenCode export folder selected; only saved exports are read",
+            "off" => "OpenCode exports turned off. Previously queued sessions are not removed",
+            "unset" => "No OpenCode export folder selected; no exports are read",
+            _ => "OpenCode export-folder settings could not be confirmed",
+        }
+        .into();
+    }
     match source_mode {
         "watch" => format!("{name} sessions folder set"),
         "off" => format!(
@@ -195,6 +208,10 @@ pub struct SourceSettingsToolCopy {
     pub key: &'static str,
     pub decline: String,
     pub unset_scans_conventional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choose_folder: Option<&'static str>,
 }
 
 #[must_use]
@@ -204,6 +221,7 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         ("codex", SourceTool::Codex),
         ("gemini", SourceTool::Gemini),
         ("cline", SourceTool::Cline),
+        ("opencode", SourceTool::OpenCode),
     ]
     .into_iter()
     .map(|(key, tool)| {
@@ -211,7 +229,11 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
             tool.adapter_name(),
             SourceSettingsToolCopy {
                 key,
-                decline: format!("I don't use {}", tool.name()),
+                decline: if tool == SourceTool::OpenCode { "Don't read OpenCode exports".into() }
+                    else { format!("I don't use {}", tool.name()) },
+                explanation: (tool == SourceTool::OpenCode).then_some(
+                    "Choose a folder of JSON files saved with opencode export SESSION_ID. Only those exports are read; this does not read OpenCode's live session store or configure model calls."),
+                choose_folder: (tool == SourceTool::OpenCode).then_some("Choose an exports folder…"),
                 unset_scans_conventional: undeclared_scans_conventional(tool.adapter_name()),
             },
         )
@@ -250,7 +272,7 @@ mod tests {
     #[test]
     fn settings_metadata_uses_adapter_policy_and_retains_queue_effects() {
         let copy = source_settings_copy();
-        assert_eq!(copy.tools.len(), 4);
+        assert_eq!(copy.tools.len(), 5);
         for (adapter, tool) in &copy.tools {
             assert_eq!(
                 tool.unset_scans_conventional,
@@ -261,7 +283,16 @@ mod tests {
                 source_check_line(source, "off")
                     .contains("Previously queued sessions are not removed")
             );
-            assert_eq!(tool.decline, format!("I don't use {}", source.name()));
+            if source == SourceTool::OpenCode {
+                assert_eq!(tool.decline, "Don't read OpenCode exports");
+                assert!(
+                    tool.explanation
+                        .unwrap()
+                        .contains("opencode export SESSION_ID")
+                );
+            } else {
+                assert_eq!(tool.decline, format!("I don't use {}", source.name()));
+            }
         }
         let payload = serde_json::to_value(copy).unwrap();
         assert_eq!(
@@ -272,6 +303,19 @@ mod tests {
             payload["tools"]["gemini-cli"]["unset_scans_conventional"],
             false
         );
+    }
+
+    #[test]
+    fn opencode_unknown_does_not_claim_off_and_exports_are_explicit() {
+        for mode in ["", "future", "unavailable"] {
+            let line = source_check_line(SourceTool::OpenCode, mode);
+            assert!(line.contains("could not be confirmed"));
+            assert_ne!(line, source_check_line(SourceTool::OpenCode, "off"));
+        }
+        assert!(source_check_line(SourceTool::OpenCode, "unset").contains("no exports are read"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("live session store is not read"));
+        assert_eq!(SourceTool::from_key("opencode"), Some(SourceTool::OpenCode));
     }
 
     /// The defect, pinned per mode. `off` and `unset` were one sentence;

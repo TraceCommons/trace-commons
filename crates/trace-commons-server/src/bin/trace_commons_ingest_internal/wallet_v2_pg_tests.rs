@@ -1,0 +1,694 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Wallet v2 completion against the router and a fresh PostgreSQL database.
+//! Only the external NEAR RPC response is local. The production verifier checks
+//! the signed NEP-413 payload, device proof, PKCE binding and FullAccess result.
+
+use super::*;
+use axum::body::Body;
+use ring::signature::KeyPair as _;
+use tower::ServiceExt;
+
+const WALLET_ACCOUNT: &str = "wallet-v2-fixture.testnet";
+const WALLET_RECIPIENT: &str = "app.tracecommons.test";
+
+/// The migrated database, plus a runtime backend on a NOSUPERUSER
+/// NOBYPASSRLS role, so provisioning writes and the session read go through
+/// the tenant policies exactly as production's do. The anchor lookup still
+/// uses the resolver role and its narrow policy.
+///
+/// `admin` is the migration owner (a superuser in CI). It is used only for
+/// this fixture's probes and seed rows, never as the handlers' database.
+struct WalletDb {
+    admin: Arc<PgBackend>,
+    runtime: Arc<PgBackend>,
+}
+
+async fn fresh_db() -> WalletDb {
+    let pg = super::migrated_pg_fixture::migrated_pg(
+        "TRACE_COMMONS_WALLET_V2_PG_TEST_URL",
+        Some("admission_test_walletv2"),
+    )
+    .await;
+    let runtime = pg.narrow_runtime("tc_walletv2_runtime").await;
+    WalletDb {
+        admin: pg.admin,
+        runtime,
+    }
+}
+
+fn identity() -> trace_commons_server::near_account_identity::NearAccountIdentity {
+    let crypto =
+        trace_commons_server::secrets::SecretsCrypto::new(SecretString::from("a".repeat(32)))
+            .unwrap();
+    let kek: Arc<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper> = Arc::new(
+        trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
+            crypto,
+            "wallet-v2-fixture",
+        ),
+    );
+    trace_commons_server::near_account_identity::NearAccountIdentity::from_parts(
+        Some(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])),
+        Some(kek),
+    )
+    .unwrap()
+}
+
+fn keypair() -> ring::signature::Ed25519KeyPair {
+    let pkcs8 =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap()
+}
+
+fn wallet_key(wallet: &ring::signature::Ed25519KeyPair) -> String {
+    format!(
+        "ed25519:{}",
+        bs58::encode(wallet.public_key().as_ref()).into_string()
+    )
+}
+
+fn challenge_pair() -> (String, String) {
+    let verifier = "wallet-v2-verifier".repeat(4);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
+}
+
+/// Independently form the NEP-413 Borsh preimage, including the Some(callback)
+/// option emitted by the actual wallet v2 start route.
+fn sign_wallet(started: &serde_json::Value, wallet: &ring::signature::Ed25519KeyPair) -> String {
+    sign_wallet_preimage(started, wallet, true)
+}
+
+/// The same preimage, optionally with the callback encoded as `None`: a
+/// well-formed signature by the right key over bytes the ceremony never issued.
+fn sign_wallet_preimage(
+    started: &serde_json::Value,
+    wallet: &ring::signature::Ed25519KeyPair,
+    with_callback: bool,
+) -> String {
+    let message = started["message"].as_str().unwrap();
+    let recipient = started["recipient"].as_str().unwrap();
+    let callback = started["wallet_url"].as_str().unwrap();
+    let nonce = base64::engine::general_purpose::STANDARD
+        .decode(started["nonce"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(nonce.len(), 32);
+    let mut bytes = 2_147_484_061_u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(message.as_bytes());
+    bytes.extend_from_slice(&nonce);
+    bytes.extend_from_slice(&(recipient.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(recipient.as_bytes());
+    if with_callback {
+        bytes.push(1); // Borsh Option::Some(callback_url)
+        bytes.extend_from_slice(&(callback.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(callback.as_bytes());
+    } else {
+        bytes.push(0); // Borsh Option::None
+    }
+    base64::engine::general_purpose::STANDARD.encode(wallet.sign(&Sha256::digest(bytes)).as_ref())
+}
+
+async fn rpc_fixture(public_key: String) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = calls.clone();
+    let router = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |Json(request): Json<serde_json::Value>| {
+            let public_key = public_key.clone();
+            let requests = requests.clone();
+            async move {
+                assert_eq!(request["jsonrpc"], "2.0");
+                assert_eq!(request["method"], "query");
+                assert_eq!(request["params"]["request_type"], "view_access_key_list");
+                assert_eq!(request["params"]["finality"], "final");
+                assert_eq!(request["params"]["account_id"], WALLET_ACCOUNT);
+                requests.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "jsonrpc":"2.0","id":"tc",
+                    "result":{"keys":[{"public_key":public_key,
+                        "access_key":{"permission":"FullAccess"}}]}
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (url, calls)
+}
+
+/// The returned directory backs the state's local storage; hold it for the
+/// test's lifetime so it is removed afterwards rather than leaked.
+fn state(db: Arc<PgBackend>, rpc_url: String) -> (Arc<AppState>, tempfile::TempDir) {
+    // No legacy witness is published; v2 must still complete. This ignored test
+    // runs alone in CI because readiness reads these process-global variables.
+    unsafe {
+        std::env::remove_var("TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON");
+        std::env::set_var(
+            "TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL",
+            "https://issuer.example",
+        );
+        std::env::set_var("TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE", "upload");
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    let settings = Arc::make_mut(&mut state);
+    settings.near_provisioning_enabled = true;
+    settings.near_provisioning_admission_ready = true;
+    settings.near_provisioning_public_origin = Some("https://commons.example".into());
+    settings.account_near_config = Some(Arc::new(trace_commons_server::config::NearConfig {
+        rpc_url,
+        network: "testnet".into(),
+        recipient: WALLET_RECIPIENT.into(),
+    }));
+    settings.near_account_identity = Some(Arc::new(identity()));
+    settings.db_mirror = Some(db as Arc<dyn Database>);
+    (state, temp)
+}
+
+async fn request(
+    state: &Arc<AppState>,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    bearer: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = axum::http::Request::builder().method(method).uri(path);
+    let bytes = if let Some(body) = body {
+        builder = builder.header(CONTENT_TYPE, "application/json");
+        serde_json::to_vec(&body).unwrap()
+    } else {
+        Vec::new()
+    };
+    if let Some(bearer) = bearer {
+        builder = builder.header(AUTHORIZATION, format!("Bearer {bearer}"));
+    }
+    let response = app(state.clone())
+        .oneshot(builder.body(Body::from(bytes)).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+async fn start(
+    state: &Arc<AppState>,
+    account: &str,
+    device_public_key: &str,
+    challenge: &str,
+) -> serde_json::Value {
+    let (status, value) = request(
+        state,
+        "POST",
+        "/v1/account/near/provision/start/v2",
+        Some(serde_json::json!({
+            "account_id":account,"device_public_key":device_public_key,
+            "code_challenge":challenge,"code_challenge_method":"S256"
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["recipient"], WALLET_RECIPIENT);
+    assert_eq!(value["network"], "testnet");
+    assert_eq!(
+        value["wallet_url"],
+        "https://commons.example/account/near/provision/wallet"
+    );
+    assert!(value["ceremony_id"].as_str().is_some());
+    assert!(value["expires_at"].as_i64().is_some());
+    for absent in [
+        "witness",
+        "issuer_url",
+        "audience",
+        "inference_receipt_endpoint",
+    ] {
+        assert!(value.get(absent).is_none(), "start leaked {absent}");
+    }
+    value
+}
+
+fn finish_body(
+    started: &serde_json::Value,
+    account: &str,
+    device: &ring::signature::Ed25519KeyPair,
+    wallet: &ring::signature::Ed25519KeyPair,
+    verifier: &str,
+) -> serde_json::Value {
+    let device_public_key =
+        base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let signing_bytes = base64::engine::general_purpose::STANDARD
+        .decode(started["device_signing_bytes"].as_str().unwrap())
+        .unwrap();
+    serde_json::json!({
+        "ceremony_id":started["ceremony_id"], "account_id":account,
+        "device_public_key":device_public_key,"wallet_public_key":wallet_key(wallet),
+        "wallet_signature":sign_wallet(started,wallet),
+        "device_signature":base64::engine::general_purpose::STANDARD
+            .encode(device.sign(&signing_bytes).as_ref()),
+        "code_verifier":verifier,
+    })
+}
+
+async fn finish(state: &Arc<AppState>, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    request(
+        state,
+        "POST",
+        "/v1/account/near/provision/finish/v2",
+        Some(body),
+        None,
+    )
+    .await
+}
+
+async fn row_counts(db: &PgBackend, tenant: &str) -> [i64; 6] {
+    let mut client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let row = tx
+        .query_one(
+            "SELECT \
+        (SELECT count(*) FROM trace_near_account_anchors WHERE tenant_id=$1), \
+        (SELECT count(*) FROM trace_accounts WHERE tenant_id=$1), \
+        (SELECT count(*) FROM trace_near_identities WHERE tenant_id=$1), \
+        (SELECT count(*) FROM device_keys WHERE tenant_id=$1), \
+        (SELECT count(*) FROM trace_near_provisioned_devices WHERE tenant_id=$1), \
+        (SELECT count(*) FROM trace_account_inference_connections WHERE tenant_id=$1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    [0, 1, 2, 3, 4, 5].map(|index| row.get(index))
+}
+
+/// Table-wide counts, with no tenant context. The tables are FORCE ROW LEVEL
+/// SECURITY, so this sees rows only on a role that bypasses RLS; on any other
+/// it reads 0 everywhere and every "nothing persisted" comparison against it
+/// passes whatever happened. Pass the admin backend, and pair each such
+/// comparison with a positive control showing the probe saw a write.
+async fn global_provisioned_counts(db: &PgBackend) -> [i64; 8] {
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*) FROM trace_near_account_anchors), \
+             (SELECT count(*) FROM trace_accounts), \
+             (SELECT count(*) FROM trace_near_identities), \
+             (SELECT count(*) FROM device_keys), \
+             (SELECT count(*) FROM trace_account_principals), \
+             (SELECT count(*) FROM trace_near_provisioned_devices), \
+             (SELECT count(*) FROM trace_sessions), \
+             (SELECT count(*) FROM trace_account_inference_connections)",
+            &[],
+        )
+        .await
+        .unwrap();
+    [0, 1, 2, 3, 4, 5, 6, 7].map(|index| row.get(index))
+}
+
+async fn persisted_wallet_device_join(
+    db: &PgBackend,
+    finished: &serde_json::Value,
+    device_public_key: &str,
+    wallet_public_key: &str,
+) -> i64 {
+    let tenant = finished["tenant_id"].as_str().unwrap();
+    let account = uuid::Uuid::parse_str(finished["account_id"].as_str().unwrap()).unwrap();
+    let device_key_id = finished["device_key_id"].as_str().unwrap();
+    let anchor = finished["anchor_hash"].as_str().unwrap();
+    let mut client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.query_one(
+        "SELECT count(*) FROM trace_near_provisioned_devices n \
+         JOIN trace_accounts a USING (tenant_id,account_id) \
+         JOIN device_keys d USING (tenant_id,device_key_id) \
+         JOIN trace_account_principals p \
+           ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id \
+              AND p.principal_ref=n.principal_ref \
+         JOIN trace_near_account_anchors h \
+           ON h.tenant_id=n.tenant_id AND h.account_id=n.account_id \
+         JOIN trace_near_identities i \
+           ON i.tenant_id=n.tenant_id AND i.account_id=n.account_id \
+         WHERE n.tenant_id=$1 AND n.account_id=$2 AND n.device_key_id=$3 \
+           AND n.anchor_hash=$4 AND h.anchor_hash=$4 \
+           AND d.public_key=$5 AND d.onboarding_origin='near' \
+           AND i.public_key=$6 AND i.near_account_id=$7 \
+           AND p.unlinked_at IS NULL AND a.closed_at IS NULL",
+        &[
+            &tenant,
+            &account,
+            &device_key_id,
+            &anchor,
+            &device_public_key,
+            &wallet_public_key,
+            &WALLET_ACCOUNT,
+        ],
+    )
+    .await
+    .unwrap()
+    .get(0)
+}
+
+/// Serialises this module's tests: both assert on table-wide counts and share
+/// one database and the process-global provisioning environment.
+fn serial() -> &'static tokio::sync::Mutex<()> {
+    static SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    SERIAL.get_or_init(Default::default)
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_WALLET_V2_PG_TEST_URL"]
+async fn wallet_v2_signed_completion_and_refusal_boundaries() {
+    use std::sync::atomic::Ordering;
+    let _serial = serial().lock().await;
+    let WalletDb { admin, runtime: db } = fresh_db().await;
+    let wallet = keypair();
+    let wrong_wallet = keypair();
+    let device = keypair();
+    let wrong_device = keypair();
+    let public_key = base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let (rpc_url, rpc_calls) = rpc_fixture(wallet_key(&wallet)).await;
+    let (state, _temp) = state(db.clone(), rpc_url);
+    let (verifier, challenge) = challenge_pair();
+    let before = global_provisioned_counts(&admin).await;
+
+    let (status, legacy) = request(
+        &state,
+        "GET",
+        "/v1/account/near/provision/capabilities",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(legacy["ready"], false, "v1 still requires the witness");
+    assert!(legacy.get("witness").is_none());
+    let (status, capabilities) = request(
+        &state,
+        "GET",
+        "/v1/account/near/provision/capabilities/v2",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(capabilities["ready"], true);
+    assert_eq!(
+        capabilities["wallet_start_path"],
+        "/v1/account/near/provision/start/v2"
+    );
+    assert_eq!(
+        capabilities["wallet_finish_path"],
+        "/v1/account/near/provision/finish/v2"
+    );
+    assert_eq!(
+        capabilities["inference_connection_selection_required"],
+        true
+    );
+    for absent in [
+        "witness",
+        "issuer_url",
+        "audience",
+        "inference_receipt_endpoint",
+    ] {
+        assert!(
+            capabilities.get(absent).is_none(),
+            "capabilities leaked {absent}"
+        );
+    }
+
+    let (status, _) = request(
+        &state,
+        "POST",
+        "/v1/account/near/provision/start",
+        Some(serde_json::json!({
+            "account_id":WALLET_ACCOUNT,"device_public_key":public_key,
+            "code_challenge":challenge,"code_challenge_method":"S256"
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "v1 start still needs a witness"
+    );
+
+    // Every refused variant carries well-formed values, so it is refused by
+    // the check it names and not by a decoder in front of it: the finish
+    // handler maps every failure to the same 400, and a malformed signature
+    // would still be refused with Ed25519 verification skipped entirely.
+    //
+    // Each failed finish consumes its own ceremony, which the retry pins: a
+    // fully valid body for the same ceremony must be refused too, or a caller
+    // could keep trying proofs against one ceremony. Neither attempt may reach
+    // RPC or produce an account, session, device or connection selection.
+    for variant in [
+        "wallet_signature_wrong_key",
+        "wallet_signature_tampered_preimage",
+        "account",
+        "pkce",
+        "device_key",
+        "device_signature_wrong_key",
+    ] {
+        let started = start(&state, WALLET_ACCOUNT, &public_key, &challenge).await;
+        let valid = finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier);
+        let mut body = valid.clone();
+        match variant {
+            // The right preimage, signed by a key the body does not name.
+            "wallet_signature_wrong_key" => {
+                body["wallet_signature"] = serde_json::json!(sign_wallet(&started, &wrong_wallet))
+            }
+            // The named key, over a preimage with the callback left out.
+            "wallet_signature_tampered_preimage" => {
+                body["wallet_signature"] =
+                    serde_json::json!(sign_wallet_preimage(&started, &wallet, false))
+            }
+            "account" => body["account_id"] = serde_json::json!("other.testnet"),
+            "pkce" => body["code_verifier"] = serde_json::json!("b".repeat(64)),
+            "device_key" => {
+                body["device_public_key"] = serde_json::json!(
+                    base64::engine::general_purpose::STANDARD
+                        .encode(wrong_device.public_key().as_ref())
+                )
+            }
+            // The real device key is named; the bytes are signed by another.
+            "device_signature_wrong_key" => {
+                let signing_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(started["device_signing_bytes"].as_str().unwrap())
+                    .unwrap();
+                body["device_signature"] = serde_json::json!(
+                    base64::engine::general_purpose::STANDARD
+                        .encode(wrong_device.sign(&signing_bytes).as_ref())
+                )
+            }
+            _ => unreachable!(),
+        }
+        for field in ["wallet_signature", "device_signature"] {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(body[field].as_str().unwrap())
+                .unwrap();
+            assert_eq!(decoded.len(), 64, "{variant}: {field} is a real signature");
+        }
+        let (status, refused) = finish(&state, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{variant}: {refused}");
+        let (status, retried) = finish(&state, valid).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{variant}: a refused finish must consume its ceremony: {retried}"
+        );
+        assert_eq!(rpc_calls.load(Ordering::SeqCst), 0, "{variant} reached RPC");
+        assert_eq!(
+            global_provisioned_counts(&admin).await,
+            before,
+            "{variant} persisted account, identity, device, session or connection state"
+        );
+    }
+
+    let started = start(&state, WALLET_ACCOUNT, &public_key, &challenge).await;
+    let valid_body = finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier);
+    let (status, finished) = finish(&state, valid_body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{finished}");
+    assert_eq!(rpc_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(finished["token_type"], "Bearer");
+    assert!(
+        finished["access_token"]
+            .as_str()
+            .unwrap()
+            .starts_with("tcn1_")
+    );
+    for absent in [
+        "witness",
+        "issuer_url",
+        "audience",
+        "inference_receipt_endpoint",
+        "connection_id",
+    ] {
+        assert!(finished.get(absent).is_none(), "finish leaked {absent}");
+    }
+    // Positive control for every `before` comparison above: the probe must see
+    // this finish's writes, one more row in each provisioned table and still no
+    // connection selection. On a role that RLS applies to it would read 0 both
+    // times, and the refusals above would have passed without proving anything.
+    let after = global_provisioned_counts(&admin).await;
+    for (index, table) in [
+        "trace_near_account_anchors",
+        "trace_accounts",
+        "trace_near_identities",
+        "device_keys",
+        "trace_account_principals",
+        "trace_near_provisioned_devices",
+        "trace_sessions",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            after[index],
+            before[index] + 1,
+            "the global probe must observe the successful finish in {table}"
+        );
+    }
+    assert_eq!(after[7], before[7], "finish never selects a connection");
+    let tenant = finished["tenant_id"].as_str().unwrap();
+    assert_eq!(row_counts(&db, tenant).await, [1, 1, 1, 1, 1, 0]);
+    assert_eq!(
+        persisted_wallet_device_join(&db, &finished, &public_key, &wallet_key(&wallet)).await,
+        1,
+        "the authenticated account must join the proved wallet and device"
+    );
+    let (status, identities) = request(
+        &state,
+        "GET",
+        "/v1/account/near-identities",
+        None,
+        Some(finished["access_token"].as_str().unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{identities}");
+    assert_eq!(
+        identities["near_identities"][0]["public_key"],
+        wallet_key(&wallet)
+    );
+    assert_eq!(
+        identities["near_identities"][0]["near_account_id"],
+        WALLET_ACCOUNT
+    );
+
+    let (status, _) = finish(&state, valid_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "consumed ceremony cannot replay"
+    );
+    assert_eq!(rpc_calls.load(Ordering::SeqCst), 1);
+
+    let started = start(&state, WALLET_ACCOUNT, &public_key, &challenge).await;
+    let (status, returned) = finish(
+        &state,
+        finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{returned}");
+    assert_eq!(rpc_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(returned["tenant_id"], finished["tenant_id"]);
+    assert_eq!(returned["account_id"], finished["account_id"]);
+    assert_eq!(returned["device_key_id"], finished["device_key_id"]);
+    assert_eq!(returned["anchor_hash"], finished["anchor_hash"]);
+    assert_eq!(row_counts(&db, tenant).await, [1, 1, 1, 1, 1, 0]);
+}
+
+/// A device key a legacy invite already registered under a `tenant-...`
+/// tenant cannot complete wallet v2 over the wire: the finish is refused, the
+/// key stays with the legacy tenant, and no account, session or device row is
+/// written. `device_keys.device_key_id` is a global primary key, so success
+/// here would have meant a NEAR session whose device keeps authenticating
+/// into the legacy tenant.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_WALLET_V2_PG_TEST_URL"]
+async fn wallet_v2_refuses_a_device_key_registered_to_another_tenant() {
+    let _serial = serial().lock().await;
+    let WalletDb { admin: db, runtime } = fresh_db().await;
+    let wallet = keypair();
+    let device = keypair();
+    let device_public_key =
+        base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        device.public_key().as_ref(),
+    );
+    let legacy_tenant = format!("tenant-legacy-{}", uuid::Uuid::new_v4().simple());
+    let admin = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&legacy_tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,$4,'invite')",
+            &[
+                &device_key_id,
+                &legacy_tenant,
+                &device_public_key,
+                &format!("sha256:{}", "ab".repeat(32)),
+            ],
+        )
+        .await
+        .unwrap();
+    let (rpc_url, _rpc_calls) = rpc_fixture(wallet_key(&wallet)).await;
+    let (state, _temp) = state(runtime, rpc_url);
+    let (verifier, challenge) = challenge_pair();
+    let before = global_provisioned_counts(&db).await;
+    // Positive control: the probe sees the legacy row seeded above, so it is
+    // reading through RLS rather than returning 0 for every table.
+    assert!(
+        before[3] >= 1,
+        "the global probe must see the seeded device key"
+    );
+
+    let started = start(&state, WALLET_ACCOUNT, &device_public_key, &challenge).await;
+    let (status, refused) = finish(
+        &state,
+        finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(refused.get("access_token").is_none(), "{refused}");
+    let holders: Vec<String> = admin
+        .query(
+            "SELECT tenant_id FROM device_keys WHERE device_key_id=$1",
+            &[&device_key_id],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(holders, vec![legacy_tenant]);
+    assert_eq!(
+        global_provisioned_counts(&db).await,
+        before,
+        "a refused finish writes no account, identity, device, principal or session"
+    );
+}

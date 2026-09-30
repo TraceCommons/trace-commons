@@ -41,6 +41,7 @@
 //! image is not reproducibly buildable and has never been reproduced. No text
 //! in this module may say "verifiable against source".
 
+pub mod inference_record;
 pub mod status;
 pub mod transport;
 pub mod verify;
@@ -183,6 +184,16 @@ pub enum WitnessTrustError {
     /// A witness response could not be read as a certificate and an envelope.
     #[error("the witness response was malformed")]
     WitnessResponseMalformed,
+    /// The witness declined the receipt behind an evidence-bearing request:
+    /// its signer, its model, or the size of the request it covers is outside
+    /// what that deployment accepts.
+    ///
+    /// A decision, not a fault. It is the refusal a rollout produces most
+    /// often -- a signer not yet trusted, a model not yet accepted -- and
+    /// folding it into [`Self::WitnessResponseMalformed`] made it read as the
+    /// witness being broken.
+    #[error("the witness declined the receipt behind this request")]
+    WitnessAdmissionEvidenceRefused,
     /// A claim is required for a witnessed submission and none was
     /// available.
     #[error("a claim is required before a session can be witnessed")]
@@ -197,6 +208,15 @@ pub enum WitnessTrustError {
     /// able to notice. Refused whatever the certificate says.
     #[error("the witness returned an artifact still carrying the raw bodies")]
     WitnessBodyNotStripped,
+    /// The witness is at capacity and certified nothing: the exact
+    /// `503 witness_saturated` pair of the pacing contract
+    /// (`trace_commons_protocol::witness_pacing`).
+    ///
+    /// The only retryable witness refusal. Nothing about the session was
+    /// judged, so it is held and tried again after `retry_after_secs` --
+    /// the witness's own `Retry-After`, bounded -- never refused.
+    #[error("the witness is busy")]
+    WitnessSaturated { retry_after_secs: u32 },
 }
 
 impl std::fmt::Debug for WitnessTrustError {
@@ -238,7 +258,53 @@ impl WitnessTrustError {
             Self::WitnessResponseMalformed => "witness_response_malformed",
             Self::WitnessClaimUnavailable => "witness_claim_unavailable",
             Self::WitnessBodyNotStripped => "witness_body_not_stripped",
+            // The wire label itself, like the admission refusal below.
+            Self::WitnessSaturated { .. } => {
+                trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
+            }
+            // The server's own spelling, passed through: one refusal, one
+            // name, wherever a contributor meets it.
+            Self::WitnessAdmissionEvidenceRefused => {
+                trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused.label()
+            }
         }
+    }
+
+    /// Every refusal label this type can produce.
+    ///
+    /// Written out rather than derived, because `refusal_label` has one arm
+    /// that returns a runtime value -- the measurement control -- and a
+    /// derivation would have to construct a variant to read it.
+    /// `every_refusal_label_is_recognised` walks the enum and fails if this
+    /// list falls behind.
+    pub const ALL_REFUSAL_LABELS: [&'static str; 15] = [
+        "witness_host_not_allowed",
+        "witness_attestation_unavailable",
+        "witness_collateral_unavailable",
+        "witness_quote_unverified",
+        "witness_quote_replayed",
+        "witness_signer_unexpected",
+        WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+        "witness_payload_too_large",
+        "witness_certificate_mismatched",
+        "witness_certificate_unverified",
+        "witness_response_malformed",
+        "witness_claim_unavailable",
+        "witness_body_not_stripped",
+        "admission_evidence_refused",
+        trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR,
+    ];
+
+    /// Recognise a refusal label that has been through a `String`.
+    ///
+    /// Returns this crate's own constant, never the caller's slice, so a
+    /// value that has crossed a boundary as text cannot become a word a
+    /// contributor is shown unless it is one of these.
+    #[must_use]
+    pub fn refusal_label_from(value: &str) -> Option<&'static str> {
+        Self::ALL_REFUSAL_LABELS
+            .into_iter()
+            .find(|label| *label == value)
     }
 }
 
@@ -304,4 +370,57 @@ pub async fn witness_session(
     let verified = verify::verify_witness(url, &evidence, &collateral, &nonce, now_unix, trust)?;
 
     transport::witness_contribution(transport, &verified, raw, attested, granted).await
+}
+
+/// Inputs for an explicitly approved token-bundle witness request.
+pub struct TokenBundleSession<'a> {
+    pub url: &'a str,
+    pub trust: &'a WitnessTrust,
+    pub now_unix: u64,
+    pub raw: trace_commons_protocol::trace_contribution::RawTraceContribution,
+    pub attested: transport::AttestedInference<'a>,
+    pub granted: &'a transport::GrantedConsent,
+    pub options: transport::TokenBundleRequest,
+}
+
+/// Perform the same nonce, measurement and signing-key checks as ordinary
+/// witnessing before transmitting any raw capture bytes.
+pub async fn witness_token_session(
+    transport: &transport::HttpWitnessTransport,
+    request: TokenBundleSession<'_>,
+) -> Result<crate::token_bundle::CertifiedBundleUpload, WitnessTrustError> {
+    use transport::WitnessTransport;
+    if !request.trust.is_pinned() {
+        return Err(WitnessTrustError::WitnessMeasurementUnpinned {
+            control: WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+            reported: None,
+        });
+    }
+    if !request.options.restricted_token_consent || request.attested.receipt.is_none() {
+        return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
+    }
+    crate::envelope::raw_contribution_size_ok(&request.raw)
+        .map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
+    let nonce = transport::WitnessNonce::fresh()?;
+    let evidence = transport.attestation(&nonce).await?;
+    let quote = hex::decode(evidence.quote_hex.trim())
+        .map_err(|_| WitnessTrustError::WitnessQuoteUnverified)?;
+    let collateral = transport.collateral(&quote).await?;
+    let verified = verify::verify_witness(
+        request.url,
+        &evidence,
+        &collateral,
+        &nonce,
+        request.now_unix,
+        request.trust,
+    )?;
+    transport
+        .witness_token_contribution(
+            &verified,
+            request.raw,
+            request.attested,
+            request.granted,
+            request.options,
+        )
+        .await
 }

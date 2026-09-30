@@ -4,4 +4,5 @@
 /profile / 200
 /install / 200
 /contributors/* / 200
+/runs/* / 200
 /about/* / 200

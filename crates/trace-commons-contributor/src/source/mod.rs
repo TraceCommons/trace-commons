@@ -299,6 +299,25 @@ pub struct SessionTranscript {
     /// them per queue entry would multiply the daemon's peak by the queue
     /// depth.
     pub attested_call: Option<Arc<crate::routing::attested::AttestedCall>>,
+    /// Why [`Self::attested_call`] is `None`, when something actually
+    /// refused.
+    ///
+    /// The refusal used to be discarded the instant it was produced -- the
+    /// overlay wrote `attested_final_call(..).ok()` -- and with it went the
+    /// only place the expensive checks are ever paid for. A surface that
+    /// wants to tell a contributor *why* a session cannot be sent would
+    /// otherwise have to re-read and re-hash every captured body to find out,
+    /// which is exactly the cost the cheap/expensive split exists to avoid.
+    /// Keeping the answer that was already computed costs one `Option`.
+    ///
+    /// `None` beside a `None` [`Self::attested_call`] means nothing refused,
+    /// because nothing ran: no body store is configured, or this transcript
+    /// never went through the overlay at all. That is a different fact from a
+    /// refusal and must not be read as one.
+    ///
+    /// Label-only, like the variant itself: it carries no path, digest or
+    /// identifier. See [`crate::routing::attested::Unattestable`].
+    pub attested_refusal: Option<crate::routing::attested::Unattestable>,
 }
 
 /// `Send + Sync` because the background daemon holds source adapters across
@@ -648,6 +667,44 @@ impl std::fmt::Debug for SourceRoots {
 }
 
 impl SourceRoots {
+    /// What each source these roots build reads from: its name and the root
+    /// `all_sources` would give it. For the daemon's automatic grant, which
+    /// records what is on disk per source, so a harness connected after the
+    /// grant, or pointed at another root, is recorded before it can arm
+    /// anything. Sources `all_sources` would not build are absent.
+    pub fn source_identities(&self) -> BTreeMap<&'static str, String> {
+        let mut out = BTreeMap::new();
+        for spec in NATIVE_SOURCES {
+            let root = match self.declared.get(spec.name) {
+                Some(SourceDeclaration::Off) => None,
+                Some(SourceDeclaration::Watch { path }) => Some(path.clone()),
+                None => match spec.undeclared {
+                    Undeclared::Conventional => spec.conventional_root.map(|root| root()),
+                    Undeclared::Nothing => None,
+                },
+            };
+            if let Some(root) = root {
+                out.insert(spec.name, root.to_string_lossy().to_string());
+            }
+        }
+        let trajectory = match &self.trajectory {
+            TrajectorySelection::None => None,
+            TrajectorySelection::Declared(path) => Some(path.to_string_lossy().to_string()),
+            TrajectorySelection::Auto {
+                working_dir,
+                staging_dir,
+            } => Some(format!(
+                "{:?} {:?}",
+                working_dir.as_deref(),
+                staging_dir.as_deref()
+            )),
+        };
+        if let Some(root) = trajectory {
+            out.insert(SOURCE_TRAJECTORY, root);
+        }
+        out
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

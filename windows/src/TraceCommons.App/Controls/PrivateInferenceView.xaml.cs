@@ -1,3 +1,4 @@
+using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -23,9 +24,17 @@ public sealed partial class PrivateInferenceView : UserControl
 
         ViewModel = new PrivateInferenceViewModel(host);
         Loaded += OnFirstLoaded;
+        Loaded += OnFundingLoaded;
+        Unloaded += (_, _) => ViewModel.Funding.Deactivate();
     }
 
     public PrivateInferenceViewModel ViewModel { get; }
+
+    private async void OnFundingLoaded(object sender, RoutedEventArgs e) =>
+        await ViewModel.Funding.ActivateAsync();
+
+    private async void OnFundingAction(object sender, RoutedEventArgs e) =>
+        await ViewModel.Funding.PressAsync();
 
     /// <summary>
     /// Reads the switch once the page is on screen rather than in the
@@ -67,6 +76,23 @@ public sealed partial class PrivateInferenceView : UserControl
     /// press may do rather than deciding for itself.
     /// </summary>
     public bool IsAnswering => ViewModel.Enabled;
+
+    /// <summary>
+    /// The credential card's one button.
+    /// </summary>
+    /// <remarks>
+    /// Which of the three actions a press performs is the view model's
+    /// question, answered from the shared table. This opens a browser only on
+    /// a ceremony that was actually started, at the URL the daemon handed
+    /// back with it -- start is the only thing that serves one, and no poll
+    /// re-serves it -- and then waits for the ceremony to settle so the card
+    /// stops saying a sign-in is under way once it is not.
+    /// </remarks>
+    private async void OnCredentialAction(object sender, RoutedEventArgs e) =>
+        await ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync());
+
+    private async void OnBalanceAction(object sender, RoutedEventArgs e) =>
+        await ViewModel.ContinueCredentialAsync(await ViewModel.PressBalanceAsync());
 
     /// <summary>
     /// "Send this tool's calls here", for one row.

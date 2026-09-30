@@ -127,7 +127,9 @@ impl Flow {
             || !browser
                 .is_some_and(|browser| same_origin(self.origin.as_deref().unwrap_or(""), browser))
         {
-            self.refuse(witness_copy().wallet.failed);
+            self.refuse(crate::witness_copy::wallet_start_refusal_line(
+                value.get("reason").and_then(Value::as_str),
+            ));
             return attempt;
         }
         self.attempt = attempt;
@@ -330,7 +332,10 @@ pub async fn handle_wallet(shared: &DaemonShared, req: &Request) -> Response {
         )
         .await
     };
-    let value = result.result.unwrap_or_default();
+    let value = match result.error {
+        Some(error) => json!({"reason": error.message}),
+        None => result.result.unwrap_or_default(),
+    };
     let cancel = {
         let mut map = flows().lock().expect("native flow lock");
         match map.get_mut(shared.store.dir()).filter(|f| f.id == flow_id) {
@@ -340,7 +345,14 @@ pub async fn handle_wallet(shared: &DaemonShared, req: &Request) -> Response {
                     flow.state = WalletState::Ready;
                     flow.message = witness_copy().wallet.available;
                 } else {
-                    flow.refuse(witness_copy().wallet.unavailable);
+                    // The daemon says which class of refusal this was; the
+                    // shared mapper turns that into the one sentence every
+                    // shell shows. This surface used to say "unavailable"
+                    // for all of them, including for the refusal that made
+                    // signup impossible in every shipped application.
+                    flow.refuse(crate::witness_copy::wallet_refusal_line(
+                        value.get("reason").and_then(Value::as_str),
+                    ));
                 }
                 None
             }
@@ -367,7 +379,10 @@ pub fn admission_response(mut response: Response, now: i64) -> Response {
             .and_then(Value::as_i64)
             .is_some_and(|expiry| expiry > now);
     let copy = witness_copy().admission;
-    value["view"] = json!({"ready":ready,"state":if ready{"Ready"}else{"Refused"},"message":if ready{copy.ready}else{copy.failed},"tone":if ready{"neutral"}else{copy.refused_tone},"glyph":if ready{""}else{copy.refused_glyph}});
+    let refused = crate::witness_copy::admission_refusal_line(
+        response.error.as_ref().map(|error| error.message.as_str()),
+    );
+    value["view"] = json!({"ready":ready,"state":if ready{"Ready"}else{"Refused"},"message":if ready{copy.ready}else{refused},"tone":if ready{"neutral"}else{copy.refused_tone},"glyph":if ready{""}else{copy.refused_glyph}});
     response
 }
 
@@ -381,6 +396,24 @@ mod tests {
         f.state = WalletState::Checking;
         f
     }
+    #[test]
+    fn ceremony_mismatch_reaches_native_views_without_a_browser_or_retry_loop() {
+        let mut flow = Flow::new();
+        flow.starting = true;
+        let response = json!({"reason": account_onboarding::CEREMONY_MISMATCH});
+        assert!(flow.finish_start(0, &response).is_none());
+        let view = flow.view();
+        assert_eq!(view.state, WalletState::Refused);
+        assert!(view.message.contains("disagree"));
+        assert!(!view.message.contains(account_onboarding::CEREMONY_MISMATCH));
+        assert!(!view.busy);
+        assert!(!view.wait);
+        assert!(view.browser_url.is_none());
+        flow.cancel();
+        flow.finish_start(0, &response);
+        assert_eq!(flow.view().state, WalletState::Idle);
+    }
+
     #[test]
     fn wallet_origin_requires_exact_https_and_no_credentials() {
         for invalid in [
@@ -424,6 +457,59 @@ mod tests {
         assert_eq!(f.state, WalletState::Complete);
         assert!(!f.view().busy);
     }
+    /// The check path must carry the daemon's refusal class all the way to
+    /// the sentence the shells print. This drives `handle_wallet` itself
+    /// rather than the mapper, because the seam that used to be wrong is the
+    /// one line between them: every refusal became "unavailable" there.
+    #[tokio::test]
+    async fn a_refused_address_and_an_unanswered_one_reach_the_shell_differently() {
+        use crate::config::tests_support::temp_store;
+        use crate::witness_copy::witness_copy;
+
+        async fn check(origin: &str) -> Value {
+            let (dir, store) = temp_store();
+            std::mem::forget(dir);
+            let shared = DaemonShared::load(store).unwrap();
+            let open = handle_wallet(
+                &shared,
+                &request(1, "native_wallet_flow", json!({"action":"open"})),
+            )
+            .await;
+            let flow_id = open.result.unwrap()["flow_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let checked = handle_wallet(
+                &shared,
+                &request(
+                    2,
+                    "native_wallet_flow",
+                    json!({"action":"check","flow_id":flow_id,"ingest_url":origin}),
+                ),
+            )
+            .await;
+            checked.result.unwrap()
+        }
+
+        // Nothing is listening here, so the daemon dials and gets nothing.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let refused = check("http://commons.example").await;
+        let unanswered = check(&format!("https://127.0.0.1:{port}")).await;
+
+        let copy = witness_copy().wallet;
+        assert_eq!(refused["message"], copy.address_refused);
+        assert_eq!(unanswered["message"], copy.unreachable);
+        assert_ne!(refused["message"], unanswered["message"]);
+        // Both are refusals, and neither is the sentence for a commons that
+        // answered and declined.
+        assert_eq!(refused["state"], "Refused");
+        assert_eq!(unanswered["state"], "Refused");
+        assert_ne!(unanswered["message"], copy.unavailable);
+    }
+
     #[test]
     fn admission_requires_fresh_integer_expiry_and_success() {
         for value in [
@@ -450,5 +536,104 @@ mod tests {
             .unwrap()["view"]["ready"],
             true
         );
+    }
+
+    fn admission_message(label: &str) -> String {
+        admission_response(Response::err(1, "unavailable", label), 10)
+            .result
+            .expect("view")["view"]["message"]
+            .as_str()
+            .expect("message")
+            .to_string()
+    }
+
+    /// `admission_receipt_endpoint_required` is the one admission failure a
+    /// contributor can do nothing about by retrying, and the only one whose
+    /// cause is configuration rather than a session, a proxy or a permission.
+    /// Collapsed into the generic sentence it reads as "try again", which is
+    /// advice that can never work.
+    #[test]
+    fn a_missing_receipt_endpoint_does_not_borrow_the_generic_failure_sentence() {
+        // `admission_setup_unavailable` is the one code that stays generic --
+        // it covers transport and filesystem failures this build cannot name.
+        // Every other code now classifies, so picking a named one here would
+        // compare two distinct sentences and pass for the wrong reason.
+        let generic = admission_message("admission_setup_unavailable");
+        assert_eq!(
+            generic,
+            witness_copy().admission.failed,
+            "an unclassified failure still says the generic sentence"
+        );
+        assert_ne!(
+            admission_message("admission_receipt_endpoint_required"),
+            generic,
+            "a contributor whose commons published no receipt endpoint is told to retry \
+             a thing that cannot succeed until the endpoint arrives"
+        );
+        assert_eq!(
+            admission_message("admission_receipt_endpoint_required"),
+            witness_copy().admission.failed_receipt_endpoint,
+            "the sentence comes from the shared copy, so the three shells say the same \
+             thing this one does"
+        );
+    }
+
+    /// Every cause a person must act on differently gets its own sentence.
+    ///
+    /// One label having escaped the generic sentence is not the fix: a person
+    /// who has not granted the inference-body permission, one whose IronWire
+    /// is not running, and one whose session came from an agent this build
+    /// cannot read are three different problems with three different actions,
+    /// and all three are told to check their settings and try again.
+    #[test]
+    fn each_distinct_admission_cause_gets_its_own_sentence() {
+        let generic = admission_message("admission_setup_unavailable");
+        assert_eq!(
+            generic,
+            witness_copy().admission.failed,
+            "an unclassified failure still says the generic sentence"
+        );
+        let distinct = [
+            "admission_setup_consent_required",
+            "admission_setup_unenrolled",
+            "admission_setup_proxy_missing",
+            "admission_setup_source_unsupported",
+            "admission_setup_endpoint_untrusted",
+            "admission_receipt_endpoint_required",
+        ];
+        for label in distinct {
+            assert_ne!(
+                admission_message(label),
+                generic,
+                "{label} still borrows the sentence that tells a person to retry"
+            );
+        }
+        let mut seen: Vec<String> = distinct.iter().map(|l| admission_message(l)).collect();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            before,
+            "two causes needing different actions were given the same words"
+        );
+    }
+
+    /// Its own sentence, not its own outcome: this is still a refusal, and a
+    /// distinct message must not leak into the `ready` flag, the state or the
+    /// tone.
+    #[test]
+    fn a_missing_receipt_endpoint_is_still_refused() {
+        let view = admission_response(
+            Response::err(1, "unavailable", "admission_receipt_endpoint_required"),
+            10,
+        )
+        .result
+        .expect("view")["view"]
+            .clone();
+        assert_eq!(view["ready"], false);
+        assert_eq!(view["state"], "Refused");
+        assert_eq!(view["tone"], witness_copy().admission.refused_tone);
+        assert_eq!(view["glyph"], witness_copy().admission.refused_glyph);
     }
 }

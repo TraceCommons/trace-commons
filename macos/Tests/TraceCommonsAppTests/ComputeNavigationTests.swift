@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import AppKit
 import SwiftUI
 import XCTest
@@ -41,7 +42,11 @@ final class ComputeNavigationTests: XCTestCase {
     func testTraceRootsGateDoesNotHideComputeOrAdvanceTraceOnboarding() async throws {
         let root = try directory()
         let trace = AppModel()
+        let rootsRequired = expectation(description: "Trace reports undeclared roots")
+        let startup = trace.$startup.dropFirst().first().sink { _ in rootsRequired.fulfill() }
         trace.start(configDirectory: root.path)
+        await fulfillment(of: [rootsRequired], timeout: 10)
+        withExtendedLifetime(startup) {}
         XCTAssertEqual(trace.startup, .needsRoots, "fresh launch must refuse watcher before scanning")
         let compute = ComputeModel()
         await compute.start(configDirectory: root.path)

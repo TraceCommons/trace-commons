@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigStore, DAEMON_SETTINGS_FILE};
@@ -84,8 +85,156 @@ const DEFAULT_CANARY_INTERVAL_SECS: u64 = 3600;
 /// `approve` reports no `hold_until`.
 const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
 
+/// A minted NEAR AI inference credential, as persisted.
+///
+/// The service returns the plaintext key exactly once, at creation, so there
+/// is no re-reading it: this record is the only copy the contributor has, and
+/// losing it means minting another. Everything beside the key is context the
+/// service itself renders in its own key list -- the prefix, the ids -- and is
+/// safe to show; the key never is.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiInferenceCredential {
+    /// The `sk-` key. Never rendered, never logged, never crosses the socket.
+    pub key: String,
+    /// The service's own id for the key, which is what revoking it needs.
+    pub key_id: String,
+    /// The leading characters the service shows in its key list, so a
+    /// contributor can tell which of their keys this is without seeing it.
+    pub key_prefix: String,
+    pub organization_id: String,
+    pub workspace_id: String,
+    pub minted_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for NearAiInferenceCredential {
+    /// Hand-written because `DaemonSettings` derives `Debug`: a derived impl
+    /// here would put the key in every `{:?}` of the whole settings document.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NearAiInferenceCredential")
+            .field("key", &"<redacted>")
+            .field("key_id", &self.key_id)
+            .field("key_prefix", &self.key_prefix)
+            .field("organization_id", &self.organization_id)
+            .field("workspace_id", &self.workspace_id)
+            .field("minted_at", &self.minted_at)
+            .finish()
+    }
+}
+
+/// The NEAR AI **session** this daemon retained after the credential
+/// ceremony, kept for one reason: reading the account balance.
+///
+/// **This is a wider credential than the inference key beside it, and the
+/// difference is not cosmetic.** The `sk-` key in
+/// [`NearAiInferenceCredential`] buys inference and nothing else -- every
+/// management route on cloud-api refuses it. A refresh token buys a session,
+/// and a session can mint further API keys, read organization and workspace
+/// state, and enumerate and delete the account's own tokens. A contributor
+/// who obtained inference has, by keeping this, given the daemon on their
+/// machine authority over their NEAR AI account that the inference key alone
+/// would never have carried.
+///
+/// It is retained anyway, deliberately, because the balance is
+/// session-authenticated and there is no narrower credential that can read
+/// it: `GET /v1/organizations/{org}/usage/balance` is `session_token`-only,
+/// as is every other management route, and an `sk-` key answers 401 on all of
+/// them. Showing a contributor what their account has left is worth the
+/// wider credential; pretending the credential is not wider would not be.
+///
+/// Only the refresh token is stored. The access token it buys is short-lived
+/// and lives in memory for as long as one daemon process runs -- there is
+/// nothing to gain from putting a second credential on disk, and the exchange
+/// route (`POST /v1/users/me/access-tokens`) is authenticated by the refresh
+/// token itself rather than by an access token, so a stale access token is
+/// never a reason to go back to the browser.
+///
+/// The refresh token **rotates**: every exchange returns a new one and the
+/// old one stops working. So this record is rewritten on each refresh, and a
+/// rotation that is minted but not persisted locks the contributor out until
+/// they re-run the ceremony. That is why the write happens before the new
+/// access token is used for anything.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiSession {
+    /// The `rt_` refresh token. Never rendered, never logged, never crosses
+    /// the socket.
+    pub refresh_token: String,
+    /// When the service last said this refresh token stops working, if it has
+    /// said. `None` is "not known" -- the OAuth finish hands the token back in
+    /// a URL fragment with no expiry beside it, so the first exchange is what
+    /// populates this. It is never treated as "does not expire": the refresh
+    /// route is the only thing that can tell us, and a refusal is what a
+    /// contributor is actually shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_expires_at: Option<DateTime<Utc>>,
+    /// When this record was last written, which after a rotation is when the
+    /// current token was issued rather than when the ceremony ran.
+    pub stored_at: DateTime<Utc>,
+    /// The User-Agent of whoever created this session, which the service
+    /// matches -- normalized -- on every refresh.
+    ///
+    /// It is part of the credential, not a description of it. For the OAuth
+    /// providers the creator is the *browser* that completed the redirect, so
+    /// this is that browser's agent, reported by the bounce page. For the NEAR
+    /// wallet flow the creating request is this client's own, so it is
+    /// `api::USER_AGENT`. Presenting the wrong one is answered `401` with an
+    /// empty body and is indistinguishable from a spent token.
+    ///
+    /// Empty for a session stored before this field existed. Those cannot be
+    /// refreshed -- nothing recorded what would match -- and the ceremony has
+    /// to run once more.
+    #[serde(default)]
+    pub user_agent: String,
+}
+
+impl std::fmt::Debug for NearAiSession {
+    /// Hand-written for the same reason as [`NearAiInferenceCredential`]'s:
+    /// `DaemonSettings` derives `Debug`, and a derived impl here would put a
+    /// live refresh token -- the wider of the two credentials in this
+    /// document -- into every `{:?}` of the whole settings blob.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NearAiSession")
+            .field("refresh_token", &"<redacted>")
+            .field("refresh_token_expires_at", &self.refresh_token_expires_at)
+            .field("stored_at", &self.stored_at)
+            .finish()
+    }
+}
+
+/// Why the stored Cloud credential could not be loaded at startup.
+///
+/// Each one is a different thing to tell the contributor, and the old single
+/// "unlock your credential store and restart" was false for two of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CloudStorageFailure {
+    /// The store did not answer: locked, denied, or a platform error. Unlock
+    /// and restart is the advice, and it is true.
+    #[default]
+    Unavailable,
+    /// This binary is not entitled to the store at all. Permanent for this
+    /// build; restarting changes nothing.
+    Unentitled,
+    /// macOS only: the store answered, and has nothing under the reference
+    /// settings name. A build from before the data-protection move kept it
+    /// in the legacy keychain, which is the only other place it can be. Not
+    /// confirmed by reading the legacy keychain -- that read can prompt, and
+    /// startup is not a moment the contributor chose -- so the move is
+    /// offered, and the move does the one read.
+    LegacyOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSettings {
+    /// Opaque OS entry and Cloud metadata. Legacy documents omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_credentials: Option<crate::daemon::stored_cloud_credentials::StoredCloudCredentials>,
+    /// Runtime-only failure, never a credential or a platform error string.
+    #[serde(skip)]
+    pub cloud_storage_unavailable: bool,
+    /// Why, when `cloud_storage_unavailable` is set. Runtime-only, like it.
+    /// The boolean stays the gate every credential use checks; this only
+    /// chooses which state, and so which sentence, a contributor is shown.
+    #[serde(skip)]
+    pub cloud_storage_failure: CloudStorageFailure,
     pub schema_version: String,
     pub poll_interval_secs: u64,
     pub quiescence_secs: u64,
@@ -121,6 +270,42 @@ pub struct DaemonSettings {
     /// Privacy-filter credentials, persisted so a service-managed daemon can
     /// reach the filter without a shell environment.
     pub near_ai: Option<NearAiSettings>,
+    /// The NEAR AI **inference** credential this daemon obtained for the
+    /// contributor, distinct from `near_ai` above, which is the
+    /// **privacy-filter** credential and answers a different service. Two
+    /// near-homonyms in one file invite "I set my NEAR AI key, why do calls
+    /// still fail", so the distinction is stated here, on the IPC boolean, and
+    /// in the doc inventory rather than left to be inferred from the name.
+    ///
+    /// This slot is the daemon's, and that is the point. The rule this module
+    /// keeps elsewhere -- never act on a slot the contributor owns -- is about
+    /// IronWire's own `config.json`, which a contributor may edit and which
+    /// `StartupProbes::Configured` exists to respect. Writing a minted key
+    /// into that file would be exactly the violation the rule forbids. So the
+    /// credential is resolved here in memory from the OS store. Settings
+    /// persist only `cloud_credentials` metadata after verified migration;
+    /// this field remains readable for upgrades from the old plaintext format.
+    ///
+    /// `#[serde(default)]` so a settings file written before this field
+    /// existed loads without one rather than failing to parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_ai_inference: Option<NearAiInferenceCredential>,
+    /// The session retained alongside the credential above, so the account
+    /// balance can be read. See [`NearAiSession`] for what this is authority
+    /// over, which is considerably more than the key beside it.
+    ///
+    /// A third NEAR-AI-shaped key in one document, and the three answer three
+    /// different questions: `near_ai` is the privacy-filter credential,
+    /// `near_ai_inference` is the key inference calls carry, and this is the
+    /// session that management reads need. Forgetting the credential clears
+    /// this too -- see `nearai_credential::ceremony::forget` -- because a
+    /// contributor who believes they revoked the daemon's access and left a
+    /// session behind has been told something false.
+    ///
+    /// `#[serde(default)]` so a settings file written before this field
+    /// existed loads without one rather than failing to parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_ai_session: Option<NearAiSession>,
     /// What the contributor said about each agent's sessions.
     ///
     /// `None` is "never asked", and it is the ONLY state that still falls
@@ -180,6 +365,11 @@ pub struct DaemonSettings {
     /// queued or submitted envelope.
     #[serde(default)]
     pub ironwire_attested_bodies: bool,
+    /// Separate consent to include filtered token probabilities in explicit reviews.
+    #[serde(default)]
+    pub token_distributions_contribution: bool,
+    #[serde(default)]
+    pub token_capture_enabled: Option<bool>,
 
     /// Run IronWire inside this daemon, so tools can send inference through
     /// it. Off by default and never turned on by discovery: finding
@@ -578,6 +768,11 @@ impl Default for DaemonSettings {
             approval_hold_secs: DEFAULT_APPROVAL_HOLD_SECS,
             local_notifications: false,
             near_ai: None,
+            near_ai_inference: None,
+            near_ai_session: None,
+            cloud_credentials: None,
+            cloud_storage_unavailable: false,
+            cloud_storage_failure: CloudStorageFailure::default(),
             claude_source: None,
             codex_source: None,
             gemini_source: None,
@@ -585,6 +780,8 @@ impl Default for DaemonSettings {
             opencode_source: None,
             ironwire: None,
             ironwire_attested_bodies: false,
+            token_distributions_contribution: false,
+            token_capture_enabled: None,
             private_inference: false,
             private_inference_offer_seen: false,
             legacy_claude_root: None,
@@ -594,6 +791,23 @@ impl Default for DaemonSettings {
 }
 
 impl DaemonSettings {
+    /// May prompt for OS storage. Call on a blocking worker before starting
+    /// Cloud consumers.
+    pub fn load_with_cloud_credentials(store: &ConfigStore) -> Result<Self> {
+        crate::daemon::cloud_credential_lifecycle::load_for_runtime(store)
+    }
+
+    /// Preserve existing metadata during preference edits without requiring an
+    /// available OS entry. Legacy plaintext must migrate before the next save.
+    /// Call on a blocking worker: migration may prompt for OS storage.
+    pub fn load_for_preferences(store: &ConfigStore) -> Result<Self> {
+        let settings = Self::load(store)?;
+        if settings.near_ai_inference.is_some() || settings.near_ai_session.is_some() {
+            Self::load_with_cloud_credentials(store)
+        } else {
+            Ok(settings)
+        }
+    }
     /// Load persisted settings, falling back to defaults when the daemon has
     /// never been configured on this machine.
     pub fn load(store: &ConfigStore) -> Result<Self> {
@@ -682,7 +896,32 @@ impl DaemonSettings {
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
-        let body = serde_json::to_vec_pretty(self).context("serializing daemon settings")?;
+        let locks = crate::daemon::nearai_credential::session::coordination(store.dir())?;
+        let _commit = locks.commit.lock()?;
+        // A preference writer may not restore a connection replaced since
+        // its snapshot was read. Credential mutations use the lifecycle.
+        crate::daemon::cloud_credential_lifecycle::ensure_current(&Self::load(store)?, self)?;
+        self.save_locked(store)
+    }
+
+    pub(crate) fn save_locked(&self, store: &ConfigStore) -> Result<()> {
+        let has_secrets = self.near_ai_inference.is_some() || self.near_ai_session.is_some();
+        if has_secrets
+            && !self.cloud_credentials.as_ref().is_some_and(|metadata| {
+                metadata.matches(
+                    self.near_ai_inference.as_ref(),
+                    self.near_ai_session.as_ref(),
+                )
+            })
+        {
+            return Err(anyhow::anyhow!(
+                "near_ai_credential_storage_migration_required"
+            ));
+        }
+        let mut persisted = self.clone();
+        persisted.near_ai_inference = None;
+        persisted.near_ai_session = None;
+        let body = serde_json::to_vec_pretty(&persisted).context("serializing daemon settings")?;
         store.write_daemon_file(DAEMON_SETTINGS_FILE, &body)
     }
 }
@@ -886,6 +1125,10 @@ pub fn apply_settings_object(
             // witness. A shell that sets `ironwire` and not this one gets
             // routing telemetry and no bodies, which is the answer most
             // contributors mean.
+            "token_distributions_contribution" => {
+                settings.token_distributions_contribution =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
             "ironwire_attested_bodies" => {
                 settings.ironwire_attested_bodies =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -896,6 +1139,10 @@ pub fn apply_settings_object(
             // clearing it stops only the instance this daemon started --
             // an IronWire someone else is running is never touched by
             // either value.
+            "token_capture_enabled" => {
+                settings.token_capture_enabled =
+                    Some(value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?);
+            }
             "private_inference" => {
                 settings.private_inference = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
@@ -985,6 +1232,67 @@ fn parse_source_declaration(
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+
+    fn credential() -> NearAiInferenceCredential {
+        NearAiInferenceCredential {
+            key: "sk-super-secret-key".into(),
+            key_id: "key-1".into(),
+            key_prefix: "sk-sup".into(),
+            organization_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            minted_at: Utc::now(),
+        }
+    }
+
+    /// `DaemonSettings` derives `Debug`, so a derived `Debug` on the
+    /// credential would put a live inference key into every `{:?}` of the
+    /// whole settings document -- one `tracing::debug!` from a log file.
+    #[test]
+    fn the_inference_key_is_not_printable_through_the_settings_it_lives_in() {
+        let mut settings = DaemonSettings::default();
+        assert!(settings.near_ai_inference.is_none(), "off by default");
+        settings.near_ai_inference = Some(credential());
+        let rendered = format!("{settings:?}");
+        assert!(!rendered.contains("sk-super-secret-key"), "{rendered}");
+        // The prefix is what the service itself shows in its key list, and is
+        // how a contributor tells which of their keys this is.
+        assert!(rendered.contains("sk-sup"), "{rendered}");
+    }
+
+    /// The credential survives the 0600 settings file, and a file written
+    /// before the field existed still loads.
+    #[test]
+    fn the_credential_round_trips_and_an_older_settings_file_still_loads() {
+        let (_dir, store) = temp_store();
+        let mut settings = DaemonSettings {
+            near_ai_inference: Some(credential()),
+            ..Default::default()
+        };
+        settings.save_for_test(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load_with_cloud_credentials(&store)
+                .unwrap()
+                .near_ai_inference,
+            settings.near_ai_inference
+        );
+
+        let mut older: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.dir().join(DAEMON_SETTINGS_FILE)).unwrap())
+                .unwrap();
+        older.as_object_mut().unwrap().remove("near_ai_inference");
+        older.as_object_mut().unwrap().remove("cloud_credentials");
+        std::fs::write(
+            store.dir().join(DAEMON_SETTINGS_FILE),
+            serde_json::to_vec(&older).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .near_ai_inference
+                .is_none()
+        );
+    }
 
     /// The daemon reads the staging directory `import-antigravity` writes to.
     ///
@@ -1842,6 +2150,22 @@ mod tests {
         assert_eq!(s.max_reuploads, DEFAULT_MAX_REUPLOADS);
         assert!(!s.local_notifications, "notifications must be opt-in");
         assert!(s.near_ai.is_none());
+    }
+
+    #[test]
+    fn token_collection_stays_opt_in_for_new_and_existing_settings() {
+        let (_d, store) = temp_store();
+        let fresh = DaemonSettings::load(&store).unwrap();
+        assert!(!fresh.token_distributions_contribution);
+        assert_eq!(fresh.token_capture_enabled, None);
+
+        let mut legacy = serde_json::to_value(&fresh).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("token_distributions_contribution");
+        object.remove("token_capture_enabled");
+        let upgraded: DaemonSettings = serde_json::from_value(legacy).unwrap();
+        assert!(!upgraded.token_distributions_contribution);
+        assert_eq!(upgraded.token_capture_enabled, None);
     }
 
     #[test]

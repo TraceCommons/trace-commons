@@ -71,6 +71,175 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let harnessPlanEntryUnusable: String
     public let harnessPlanNoConfigPath: String
 
+    /// The heading over the sign-in card.
+    /// Enrolling this device with the NEAR AI login a contributor already
+    /// has, instead of a NEAR wallet. Both paths are offered; neither is
+    /// removed. The ten refusals are the daemon's own control names and each
+    /// says its own thing -- the three that refuse before anything is spent
+    /// especially, since a contributor told the wrong one debugs the wrong
+    /// thing.
+    public let nearAiEnrollTitle: String
+    public let nearAiEnrollWhat: String
+    public let nearAiEnrollAction: String
+    public let nearAiEnrollNeedsLogin: String
+    public let nearAiEnrollWorking: String
+    public let nearAiEnrollDone: String
+    public let nearAiEnrollAlreadyEnrolled: String
+    public let nearAiEnrollNoSession: String
+    public let nearAiEnrollEndpointRefused: String
+    public let nearAiEnrollTokenUnavailable: String
+    public let nearAiEnrollStartFailed: String
+    public let nearAiEnrollCommonsUnreachable: String
+    public let nearAiEnrollCommonsUnsupported: String
+    public let nearAiEnrollInvalid: String
+    public let nearAiEnrollVerificationFailed: String
+    public let nearAiEnrollUnavailable: String
+    public let credentialTitle: String
+    /// What holding a key of one's own changes about this destination.
+    public let credentialWhat: String
+    public let credentialProviderLabel: String
+    public let credentialProviderGithub: String
+    public let credentialProviderGoogle: String
+    public let credentialProviderNear: String
+    public let credentialWalletNotice: String
+    /// The three consequences of pressing Obtain: a browser opens, the
+    /// contributor signs in with a company that is not this app, and a key
+    /// is minted and kept here.
+    ///
+    /// Drawn WHEREVER Obtain is offered, and never separated from it. The
+    /// button is the only control on this shell that opens a browser and
+    /// mints something at a third party, and a contributor who pressed it
+    /// having read only its label was not told what they agreed to.
+    public let credentialCost: String
+    public let credentialObtain: String
+    public let credentialCancel: String
+    public let credentialForget: String
+    /// That forgetting is local: the key stays valid at the service until
+    /// the contributor removes it in their own account. Drawn WHEREVER
+    /// Forget is offered -- `handle_forget`'s `revoked: false` in words, and
+    /// a button labelled only "Forget" reads as a revocation it is not.
+    public let credentialForgetExplains: String
+    /// The button behind `migration_available`, and the sentence drawn beside
+    /// it: moving copies the sign-in out of the login keychain, and macOS may
+    /// ask for the login password once to allow that.
+    public let credentialMigrate: String
+    public let credentialMigrateExplains: String
+    public let credentialAbsent: String
+    public let credentialObtaining: String
+    public let credentialFailed: String
+    public let credentialCancelled: String
+    public let credentialPresent: String
+    /// A state label this build has never heard of.
+    ///
+    /// Its own sentence, and it must never degrade to `credentialAbsent`:
+    /// that is a claim about what this machine holds, and a contributor who
+    /// already has a key would read it as an invitation to mint a second one
+    /// in their own account that nothing here would ever mention again.
+    public let credentialUnknown: String
+    /// A daemon that does not answer the question at all. Distinct from
+    /// `credentialUnknown` for the same reason and by the same rule.
+    public let credentialUnreported: String
+    /// Why a connect control is not on offer. Drawn from
+    /// `tc_harness_credential_notice` and never from this shell's own
+    /// reading of a `destination_credentialed` field.
+    public let harnessNeedsCredential: String
+
+    /// The four `eligibility` states a queue entry can carry.
+    ///
+    /// Never picked by a `switch` here: the sentence for a state comes back
+    /// from `tc_contribution_eligibility_line`, and these are carried so a
+    /// test can pin what that table answered against the set this build was
+    /// compiled with. `eligibilityUnknown` is the one an unfamiliar state
+    /// reaches, and it must never degrade into an ineligibility.
+    public let eligibilityEligible: String
+    public let eligibilityIneligiblePermanent: String
+    public let eligibilityIneligibleConfiguration: String
+    public let eligibilityUnknown: String
+    /// The thirteen `eligibility_reason` labels, in the order the Rust
+    /// declares them. An `eligible` row carries no reason at all, and an
+    /// unfamiliar one renders nothing rather than borrowing one of these.
+    public let eligibilityReasonNoCall: String
+    public let eligibilityReasonCaptureOff: String
+    public let eligibilityReasonDigestAbsent: String
+    public let eligibilityReasonUpstreamIdAbsent: String
+    public let eligibilityReasonDigestMismatch: String
+    public let eligibilityReasonReferenceMalformed: String
+    public let eligibilityReasonBodiesUnreadable: String
+    public let eligibilityReasonBodyNotUtf8: String
+    public let eligibilityReasonBodyTooLarge: String
+    public let eligibilityReasonEvidenceCaptureOff: String
+    public let eligibilityReasonMarkerAbsent: String
+    public let eligibilityReasonRequestMalformed: String
+    public let eligibilityReasonReceiptUnavailable: String
+    public let eligibilityReasonReceiptNotIssued: String
+
+    /// The four `attestation` marks a queue entry can carry, and the thirteen
+    /// `attestation_reason` sentences.
+    ///
+    /// Separate sentences from the `eligibility*` fields above over the SAME
+    /// thirteen reason labels. Five of the eligibility sentences say the
+    /// session cannot be sent, which is true for an evidence-admitted
+    /// contributor and false for an invited one, whose session sends
+    /// perfectly well and merely arrives without a copy of its call. Do not
+    /// render one where the other belongs.
+    /// The certificate-held list, in both readings.
+    ///
+    /// The list is driven by the queue entry's `holds_certificate`, true
+    /// after either witness route. Which sentence a row gets follows the
+    /// contributor's invite status -- the same status this shell already
+    /// reads for the eligibility surface -- and NEVER the attestation mark
+    /// below, which answers whether the session carries a copy of its model
+    /// call. Holds-a-certificate and was-attested are different facts.
+    public let certificateRowCandidate: String
+    public let certificateRowAttested: String
+    public let certificateListCandidate: String
+    public let certificateListAttested: String
+    public let certificateListEmpty: String
+    public let attestationAttested: String
+    public let attestationUnattestedPermanent: String
+    public let attestationUnattestedConfiguration: String
+    public let attestationUnknown: String
+    public let attestationReasonNoCall: String
+    public let attestationReasonCaptureOff: String
+    public let attestationReasonDigestAbsent: String
+    public let attestationReasonUpstreamIdAbsent: String
+    public let attestationReasonDigestMismatch: String
+    public let attestationReasonReferenceMalformed: String
+    public let attestationReasonBodiesUnreadable: String
+    public let attestationReasonBodyNotUtf8: String
+    public let attestationReasonBodyTooLarge: String
+    public let attestationReasonEvidenceCaptureOff: String
+    public let attestationReasonMarkerAbsent: String
+    public let attestationReasonRequestMalformed: String
+    public let attestationReasonReceiptUnavailable: String
+    public let attestationReasonReceiptNotIssued: String
+
+    /// The balance row: its heading, what it is a fact about, and the seven
+    /// sentences a state can reach.
+    ///
+    /// Never picked by a `switch` here: the sentence for a state comes back
+    /// from `tc_near_ai_balance_state_line`, and these are carried so a test
+    /// can pin what that table answered against the set this build was
+    /// compiled with. Nothing on this row judges an amount -- a shell that
+    /// painted a low balance as a warning would be inventing a claim the
+    /// Rust does not make.
+    public let balanceTitle: String
+    public let fundingTitle: String
+    public let fundingWhat: String
+    public let fundingManage: String
+    public let fundingRefresh: String
+    public let fundingUnavailable: String
+    public let balanceWhat: String
+    public let balanceNoSession: String
+    public let balanceSessionExpired: String
+    public let balanceNoOrganization: String
+    public let balanceUnavailable: String
+    public let balanceUnknown: String
+    public let balanceUnreported: String
+    /// The sentence a `null` remaining figure gets INSTEAD of `$0.00`. An
+    /// unreported figure is not a spent-out account.
+    public let balanceNoRemaining: String
+
     /// `CaseIterable` so a test on the far side can compare the exported
     /// field set against the declared one in BOTH directions -- a field the
     /// Rust grows and this struct drops would sail past a test that only
@@ -124,6 +293,99 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case harnessPlanNothingToChange = "harness_plan_nothing_to_change"
         case harnessPlanEntryUnusable = "harness_plan_entry_unusable"
         case harnessPlanNoConfigPath = "harness_plan_no_config_path"
+        case nearAiEnrollTitle = "near_ai_enroll_title"
+        case nearAiEnrollWhat = "near_ai_enroll_what"
+        case nearAiEnrollAction = "near_ai_enroll_action"
+        case nearAiEnrollNeedsLogin = "near_ai_enroll_needs_login"
+        case nearAiEnrollWorking = "near_ai_enroll_working"
+        case nearAiEnrollDone = "near_ai_enroll_done"
+        case nearAiEnrollAlreadyEnrolled = "near_ai_enroll_already_enrolled"
+        case nearAiEnrollNoSession = "near_ai_enroll_no_session"
+        case nearAiEnrollEndpointRefused = "near_ai_enroll_endpoint_refused"
+        case nearAiEnrollTokenUnavailable = "near_ai_enroll_token_unavailable"
+        case nearAiEnrollStartFailed = "near_ai_enroll_start_failed"
+        case nearAiEnrollCommonsUnreachable = "near_ai_enroll_commons_unreachable"
+        case nearAiEnrollCommonsUnsupported = "near_ai_enroll_commons_unsupported"
+        case nearAiEnrollInvalid = "near_ai_enroll_invalid"
+        case nearAiEnrollVerificationFailed = "near_ai_enroll_verification_failed"
+        case nearAiEnrollUnavailable = "near_ai_enroll_unavailable"
+        case credentialTitle = "credential_title"
+        case credentialWhat = "credential_what"
+        case credentialProviderLabel = "credential_provider_label"
+        case credentialProviderGithub = "credential_provider_github"
+        case credentialProviderGoogle = "credential_provider_google"
+        case credentialProviderNear = "credential_provider_near"
+        case credentialWalletNotice = "credential_wallet_notice"
+        case credentialCost = "credential_cost"
+        case credentialObtain = "credential_obtain"
+        case credentialCancel = "credential_cancel"
+        case credentialForget = "credential_forget"
+        case credentialForgetExplains = "credential_forget_explains"
+        case credentialMigrate = "credential_migrate"
+        case credentialMigrateExplains = "credential_migrate_explains"
+        case credentialAbsent = "credential_absent"
+        case credentialObtaining = "credential_obtaining"
+        case credentialFailed = "credential_failed"
+        case credentialCancelled = "credential_cancelled"
+        case credentialPresent = "credential_present"
+        case credentialUnknown = "credential_unknown"
+        case credentialUnreported = "credential_unreported"
+        case harnessNeedsCredential = "harness_needs_credential"
+        case eligibilityEligible = "eligibility_eligible"
+        case eligibilityIneligiblePermanent = "eligibility_ineligible_permanent"
+        case eligibilityIneligibleConfiguration = "eligibility_ineligible_configuration"
+        case eligibilityUnknown = "eligibility_unknown"
+        case eligibilityReasonNoCall = "eligibility_reason_no_call"
+        case eligibilityReasonCaptureOff = "eligibility_reason_capture_off"
+        case eligibilityReasonDigestAbsent = "eligibility_reason_digest_absent"
+        case eligibilityReasonUpstreamIdAbsent = "eligibility_reason_upstream_id_absent"
+        case eligibilityReasonDigestMismatch = "eligibility_reason_digest_mismatch"
+        case eligibilityReasonReferenceMalformed = "eligibility_reason_reference_malformed"
+        case eligibilityReasonBodiesUnreadable = "eligibility_reason_bodies_unreadable"
+        case eligibilityReasonBodyNotUtf8 = "eligibility_reason_body_not_utf8"
+        case eligibilityReasonBodyTooLarge = "eligibility_reason_body_too_large"
+        case eligibilityReasonEvidenceCaptureOff = "eligibility_reason_evidence_capture_off"
+        case eligibilityReasonMarkerAbsent = "eligibility_reason_marker_absent"
+        case eligibilityReasonRequestMalformed = "eligibility_reason_request_malformed"
+        case eligibilityReasonReceiptUnavailable = "eligibility_reason_receipt_unavailable"
+        case certificateRowCandidate = "certificate_row_candidate"
+        case certificateRowAttested = "certificate_row_attested"
+        case certificateListCandidate = "certificate_list_candidate"
+        case certificateListAttested = "certificate_list_attested"
+        case certificateListEmpty = "certificate_list_empty"
+        case eligibilityReasonReceiptNotIssued = "eligibility_reason_receipt_not_issued"
+        case attestationAttested = "attestation_attested"
+        case attestationUnattestedPermanent = "attestation_unattested_permanent"
+        case attestationUnattestedConfiguration = "attestation_unattested_configuration"
+        case attestationUnknown = "attestation_unknown"
+        case attestationReasonNoCall = "attestation_reason_no_call"
+        case attestationReasonCaptureOff = "attestation_reason_capture_off"
+        case attestationReasonDigestAbsent = "attestation_reason_digest_absent"
+        case attestationReasonUpstreamIdAbsent = "attestation_reason_upstream_id_absent"
+        case attestationReasonDigestMismatch = "attestation_reason_digest_mismatch"
+        case attestationReasonReferenceMalformed = "attestation_reason_reference_malformed"
+        case attestationReasonBodiesUnreadable = "attestation_reason_bodies_unreadable"
+        case attestationReasonBodyNotUtf8 = "attestation_reason_body_not_utf8"
+        case attestationReasonBodyTooLarge = "attestation_reason_body_too_large"
+        case attestationReasonEvidenceCaptureOff = "attestation_reason_evidence_capture_off"
+        case attestationReasonMarkerAbsent = "attestation_reason_marker_absent"
+        case attestationReasonRequestMalformed = "attestation_reason_request_malformed"
+        case attestationReasonReceiptUnavailable = "attestation_reason_receipt_unavailable"
+        case attestationReasonReceiptNotIssued = "attestation_reason_receipt_not_issued"
+        case balanceTitle = "balance_title"
+        case fundingTitle = "funding_title"
+        case fundingWhat = "funding_what"
+        case fundingManage = "funding_manage"
+        case fundingRefresh = "funding_refresh"
+        case fundingUnavailable = "funding_unavailable"
+        case balanceWhat = "balance_what"
+        case balanceNoSession = "balance_no_session"
+        case balanceSessionExpired = "balance_session_expired"
+        case balanceNoOrganization = "balance_no_organization"
+        case balanceUnavailable = "balance_unavailable"
+        case balanceUnknown = "balance_unknown"
+        case balanceUnreported = "balance_unreported"
+        case balanceNoRemaining = "balance_no_remaining"
     }
 
     /// All or nothing, for the reason on the type.

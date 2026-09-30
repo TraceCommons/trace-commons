@@ -1,4 +1,5 @@
 import SwiftUI
+import TCBridge
 import TCShellCore
 
 /// The queue: one per session waiting for a decision.
@@ -83,6 +84,9 @@ struct QueueContent: View {
             if let budget = model.budgetHealth {
                 HealthBanner(health: budget)
             }
+            if let witness = model.witnessCapacityHealth {
+                HealthBanner(health: witness)
+            }
             if let undo = model.undo {
                 UndoBar(
                     undo: undo,
@@ -91,13 +95,16 @@ struct QueueContent: View {
                 )
             }
             if let error = model.lastActionError {
-                ActionErrorBanner(text: error) { model.lastActionError = nil }
+                ActionMessageBanner(text: error) { model.lastActionError = nil }
             }
             if let notice = model.lastActionNotice {
-                Text(notice)
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(.secondary)
+                ActionMessageBanner(text: notice) { model.lastActionNotice = nil }
             }
+
+            // The sessions a witness certificate is held for, gathered above
+            // the folders they are scattered across. Drawn on every render
+            // including when it is empty -- see `CertificateSection`.
+            CertificateSection(entries: model.awaitingDecision)
 
             // The offer to answer model calls on this computer, on the
             // screen this app opens on. Settings is where the switch LIVES;
@@ -194,6 +201,11 @@ struct QueueContent: View {
                 ForEach(model.waitingByProject) { group in
                     QueueFolderRow(
                         group: group,
+                        // The daemon's own row for this project, matched by
+                        // the id `list_projects` mints -- the same id the
+                        // grouping keys on. Nil until that call answers.
+                        project: model.projects.first { $0.projectId == group.id },
+                        eligibilityCalls: model.eligibilityCalls,
                         onOpen: { location = .project(group.id) },
                         onSubmitAll: { model.submitProject(id: group.id) },
                         onSubmitAllAs: { model.submitProject(id: group.id, verdict: $0) },
@@ -243,6 +255,9 @@ struct QueueContent: View {
 
             ProjectQueueGroup(
                 group: group,
+                copy: model.privateInferenceCopy,
+                eligibilityCalls: model.eligibilityCalls,
+                attestationCalls: model.attestationCalls,
                 summaries: model.summaries,
                 summaryErrors: model.summaryErrors,
                 tooLarge: model.tooLarge,
@@ -272,6 +287,15 @@ struct QueueContent: View {
 /// and stating them in both places would be two things to keep in step.
 private struct ProjectQueueGroup: View {
     let group: QueueGroup<QueueEntry>
+    /// The shared sentences, or `nil` when the payload would not decode.
+    /// Passed down rather than read here: this view draws nothing itself.
+    let copy: PrivateInferenceCopy?
+    /// The eligibility branch tables, all four of them the Rust's.
+    let eligibilityCalls: EligibilityCalls
+    /// The attestation mark's three tables, also the Rust's. Separate from
+    /// the four above because they answer a different question and their
+    /// reason sentences differ label for label.
+    let attestationCalls: AttestationCalls
     let summaries: [String: PreviewSummary]
     let summaryErrors: [String: String]
     let tooLarge: [String: PreviewTooLarge]
@@ -331,6 +355,9 @@ private struct ProjectQueueGroup: View {
         ForEach(group.entries) { entry in
             QueueRow(
                 entry: entry,
+                copy: copy,
+                eligibilityCalls: eligibilityCalls,
+                attestationCalls: attestationCalls,
                 summary: summaries[entry.entryID],
                 summaryError: summaryErrors[entry.entryID],
                 tooLarge: tooLarge[entry.entryID],
@@ -355,6 +382,14 @@ private struct ProjectQueueGroup: View {
 /// above.
 struct QueueRow: View {
     let entry: QueueEntry
+    /// The shared sentences. `nil` when the copy payload would not decode,
+    /// which draws no eligibility sentence rather than a blank one -- but
+    /// does NOT re-offer a control the ABI withheld; see `offersContribute`.
+    let copy: PrivateInferenceCopy?
+    let eligibilityCalls: EligibilityCalls
+    /// The attestation mark's three tables. Handed to every row, because
+    /// every row has a mark to draw.
+    let attestationCalls: AttestationCalls
     let summary: PreviewSummary?
     let summaryError: String?
     /// Set when the daemon's preview scheduler refused this session for
@@ -387,6 +422,86 @@ struct QueueRow: View {
     private var survivorLine: String? {
         guard let summary else { return nil }
         return RedactionLabels.survivorLine(summary.redactions)
+    }
+
+    // MARK: - Whether this session can be contributed at all
+
+    /// What the daemon said about contributing this session, or nothing.
+    ///
+    /// `nil` for an invited contributor and for a daemon predating the
+    /// field. Nothing below branches on the state string; all three
+    /// questions go to `EligibilitySurface`, which asks the Rust.
+    private var eligibility: ContributionEligibility? { entry.contributionEligibility }
+
+    /// The sentence on the row, or none. Absent both when there is no
+    /// eligibility question and when the copy payload would not decode -- in
+    /// the second case the card says nothing rather than saying it blankly.
+    private var eligibilityLine: String? {
+        guard let copy else { return nil }
+        return EligibilitySurface.stateLine(
+            eligibility, copy: copy, calls: eligibilityCalls)
+    }
+
+    /// The reason under it, or none. Absent on every `eligible` row and on a
+    /// reason this build has never heard of.
+    private var eligibilityReasonLine: String? {
+        EligibilitySurface.reasonLine(eligibility, calls: eligibilityCalls)
+    }
+
+    /// The tone both sentences are painted in, from the ABI and never from
+    /// this shell's reading of the state.
+    private var eligibilityTone: TC.Tone? {
+        EligibilitySurface.tone(eligibility, calls: eligibilityCalls)
+            .map(PrivateInferenceIndicator.palette)
+    }
+
+    // MARK: - Whether this session carries proof of its last model call
+
+    /// The mark on the row, or none.
+    ///
+    /// `nil` ONLY when the copy payload would not decode, which is the same
+    /// hedge the eligibility line makes: the card says nothing rather than
+    /// saying it blankly. It is never `nil` for a want of a mark -- every
+    /// entry carries one, an invited contributor's included, which is the
+    /// difference between this line and its sibling above.
+    private var attestationLine: String? {
+        guard let copy else { return nil }
+        return AttestationSurface.markLine(
+            entry.attestationMark, copy: copy, calls: attestationCalls)
+    }
+
+    /// The reason under it, or none.
+    ///
+    /// Absent on every `attested` row, present on both unattested marks, and
+    /// present on `unknown` only sometimes -- a row nobody evaluated has
+    /// nothing to add, a send retracted for an unreachable receipt service
+    /// does. `AttestationSurface` branches on the key, never on the mark.
+    private var attestationReasonLine: String? {
+        AttestationSurface.reasonLine(entry.attestationMark, calls: attestationCalls)
+    }
+
+    /// The tone that sentence is painted in, from the ABI. Neutral for both
+    /// the unknown mark and a permanently unattested one, so an ordinary
+    /// older session reads as quietly as it should.
+    private var attestationTone: TC.Tone {
+        PrivateInferenceIndicator.palette(
+            AttestationSurface.tone(entry.attestationMark, calls: attestationCalls))
+    }
+
+    /// Whether `Submit` is drawn at all.
+    ///
+    /// The ROW's send control is removed rather than disabled: there is
+    /// nothing to enable, and a greyed button invites a contributor to hunt
+    /// for what would ungrey it. The row itself stays -- the session is
+    /// still shown, still openable, still dismissable -- because hiding a
+    /// contributor's own work is its own dishonesty.
+    ///
+    /// Asked of the ABI even when `copy` is nil. A build that could not read
+    /// its sentences must not fall back to offering the button: the sentence
+    /// is what explains the missing control, and losing the sentence is not
+    /// a reason to send work the server will refuse.
+    private var offersContribute: Bool {
+        EligibilitySurface.offersContribute(eligibility, calls: eligibilityCalls)
     }
 
     var body: some View {
@@ -459,9 +574,8 @@ struct QueueRow: View {
         Group {
             if let summary {
                 Text(summary.openingPrompt.isEmpty ? "(no opening prompt)" : summary.openingPrompt)
-                    .font(TC.Font_.body)
+                    .tcType(TC.Font_.bodyText)
                     .foregroundStyle(TC.inkPrimary)
-                    .lineSpacing(TC.Font_.LineHeight.spacing(for: 13, TC.Font_.LineHeight.body))
                     .lineLimit(3)
                     .textSelection(.enabled)
             } else if let tooLarge {
@@ -529,6 +643,8 @@ struct QueueRow: View {
                     survivor
                 }
                 extent
+                admissibility
+                attestation
             }
             Spacer(minLength: TC.Space.m)
             actions
@@ -552,9 +668,8 @@ struct QueueRow: View {
     /// case that gets the gold rather than the strip's grey.
     private var caption: some View {
         Text(ScrubbingCaveat.rowLine(redactionCount: redactionCount))
-            .font(TC.Font_.footnote)
+            .tcType(TC.Font_.footnoteText)
             .foregroundStyle(ScrubbingCaveat.tone(redactionCount: redactionCount).textColor)
-            .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -573,11 +688,81 @@ struct QueueRow: View {
     private var extent: some View {
         if let line = entry.subagentLine {
             Text(line)
-                .font(TC.Font_.footnote)
+                .tcType(TC.Font_.footnoteText)
                 .foregroundStyle(entry.wasTrimmed ? TC.goldText : TC.inkSecondary)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel(line)
+        }
+    }
+
+    /// Whether this session can be contributed, and why not when it cannot.
+    ///
+    /// Outside the `if let summary` for the reason `extent` is: eligibility
+    /// is a load-time fact carried on the entry, so the line is as true
+    /// while the card still reads "Reading it locally…" as it is afterwards.
+    /// A session that cannot be sent must not be able to reach a decision
+    /// through a card that never got a preview.
+    ///
+    /// Absent entirely when the entry carried no `eligibility` key, so an
+    /// invited contributor's card is the card they always had.
+    @ViewBuilder
+    private var admissibility: some View {
+        if let eligibilityLine {
+            let tone = eligibilityTone ?? TC.Tone.neutral
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                // The glyph comes off the same tone as the colour, so the
+                // state survives greyscale and a black-and-white screenshot.
+                Label(eligibilityLine, systemImage: tone.symbol)
+                    .tcType(TC.Font_.footnoteText)
+                    .foregroundStyle(tone.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let eligibilityReasonLine {
+                    Text(eligibilityReasonLine)
+                        .tcType(TC.Font_.footnoteText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// Whether this session carries a checkable copy of the model call that
+    /// produced it.
+    ///
+    /// A SIBLING OF `admissibility`, NOT A PART OF IT, and drawn at the same
+    /// level for a reason: nesting it under the eligibility line would hide
+    /// it from exactly the contributors this exists for, since an invited
+    /// contributor's entry carries no eligibility question and every entry
+    /// carries a mark.
+    ///
+    /// One line on an attested row, which is the common one: `attested`
+    /// never carries a reason, and its tone is the settled one the card
+    /// already uses. The second line appears only where there is something
+    /// to explain -- both unattested marks, and the `unknown` row whose send
+    /// was retracted for a receipt that could not be fetched.
+    ///
+    /// Nothing here is pressable. The mark describes the trace; whether the
+    /// session may be sent is the eligibility control's question, one
+    /// section up.
+    @ViewBuilder
+    private var attestation: some View {
+        if let attestationLine {
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                // The glyph comes off the same tone as the colour, so the
+                // mark survives greyscale and a black-and-white screenshot.
+                Label(attestationLine, systemImage: attestationTone.symbol)
+                    .tcType(TC.Font_.footnoteText)
+                    .foregroundStyle(attestationTone.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let attestationReasonLine {
+                    Text(attestationReasonLine)
+                        .tcType(TC.Font_.footnoteText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
         }
     }
 
@@ -679,14 +864,21 @@ struct QueueRow: View {
                 Skips this session for good, even if you keep working in it. \
                 This project will keep being offered.
                 """)
-            Button("Submit", action: onSubmit)
-                // Untinted, and the same weight as "Not this one": a
-                // shortcut is not a recommendation. See the note above.
-                .tint(.primary)
-                .help("""
-                Sends this session now. Scrubbing runs the same as it always does, and \
-                you'll get a moment to undo.
-                """)
+            // Drawn only when the shared table offers it. Not disabled:
+            // there is nothing to enable, the sentence in the footer has
+            // already said why, and a greyed button sends a contributor
+            // hunting for a setting that would ungrey it. The row is still
+            // here, still openable, still dismissable.
+            if offersContribute {
+                Button("Submit", action: onSubmit)
+                    // Untinted, and the same weight as "Not this one": a
+                    // shortcut is not a recommendation. See the note above.
+                    .tint(.primary)
+                    .help("""
+                    Sends this session now. Scrubbing runs the same as it always does, and \
+                    you'll get a moment to undo.
+                    """)
+            }
             // No keyboard shortcut. Return used to be bound here as the
             // default action, which meant a two-row queue registered the
             // same shortcut twice and neither row could say which one a
@@ -790,7 +982,7 @@ struct UndoBar: View {
                     .font(TC.Font_.bodyDense)
                     .foregroundStyle(TC.inkPrimary)
                 if undo.offerUndo {
-                    Text(held)
+                    Text(approvalAge)
                         .font(TC.Font_.ledger)
                         .monospacedDigit()
                         .foregroundStyle(TC.inkSecondary)
@@ -799,14 +991,10 @@ struct UndoBar: View {
             }
             if undo.offerUndo {
                 Text("""
-                The watcher sends approved sessions on its next sweep. This app \
-                cannot see when that lands, so it does not pretend to count it \
-                down: undo works until the sweep starts, and says so plainly if \
-                it is already too late.
+                Approved sessions will send automatically. You can undo until uploading starts.
                 """)
-                .font(TC.Font_.footnote)
+                .tcType(TC.Font_.footnoteText)
                 .foregroundStyle(TC.inkSecondary)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
                 .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: TC.Space.s) {
@@ -818,12 +1006,12 @@ struct UndoBar: View {
                         .tcPrimaryAction()
                         .keyboardShortcut(.defaultAction)
                 }
-                Button(undo.offerUndo ? "Let it send" : "Dismiss", action: onKeep)
+                Button("Dismiss", action: onKeep)
                     .tint(.primary)
                     .help(
                         undo.offerUndo
-                            ? "Puts this notice away. It does not change the decision."
-                            : "Puts this notice away."
+                            ? "Close this notice. Approved sessions will still send automatically."
+                            : "Close this notice."
                     )
                 Spacer(minLength: 0)
             }
@@ -834,10 +1022,10 @@ struct UndoBar: View {
         .tcCard()
     }
 
-    private var held: String {
+    private var approvalAge: String {
         undo.heldSeconds >= AppModel.Undo.tickCeiling
-            ? "held \(AppModel.Undo.tickCeiling)s+"
-            : "held \(undo.heldSeconds)s"
+            ? "Approved \(AppModel.Undo.tickCeiling)s+ ago"
+            : "Approved \(undo.heldSeconds)s ago"
     }
 }
 
@@ -881,7 +1069,7 @@ struct NotOfferedDisclosure: View {
                 if expanded {
                     VStack(alignment: .leading, spacing: TC.Space.xxs) {
                         ForEach(counts.sorted(by: { $0.key < $1.key }), id: \.key) { label, count in
-                            Text("\(count) — \(OutcomeCopy.sentence(for: label))")
+                            Text("\(count) — \(TCOutcome.line(label: label))")
                                 .font(TC.Font_.meta)
                                 .foregroundStyle(TC.inkSecondary)
                         }

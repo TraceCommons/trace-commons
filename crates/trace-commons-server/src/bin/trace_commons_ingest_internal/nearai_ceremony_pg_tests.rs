@@ -1,0 +1,752 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! The NEAR AI enrolment ceremony, client half against server half, over a
+//! real PostgreSQL.
+//!
+//! #836 shipped as two halves that had never been run against each other. The
+//! client runs the ceremony (`daemon/nearai_onboarding.rs`); the server
+//! verifies it (`near-ai/provision/{start,finish}`). Each half had a suite and
+//! each suite passed, which is exactly the shape that cannot see a
+//! disagreement **between** them.
+//!
+//! One shared function, `near_ai_provisioning_device_bytes`, computes the
+//! device-proof preimage on both sides, so the byte layout cannot diverge.
+//! What that does not close is whether both halves feed it the same arguments
+//! — and they did not. The server returned the ceremony nonce as hex while the
+//! client decoded it as standard base64; hex characters are all in the base64
+//! alphabet and 64 is a multiple of 4, so the decode *succeeded* and yielded 48
+//! bytes, `try_into::<[u8; 32]>` failed, and every enrolment refused
+//! `near_ai_enroll_invalid` before the device ever signed. Neither half's tests
+//! could see it.
+//!
+//! # Why the assertions are shaped the way they are
+//!
+//! `the_start_nonce_is_the_shape_the_client_decodes` asserts the **field
+//! shape**, not just the outcome. A test that only checked "enrolment
+//! succeeds" would have caught this bug but reported it as a signature failure
+//! or a refused finish, sending the next reader to the wrong half. When this
+//! recurs it will recur as an encoding, so the failure message names the
+//! encoding.
+//!
+//! # What is real
+//!
+//! Real: the server's `start` and `finish` handlers over the real router, the
+//! real ceremony row in a real PostgreSQL, the real device signature, the
+//! shared preimage function, and the client's own marshalling via
+//! `device_proof_for_ceremony` — the seam that exists so this test does not
+//! have to reimplement the client's half.
+//!
+//! Stubbed: NEAR AI introspection only, and only through the `cfg(test)` seam
+//! on `AppState`, which does not exist in a shipped binary. Nothing else about
+//! the ceremony is stood in for; the preimage, the signature and the ceremony
+//! storage are the things under test.
+
+use super::*;
+use axum::body::Body;
+use tower::ServiceExt;
+use trace_commons_contributor::daemon::nearai_onboarding::{
+    device_proof_for_ceremony, start_payload,
+};
+use trace_commons_contributor::identity::DeviceIdentity;
+
+/// A subject nobody has enrolled before, minted per call.
+///
+/// Not a constant, and the difference is the whole point. The anchor is a blind
+/// index over this value, so a fixed subject enrolling a second time resolves
+/// the *existing* anchor and reuses its tenant -- which is the returning
+/// contributor path behaving correctly, and it writes no new row. An assertion
+/// of `before + 1` then fails on any database where this suite has already run,
+/// so with a constant the suite passes exactly once per database and cannot be
+/// re-run against it.
+///
+/// This surfaced the moment enrolment first succeeded: on a second local run
+/// the count stayed at one. That is the resolver pool working, not a defect,
+/// but a fixture that only holds on a pristine database is one that tests the
+/// database's history as much as the code.
+fn stub_subject() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "auth0|nearai-ceremony-fixture-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Serialises this suite against itself.
+///
+/// `anchor_rows` counts the whole table, and every test here shares one
+/// database and one process. A refusal test captures the
+/// count, refuses a finish, and re-counts; if the enrolling test commits its
+/// anchor inside that window, the refusal test reads a row it did not write and
+/// reports that a refused finish wrote one.
+///
+/// That was invisible until the happy path started working. While every
+/// enrolment refused, no test ever wrote an anchor, so the table-wide count was
+/// accidentally stable and the two refusal tests passed for a reason unrelated
+/// to what they assert. The first green run of
+/// `a_client_device_proof_enrols_against_the_real_handlers` is what made them
+/// fail -- a fixed bug surfacing a second one, not a regression.
+///
+/// The module note above says this state is process-global. It is, and that
+/// covers the environment variables too, but running the suite in its own CI
+/// step only isolates it from *other* suites. This is the isolation from
+/// itself, held here rather than left to `--test-threads=1` so a future edit to
+/// the workflow cannot quietly remove it.
+fn serial() -> &'static tokio::sync::Mutex<()> {
+    static SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    SERIAL.get_or_init(Default::default)
+}
+
+/// A migrated PostgreSQL on the isolated URL this job supplies, with the
+/// runtime pool and the resolver pool on two roles rather than one (see
+/// `migrated_pg_fixture::pg_config` for why aliasing them is #727).
+///
+/// Deliberately the same variable the sibling suite uses: one database per CI
+/// job, and a suite that silently invents its own would not be running against
+/// the schema the job migrated.
+async fn ceremony_pg_admin() -> Arc<PgBackend> {
+    super::migrated_pg_fixture::migrated_pg("TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL", None)
+        .await
+        .admin
+}
+
+/// The pepper and account-name key wallet provisioning already needs.
+///
+/// Same shape as `tests/account_onboarding_pg.rs`'s fixture: both arguments are
+/// required with no default, so an absent control refuses rather than falling
+/// back to something weaker.
+fn ceremony_identity() -> trace_commons_server::near_account_identity::NearAccountIdentity {
+    use base64::Engine as _;
+    let crypto =
+        trace_commons_server::secrets::SecretsCrypto::new(SecretString::from("a".repeat(32)))
+            .expect("fixture SecretsCrypto");
+    let kek: Arc<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper> = Arc::new(
+        trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
+            crypto,
+            "nearai-ceremony-fixture",
+        ),
+    );
+    trace_commons_server::near_account_identity::NearAccountIdentity::from_parts(
+        Some(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])),
+        Some(kek),
+    )
+    .expect("fixture identity")
+}
+
+/// A local stand-in for NEAR AI's `GET /users/me`, and nothing else.
+///
+/// Returns its base URL. This is the one thing the test stubs: it is not our
+/// half of anything, and reaching it at all requires the device proof to have
+/// already verified, because introspection is deliberately the last step of
+/// `finish`.
+async fn stub_near_ai(subject: String) -> String {
+    // `/users/me`, the path cloud-api serves and the one the client asks for
+    // after #852. A stub on `/me` would 404 and the refusal would arrive as a
+    // generic finish failure, which is the shape that cost a day already.
+    let router = axum::Router::new().route(
+        "/users/me",
+        axum::routing::get(move || {
+            let subject = subject.clone();
+            async move {
+                axum::Json(serde_json::json!({
+                    "id": subject,
+                    "auth_provider": "github",
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    base
+}
+
+/// Everything `near_ai_login_ready` requires, so the routes are mounted.
+///
+/// These are process-global, which is why this suite is `#[ignore]`d and run in
+/// its own step rather than alongside the parallel unit tests.
+fn publish_provisioning_material() {
+    // SAFETY: single-threaded setup at the top of one serial, ignored test.
+    unsafe {
+        std::env::set_var(
+            "TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON",
+            serde_json::json!({
+                "url": "https://witness.example",
+                "signing_address": format!("0x{}", "ab".repeat(20)),
+                "expected_measurements": [format!("mrtd={}", "cd".repeat(48))],
+            })
+            .to_string(),
+        );
+        std::env::set_var(
+            "TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL",
+            "https://issuer.example",
+        );
+        std::env::set_var("TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE", "upload");
+    }
+}
+
+/// An `AppState` with the NEAR AI login path ready and introspection pointed at
+/// the stub.
+///
+/// The returned directory backs the state's local storage; hold it for the
+/// test's lifetime so it is removed afterwards rather than leaked.
+async fn ceremony_state(
+    db: Arc<PgBackend>,
+    near_ai_base: String,
+) -> (Arc<AppState>, tempfile::TempDir) {
+    publish_provisioning_material();
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    let s = Arc::make_mut(&mut state);
+    s.near_provisioning_enabled = true;
+    s.near_provisioning_admission_ready = true;
+    s.near_account_identity = Some(Arc::new(ceremony_identity()));
+    s.db_mirror = Some(db.clone() as Arc<dyn Database>);
+    s.near_ai_introspection_base_url = Some(near_ai_base);
+    (state, temp)
+}
+
+async fn post_json(
+    state: &Arc<AppState>,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, Vec<u8>) {
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let response = app(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, bytes)
+}
+
+/// How many anchor rows exist for the stub subject. The thing a successful
+/// enrolment is supposed to leave behind, and the thing a refused one must not.
+async fn anchor_rows(db: &PgBackend) -> i64 {
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    client
+        .query_one(
+            "SELECT count(*)::bigint FROM trace_near_account_anchors",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+fn device() -> (tempfile::TempDir, DeviceIdentity) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = trace_commons_contributor::config::ConfigStore::open(dir.path().to_path_buf())
+        .expect("a config store");
+    let identity = DeviceIdentity::load_or_generate(&store).expect("a device identity");
+    (dir, identity)
+}
+
+fn challenge_pair() -> (String, String) {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let verifier = "a".repeat(64);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
+}
+
+/// The whole ceremony: the server's real `start`, the client's real
+/// marshalling, the server's real `finish`, and the anchor row that proves it
+/// completed.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn a_client_device_proof_enrols_against_the_real_handlers() {
+    let _serial = serial().lock().await;
+    let db = ceremony_pg_admin().await;
+    let before = anchor_rows(&db).await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (_dir, identity) = device();
+    let (verifier, challenge) = challenge_pair();
+
+    let (status, body) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/start",
+        // The client's own body, not one this test composes. A hand-written
+        // start request is a second implementation of the client's half, and
+        // it agrees with the server by construction -- which is precisely how
+        // the omitted `code_challenge_method` survived until #851.
+        start_payload(&challenge, &identity.public_key_b64),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let nonce_wire = started["nonce"]
+        .as_str()
+        .expect("a nonce field")
+        .to_string();
+    let ceremony_id = started["ceremony_id"].as_str().unwrap().to_string();
+    let expires_at = started["expires_at"].as_i64().unwrap();
+
+    // The field shape, named. See the module docs: when this recurs it will
+    // recur as an encoding, and a bare "enrolment failed" would send the next
+    // reader to the signature check instead of to this line.
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&nonce_wire)
+            .map(|bytes| bytes.len()),
+        Ok(32),
+        "the nonce the server returned is not what the client decodes: the \
+         client reads this field with standard base64 and requires exactly 32 \
+         bytes. A 64-character hex string decodes as valid base64 to 48 bytes, \
+         which is the #836 mismatch."
+    );
+
+    // The client's own marshalling, through the seam that exists so this test
+    // does not reimplement it.
+    let device_signature = device_proof_for_ceremony(
+        &identity,
+        &ceremony_id,
+        &nonce_wire,
+        &challenge,
+        expires_at,
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("the client must be able to build a proof for its own ceremony");
+
+    let (status, body) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/finish",
+        serde_json::json!({
+            "ceremony_id": ceremony_id,
+            "code_verifier": verifier,
+            "device_public_key": identity.public_key_b64,
+            "device_signature": device_signature,
+            "access_token": "stub-near-ai-jwt",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the server refused a proof its own start ceremony asked for: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let finished: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        finished["tenant_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("nearai-")
+    );
+    assert!(!finished["anchor_hash"].as_str().unwrap().is_empty());
+    assert_eq!(
+        anchor_rows(&db).await,
+        before + 1,
+        "a successful enrolment must leave an anchor row"
+    );
+}
+
+/// A new client can complete account enrollment without publishing the old
+/// enrollment witness. Only a later account-session selection may return its
+/// operator-reviewed connection configuration.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn v2_enrols_without_legacy_witness_and_never_selects_implicitly() {
+    let _serial = serial().lock().await;
+    let db = ceremony_pg_admin().await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    // SAFETY: this ignored suite serializes its process-global test controls.
+    unsafe { std::env::remove_var("TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON") };
+    let catalog = trace_commons_server::inference_connection::OperatorInferenceConnection::new(
+        "pilot".into(),
+        "near-ai".into(),
+        trace_commons_protocol::inference_connection::DISCLOSURE_VERSION,
+        trace_commons_protocol::inference_connection::ConnectionWitnessConfig {
+            url: "https://selected-witness.example/v1".into(),
+            signing_address: format!("0x{}", "ab".repeat(20)),
+            expected_measurements: vec![format!("mrtd={}", "cd".repeat(48))],
+        },
+        None,
+    )
+    .unwrap();
+    let mut state = state;
+    let settings = Arc::make_mut(&mut state);
+    settings.inference_connection_catalog = Arc::new(vec![catalog]);
+    settings.near_provisioning_public_origin = Some("https://commons.example".into());
+    settings.account_near_config = Some(Arc::new(trace_commons_server::config::NearConfig {
+        rpc_url: "http://near-rpc.invalid".into(),
+        network: "testnet".into(),
+        recipient: NEAR_TEST_RECIPIENT.into(),
+    }));
+
+    let legacy = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/near/provision/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let legacy: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(legacy.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(legacy["ready"], false);
+    assert_eq!(legacy["near_ai_login_ready"], false);
+    assert!(legacy.get("witness").is_none());
+
+    let v2 = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/near/provision/capabilities/v2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let v2: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(v2.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v2["near_ai_login_ready"], true);
+    assert_eq!(v2["ready"], true);
+    assert_eq!(v2["offers_available"], true);
+    assert!(v2.get("witness").is_none());
+    assert!(v2.get("issuer_url").is_none());
+    assert_eq!(
+        v2["near_ai_start_path"],
+        "/v1/account/near-ai/provision/start/v2"
+    );
+    assert_eq!(
+        v2["near_ai_finish_path"],
+        "/v1/account/near-ai/provision/finish/v2"
+    );
+
+    let pkcs8 =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let device = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    use ring::signature::KeyPair as _;
+    let public_key = base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let (verifier, challenge) = challenge_pair();
+    let wallet_start = serde_json::json!({
+        "account_id": "alice.testnet",
+        "device_public_key": public_key,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    });
+    let (legacy_wallet_status, _) = post_json(
+        &state,
+        "/v1/account/near/provision/start",
+        wallet_start.clone(),
+    )
+    .await;
+    assert_ne!(legacy_wallet_status, StatusCode::OK);
+    let (wallet_status, wallet_body) = post_json(
+        &state,
+        v2["wallet_start_path"].as_str().unwrap(),
+        wallet_start,
+    )
+    .await;
+    assert_eq!(
+        wallet_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&wallet_body)
+    );
+    assert!(
+        !wallet_body
+            .windows(b"witness".len())
+            .any(|w| w == b"witness")
+    );
+    let (legacy_status, _) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/start",
+        start_payload(&challenge, &public_key),
+    )
+    .await;
+    assert_ne!(legacy_status, StatusCode::OK);
+    let before = anchor_rows(&db).await;
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let before_selection: i64 = client
+        .query_one(
+            "SELECT count(*)::bigint FROM trace_account_inference_connections",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    drop(client);
+
+    let (status, body) = post_json(
+        &state,
+        v2["near_ai_start_path"].as_str().unwrap(),
+        start_payload(&challenge, &public_key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let nonce: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(started["nonce"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let device_public_key: [u8; 32] = device.public_key().as_ref().try_into().unwrap();
+    let signing_bytes = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
+        &nonce,
+        started["ceremony_id"].as_str().unwrap(),
+        &device_public_key,
+        &challenge,
+        started["expires_at"].as_i64().unwrap(),
+    );
+    let device_signature =
+        base64::engine::general_purpose::STANDARD.encode(device.sign(&signing_bytes).as_ref());
+    let (status, body) = post_json(
+        &state,
+        v2["near_ai_finish_path"].as_str().unwrap(),
+        serde_json::json!({
+            "ceremony_id": started["ceremony_id"],
+            "code_verifier": verifier,
+            "device_public_key": public_key,
+            "device_signature": device_signature,
+            "access_token": "stub-near-ai-jwt",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let finished: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(finished.get("witness").is_none());
+    assert!(finished.get("inference_receipt_endpoint").is_none());
+    assert_eq!(anchor_rows(&db).await, before + 1);
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let after_selection: i64 = client
+        .query_one(
+            "SELECT count(*)::bigint FROM trace_account_inference_connections",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(after_selection, before_selection);
+}
+
+/// A refused finish leaves nothing behind.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn a_refused_finish_writes_no_anchor_row() {
+    let _serial = serial().lock().await;
+    let db = ceremony_pg_admin().await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (_dir, identity) = device();
+    let (verifier, challenge) = challenge_pair();
+
+    let (_, body) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/start",
+        // The client's own body, not one this test composes. A hand-written
+        // start request is a second implementation of the client's half, and
+        // it agrees with the server by construction -- which is precisely how
+        // the omitted `code_challenge_method` survived until #851.
+        start_payload(&challenge, &identity.public_key_b64),
+    )
+    .await;
+    let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let before = anchor_rows(&db).await;
+
+    // A signature over a different ceremony id: well-formed, correctly
+    // encoded, and not for this ceremony.
+    let wrong = device_proof_for_ceremony(
+        &identity,
+        "some-other-ceremony",
+        started["nonce"].as_str().unwrap(),
+        &challenge,
+        started["expires_at"].as_i64().unwrap(),
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("the client can build a proof for the wrong ceremony");
+
+    let (status, _) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/finish",
+        serde_json::json!({
+            "ceremony_id": started["ceremony_id"],
+            "code_verifier": verifier,
+            "device_public_key": identity.public_key_b64,
+            "device_signature": wrong,
+            "access_token": "stub-near-ai-jwt",
+        }),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a proof for another ceremony was accepted"
+    );
+    assert_eq!(
+        anchor_rows(&db).await,
+        before,
+        "a refused finish wrote an anchor row"
+    );
+}
+
+/// A device key a legacy invite already registered under a `tenant-...`
+/// tenant cannot complete the NEAR AI ceremony: the finish is refused, the key
+/// stays with the legacy tenant, and no anchor is written. `device_key_id` is
+/// a global primary key, so success here would have meant a NEAR AI session
+/// whose device keeps authenticating into the legacy tenant.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn a_device_key_registered_to_another_tenant_is_refused() {
+    let _serial = serial().lock().await;
+    let db = ceremony_pg_admin().await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (_dir, identity) = device();
+    let (verifier, challenge) = challenge_pair();
+    let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        &base64::engine::general_purpose::STANDARD
+            .decode(&identity.public_key_b64)
+            .unwrap(),
+    );
+    let legacy_tenant = format!("tenant-legacy-{}", uuid::Uuid::new_v4().simple());
+    let admin = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&legacy_tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,$4,'invite')",
+            &[
+                &device_key_id,
+                &legacy_tenant,
+                &identity.public_key_b64,
+                &format!("sha256:{}", "cd".repeat(32)),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let (_, body) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/start",
+        start_payload(&challenge, &identity.public_key_b64),
+    )
+    .await;
+    let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let signature = device_proof_for_ceremony(
+        &identity,
+        started["ceremony_id"].as_str().unwrap(),
+        started["nonce"].as_str().unwrap(),
+        &challenge,
+        started["expires_at"].as_i64().unwrap(),
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("a valid proof");
+    let before = anchor_rows(&db).await;
+
+    let (status, body) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/finish",
+        serde_json::json!({
+            "ceremony_id": started["ceremony_id"],
+            "code_verifier": verifier,
+            "device_public_key": identity.public_key_b64,
+            "device_signature": signature,
+            "access_token": "stub-near-ai-jwt",
+        }),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a device held by another tenant was provisioned: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        anchor_rows(&db).await,
+        before,
+        "a refused finish wrote an anchor"
+    );
+    let holders: Vec<String> = admin
+        .query(
+            "SELECT tenant_id FROM device_keys WHERE device_key_id=$1",
+            &[&device_key_id],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(holders, vec![legacy_tenant]);
+}
+
+/// A client-asserted account is refused at the parse boundary.
+///
+/// The server half made this structural with `#[serde(deny_unknown_fields)]`
+/// and has its own test over `from_value`. This crosses it from the wire: the
+/// body goes through the real route, so it also pins that nothing upstream of
+/// the deserialiser strips or tolerates the field.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn a_finish_naming_an_account_is_refused_over_the_wire() {
+    let _serial = serial().lock().await;
+    let db = ceremony_pg_admin().await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (_dir, identity) = device();
+    let (verifier, challenge) = challenge_pair();
+
+    let (_, body) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/start",
+        // The client's own body, not one this test composes. A hand-written
+        // start request is a second implementation of the client's half, and
+        // it agrees with the server by construction -- which is precisely how
+        // the omitted `code_challenge_method` survived until #851.
+        start_payload(&challenge, &identity.public_key_b64),
+    )
+    .await;
+    let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let signature = device_proof_for_ceremony(
+        &identity,
+        started["ceremony_id"].as_str().unwrap(),
+        started["nonce"].as_str().unwrap(),
+        &challenge,
+        started["expires_at"].as_i64().unwrap(),
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("a valid proof");
+    let before = anchor_rows(&db).await;
+
+    let (status, _) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/finish",
+        serde_json::json!({
+            "ceremony_id": started["ceremony_id"],
+            "code_verifier": verifier,
+            "device_public_key": identity.public_key_b64,
+            "device_signature": signature,
+            "access_token": "stub-near-ai-jwt",
+            // The whole point of the ceremony: the account is whatever the
+            // commons resolves the token to, never what the client says.
+            "account_id": "attacker.near",
+        }),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a finish naming an account was accepted"
+    );
+    assert_eq!(anchor_rows(&db).await, before);
+}

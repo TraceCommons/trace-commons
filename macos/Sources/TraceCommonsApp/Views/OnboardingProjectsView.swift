@@ -61,7 +61,7 @@ struct OnboardingProjectsContent: View {
         VStack(alignment: .leading, spacing: TC.Space.xl) {
             header
             if let error = model.lastActionError {
-                ActionErrorBanner(text: error) { model.lastActionError = nil }
+                ActionMessageBanner(text: error) { model.lastActionError = nil }
             }
             projectList
             continueButton

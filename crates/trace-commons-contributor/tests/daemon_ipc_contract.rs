@@ -1,6 +1,7 @@
 //! The daemon IPC contract, exercised over a real unix socket.
 //!
 //! These tests are the executable half of `docs/contributor-daemon-ipc-v1_1.md`.
+
 //! Three native applications will be written against this framing, so the
 //! properties asserted here -- id correlation, snapshot-before-delta, the
 //! authorization carve-out, and behaviour on malformed input -- are the ones
@@ -27,6 +28,25 @@ use trace_commons_contributor::daemon::preview_scheduler::{
     self, MAX_PREVIEW_SESSION_BYTES, STATE_QUEUED, STATE_READY,
 };
 use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, entry_id_for};
+
+#[test]
+fn publication_methods_are_documented_with_bounds_and_fixed_errors() {
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    for required in [
+        "| `history_detail` |",
+        "| `publish_public_run` |",
+        "| `unpublish_public_run` |",
+        "up to 24 redacted evidence candidates",
+        "each excerpt capped at 700 characters",
+        "`public-run-trace-not-found`",
+        "`public-run-source-not-found`",
+    ] {
+        assert!(
+            contract.contains(required),
+            "missing IPC contract: {required}"
+        );
+    }
+}
 use trace_commons_contributor::daemon::settings::DaemonSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
 use trace_commons_contributor::source::TraceSource;
@@ -35,6 +55,8 @@ use trace_commons_contributor::source::claude_code::ClaudeCodeSource;
 fn fixture_config(device_key_id: &str) -> trace_commons_contributor::config::ContributorConfig {
     trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
@@ -199,10 +221,45 @@ async fn arming_autonomy_over_the_socket_is_now_allowed() {
     let dir = tempfile::tempdir().unwrap();
     let key = std::fs::canonicalize(dir.path()).unwrap();
     let key = key.to_string_lossy();
-    c.send(&format!(
+    let arm = format!(
         r#"{{"id":3,"method":"set_project_mode","params":{{"project_key":"{key}","label":"p","mode":"auto_upload"}}}}"#,
-    ))
-    .await;
+    );
+
+    // Arming records the terms it is granted under, so before enrollment
+    // there is nothing to grant and it is refused.
+    c.send(&arm).await;
+    let resp = c.recv_json().await;
+    assert_eq!(
+        resp["error"]["message"], "arming-terms-unavailable",
+        "{resp}"
+    );
+
+    let store = ConfigStore::open(h.store_dir.clone()).unwrap();
+    store
+        .save_config(&trace_commons_contributor::config::ContributorConfig {
+            inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
+            inference_receipt_check_attestation: false,
+            schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
+                .into(),
+            issuer_url: "http://issuer.invalid".into(),
+            ingest_url: "http://ingest.invalid".into(),
+            audience: "trace-commons-upload".into(),
+            tenant_id: "tenant-abc".into(),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: "sha256:aa".into(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
+            witness: None,
+        })
+        .unwrap();
+    c.send(&arm).await;
     let resp = c.recv_json().await;
     assert!(resp["error"].is_null(), "{resp}");
 }

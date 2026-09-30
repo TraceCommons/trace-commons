@@ -80,6 +80,7 @@
                 -->
                 <StackPanel Spacing="2">
                     <TextBlock Text="Would send" Style="{StaticResource TcEyebrowTextStyle}" />
+                    <TextBlock Text="{x:Bind ViewModel.ProbabilitySummary, Mode=OneWay}" TextWrapping="Wrap" />
                     <TextBlock Text="{x:Bind ViewModel.WouldSendText, Mode=OneWay}"
                                Style="{StaticResource TcMonoFigureTextStyle}" />
                 </StackPanel>
@@ -173,13 +174,6 @@
                            Style="{StaticResource TcCaptionTextStyle}"
                            TextWrapping="Wrap"
                            TextAlignment="Center" />
-                <Button Content="{x:Bind ViewModel.AdmissionHeading}" Click="OnPrepareAdmission"
-                        Visibility="{x:Bind ViewModel.CanPrepareAdmission, Mode=OneWay}" />
-                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
-                    <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.AdmissionGlyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
-                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionRefusalMessage, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
-                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionNeutralMessage, Mode=OneWay}" TextWrapping="Wrap" />
-                </Grid>
                 <Button Content="{x:Bind ViewModel.WitnessAction}" Click="OnWitnessReview"
                         Visibility="{x:Bind ViewModel.CanRequestWitness, Mode=OneWay}" />
             </StackPanel>
@@ -379,6 +373,38 @@
                                                Visibility="{x:Bind HasDetail}"
                                                Style="{StaticResource TcCaptionSmallTextStyle}"
                                                Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!--
+                        K11, for this session: the size before redaction and
+                        after, where each goes, and what the witness was
+                        checked against when it reviewed it. Every row is
+                        RouteDisclosureSurface's, the Rust's words for the
+                        daemon's route_disclosure and certificate_detail. Raw
+                        text is never shown.
+                    -->
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.SessionDisclosureRows, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="interop:DisclosureRow">
+                                <StackPanel Spacing="2" Margin="0,2">
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsHeading}"
+                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsText}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsValue}"
+                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                    <TextBlock Text="{x:Bind Value}"
+                                               Visibility="{x:Bind IsValue}"
+                                               Style="{StaticResource TcMonoChipTextStyle}"
+                                               IsTextSelectionEnabled="True"
                                                TextWrapping="Wrap" />
                                 </StackPanel>
                             </DataTemplate>
@@ -709,6 +735,59 @@
                     </StackPanel>
                 </Border>
             </StackPanel>
+
+            <!--
+                Whether this session can be contributed at all, above the
+                buttons that act on it.
+
+                Contribute is DISABLED rather than hidden here, unlike on the
+                queue row: on the row the button's absence is read against its
+                siblings, but this is the sheet a contributor opened on
+                purpose to reach that one control, and a control that is gone
+                from the place it was expected reads as a broken window. The
+                sentences below say why it will not press.
+
+                Absent entirely for an invited contributor, who has no
+                eligibility question. Every binding OneWay: a submit-time
+                failure writes its reason back into the entry.
+            -->
+            <StackPanel Spacing="2"
+                        Visibility="{x:Bind ViewModel.HasEligibilityText, Mode=OneWay}">
+                <TextBlock Text="{x:Bind ViewModel.EligibilityText, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.EligibilityReasonText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasEligibilityReason, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionSmallTextStyle}"
+                           Foreground="{ThemeResource TcInkSecondaryBrush}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!--
+                Admission preparation, drawn on every preview in the place the
+                Linux shell has always drawn it, rather than only where a
+                preview failed.
+
+                It arms this session's NEXT call; the copy says so, and asks
+                the contributor to continue the agent task and come back. So
+                it is a thing someone opens the sheet to do, not a remedy for
+                a sheet that broke. While it lived in the failed-preview
+                notice, the only route to it was a witness review that failed
+                first.
+
+                CanPrepareAdmission is false unless the daemon says this
+                contributor's enrolment admits evidence-bearing contribution,
+                so an invited contributor, whom it could only refuse, is not
+                offered it at all. Visibility, not IsEnabled: absent, not
+                present and refusing.
+            -->
+            <Button Content="{x:Bind ViewModel.AdmissionHeading}" Click="OnPrepareAdmission"
+                    Visibility="{x:Bind ViewModel.CanPrepareAdmission, Mode=OneWay}" />
+            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.AdmissionGlyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
+                <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionRefusalMessage, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
+                <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionNeutralMessage, Mode=OneWay}" TextWrapping="Wrap" />
+            </Grid>
 
             <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
                 <!-- Outlined like Close, never filled: it must not read as a

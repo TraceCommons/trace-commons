@@ -139,6 +139,94 @@ a {
   grid-template-columns: minmax(0, 0.8fr) minmax(320px, 1.2fr);
 }
 
+.public-run-hero {
+  align-items: end;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 32px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.34fr);
+  padding: 40px 0 32px;
+}
+
+.public-run-action {
+  border-left: 1px solid var(--line);
+  padding-left: 24px;
+}
+
+.public-run-action button {
+  min-height: 44px;
+  width: 100%;
+}
+
+.public-run-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.34fr);
+}
+
+.public-run-main,
+.public-run-provenance {
+  box-shadow: none;
+}
+
+.public-run-section + .public-run-section,
+.public-run-divider {
+  border-top: 1px solid var(--line);
+  margin-top: 24px;
+  padding-top: 24px;
+}
+
+.public-run-prose,
+.public-run-workflow,
+.public-run-evidence {
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.public-run-title,
+.public-run-outcome,
+.public-run-prose,
+.public-run-workflow,
+.public-run-evidence li {
+  white-space: pre-wrap;
+}
+
+.public-run-evidence,
+.public-run-links {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 0;
+  padding-left: 20px;
+}
+
+.public-run-evidence li {
+  border-bottom: 1px solid var(--line);
+  padding: 0 0 12px 4px;
+}
+
+.public-run-evidence li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.public-run-date {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 0;
+}
+
+.public-run-status {
+  min-height: 360px;
+}
+
+.clipboard-buffer {
+  height: 1px;
+  left: -10000px;
+  position: fixed;
+  top: 0;
+  width: 1px;
+}
+
 .eyebrow {
   color: var(--green);
   font-size: 12px;
@@ -706,6 +794,8 @@ button.danger {
 
   .hero-band,
   .profile-band,
+  .public-run-hero,
+  .public-run-grid,
   .chart-grid,
   .brief-strip,
   .brief-grid,
@@ -719,6 +809,13 @@ button.danger {
 
   .brief-strip {
     align-items: start;
+  }
+
+  .public-run-action {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
+    padding-top: 24px;
   }
 }
 

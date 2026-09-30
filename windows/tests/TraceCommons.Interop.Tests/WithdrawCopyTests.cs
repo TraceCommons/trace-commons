@@ -158,8 +158,9 @@ public sealed class WithdrawCopyTests
     [Fact]
     public void EveryTierStatesTheSameVerifiedThingAboutCredit()
     {
-        // Rule 3. Credit already recorded stays recorded, and no tier says
-        // anything else about it. Nothing here may imply a claw-back.
+        // Rule 3. Settled credit stays, pending credit is forfeited, and no
+        // tier says anything else about it. Nothing here may imply a
+        // claw-back of settled credit.
         foreach (WithdrawStage stage in new[]
                  {
                      WithdrawStage.NotInTheCommons,
@@ -170,7 +171,7 @@ public sealed class WithdrawCopyTests
             Assert.Equal(WithdrawCopy.CreditNote, WithdrawCopy.Confirmation(stage).Credit);
         }
 
-        Assert.Equal("Credit already recorded stays.", WithdrawCopy.CreditNote);
+        Assert.Equal("Credit that has already settled stays. Credit still pending is forfeited.", WithdrawCopy.CreditNote);
     }
 
     [Fact]
@@ -281,9 +282,8 @@ public sealed class WithdrawCopyTests
         // Rule 6. `withdraw_bulk` reports only counts, so rule 1 cannot be
         // honoured for it at all -- and the shared design draws a button
         // here, so its absence is explained rather than left as a gap.
-        Assert.Contains("only", WithdrawCopy.NoBulk, StringComparison.Ordinal);
-        Assert.Contains("how many succeeded", WithdrawCopy.NoBulk, StringComparison.Ordinal);
-        Assert.Contains("one at a time", WithdrawCopy.NoBulk, StringComparison.Ordinal);
+        Assert.Contains("individually", WithdrawCopy.NoBulk, StringComparison.Ordinal);
+        Assert.Contains("result for each", WithdrawCopy.NoBulk, StringComparison.Ordinal);
     }
 
     [Fact]

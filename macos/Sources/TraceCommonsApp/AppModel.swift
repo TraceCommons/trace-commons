@@ -74,7 +74,30 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var startup: Startup = .starting
-    @Published private(set) var status: DaemonStatus = .unknown
+    @Published private(set) var isStartingDaemon = false
+    private let daemonStartup: DaemonStartup
+
+    init(daemonStartup: DaemonStartup? = nil) {
+        self.daemonStartup = daemonStartup ?? DaemonStartup()
+    }
+    @Published private(set) var status: DaemonStatus = .unknown {
+        didSet {
+            // Worded across the ABI once per notice the daemon sends, not on
+            // every re-render of the card.
+            if status.legacyInviteMigration != oldValue.legacyInviteMigration {
+                legacyMigrationNotice = status.legacyInviteMigration.noticeJSON
+                    .flatMap(legacyMigrationWording)
+                    .flatMap(LegacyMigrationNotice.decode(fromJSON:))
+            }
+        }
+    }
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// in the Rust's words, or nil when there is none or it cannot be read.
+    @Published private(set) var legacyMigrationNotice: LegacyMigrationNotice?
+    /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
+    /// replaced only by tests.
+    var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
+        forNotice:)
     @Published private(set) var pending: [QueueEntry] = [] {
         didSet { recomputeWaiting() }
     }
@@ -92,7 +115,12 @@ final class AppModel: ObservableObject {
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
     @Published private(set) var consentScopes: [ConsentScope] = []
-    @Published private(set) var daemonSettings: DaemonSettingsView?
+    @Published private(set) var daemonSettings: DaemonSettingsView? {
+        // A settings write can change what leaves this machine -- inference
+        // evidence adds or removes the prompt-and-reply line, a filter change
+        // moves the local route's -- so the disclosure moves with it.
+        didSet { if daemonSettings != oldValue { refreshRouteDisclosure() } }
+    }
 
     // MARK: - The local proxy
 
@@ -395,6 +423,196 @@ final class AppModel: ObservableObject {
         lastActionError = privateInferenceCopy?.writeUnconfirmed
     }
 
+    // MARK: - The key this destination answers with
+
+    /// The three branch tables the credential card turns on, all decided in
+    /// the Rust. This shell owns no `switch` on this surface either.
+    /// The four branch tables the queue's eligibility rows turn on, all
+    /// decided in the Rust. This shell owns no `switch` on this surface
+    /// either -- see `EligibilitySurface`.
+    let eligibilityCalls = EligibilityCalls(
+        stateLine: { TCContributionEligibility.stateLine(state: $0) },
+        stateTone: { TCContributionEligibility.stateTone(state: $0) },
+        control: { TCContributionEligibility.control(state: $0) },
+        reasonLine: { TCContributionEligibility.reasonLine(reason: $0) },
+        withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) },
+        groupControl: { TCContributionEligibility.groupControl(pending: $0, contributable: $1) }
+    )
+
+    /// The three branch tables the queue's attestation mark turns on, all
+    /// decided in the Rust -- see `AttestationSurface`.
+    ///
+    /// Three and not four. There is no control table here, because the mark
+    /// describes the trace and offers nothing to press; whether a session
+    /// may be sent stays `eligibilityCalls.control`'s question.
+    ///
+    /// The reason closure is `TCAttestation`'s, never
+    /// `TCContributionEligibility`'s. Both take the same thirteen labels and
+    /// answer different sentences, so the wrong one here would compile,
+    /// render, and tell a contributor their session had been refused.
+    let attestationCalls = AttestationCalls(
+        markLine: { TCAttestation.markLine(mark: $0) },
+        markTone: { TCAttestation.markTone(mark: $0) },
+        reasonLine: { TCAttestation.reasonLine(reason: $0) }
+    )
+
+    let credentialCalls = CredentialCalls(
+        stateLine: { TCNearAiCredential.stateLine(state: $0) },
+        stateTone: { TCNearAiCredential.stateTone(state: $0) },
+        action: { TCNearAiCredential.action(state: $0) },
+        harnessNotice: { TCNearAiCredential.harnessNotice(credentialed: $0) ?? "" }
+    )
+
+    let balanceCalls = BalanceCalls(
+        stateLine: { TCNearAiBalance.stateLine(state: $0) },
+        stateTone: { TCNearAiBalance.stateTone(state: $0) },
+        action: { TCNearAiBalance.action(state: $0) },
+        amount: { TCNearAiBalance.amount(present: $0, nanos: $1, scale: $2) },
+        remainingLine: { TCNearAiBalance.remainingLine(present: $0, nanos: $1, scale: $2) },
+        limitLine: { TCNearAiBalance.limitLine(present: $0, nanos: $1, scale: $2) },
+        spentLine: { TCNearAiBalance.spentLine(present: $0, nanos: $1, scale: $2) },
+        observedLine: { TCNearAiBalance.observedLine(secondsAgo: $0) }
+    )
+
+    /// What this machine holds, from the daemon's own report.
+    ///
+    /// Seeded as unreported rather than absent: before the first poll
+    /// answers, this shell has read nothing, and "no key is kept here" is a
+    /// claim about the machine that would invite a second sign-in.
+    @Published private(set) var credentialStatus: CredentialStatus = .unreported
+
+    /// What is left in the account, from the daemon's own report.
+    ///
+    /// Seeded as unreported for `credentialStatus`'s reason, and it matters
+    /// more here: every other seed value would be a claim about somebody's
+    /// money made before anything was read.
+    @Published private(set) var balanceStatus: BalanceStatus = .unreported
+
+    /// The ceremony this shell started, while it is still going.
+    ///
+    /// Kept because `browser_url` is served ONCE, by start, and no poll
+    /// re-serves it -- and because cancel requires the attempt id, which is
+    /// also only ever handed over here. Dropped when the ceremony leaves the
+    /// state that has something to cancel.
+    @Published private(set) var credentialAttempt: CredentialAttempt?
+
+    @Published private(set) var credentialBusy = false
+
+    /// Re-read on every settings refresh, and again while a ceremony is in
+    /// flight: the ceremony finishes in a browser this app does not own, so
+    /// nothing here is told when it does.
+    func refreshNearAiCredential() {
+        let attempt = credentialAttempt?.attemptID
+        perform(
+            CredentialSurface.statusMethod,
+            work: { try $0.nearAiCredentialStatus(attemptID: attempt) }
+        ) { status in
+            self.publishIfChanged(\.credentialStatus, status)
+            // The attempt is let go the moment the shared table stops
+            // offering a cancel for it. Holding a finished attempt's id
+            // would keep polling a ceremony nobody is waiting on.
+            if CredentialSurface.action(status, calls: self.credentialCalls) != .cancel {
+                self.credentialAttempt = nil
+            }
+        }
+        refreshNearAiBalance()
+    }
+
+    /// Re-read whenever the key is, because it is the key the balance is
+    /// read WITH: signing in, signing in again and forgetting all move this
+    /// row, and a card whose two halves disagreed about whether a session
+    /// exists would be worse than either half alone.
+    func refreshNearAiBalance() {
+        perform(
+            BalanceSurface.statusMethod,
+            work: { try $0.nearAiBalance() }
+        ) { status in
+            self.publishIfChanged(\.balanceStatus, status)
+        }
+    }
+
+    func nearAiFunding(expected: FundingDestination?) async -> FundingStatus? {
+        guard let client, !credentialBusy else { return nil }
+        let result = await Task.detached(priority: .userInitiated) {
+            try? client.nearAiFunding(expected: expected)
+        }.value
+        guard self.client === client, !Task.isCancelled, !credentialBusy else { return nil }
+        return result
+    }
+
+    /// Begins the ceremony and hands back the one URL that was served.
+    ///
+    /// The URL is returned rather than opened here: opening a browser is the
+    /// view's `openURL` environment, and this model has no window. A `nil`
+    /// means the ceremony did not begin in a way this shell can carry
+    /// through, and nothing is left half-started -- the daemon's own attempt
+    /// times out on the browser.
+    func startNearAiCredential(provider: String? = nil) async -> URL? {
+        guard let client, !credentialBusy else { return nil }
+        credentialBusy = true
+        let outcome = await Task.detached(priority: .userInitiated) {
+            Result { try client.nearAiCredentialStart(provider: provider) }
+        }.value
+        credentialBusy = false
+        guard case .success(let attempt) = outcome, let attempt else {
+            lastActionError = privateInferenceCopy?.writeUnconfirmed
+            return nil
+        }
+        credentialAttempt = attempt
+        refreshNearAiCredential()
+        return URL(string: attempt.browserURL)
+    }
+
+    /// Stops waiting on the browser.
+    ///
+    /// Sent with no attempt id when this shell holds none: the daemon cancels
+    /// whatever sign-in it is running, so an app restarted mid-ceremony can
+    /// still stop the one it never started.
+    func cancelNearAiCredential() {
+        let attemptID = credentialAttempt?.attemptID
+        submitNearAiCredential { try $0.nearAiCredentialCancel(attemptID: attemptID) }
+    }
+
+    /// Removes the stored key from this machine.
+    func forgetNearAiCredential() {
+        submitNearAiCredential { try $0.nearAiCredentialForget() }
+    }
+
+    func migrateNearAiCredential() {
+        submitNearAiCredential { try $0.nearAiCredentialMigrate() }
+    }
+
+    /// One write, then a re-read of everything the key is behind.
+    ///
+    /// The listener and the tool list are re-read as well as the card: the
+    /// key is what this destination answers with, so forgetting it moves the
+    /// sentence under the switch and the connect controls too, and a card
+    /// that updated alone would leave both claiming otherwise.
+    ///
+    /// The busy flag is cleared on BOTH outcomes. `perform` runs its
+    /// continuation on success only, which would leave a failed cancel with
+    /// the button disabled and no way back.
+    private func submitNearAiCredential(_ work: @escaping (DaemonClient) throws -> Void) {
+        guard !credentialBusy else { return }
+        guard let client else {
+            lastActionError = privateInferenceCopy?.writeUnconfirmed
+            return
+        }
+        credentialBusy = true
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try work(client) }
+            await MainActor.run {
+                self.credentialBusy = false
+                if case .failure = outcome {
+                    self.lastActionError = self.privateInferenceCopy?.writeUnconfirmed
+                }
+                self.refreshNearAiCredential()
+                self.refreshSettings()
+                self.refreshHarnesses()
+            }
+        }
+    }
+
     // MARK: - The redaction witness
 
     /// The witness surface's fixed words, decoded once from the Rust.
@@ -525,6 +743,68 @@ final class AppModel: ObservableObject {
         // just asked for, so it wins over a refused read.
         if case .refused(let writeLabel) = wrote { label = writeLabel }
         publishIfChanged(\.witnessLabel, label)
+        // The disclosure names the witness, so it moves with it.
+        refreshRouteDisclosure()
+    }
+
+    // MARK: - What leaves this machine (K11)
+
+    /// The daemon's facts in the shared crate's words, or where the panel
+    /// stands without them: loading before the first answer, unreadable when
+    /// there is no daemon to ask or its answer did not decode. Never a blank
+    /// panel, which would read as nothing to disclose.
+    @Published private(set) var routeDisclosureState: RouteDisclosureState = .loading
+    var routeDisclosure: RouteDisclosure? {
+        if case .shown(let disclosure) = routeDisclosureState { return disclosure }
+        return nil
+    }
+    /// Which read is the latest asked for. Each read is its own detached
+    /// task, so answers can land out of order; only the latest one's is
+    /// published, and an older answer arriving after it is dropped.
+    private var routeDisclosureGeneration: UInt64 = 0
+    /// The Rust's words for that case, read once: they do not change.
+    let routeDisclosureUnreadableCopy: RouteDisclosureUnreadable? =
+        TCConsentCopy.routeDisclosureUnreadableJSON().flatMap {
+            RouteDisclosureUnreadable.decode(fromJSON: $0)
+        }
+    /// Held certificates' claims, by entry id, for the review sheet.
+    @Published private(set) var certificateDetails: [String: CertificateDetail] = [:]
+
+    /// Re-read what leaves this machine. Called wherever a fact it states
+    /// can change: the witness, enrolment, and any settings write (through
+    /// `daemonSettings`), as well as when a disclosure surface appears.
+    func refreshRouteDisclosure() {
+        routeDisclosureGeneration &+= 1
+        let generation = routeDisclosureGeneration
+        guard let client else {
+            publishIfChanged(\.routeDisclosureState, .unreadable)
+            return
+        }
+        Task.detached(priority: .userInitiated) {
+            let facts = try? client.routeDisclosureFactsJSON()
+            let disclosure = facts
+                .flatMap { TCConsentCopy.routeDisclosureJSON(forFacts: $0) }
+                .flatMap { RouteDisclosure.decode(fromJSON: $0) }
+            await MainActor.run {
+                guard generation == self.routeDisclosureGeneration else { return }
+                self.publishIfChanged(
+                    \.routeDisclosureState, disclosure.map { .shown($0) } ?? .unreadable)
+            }
+        }
+    }
+
+    /// Ask for the certificate one entry holds. Only for an entry whose
+    /// `holdsCertificate` is true; anything unreadable leaves nothing shown.
+    func loadCertificateDetail(entryID: String) {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let detail = (try? client.certificateDetailJSON(entryID: entryID)).flatMap { json in
+                TCConsentCopy.certificateDetailCopyJSON().flatMap {
+                    CertificateDetail.decode(detailJSON: json, copyJSON: $0)
+                }
+            }
+            await MainActor.run { self.certificateDetails[entryID] = detail }
+        }
     }
 
     @Published private(set) var outcomeCounts: [String: Int] = [:]
@@ -534,12 +814,18 @@ final class AppModel: ObservableObject {
 
     /// A one-line statement about something that DID happen, as opposed to
     /// `lastActionError`, which is about something that did not. Kept apart
-    /// so the two never have to be told from each other by their wording:
-    /// the Waiting screen renders this one in its own voice.
+    /// so the two never have to be told from each other by their wording.
+    ///
+    /// Nothing here clears it on the way to somewhere else -- only two
+    /// actions ever assign it, so unlike `lastActionError` it is not
+    /// overwritten by the next thing that goes wrong. Its dismiss control on
+    /// the Waiting screen is therefore the only way out of it, which is why
+    /// it has one: see `ActionMessageBanner`.
     @Published var lastActionNotice: String?
 
     private var daemon: TCDaemon?
     private var client: DaemonClient?
+    var skillLearningClient: DaemonClient? { client }
     private var subscription: TCSubscription?
     private var undoTask: Task<Void, Never>?
 
@@ -644,7 +930,32 @@ final class AppModel: ObservableObject {
         // The budget banner says the same thing with real numbers, so the
         // bare label is suppressed when it is going to be drawn.
         if label == "daily-cap-reached" && status.dailyBudget.blocked { return nil }
+        // Likewise the witness banner, with the count -- only when it is
+        // actually going to be drawn.
+        if label == "witness-saturated" && witnessCapacityHealth != nil { return nil }
+        // And the held-folder notice, which names the folders and says why --
+        // again only when it is going to be drawn.
+        if label == GateHeld.label && gateHeldNotice != nil { return nil }
         return HealthCopy.forLabel(label)
+    }
+
+    /// The notice for armed folders the automatic-contribution gate is
+    /// holding, in the Rust's words, when there are any. Independent of
+    /// `health` for the reason `witnessCapacityHealth` is. Nil when nothing
+    /// is held or the notice cannot be read; the label, if it holds the
+    /// slot, then falls back to `forLabel`'s on-hold line.
+    var gateHeldNotice: GateHeldNotice? {
+        guard status.gateHeld.held else { return nil }
+        return TCConsentCopy.gateHeldNoticeJSON(forHeld: status.gateHeld.json)
+            .flatMap(GateHeldNotice.decode(fromJSON:))
+    }
+
+    /// The banner for approved sessions held on a busy privacy witness, when
+    /// there are any. Independent of `health` for the reason `budgetHealth`
+    /// is: another label can hold the daemon's one health slot while these
+    /// sessions are still waiting.
+    var witnessCapacityHealth: HealthCopy? {
+        HealthCopy.forWitnessCapacity(status.witnessCapacity)
     }
 
     /// The spent-budget banner, when there is one.
@@ -667,6 +978,14 @@ final class AppModel: ObservableObject {
     /// that refused, rather than re-resolving and possibly disagreeing with
     /// it.
     private(set) var configDirectory: String = ""
+
+    /// Whether the watcher this shell is driving belongs to another
+    /// process.
+    ///
+    /// Worth surfacing rather than hiding: an attached daemon cannot be
+    /// stopped from here and cannot open a redacted body preview, and a
+    /// contributor who is not told that meets it as a dead control.
+    var isAttachedDaemon: Bool { daemon?.isAttached ?? false }
 
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
@@ -699,22 +1018,30 @@ final class AppModel: ObservableObject {
     /// `settingsJSON` is the roots screen's mechanism: the C ABI persists it
     /// and only then evaluates whether both session roots are declared, so
     /// one call both records the contributor's answer and starts the watcher.
-    func startDaemon(at path: String, settingsJSON: String?) {
-        do {
-            let daemon = try TCDaemon(configDir: path, settingsJSON: settingsJSON)
-            let client = DaemonClient(daemon: daemon)
-            self.daemon = daemon
-            self.client = client
-            startup = .running
-            subscribe()
-            refreshAll()
-        } catch TCDaemon.TCError.rootsNotDeclared {
-            // Not a dead end any more: the roots screen renders on this
-            // state and calls back into `startDaemon` with the two folders
-            // the contributor picked.
-            startup = .needsRoots
-        } catch {
-            startup = .refused("\(error)")
+    func startDaemon(
+        at path: String,
+        settingsJSON: String?,
+        completion: (@MainActor @Sendable (Startup) -> Void)? = nil
+    ) {
+        guard daemon == nil, !daemonStartup.isStarting else { return }
+        isStartingDaemon = true
+        daemonStartup.start(configDirectory: path, settingsJSON: settingsJSON) { [weak self] result in
+            guard let self else { return false }
+            self.isStartingDaemon = false
+            switch result {
+            case .success(let daemon):
+                self.daemon = daemon
+                self.client = DaemonClient(daemon: daemon)
+                self.startup = .running
+                self.subscribe()
+                self.refreshAll()
+            case .failure(TCDaemon.TCError.rootsNotDeclared):
+                self.startup = .needsRoots
+            case .failure(let error):
+                self.startup = .refused("\(error)")
+            }
+            completion?(self.startup)
+            return true
         }
     }
 
@@ -818,6 +1145,8 @@ final class AppModel: ObservableObject {
     /// a few seconds in the bad case; that is the correct trade against
     /// freeing memory another thread is reading.
     func shutdown() {
+        daemonStartup.cancel()
+        isStartingDaemon = false
         undoTask?.cancel()
         let subscription = self.subscription
         let daemon = self.daemon
@@ -876,6 +1205,7 @@ final class AppModel: ObservableObject {
         refreshAudit()
         refreshPublicProfile()
         refreshHarnesses()
+        refreshNearAiCredential()
     }
 
     /// The local change log. Refreshed alongside everything else at launch,
@@ -1162,24 +1492,90 @@ final class AppModel: ObservableObject {
     /// `failure.message`, and `enroll`'s failure message must never reach a
     /// screen -- `OnboardingConnectView` renders one fixed sentence for
     /// every failure of this call instead.
-    func prepareAdmissionSession(entryID: String, backend: String) async -> AdmissionPreparation? {
-        guard let client else { return nil }
-        return await Task.detached { try? client.prepareAdmissionSession(entryID: entryID, backend: backend) }.value
+    /// What a preparation did, and the words the daemon chose for it.
+    ///
+    /// This used to return `AdmissionPreparation?` through `try?`, which threw
+    /// the refusal away: the bridge now carries the daemon's sentence on the
+    /// `Failure` it raises, and `try?` discarded the whole error to get a
+    /// `nil` the view could only answer with one generic line. Sixteen causes
+    /// arrived here and left as the same sentence.
+    ///
+    /// The success sentence comes from the same `view`, so both outcomes are
+    /// the daemon's words rather than this shell's.
+    func prepareAdmissionSession(entryID: String, backend: String) async -> AdmissionOutcome {
+        guard let client else { return AdmissionOutcome(succeeded: false, sentence: nil) }
+        return await Task.detached(priority: .userInitiated) {
+            AppModel.admissionOutcome(from: client, entryID: entryID, backend: backend)
+        }.value
+    }
+
+    /// The whole decision, so the detached task above holds none of it.
+    ///
+    /// Split out because `client` is private and a test cannot reach this
+    /// arm through the model: without it the only reachable path is the
+    /// no-client guard, and dropping the daemon's sentence again would stay
+    /// green. Takes the client so a test can hand it one over a recording
+    /// transport and cross the real bridge and the real decode.
+    nonisolated static func admissionOutcome(
+        from client: DaemonClient,
+        entryID: String,
+        backend: String
+    ) -> AdmissionOutcome {
+        do {
+            let prepared = try client.prepareAdmissionSession(entryID: entryID, backend: backend)
+            return AdmissionOutcome(
+                succeeded: prepared.view?.ready == true,
+                sentence: prepared.view?.message
+            )
+        } catch {
+            return AdmissionOutcome(
+                succeeded: false,
+                sentence: DaemonClient.refusalSentence(from: error)
+            )
+        }
     }
 
     func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) async -> NativeWalletView? {
         guard let client else { return nil }
         return await Task.detached { try? client.nativeWalletFlow(action: action, flowID: flowID, commons: commons, account: account) }.value
     }
+    /// Join with the NEAR AI login, reporting the daemon's own control name.
+    ///
+    /// The label is passed back untouched for `TCNearAiEnroll` to turn into a
+    /// sentence. This model does not know which of the ten refusals it is and
+    /// must not guess: a shell-side table would be an eleventh that agrees
+    /// with the shared one until it does not.
+    func nearAiAccountEnroll(commons: String) async -> NearAiEnrollOutcome {
+        guard let client else { return .refused("near_ai_enroll_unavailable") }
+        return await Task.detached(priority: .userInitiated) { () -> NearAiEnrollOutcome in
+            do {
+                return .joined(try client.nearAiAccountEnroll(commons: commons))
+            } catch let failure as DaemonClient.Failure {
+                // `message` is the daemon's control name -- the enrolment
+                // handler answers a label and nothing else, because the
+                // errors underneath can quote a remote body or a URL. Empty
+                // falls back to the generic label rather than to a blank.
+                return .refused(
+                    failure.message.isEmpty ? "near_ai_enroll_unavailable" : failure.message)
+            } catch {
+                return .refused("near_ai_enroll_unavailable")
+            }
+        }.value
+    }
+
     func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
         guard let client else { return .failed }
-        return await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
+        let outcome = await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
             do {
                 return .succeeded(try client.enroll(invite: invite, scopes: scopes))
             } catch {
                 return .failed
             }
         }.value
+        // Enrolling moves the route off `not_enrolled`; a failure may still
+        // have landed, so re-read either way.
+        refreshRouteDisclosure()
+        return outcome
     }
 
     /// Records that the NEAR AI first-use notice was shown, and clears the
@@ -1187,6 +1583,90 @@ final class AppModel: ObservableObject {
     /// Refreshes settings and status afterward so `nearAIConfigured` /
     /// `health` reflect the daemon's own post-acknowledgment state rather
     /// than an assumption made here.
+    /// Records that one void notice was shown, then re-reads status so the
+    /// daemon's own list, not an assumption made here, decides what stays.
+    func acknowledgeGrantVoid(id: UInt64) {
+        perform(
+            "acknowledge_grant_voids",
+            work: { try $0.acknowledgeGrantVoids(ids: [id]) }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
+    /// Records that one rewording notice was shown (K5), then re-reads
+    /// status so the daemon's own list decides what stays.
+    func acknowledgeArmingRewording(id: UInt64) {
+        perform(
+            "acknowledge_arming_rewordings",
+            work: { try $0.acknowledgeArmingRewordings(ids: [id]) }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
+    /// Projects whose "Ask me first" the daemon refused, by project id, so
+    /// the notice can show the Rust's refusal line. Cleared on a retry.
+    @Published private(set) var askFirstRefused: Set<String> = []
+
+    /// "Ask me first" on a rewording or held-folder notice. The same call as
+    /// Settings -- `set_project_mode` with the project's id and
+    /// `notify_only` -- which also answers a rewording notice. A refusal
+    /// changes nothing; the notice stays and says so.
+    func askFirst(projectID: String) {
+        guard let client else { return }
+        askFirstRefused.remove(projectID)
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.setProjectMode(projectID: projectID, mode: .ask) }
+            await MainActor.run {
+                if case .failure = outcome {
+                    self.askFirstRefused.insert(projectID)
+                }
+                self.refreshStatus()
+                self.refreshProjects()
+                self.refreshAudit()
+            }
+        }
+    }
+
+    /// Records that the legacy invite migration notice was shown, then
+    /// re-reads status so the daemon, not this shell, decides it is gone.
+    func acknowledgeLegacyInviteMigration() {
+        perform(
+            "acknowledge_legacy_invite_migration",
+            work: { try $0.acknowledgeLegacyInviteMigration() }
+        ) { _ in
+            self.refreshStatus()
+        }
+    }
+
+    /// Void notices whose "Turn back on" the daemon refused, by notice id,
+    /// so the card can show the Rust's refusal line. Cleared on a retry.
+    @Published private(set) var grantVoidRearmRefused: Set<UInt64> = []
+
+    /// "Turn back on" on a project's void notice. The same call as arming a
+    /// project in Settings -- `set_project_mode` with the project's id and
+    /// `auto_upload` -- so the daemon applies the same refusals, writes the
+    /// same `armed-auto-upload` row, and clears the notice itself. A refusal
+    /// changes nothing; the notice stays and says so.
+    func rearmGrantVoid(id: UInt64, projectID: String) {
+        guard let client else { return }
+        grantVoidRearmRefused.remove(id)
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.setProjectMode(projectID: projectID, mode: .autoUpload) }
+            await MainActor.run {
+                if case .failure = outcome {
+                    self.grantVoidRearmRefused.insert(id)
+                }
+                self.refreshStatus()
+                self.refreshProjects()
+                self.refreshAudit()
+            }
+        }
+    }
+
     func acknowledgeNearAINotice() {
         perform(
             "acknowledge_near_ai_notice",
@@ -1264,6 +1744,65 @@ final class AppModel: ObservableObject {
                 daemonSettings = confirmed
             }
             inferenceEvidenceSaveFailed = true
+        }
+        // A lost answer does not prove the write failed, and an unchanged
+        // settings view triggers no re-read of its own: ask the daemon.
+        refreshRouteDisclosure()
+    }
+
+    @Published private(set) var tokenStorageNotice = ""
+    func setLocalTokenCapture(_ enabled: Bool) async {
+        guard !tokenContributionBusy, let client else { return }
+        tokenContributionBusy = true
+        tokenStorageNotice = ""
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setSettings(["token_capture_enabled": enabled]) }
+        }.value
+        switch result {
+        case .success(let settings): daemonSettings = settings
+        case .failure: tokenStorageNotice = daemonSettings?.tokenStorage?.failureLine ?? ""
+        }
+    }
+    func cleanTokenStorage(discard: Bool) async {
+        guard !tokenContributionBusy, let client else { return }
+        tokenContributionBusy = true
+        tokenStorageNotice = ""
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.tokenStorageAction(discard: discard) }
+        }.value
+        switch result {
+        case .success(let status): daemonSettings?.tokenStorage = status
+        case .failure: tokenStorageNotice = daemonSettings?.tokenStorage?.failureLine ?? ""
+        }
+    }
+
+    @Published private(set) var tokenContributionBusy = false
+    @Published private(set) var tokenContributionSaveFailed = false
+
+    func setTokenContribution(_ enabled: Bool, disclosureConfirmed: Bool = false) async {
+        guard !tokenContributionBusy else { return }
+        tokenContributionSaveFailed = false
+        guard let client else {
+            daemonSettings?.tokenDistributionsContribution = nil
+            tokenContributionSaveFailed = true
+            return
+        }
+        tokenContributionBusy = true
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setTokenContribution(enabled, disclosureConfirmed: disclosureConfirmed) }
+        }.value
+        switch result {
+        case .success(let settings):
+            daemonSettings = settings
+            refreshAudit()
+        case .failure:
+            if let confirmed = await Task.detached(operation: { try? client.settings() }).value {
+                daemonSettings = confirmed
+            }
+            tokenContributionSaveFailed = true
         }
     }
 
@@ -1352,7 +1891,14 @@ final class AppModel: ObservableObject {
     /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
     /// for whatever the viewport actually realizes, so this stays
     /// proportional to what is on screen.
-    private func applyPendingUpdate(_ entries: [QueueEntry]) {
+    ///
+    /// Internal rather than private so a test can land a snapshot and watch
+    /// what a view holding this model would see. `pending` is
+    /// `@Published private(set)` and there is no other way in; the
+    /// eligibility gate on an open preview sheet reads `awaitingDecision`,
+    /// which only a snapshot moves, so a test that cannot deliver one
+    /// cannot prove the sheet re-reads it.
+    func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
         publishIfChanged(\.pending, entries)
         let currentIDs = Set(entries.map(\.entryID))
@@ -1511,6 +2057,23 @@ final class AppModel: ObservableObject {
         correction: String? = nil,
         completion: ((Bool) -> Void)? = nil
     ) {
+        // THE PRESS DECIDES WHAT IS SENT. The queue card draws its Submit
+        // only for a row the shared table offers one for, and its rows come
+        // from `awaitingDecision` so they are never stale -- but the tap
+        // still lands after the render that drew the button, and a snapshot
+        // can arrive in between. Asked here rather than in the view so
+        // every route to a single approval goes through it.
+        //
+        // A refusal is silent on purpose: the row is about to repaint
+        // without its button and with the sentence saying why, which is the
+        // answer. An error banner would name a failure that did not happen.
+        guard EligibilitySurface.mayProceed(
+            entry, in: awaitingDecision, id: \.entryID,
+            eligibility: { $0.contributionEligibility }, calls: eligibilityCalls)
+        else {
+            completion?(false)
+            return
+        }
         perform("approve", work: {
             try $0.approve(entryID: entry.entryID, verdict: verdict, correction: correction)
         }) { response in
@@ -1534,13 +2097,41 @@ final class AppModel: ObservableObject {
     /// `verdict` applies to every entry the approval covers. The plain
     /// `Submit all` passes none; `Submit all as...` is the opt-in path that
     /// passes one.
+    ///
+    /// **A GROUP-LEVEL SUBMIT MEANS "ALL ELIGIBLE", NEVER "ALL", AND THE
+    /// DAEMON ENFORCES THAT.** Both group selectors act only on entries whose
+    /// eligibility is `eligible`, and report how many they left out as
+    /// `excluded_ineligible`. This shell used to fan the call out into one
+    /// `entry_id` approval per eligible entry and merge the responses; it
+    /// does not any more, because a per-project approve has no row to check
+    /// and no shell can close that gap from outside. One call, one approval
+    /// instant, one hold that covers every entry it took.
     func submitProject(id projectID: String, verdict: ContributorVerdict? = nil) {
-        let attempted = awaitingDecision.filter { $0.projectID == projectID }.map(\.entryID)
+        // The ids this shell believes the call covers, for the undo path
+        // only. The daemon decides what it actually takes, and its
+        // `excluded_ineligible` says how many it did not -- neither is
+        // recovered by filtering here.
+        let attempted = EligibilitySurface.contributable(
+            awaitingDecision.filter { $0.projectID == projectID },
+            eligibility: { $0.contributionEligibility }, calls: eligibilityCalls
+        ).map(\.entryID)
         perform("approve", work: {
             try $0.approve(projectID: projectID, verdict: verdict)
         }) { response in
             self.refreshQueue()
             self.showToast(for: response, attempted: attempted)
+            // What became of the rest, from the daemon's own count and the
+            // shared sentence. NEVER BRANCHED ON HERE: the table answers the
+            // empty string for zero and for the absence, so a filter that
+            // ran and took everything, and one that never ran, both draw
+            // nothing without this code knowing which it was.
+            // `clamping`, not `Int64(...)`: the field is unsigned on the
+            // wire and a plain conversion TRAPS above `Int64.max` rather
+            // than wrapping. No honest daemon sends that, which is exactly
+            // why it would be a crash nobody had thought about.
+            let withheld = Int64(clamping: response.excludedIneligible ?? 0)
+            let sentence = self.eligibilityCalls.withheldLine(withheld) ?? ""
+            self.lastActionNotice = sentence.isEmpty ? nil : sentence
         }
     }
 
@@ -1752,7 +2343,7 @@ final class AppModel: ObservableObject {
         /// The server withdrew it, and reported this tier. `nil` reach means
         /// the daemon sent a label this build does not know -- which is
         /// reported as not-knowable, never smoothed into the mild answer.
-        case withdrawn(WithdrawalReach?)
+        case withdrawn(WithdrawalReach?, String? = nil)
         /// The daemon has no account session, so the request was never made.
         case noAccountSession
         /// Anything else. Carries the daemon's fixed label, which by
@@ -1762,6 +2353,20 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var withdrawals: [String: WithdrawalResult] = [:]
     @Published private(set) var withdrawing: Set<String> = []
+    @Published private(set) var sessionDetails: [String: SessionDetail] = [:]
+    @Published private(set) var sessionDetailErrors: [String: String] = [:]
+    @Published private(set) var loadingSessionDetails: Set<String> = []
+    @Published private(set) var publicRunErrors: [String: String] = [:]
+    @Published private(set) var publicRunWorking: Set<String> = []
+    @Published var skillLearningStore = SkillLearningStore()
+    private var accountOwnedContentScope: String?
+    private var sessionDetailRequestSequence: UInt64 = 0
+    @Published private(set) var skillLearningCopy: SkillLearningCopy? = SkillLearningCopy.decode(
+        fromJSON: TCSkillLearning.copyJSON() ?? ""
+    )
+    @Published private(set) var publicRunCopy: PublicRunCopy? = PublicRunCopy.decode(
+        fromJSON: TCPublicRun.copyJSON() ?? ""
+    )
 
     /// Withdraws one trace.
     ///
@@ -1789,13 +2394,132 @@ final class AppModel: ObservableObject {
                 self.withdrawing.remove(id)
                 switch outcome {
                 case .success(let value):
-                    self.withdrawals[id] = .withdrawn(value.distributionReach)
+                    self.withdrawals[id] = .withdrawn(value.distributionReach, value.tokenDeletionNote)
                     self.refreshHistory()
                 case .failure(let error):
                     let label = (error as? DaemonClient.Failure)?.message ?? "withdraw-failed"
                     self.withdrawals[id] = label == "account-session-required"
                         ? .noAccountSession
                         : .failed(label)
+                }
+            }
+        }
+    }
+
+    func loadSessionDetail(_ record: HistoryRecord) {
+        guard let client else { return }
+        let id = record.submissionID
+        guard !loadingSessionDetails.contains(id) else { return }
+        guard !publicRunWorking.contains(id) else { return }
+        sessionDetailRequestSequence &+= 1
+        let requestSequence = sessionDetailRequestSequence
+        loadingSessionDetails.insert(id)
+        sessionDetails[id] = nil
+        sessionDetailErrors[id] = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try client.sessionDetail(submissionID: id) }
+            await MainActor.run {
+                self.loadingSessionDetails.remove(id)
+                guard requestSequence == self.sessionDetailRequestSequence else { return }
+                switch result {
+                case .success(let detail):
+                    self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
+                    self.sessionDetails[id] = detail
+                case .failure(let error):
+                    self.sessionDetails[id] = nil
+                    let label = (error as? DaemonClient.Failure)?.message ?? ""
+                    if label == "account-session-required"
+                        || label == "session-detail-not-found"
+                        || label == "session-owner-changed"
+                    {
+                        self.clearAccountOwnedContent()
+                    }
+                    self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: label)
+                }
+            }
+        }
+    }
+
+    private func reconcileAccountOwnedContent(scope: String?) {
+        guard let scope else { return }
+        if let previous = accountOwnedContentScope, previous != scope {
+            clearAccountOwnedContent()
+        }
+        accountOwnedContentScope = scope
+    }
+
+    private func clearAccountOwnedContent() {
+        accountOwnedContentScope = nil
+        sessionDetails.removeAll()
+        sessionDetailErrors.removeAll()
+        publicRunErrors.removeAll()
+        skillLearningStore = SkillLearningStore()
+    }
+
+    func publishPublicRun(_ record: HistoryRecord, draft: PublicRunDraftInput) {
+        guard let client else { return }
+        let id = record.submissionID
+        guard let detail = sessionDetails[id],
+              let taskSuccess = detail.taskSuccess
+        else { return }
+        guard !publicRunWorking.contains(id) else { return }
+        guard !loadingSessionDetails.contains(id) else { return }
+        publicRunWorking.insert(id)
+        publicRunErrors[id] = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result {
+                try client.publishPublicRun(
+                    submissionID: id,
+                    draft: draft,
+                    taskSuccess: taskSuccess,
+                    contributedVersion: detail.contributedVersion,
+                    expectedPublicationVersion: detail.publicationVersion
+                )
+            }
+            await MainActor.run {
+                self.publicRunWorking.remove(id)
+                switch result {
+                case .success(let page):
+                    if var detail = self.sessionDetails[id] {
+                        detail.publication = page
+                        detail.publicationVersion = page.version
+                        self.sessionDetails[id] = detail
+                    }
+                    if let warning = page.credentialWarning {
+                        self.publicRunErrors[id] = TCPublicRun.publicationErrorLine(label: warning)
+                    }
+                case .failure(let error):
+                    let label = (error as? DaemonClient.Failure)?.message ?? ""
+                    self.publicRunErrors[id] = TCPublicRun.publicationErrorLine(label: label)
+                }
+            }
+        }
+    }
+
+    func unpublishPublicRun(_ record: HistoryRecord) {
+        guard let client else { return }
+        let id = record.submissionID
+        guard !publicRunWorking.contains(id) else { return }
+        guard !loadingSessionDetails.contains(id) else { return }
+        publicRunWorking.insert(id)
+        publicRunErrors[id] = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try client.unpublishPublicRun(submissionID: id) }
+            await MainActor.run {
+                self.publicRunWorking.remove(id)
+                switch result {
+                case .success(let outcome):
+                    if var detail = self.sessionDetails[id] {
+                        detail.publication = nil
+                        detail.publicationVersion = outcome.expectedPublicationVersion
+                        self.sessionDetails[id] = detail
+                    }
+                    if let warning = outcome.credentialWarning {
+                        self.publicRunErrors[id] = TCPublicRun.publicationErrorLine(label: warning)
+                    }
+                case .failure(let error):
+                    let label = (error as? DaemonClient.Failure)?.message ?? ""
+                    self.publicRunErrors[id] = TCPublicRun.publicationErrorLine(label: label)
                 }
             }
         }
@@ -1830,12 +2554,29 @@ final class AppModel: ObservableObject {
     }
 
     func requestWitnessReview(entryID: String) async -> Bool {
-        guard let client else { return false }
+        await witnessReviewOutcome(entryID: entryID).succeeded
+    }
+
+    /// A refused review and the sentence the daemon chose for it.
+    ///
+    /// The `Bool` above is kept for callers that only need to know whether to
+    /// reload. This one is for the sheet, which has to say *why*: before it,
+    /// every refusal -- a receipt the reviewer declined, a reviewer that was
+    /// simply down, one that could not prove itself -- rendered the same
+    /// single sentence.
+    func witnessReviewOutcome(entryID: String) async -> WitnessReviewOutcome {
+        guard let client else { return WitnessReviewOutcome(succeeded: false, sentence: nil) }
         return await Task.detached(priority: .userInitiated) {
             do {
                 try client.requestWitnessReview(entryID: entryID)
-                return true
-            } catch { return false }
+                return WitnessReviewOutcome(succeeded: true, sentence: nil)
+            } catch {
+                return WitnessReviewOutcome(
+                    succeeded: false,
+                    sentence: DaemonClient.refusalSentence(from: error),
+                    retryLine: DaemonClient.busyRetryLine(from: error)
+                )
+            }
         }.value
     }
 
@@ -1904,7 +2645,19 @@ final class AppModel: ObservableObject {
             // dropped, so the card's extent line is absent and the capture
             // shows exactly what it showed before these fields existed.
             subagentCount: 0,
-            subagentsDropped: 0
+            subagentsDropped: 0,
+            // The screenshot fixture stands for an invited contributor: no
+            // eligibility field, so the capture shows the card exactly as it
+            // looked before this surface existed.
+            eligibility: nil,
+            eligibilityReason: nil,
+            // The same invited contributor still gets a mark: an attested
+            // session, which is the state the capture is meant to show.
+            attestation: "attested",
+            attestationReason: nil,
+            // The capture shows a session a certificate is held for, which
+            // is the state the certificate-held list is drawn from.
+            holdsCertificateRaw: true
         )
         var offsets: [Int] = []
         if !needle.isEmpty {
@@ -1923,6 +2676,29 @@ final class AppModel: ObservableObject {
                 offsets: offsets
             )
         )
+    }
+
+    /// What a preparation did, and the words for it either way.
+    ///
+    /// The mirror of [`WitnessReviewOutcome`], for the same reason: a `Bool`
+    /// cannot carry why.
+    struct AdmissionOutcome: Sendable {
+        let succeeded: Bool
+        /// The daemon's classified sentence, or `nil` when it sent none and
+        /// the caller should keep its own fallback.
+        let sentence: String?
+    }
+
+    /// What a witness review did, and the words for it when it refused.
+    struct WitnessReviewOutcome: Sendable {
+        let succeeded: Bool
+        /// The daemon's classified sentence, or `nil` when it sent none and
+        /// the caller should keep its own fallback.
+        let sentence: String?
+        /// Set only when the witness was busy: when the person may try the
+        /// review again. A busy witness judged nothing, so it is not a
+        /// refusal.
+        var retryLine: String? = nil
     }
 
     enum PreviewOutcome {

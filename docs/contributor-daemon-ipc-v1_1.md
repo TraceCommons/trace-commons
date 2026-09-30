@@ -1,4 +1,4 @@
-# Contributor daemon IPC — `trace_commons.daemon.v1_1`
+# Contributor daemon IPC: `trace_commons.daemon.v1_1`
 
 Status: **stable, additive, with one deliberate exception**. This is the
 contract the native menu-bar and window applications are built against, on
@@ -25,7 +25,7 @@ old behaviour, because no application has shipped against `v1` yet. See
   each validated against a fixed ceiling rather than left open (see
   [`set_settings`](#set_settings)). Before this, the only way to raise either
   cap was to stop the daemon and hand-edit `daemon-settings.json`.
-- `project_id` — an opaque, daemon-issued handle for a project. It appears
+- `project_id` is an opaque, daemon-issued handle for a project. It appears
   on every queue entry (`list_pending`, the `snapshot` event) and on every
   `list_projects` row, and `set_project_mode` accepts it in place of
   `project_key`. Before this, a socket client could not call
@@ -38,7 +38,7 @@ old behaviour, because no application has shipped against `v1` yet. See
   consent scope but had no way to claim the handle that scope is about, so
   the "Go public" flow and the settings profile panel were unreachable from
   every application. See ["The public profile"](#the-public-profile).
-- `status.routing` — whether the IronWire proxy overlay is declared and
+- `status.routing` reports whether the IronWire proxy overlay is declared and
   whether it is producing anything, in three states rather than two. Before
   this, a contributor who declared a proxy that never produced a row saw the
   same nothing as one who never declared it, and a declaration change did
@@ -48,9 +48,9 @@ old behaviour, because no application has shipped against `v1` yet. See
   ones, each with the mode actually in force and a `configured` boolean. An
   onboarding screen that asks a contributor to exclude a repository has to
   be able to list a repository nobody has ruled on yet.
-- `preview_turns` — an index of turn boundaries **into the body
+- `preview_turns` provides an index of turn boundaries **into the body
   `preview_body` already returns**. The transcript surface wants
-  `— user — turn 1 —` separators and a `144 more turns` footer, and had
+  separators that identify `user` and `turn 1`, plus a `144 more turns` footer. It had
   nothing to place them from. This is strictly an overlay: `preview_body`'s
   request and response shapes are untouched, its bytes are unchanged, and
   every offset indexes that same string. The daemon deliberately does not
@@ -59,7 +59,7 @@ old behaviour, because no application has shipped against `v1` yet. See
   contributor less than the artifact under a tab titled "exactly what would
   be sent". See ["`preview_turns`"](#preview_turns).
 - `preview_request`, `preview_visible`, `preview_cancel`, and the
-  `preview_ready` event — the **bounded** preview path. `preview` builds on
+  `preview_ready` event form the **bounded** preview path. `preview` builds on
   the connection's time, which meant a shell drawing a list of N cards
   started N full read-parse-redact-serialize passes at once; on one
   contributor's machine (about 500 queued sessions, 11.7 GB across 4,097
@@ -78,6 +78,17 @@ old behaviour, because no application has shipped against `v1` yet. See
   sense -- no existing `history_rollup` field changed shape, and a client
   that ignores the object is unaffected. See
   ["`history_rollup`"](#history_rollup).
+- `history_detail`, reviewed public pages, and the seven `skill_*` methods
+  add the account-owned session-to-skill flow. The daemon derives a candidate
+  from one accepted correction, freezes the owner-reviewed Agent Skill,
+  compares it with two controls through a NEAR-owned model, and exposes a
+  signed, preview-before-write Codex installation with rollback. See
+  ["Session detail and publication"](#session-detail-and-publication) and
+  ["Tested skill workflow"](#tested-skill-workflow).
+- `certificate_detail` provides a bounded read-only projection of a held
+  witness certificate for native review surfaces. It returns signed claims,
+  recovered signer, receipt state, and explicit expiry absence without
+  exposing the stored envelope, signature, or certificate JSON.
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -98,7 +109,7 @@ containing directory: the daemon refuses to serve unless it is 0700, and a
 place a socket there either.
 
 **Windows**: a named pipe at `\\.\pipe\trace-commons-daemon-<16 hex>`, where
-the hex is a SHA-256 prefix over the state directory path — never the path
+the hex is a SHA-256 prefix over the state directory path. The path itself
 itself, which under the default layout carries the OS username, and which a
 pipe name would expose to every process on the machine.
 
@@ -107,7 +118,7 @@ matters. A named pipe does not live in the state directory; it lives in the
 machine-wide pipe namespace, where any local process may attempt to open it
 by name. **Its DACL is the only thing protecting it.** The daemon builds one
 granting the creating user's SID alone (`D:P(A;;GA;;;<sid>)`, protected so
-no inherited entry can widen it) and refuses to serve if it cannot — there is
+no inherited entry can widen it) and refuses to serve if it cannot. There is
 no fallback to a default-ACL pipe, because that fallback is the
 vulnerability. The first instance is created with `first_pipe_instance` so a
 squatter cannot pre-create the name under a weaker descriptor and be served
@@ -120,20 +131,20 @@ opens the pipe as a file handle, which has no equivalent of
 > **The Windows DACL is verified by CI, and that job has not yet run.**
 > Type-checking for `x86_64-pc-windows-gnu` establishes the FFI signatures
 > and the control flow and nothing about whether the descriptor actually
-> excludes another user — a runtime property no cross-compile can observe.
+> excludes another user, which is a runtime property no cross-compile can observe.
 > The observation is the `windows-pipe-acl` CI job
 > (`scripts/windows/verify-pipe-acl.ps1`, driving
 > `src/bin/win-pipe-acl-probe.rs`): on `windows-latest` it creates a second,
 > non-administrator local account, has it attempt to open the pipe, and
 > requires ERROR_ACCESS_DENIED, with a control confirming the owning user is
-> still admitted. The account is deliberately not an administrator — one can
+> still admitted. The account is deliberately not an administrator because one can
 > take ownership of any object and would reach the pipe regardless, so that
 > test would look like evidence while proving nothing.
 >
 > **That job has run and passed** (PR #247, run 31307072159): `DENIED 5` from
-> the second user — ERROR_ACCESS_DENIED, refused by the access check
+> the second user: ERROR_ACCESS_DENIED, refused by the access check
 > specifically rather than by pipe-busy or file-not-found, which the script
-> rejects so a coincidental refusal cannot pass as evidence — and `CONNECTED`
+> rejects so a coincidental refusal cannot pass as evidence. It also recorded `CONNECTED`
 > from the owner. The claim holds only while that job keeps running; weaken
 > or remove it and the verification lapses with it.
 
@@ -206,6 +217,12 @@ What replaces the restriction is **visibility, not gatekeeping**:
   is rolled back and the call returns `audit-write-failed`. It does not
   succeed with a warning: an unrecorded change is exactly what removing the
   terminal-only restriction was not supposed to make possible.
+- Arming records the terms it is granted under (see `auto-upload-voided`
+  below). With no config to read them from -- not yet enrolled, or a config
+  that cannot be read -- `set_project_mode: "auto_upload"` is refused with
+  `arming-terms-unavailable` (`ERR_UNAVAILABLE`) before anything is recorded.
+  Arming the unknown-project bucket is refused for its own reason first,
+  also before anything is recorded.
 - The durable log is capped and rotates oldest-first, so it cannot grow
   until appending to it starts failing. Capping `list_audit`'s output alone
   would not have bounded the file.
@@ -219,7 +236,7 @@ It does not prevent anything; it only lets a contributor later see that
 something happened. Do not build a security argument, a permission gate, or
 any enforcement logic on top of `list_audit` -- it is a record, not a guard.
 
-## Naming a project: ids, keys, and labels
+## Project identifiers
 
 A project has three names on this contract, and they are not
 interchangeable.
@@ -244,7 +261,7 @@ can see a project can name it. `set_project_mode` accepts it in place of
 `project_key`, and it is the identifier **every socket client should use**.
 `project_id` wins if both are sent.
 
-An id resolves only against projects the daemon already knows — one already
+An id resolves only against projects the daemon already knows: one already
 in the policy, one sitting in the queue, or the `unknown-project` sentinel.
 An id that resolves to none of those is refused with the fixed label
 `project-id-unrecognized`, and nothing is recorded.
@@ -253,13 +270,13 @@ Knowing an id confers nothing. It is an identifier, not a capability: the
 same call was always available to anyone who could name the directory, and
 resolution is still limited to projects the daemon discovered on its own.
 
-### `project_key`, and why it is still accepted
+### Accepted `project_key` use
 
 `project_key` is an absolute local path. It does not cross the socket in any
 response, and no GUI should ever hold one. It remains an accepted
 *parameter* for exactly one caller: a human in a terminal running
 `daemon project <path> --mode ignore` **before that project's first
-session** — the flow that excludes a repository pre-emptively. The daemon
+session**. This flow excludes a repository pre-emptively. The daemon
 cannot mint an id for a project it has never discovered, so an id cannot
 serve that flow, and the two coexist deliberately rather than one replacing
 the other.
@@ -297,16 +314,27 @@ something it can corroborate, rather than to a string a client invented.
   cross the socket. Do not display or log a path. Render the label; send the
   id back.
 - History records carry no path at all.
-- `get_settings` reports three booleans -- `near_ai_configured`,
+- `get_settings` reports five booleans -- `near_ai_configured`,
+  `near_ai_inference_configured`, `near_ai_session_retained`,
   `claude_root_configured`, `codex_root_configured` -- and never the
-  underlying values. The first is a credential (the privacy-filter API key);
-  the other two are local filesystem paths. All three are configured-or-not
-  facts an app may render as a checkmark, never as text containing the
-  actual value.
+  underlying values. The first three are credentials and are **different
+  credentials for different services**, which their near-identical names do
+  not convey: `near_ai_configured` is the privacy-filter API key,
+  `near_ai_inference_configured` is the NEAR AI inference key this daemon
+  mints for a contributor, and `near_ai_session_retained` is the NEAR AI
+  session kept alongside that key so the account balance can be read. The
+  session is the **widest** of the three -- a refresh token can mint further
+  API keys and read organization and workspace state, where the inference key
+  buys inference and nothing else -- and it is the one that most obviously
+  must never cross this socket. The last two are local filesystem paths. All
+  five are configured-or-not facts an app may render as a checkmark, never as
+  text containing the actual value.
 - `preview` returns a **summary** over the socket -- counts, labels, and
   sizes. The full redacted event body is a separate call, `preview_body`,
   because it does not fit one frame and has to be paged. Both carry trace
-  content under the one carve-out below; nothing else on this surface does.
+  content under the preview boundary below. Account-authenticated session
+  detail and tested-skill extraction have their own bounded content boundary;
+  no other method returns session-derived text.
   An earlier revision of this document said the body was deliberately
   in-process only, reachable through the crate's C ABI, on the reasoning
   that any process could compute a preview for itself. That reasoning does
@@ -318,15 +346,13 @@ something it can corroborate, rather than to a string a client invented.
   the running daemon is still holding. So the body is served over the
   socket, paged.
 
-### The preview exemption
+### The preview content boundary
 
-`preview` is the **one** interface that deliberately carries trace content,
-and this is a decision, not a contradiction left lying around. The socket's
+The preview interfaces deliberately carry trace content. The socket's
 `opening_prompt`, the socket's `preview_body` chunks, and the C ABI's
 `tc_preview_body` are all trace content. A contributor cannot consent to
 sending something they cannot see; an approval given against a byte count
-and a project name is not an informed one. So the rule has exactly one
-carve-out, and it is bounded:
+and a project name is not an informed one. This content is bounded:
 
 - **Post-redaction only.** What preview carries is what the real redaction
   pipeline produced. Raw session text never crosses either boundary.
@@ -380,9 +406,10 @@ the rest of the exemption, plus three of their own:
 They never cross the socket or the C ABI. `preview` reports the
 `envelope_digest` that identifies them; it does not serve them.
 
-Everywhere else the rule remains absolute: no path, token, invite code,
-claim, device key, or trace content in any log line, error string, receipt,
-history record, audit entry, notification text, or IPC response.
+Outside the preview, owned-session, and tested-skill response fields named in
+this contract, the rule remains absolute: no unrestricted local path, token,
+invite code, claim, device private key, or trace content appears in a log line,
+error string, receipt, audit entry, notification text, or IPC response.
 
 ## Native onboarding state and bootstrap trust
 
@@ -419,15 +446,22 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
 | `list_pending` | — | `pending[]` of queue entries | |
+| `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
+| `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
 | `prepare_admission_session` | `entry_id`, `backend`, `confirmed: true` | `status: "ready_for_next_inference"`, `expires_at`, `view` | consent-gated challenge registration for the next inference; no funding or routing changes |
 | `native_wallet_flow` | `action: open/check/start/wait/cancel`; `flow_id` after open; `ingest_url` for check/start; `account_id` for start | shared wallet view (see below) | owns capability checks, origin validation, polling cadence and cancellation; no new C ABI |
-| `near_account_capabilities` | `ingest_url` | validated `ready`, issuer, audience and witness settings | checks allowlisted HTTPS service; no signup or funding |
+| `near_account_capabilities` | `ingest_url` | validated `ready`, issuer, audience and witness settings; on `ready: false` a `reason` of `address_refused`, `unreachable` or `unsupported` | checks allowlisted HTTPS service; no signup or funding. With `TRACE_COMMONS_ALLOWED_HOSTS` unset the allowlist is derived from `ingest_url` plus the issuer and witness hosts that origin publishes |
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
+| `near_ai_credential_start` | `provider` (optional, default `github`) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
+| `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
+| `near_ai_credential_cancel` | `attempt_id` (**required**) | `attempt_id`, `status` | stops this machine waiting on the browser; `near_ai_credential_unknown` if the id is not the current attempt |
+| `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
+| `near_ai_credential_migrate` | — | `migrated`, `state` | asynchronous only; macOS. Copies the sign-in an earlier build kept in the login keychain into the data-protection store under the same reference, and never deletes the legacy entry. The one read of the login keychain, so it may raise a password prompt, which is why only a contributor's action sends it. `migrated: false` means neither store held it, and the dangling reference was dropped (`state` becomes `absent`). A refused legacy read is an error and changes nothing. See "The credential state" below |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
@@ -438,9 +472,19 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>`, `retracted: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
+| `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
+| `skill_candidate` | `submission_id` | candidate, correction, up to six evidence excerpts, default draft, manual control, evaluation contract, and optional replacement review id | reads the same account-owned redacted record as `history_detail`; no model call |
+| `skill_review` | `candidate_id`, `draft: {name, description, procedure}`, `replaces_review_id` (optional) | reviewed draft, complete `SKILL.md`, SHA-256, and source lineage | validates and freezes the exact skill locally; a changed prior review requires its id |
+| `skill_evaluate` | `review_id`, `skill_sha256` | bounded three-arm evaluation report, source-exclusion record, regressions, and install verdict | uses one eligible NEAR-owned model; sends public fixtures and approved generic skill content only |
+| `skill_install_plan` | `evaluation_id` | exact `SKILL.md`, signed marker JSON, separate preview digests, symbolic locations, occupancy, and install permission | performs blocking local inspection without writing the package |
+| `skill_install_commit` | `plan_id`, `as_previewed_sha256`, `as_previewed_marker_sha256` | installed package identity, source lineage, digests, time, and symbolic target location | one-use commit of both previewed files; never accepts paths from the client |
+| `skill_install_status` | `source_submission_id` | `installed`, plus verified `skill` or `null` | verifies exact signed on-disk state after restart |
+| `skill_install_rollback` | `install_id`, `source_submission_id` | `removed`, `retained_directory` | makes the skill unavailable with one quarantine rename and retains a non-loadable backup |
+| `publish_public_run` | `submission_id`, `draft`, `task_success`, `contributed_version`, `expected_publication_version` | reviewed public page | computes the approval digest over every public field and owner-state version |
+| `unpublish_public_run` | `submission_id` | `unpublished`, `expected_publication_version` | idempotent account-authenticated request |
 | `refresh_history` | — | `requested: true` | |
 | `list_audit` | `limit` (optional, default 50, max 1000) | `entries[]`, newest first | see "Audit log" below |
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
@@ -451,11 +495,16 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
-| `acknowledge_near_ai_notice` | — | `acknowledged: true` | clears the `near-ai-notice-not-acknowledged` health label |
+| `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
+| `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept`, `legacy_session_revoked` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
+| `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
+| `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
+| `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
+| `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
@@ -463,6 +512,11 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `shutdown` | — | `stopping: true` | |
 | `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
+| `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
+| `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
+| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
+| `inference_connection_install` | `connection_id`, `config_digest` (both **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
+| `inference_connection_disconnect` | `connection_id` (**required**) | `disconnected`, `connection_id`, `state_version` (or `null`), `local_witness_removed`, `server_disconnect` (`revoked` / `not-found` / `pending`), `server_refusal` (label or `null`) | removes the local witness first, with or without an account session; see "Connecting inference" below |
 
 ### `status`
 
@@ -488,9 +542,21 @@ pins. No account token, device key or PKCE verifier is returned to native views.
     "blocked_entries": 14,
     "blocked_bytes": 137283584
   },
-  "routing": { "state": "not_declared", "last_refresh_at": null }
+  "routing": { "state": "not_declared", "last_refresh_at": null },
+  "grant_voids": [],
+  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
+  "arming_rewordings": [],
+  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] }
 }
 ```
+
+`grant_voids` is additive; see "Void notices" below. `witness_capacity`,
+`arming_rewordings` and `automatic_contribution_held` are additive; see their
+sections below.
+
+`legacy_invite_migration` is additive: `{"offered": bool, "notice": null |
+{"folders_kept": n, "automatic_grant_kept": bool}}`. See "Moving a legacy
+invite identity" below.
 
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
@@ -504,8 +570,8 @@ holding back.
 
 It is deliberately **not** routed through `health`. The daemon does set
 `daily-cap-reached` when a cap refuses an upload, but that label sits at the
-bottom of the precedence order, so any other condition — a full queue, in
-the case this field was added for — occupies the single
+bottom of the precedence order, so any other condition, including the full
+queue that prompted this field, occupies the single
 `health.last_error_label` slot and the cap becomes invisible. A client that
 only reads `health` therefore cannot tell a spent budget from a broken
 daemon. Read `daily_budget` independently of `health`.
@@ -525,7 +591,39 @@ stops at the first entry that does not fit rather than skipping past it, so
 a small entry queued behind a large one waits as well.
 
 `blocked` is false when the budget is spent but nothing is approved and
-waiting — there is no one to tell in that case.
+waiting. No contributor action is pending in that case.
+
+#### `witness_capacity`
+
+Additive. How many approved sessions are held because the privacy witness
+answered `503 witness_saturated` (the pacing contract in
+`trace_commons_protocol::witness_pacing`), and when the first of them is
+tried again. Always present; `waiting_sessions` is `0` and `next_retry_at`
+`null` when nothing is waiting.
+
+| field | meaning |
+| --- | --- |
+| `waiting_sessions` | approved entries whose `reason_label` is `witness-saturated` |
+| `next_retry_at` | the earliest `retry_after` among them (RFC 3339), or `null` |
+
+The upload pass marks its witness requests
+`x-trace-witness-workload: background`; a review a contributor asked for
+sends no header. On a saturation refusal the entry keeps its approval, is
+labelled `witness-saturated`, and is not claimed again before the witness's
+own `Retry-After` (bounded to an hour; an unreadable value is the contract's
+30 seconds), doubling while the witness stays busy, capped at an hour, plus
+up to half the witness's delay of per-session jitter. Every later entry in
+the same pass that would need the witness is held until the same time
+without being sent, so a busy witness is asked once per pass, not once per
+session. There is no attempt limit: a busy witness never costs a session.
+
+It is beside `health` for the reason `daily_budget` is: the daemon also
+sets `witness-saturated` in the health slot, set and retracted from the
+queue on every upload pass, but a higher-precedence label can mask it.
+Render the condition from this object. The words are
+`consent_copy::witness_capacity_notice_for_wire` (`tc_witness_capacity_notice`
+across the ABI); a shell renders `next_retry_at` itself, in local time,
+beside the notice's `next_check` label.
 
 Counts and timestamps only. No entry id, hash, or path appears here.
 
@@ -533,12 +631,67 @@ Approved entries are not listed by `list_pending`, which returns `pending`
 entries only, so this is the only place the condition is reported; there is
 no per-entry equivalent.
 
+#### `arming_rewordings`
+
+Additive. K5 of the connect-and-forget design: armed folders whose arming
+words claimed a model scrubs their sessions (the "will be scrubbed" arming
+offer, or the grant's model-scrub wording), where the words in force for them
+now claim only the fixed patterns. The folder stays armed; this notice is how
+the contributor is told what its arming now means. Always present; `[]` when
+there is nothing to show.
+
+```json
+[{ "id": 0, "reworded_at": "2026-09-27T01:00:00Z",
+   "project_id": "3f2a...", "project_label": "api",
+   "was": "model_scrubbed", "now": "patterns_only" }]
+```
+
+Each element is named the way `list_projects` names the project, never by its
+key. A notice is recorded once per narrowing, in the policy file with the
+claim it records, so it survives a restart; the watcher checks on every pass.
+It stays until a shell calls `acknowledge_arming_rewordings` with its `id`
+(audited as `arming-rewordings-acknowledged`, no "all") or the contributor
+sets the project's mode, which answers it. A void takes it with it. The
+rewording itself is audited as `arming-reworded` with the project label.
+
+Today no rewording is recorded: every shell's arming offer says "will be
+scrubbed" whatever R1's disclosure is, so the words in force have not
+changed. It fires when the arming offer becomes disclosure-dependent
+(`arming_wording::project_arming_claim`), or when a folder's disclosure drops
+to patterns-only. The words are
+`consent_copy::arming_reworded_notice_for_wire` (`tc_arming_reworded_notice`);
+its `ask_first_action` button is `set_project_mode` with the element's
+`project_id` and `notify_only`.
+
+#### `automatic_contribution_held`
+
+Additive. What the automatic-contribution gate held at the last **full**
+watcher pass: sessions in armed folders it is holding instead of approving
+(for example, R3 before this commons admits the account), the unmet
+requirements' reason labels, and each folder, named as `list_projects` names
+it. Always present; zero, `[]` and `[]` when nothing is held, which is always
+the case while `automatic_gate::ENFORCED` is off.
+
+| field | meaning |
+| --- | --- |
+| `held_sessions` | sessions held, as `TickReport::gate_blocked` counts them |
+| `reasons` | `automatic_gate::REASON_*` labels; empty when nothing is held |
+| `projects[]` | `project_id`, `project_label`, `held_sessions` per armed folder |
+
+Set and cleared only by a full pass; a scoped pass sees only changed paths and
+leaves it as it was. In memory only: a restarted daemon's first full pass
+measures it again. The daemon also sets `automatic-contribution-held` in the
+health slot from the same pass, but a higher label can mask it, so render the
+condition from this object. It is never acknowledged: it releases on its own
+on the first full pass that finds the gate met. The words are
+`consent_copy::gate_held_notice_for_wire` (`tc_gate_held_notice`).
+
 #### `routing`
 
 Additive, and the protocol version is unchanged: `trace_commons.daemon.v1_1`
-stays as it is. Every shell ignores keys it does not know — the Swift models
+stays as it is. Every shell ignores keys it does not know. The Swift models
 decode declared keys only, the GTK models carry no `deny_unknown_fields`, and
-the Windows deserializer is left at its default — so an older shell against a
+the Windows deserializer is left at its default, so an older shell against a
 newer daemon behaves exactly as it did before, which is the rule this
 document's "additive" status already states.
 
@@ -574,28 +727,30 @@ This does not authenticate a later listener or cancel an already in-flight reque
 | `token_unreadable` | declared, and no ledger could be built: `control.token` could not be read |
 | `unknown` | internal routing state is unavailable; no configuration or token diagnosis is implied |
 
-Every routing snapshot includes `derived: true|false`. True identifies automatic
-metadata routing from this daemon's owned proxy; false identifies an explicit or
-absent declaration. With `state: "unknown"`, false is only a conservative default,
-not evidence that metadata is disabled. Shells use the effective status and its
-origin alongside the independent explicit declaration controls. The shared routing
-copy payload includes `derived_origin` for that explanation and `state_unknown`
-for unavailable nonempty labels. The origin is descriptive and never turns the
-explicit routing switch on or enables body reading. Older snapshots without
-`derived` omit that explanation; they do not synthesize it from a hosting flag.
+Every routing snapshot includes `derived: true|false`, with these meanings:
+
+- `true` identifies automatic metadata routing from this daemon's owned proxy.
+- `false` identifies an explicit or absent declaration.
+
+With `state: "unknown"`, false is a conservative default that provides no
+evidence about metadata status; shells should present the effective status,
+its origin, and the independent explicit declaration controls together. The
+shared routing copy includes `derived_origin` for that explanation and
+`state_unknown` for unavailable nonempty labels. `derived_origin` is descriptive
+and cannot enable routing or body reading; older snapshots omit the explanation.
 
 `token_unreadable` is what a declared proxy that is not running looks like,
 and it is the one state a contributor has to act on. It was reported as
 `not_declared` before it existed, which made a shell print "off" under a
 switch the contributor could see was on. It is not `awaiting_rows` either:
 that state says a reader exists and has seen nothing, and this one says no
-reader exists. `last_refresh_at` is always `null` under it — nothing was
+reader exists. `last_refresh_at` is always `null` under it because nothing was
 built, so nothing was ever checked.
 
 `awaiting_rows` is **not an error** and a client must not render it as one.
 A machine whose proxy was installed this morning reports it, and so does one
 whose declaration changed a second ago: `set_settings` rebuilds the ledger in
-place — no restart — and a rebuilt ledger starts cold by construction. Say
+place without a restart, and a rebuilt ledger starts cold by construction. Say
 "nothing seen yet", not "broken".
 
 The distinction `not_declared` carries cannot be recovered from row counts:
@@ -604,7 +759,7 @@ nothing both have zero rows, and reporting them the same way tells a
 contributor whose declaration never took that everything is fine.
 
 `last_refresh_at` is when a refresh last **reached** the proxy and came back
-readable — RFC 3339, or `null` when none ever has. It is not stamped on a
+readable (RFC 3339), or `null` when none ever has. It is not stamped on a
 failed attempt, which is what makes it useful: rows say data exists, not that
 the proxy answers now, and a proxy that died an hour ago still has rows. With
 `awaiting_rows`, a non-null `last_refresh_at` means the proxy answered and
@@ -635,7 +790,13 @@ No port, token, or row content appears here.
 ```
 
 `subagent_count` and `subagents_dropped` also appear on every queue entry
-(`list_pending`, the `snapshot` event). Both are additive; the schema version
+(`list_pending`, the `snapshot` event), as do `eligibility` and
+`eligibility_reason` -- see "Contribution eligibility" below -- and
+`attestation` and `attestation_reason`, see "The attestation mark" below,
+and `holds_certificate`, see "The certificate a queue entry holds" below.
+`attestation` and `holds_certificate` are on EVERY entry; `eligibility` is
+not. All are
+additive; the schema version
 stays `trace_commons.daemon.v1_1`, and a client that ignores them behaves
 exactly as before.
 
@@ -659,7 +820,7 @@ No ordinal is exposed -- there is no "1 of 3" -- because nothing in the
 transcript format supplies one. Ordering delegated transcripts against each
 other would be a claim this daemon cannot verify.
 
-`opening_prompt` is redacted trace content -- see "The preview exemption"
+`opening_prompt` is redacted trace content -- see "The preview content boundary"
 above for why this one field is allowed to be, and what that permission does
 not extend to.
 
@@ -706,10 +867,10 @@ preview a local file; that requirement was incidental and is gone.
 
 `enrolled` says which kind of preview you got:
 
-- `true` — the ordinary case. Built from the real enrolled identity through
+- `true` is the ordinary case. It is built from the real enrolled identity through
   the configured privacy filter, and (as described above) **pinned**: the
   envelope is stored and a later `approve` covers exactly those bytes.
-- `false` — no enrollment on this device. The envelope is built from the
+- `false` means this device has no enrollment. The envelope is built from the
   same placeholder identity the CLI's unenrolled `--dry-run` uses, with a
   preview submission id disjoint from any real one, and through the
   **deterministic-only** redactor: any configured external privacy filter is
@@ -735,29 +896,29 @@ The handler enforces these conditions:
 
 1. Require an authenticated local IPC caller, an enrolled device, a pending entry
    the caller already holds, and explicit confirmation to send this session to
-   the configured remote witness before redaction. Body-export consent remains
-   separate: read `ironwire_attested_bodies` from current daemon settings, never
-   from a caller's inferred proxy/scanner state. No confirmation means no work.
+   the configured remote witness before redaction. Read the separate body-export
+   consent, `ironwire_attested_bodies`, from current daemon settings; a missing
+   confirmation ends the request before work begins.
 2. Snapshot the selected entry's source hash and current configuration, including
-   consent and witness pins. Call `preview::build_witnessed_preview` with
+   consent and witness pins, then call `preview::build_witnessed_preview` with
    `WitnessPreviewOptions { raw_session_confirmed, expected_session_hash,
    include_inference_bodies, verdict, correction }`. A missing/stale device,
    changed source, unpinned witness, failed claim, or unverified certificate
-   refuses. There is no local-redaction fallback.
-3. This is an ordinary authenticated upload-claim request, not an admission or
-   credit action. Its explicitly echoed grant must be fresh and no wider than
-   requested permissions. The granted scopes/uses are included in the bytes the
-   witness certifies. The helper never uploads a contribution or persists a token.
+   refuses without a local-redaction fallback.
+3. Use an ordinary authenticated upload-claim request, separate from admission
+   and credit. Its explicitly echoed grant must be fresh and no wider than the
+   requested permissions; the witness certifies bytes that include the granted
+   scopes and uses. The helper uploads no contribution and persists no token.
 4. On completion, take the queue lock and recheck that the entry is still pending
-   and its source/configuration/consent match the snapshot. Persist via
+   and its source/configuration/consent match the snapshot; persist via
    `approved_envelope::save_witnessed`, then pin `summary.envelope_digest` and save
-   the queue. A failed save must not allow approval without a persisted artifact.
-   Never route this result through the local-envelope `save` function.
+   the queue. A failed save blocks approval, and the result never passes through
+   the local-envelope `save` function.
 5. `witness-sha256:` pins identify the full versioned record: exact wire bytes,
    certificate/signature, source hash, configuration fingerprint, and approval
-   answers. Read through `load_witnessed`; check its digest and `validate` against
+   answers; read through `load_witnessed`, check its digest and `validate` against
    current context, then use `envelope()` for existing body/turn/summary rendering.
-   Missing, corrupt, partial, unknown-version, or legacy local records are refused.
+   Missing, corrupt, partial, unknown-version, and legacy local records are refused.
 6. The witnessed artifact is immutable. Corrections/verdicts must be supplied
    before that explicit review, and approval must match those answers exactly.
    A changed answer requires another explicit review; neither ordinary `approve`
@@ -795,7 +956,7 @@ revision" note for what that measured out to on a real machine.
 on-screen entries first, and refuses sessions too large to be worth parsing
 for a card.
 
-**`preview_request`** — params `{entry_id}`. Returns immediately, always,
+**`preview_request`** takes `{entry_id}`. It always returns immediately,
 with an object whose `state` is one of:
 
 | `state` | Also carries | Meaning |
@@ -819,14 +980,14 @@ Calling this repeatedly for the same entry is free and is the intended
 usage: a cached result comes straight back, and an entry already queued or
 building is not enqueued twice.
 
-**`preview_visible`** — params `{entry_ids: [...]}`. Replaces the daemon's
+**`preview_visible`** takes `{entry_ids: [...]}` and replaces the daemon's
 idea of what is on screen, wholesale. Send it after each scroll settles; it
 takes one lock and moves no work. Visibility decides the **order** previews
 are built in, never whether they are built: an entry that scrolls away keeps
 its place in the queue. An unparseable id is `bad_params` /
 `entry-ids-invalid`; an empty array is valid and means nothing is on screen.
 
-**`preview_cancel`** — params `{entry_id}`. Returns `{entry_id, dropped}`.
+**`preview_cancel`** takes `{entry_id}` and returns `{entry_id, dropped}`.
 `dropped: false` means there was nothing to drop -- already finished, never
 requested, already cancelled -- and is not an error, because a client that
 cancels on every card leaving the list will hit it constantly.
@@ -856,9 +1017,8 @@ already `approved`, so a declined conversation uploaded unattended.
 addresses every session -- by its path. Once dismissed, the watcher skips
 that session for good: no new `pending` card, no `approved` one, and no
 re-read (the skip sits in front of the load, so a declined conversation
-someone keeps working in costs nothing per poll). Arming a project does not
-override it -- `auto_upload` is a standing yes to sessions the contributor
-has not ruled on, not to one they have.
+someone keeps working in costs nothing per poll); arming a project cannot
+override it because `auto_upload` applies only to sessions without a ruling.
 
 There is no un-dismiss. The record is the dismissed entry itself, which
 lives in the queue file with reason `dismissed-by-contributor` and is never
@@ -884,16 +1044,45 @@ the daemon process and does not survive a daemon restart.
 
 ### `set_project_mode` and the ignore purge
 
-Setting a project to `ignore` also clears whatever it has waiting: every
-`pending` entry for that project moves to `refused` with
-`reason_label = "project-ignored"`. The response carries `purged`, the
-number of entries that moved.
+Setting a project to `ignore` also clears whatever it has waiting. Two
+kinds of entry move to `refused` with `reason_label = "project-ignored"`,
+and the response counts them separately:
 
-`approved` and `uploading` entries are deliberately untouched. An approval
-is a decision already made about specific bytes under specific consent
-scopes, and a project-level preference set afterwards does not retract it --
-so a project with three waiting and one approved loses three and still
-uploads one. A client MUST say so rather than let a contributor discover it.
+- `purged`: `pending` entries for that project -- the cards the contributor
+  was shown as waiting.
+- `retracted`: `approved` entries the daemon approved **unattended**, under
+  the project's standing `auto_upload`. Nobody decided about those bytes, so
+  excluding the project is the contributor's first decision about them.
+
+A client comparing the result with the number of waiting cards it showed
+MUST compare against `purged` only; `retracted` entries were never on screen
+as waiting. Both fields are always present and may be `0`.
+
+**Turning automatic off retracts too.** Setting a project to `notify_only`
+moves the same unattended `approved` entries back to `pending`, with their
+old approval's terms cleared, and counts them in `retracted`; `purged` is
+`0`, since no waiting card is removed. They become ordinary waiting cards
+for the contributor to decide, rather than refusals: turning automatic off
+means "ask me", not "never offer this". Before this, only `ignore`
+retracted, so turning automatic off left every session it had already
+approved uploading.
+
+An `approved` entry the **contributor** approved is deliberately untouched,
+and so is an `uploading` entry. A contributor's approval is a decision
+already made about specific bytes under specific consent scopes, and a
+project-level preference set afterwards does not retract it -- so a project
+with three waiting and one approved by hand loses three and still uploads
+one. A client MUST say so rather than let a contributor discover it.
+
+An unattended approval that was `uploading` at the moment of the change and
+did not complete -- the daily cap, a fail-closed precondition, a restart --
+returns to `approved`. It is not sent: the upload pass re-checks the
+project's mode before sending any unattended approval, refuses it as
+`"project-ignored"` if the project is now `ignore`, returns it to `pending`
+if the project is now `notify_only`, and emits `queue_changed`. That arrives
+on a later pass, not in this response. A project key the policy cannot
+resolve falls back to `notify_only`, so a lookup miss now waits for the
+contributor rather than sending.
 
 `"project-ignored"` is not `"dismissed-by-contributor"`. A dismissal is
 permanent and suppresses that conversation at its path forever; this is a
@@ -901,8 +1090,9 @@ verdict on whatever was queued at the moment the mode changed, so setting
 the project back to `notify_only` or `auto_upload` lets those sessions be
 offered again -- including sessions that are finished and will never be
 written to again. Leaving `ignore` drops that project's `"project-ignored"`
-entries outright, which is what lets the watcher re-offer them; `dismissed`
-and pipeline refusals in the same project are untouched. The re-offer
+entries outright -- purged, retracted and refused-at-send alike -- which is
+what lets the watcher re-offer them; `dismissed` and pipeline refusals in the
+same project are untouched. The re-offer
 arrives on a later poll, not in this response, and is still subject to the
 queue cap.
 
@@ -938,12 +1128,11 @@ Response:
 ```
 
 **It is paged, and you must page it.** A redacted envelope can approach the
-1.5 MB envelope ceiling; a socket line is capped at `max_line_bytes` (1 MiB).
-A single frame therefore cannot be promised, so there is none: read from
-`offset: 0`, append `chunk`, and follow `next_offset` until it is `null`.
-Nothing is ever silently truncated -- `total_bytes` is the length of the
-whole body, and a client that has not received `[0, total_bytes)` has not
-read the trace.
+1.5 MB envelope ceiling while a socket line is capped at `max_line_bytes`
+(1 MiB), so the method promises no single frame. Read from `offset: 0`, append
+each `chunk`, and follow `next_offset` until it is `null`; `total_bytes` gives
+the whole length, and receiving less than `[0, total_bytes)` means the trace
+remains incomplete.
 
 **Continuation pages must be anchored.** Every response carries
 `body_digest`, a SHA-256 over the complete body. Send it back on every
@@ -997,7 +1186,7 @@ the body it is showing belongs to the summary it displayed.
 ### `preview_turns`
 
 Where the turns begin inside the body `preview_body` returns, so a client
-can draw `— user — turn 1 —` separators and a `144 more turns` footer over a
+can draw separators that identify `user` and `turn 1`, plus a `144 more turns` footer over a
 transcript it is rendering verbatim.
 
 **This adds nothing to the body and changes nothing about it.** It is an
@@ -1045,7 +1234,7 @@ event names a tool. `byte_offset` and `byte_len` are a half-open range of
 **Grouping: a tool call and its result are one turn.** A `tool_call`
 followed immediately by the `tool_result` carrying the same `tool_call_id`
 is indexed as a single turn spanning both events, so the separator reads
-`— tool: bash — turn 3 —` once rather than putting a boundary between a
+`tool: bash, turn 3` once rather than putting a boundary between a
 command and its output. The pairing must be explicit and adjacent:
 an unmatched call, a result whose call is missing, a pair reordered by the
 source, and a pair with no `tool_call_id` to correlate on are all one turn
@@ -1091,28 +1280,64 @@ render, not from anything the daemon left out.
       "mode": "notify_only",
       "added_at": null,
       "configured": false,
-      "is_unresolved_bucket": false
+      "is_unresolved_bucket": false,
+      "pending_count": 7,
+      "contributable_count": 3
     }
   ]
 }
 ```
 
+`pending_count` is how many `Pending` entries this project holds.
+`contributable_count` is how many of those a group-level `approve` would act
+on -- what a shell needs to draw "send the 3 of 7 that can be sent" without
+enumerating rows and classifying them itself.
+
+**`contributable_count` is ABSENT when eligibility does not apply**, on the
+same rule as an entry's `eligibility` field: an invited contributor has no
+"3 of 7" to be told about, and `pending_count` alone is their answer. Test
+for the key; it is never null.
+
+Both numbers, never one. "Submit all (7)" quietly becoming "Submit all (3)"
+is worse than either: the contributor sees a smaller number with no
+explanation and cannot tell whether four sessions vanished or were never
+counted. A control that counts the sendable ones needs the total beside it,
+and `pending_count - contributable_count` is what
+`tc_contribution_withheld_line` turns into the sentence that closes the gap.
+
+**Absent, never zero.** A client that read a zero where the question does not
+apply would draw "Submit all (0)" and offer nothing to an invited contributor
+whose sessions are all perfectly sendable. When the key is missing, count the
+button off `pending_count` and render no withheld line.
+
+**`contributable_count: 0` means the group's submit control is not offered.**
+A header offering "Submit all" where nothing is eligible is a press with no
+visible consequence -- the row-level rule ("shown, not offered") one level up.
+The group still renders, with its rows and their sentences; only the control
+goes. Decide it through `tc_contribution_group_control(pending,
+contributable)`, passing **any negative value** for an absent
+`contributable_count`, so the absent-versus-zero distinction is made once
+rather than in three shells.
+
+It is a count and not a promise. Entries can move between this call and the
+approve, and the expensive checks still run at submit -- see "Contribution
+eligibility" below.
+
 Every project the daemon knows about, in two kinds:
 
-- **configured** (`configured: true`, `added_at` set) — the contributor has
+- **configured** (`configured: true`, `added_at` set) means the contributor has
   ruled on it with `set_project_mode`.
-- **discovered** (`configured: false`, `added_at: null`) — the daemon has
+- **discovered** (`configured: false`, `added_at: null`) means the daemon has
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
 
 #### `is_unresolved_bucket`
 
 True for exactly one row: the bucket holding sessions whose working directory
-had no usable final segment. Sessions in it can never be armed for automatic
-upload — `Policy` refuses `auto_upload` for that key independently of any
-client — so a shell showing the row with a permanent note is **reporting**
-enforcement, not performing it. `Ignore` still applies: the bucket can be
-silenced even though it cannot be armed.
+had no usable final segment. `Policy` prevents those sessions from being armed
+for automatic upload, independently of any client, so a shell showing the row
+with a permanent note is **reporting** enforcement. `Ignore` still applies and
+can silence the bucket.
 
 The flag is sent rather than left for clients to derive, because the daemon is
 the only side that knows it for free. Deriving it means re-implementing the
@@ -1127,7 +1352,7 @@ the moment that wording improves, and does it silently.
 Discovered rows are reported because the onboarding "which of these should
 never be uploaded" screen has to list precisely the projects nobody has
 decided about yet. A project becomes configured only by being ruled on, so a
-configured-only list is a list of decisions already made — it can never
+configured-only list contains decisions already made, so it can never
 contain the repository the contributor is being asked to exclude. Nothing
 new crosses the socket: a discovered row carries the same two
 daemon-derived fields (`project_id`, `project_label`) that the queue entry
@@ -1139,13 +1364,11 @@ file says `auto_upload`, because the daemon refuses to act on that.
 
 ### The `outcome` verdict
 
-`approve` accepts an optional `outcome` parameter: the contributor's own
-verdict on how the session went. It is optional; the accepted values are
-`worked`, `partly`, or `failed`. Absent means `TaskSuccess::Unknown`, and the
-approval proceeds normally -- no verdict is not an error. Any other value is
-refused with `bad_params` (`outcome-invalid`) and approves nothing. A value
-supplied alongside `all` or `project_id` applies to every entry that
-approval covers, not just one.
+`approve` accepts an optional `outcome` parameter for the contributor's verdict
+on the session. Accepted values are `worked`, `partly`, and `failed`; absence
+maps to `TaskSuccess::Unknown` and allows approval to proceed. Any other value
+returns `bad_params` (`outcome-invalid`) without approving an entry, while a
+valid value sent with `all` or `project_id` applies across that approval.
 
 ### The `correction` parameter
 
@@ -1194,9 +1417,85 @@ and must never echo the correction text or the detected value.
   "hold_until": "2026-08-08T12:00:10Z",
   "flagged": 1,
   "redactions": { "private_email": 2, "secret:openai_api_key": 1 },
-  "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ]
+  "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ],
+  "excluded_ineligible": 4,
+  "excluded_held": 1
 }
 ```
+
+**A group-level `approve` means "all eligible", never "all".** Both group
+selectors -- `project_id` and `all` -- act only on entries whose
+`eligibility` is `eligible`. The alternative either fails partway or succeeds
+at sending exactly what the surface just finished saying could not be sent,
+and no shell can close it: a per-project approve has no row to check, so the
+per-row gate cannot reach it.
+
+`excluded_ineligible` is how many pending entries the selector left out for
+this reason, so a client can say what became of the rest rather than infer it
+from a count smaller than the one it drew a button for. Excluded entries do
+**not** appear in `skipped`: they were never selected, and `skipped` is the
+account of what this call was asked to act on.
+
+`excluded_ineligible` is **absent** when no filter ran -- an invited
+contributor, or a single `entry_id`. Absent, never zero: zero would read as
+"nothing was left out", which is a claim about a filter that did not run.
+
+**A group `approve` also leaves out sessions held for a person's review**, and
+`excluded_held` is how many. An entry is held when it was revoked for a
+reason no unattended approval can satisfy:
+
+- `token-distribution-review-required`, which clears through a witness review
+  of that one session;
+- `witness-risk-review-required`: a session approved on the contributor's
+  behalf that the witness certified with a residual-risk verdict other than
+  `low`. The witness has already seen it, and nothing went to the commons.
+  Its certified review is kept pinned to the entry, so `preview` shows the
+  witness's bytes without running the witness again, and a person's
+  `approve` uploads exactly those bytes. Like any pinned `Pending` preview,
+  the pin is released after the preview age limit, and opening it then runs
+  the witness again.
+
+A group control is by definition not a review of one
+session, so held entries are left out for every contributor, invited or not,
+and are not in `skipped`. The watcher does not re-approve them under an
+`auto_upload` opt-in either; before it stopped, it re-approved one on the
+next poll, the uploader revoked it again, and the session never uploaded.
+
+`excluded_held` is present on every group call, because this filter always
+runs on one, and absent on a single `entry_id`, where it does not. It is kept
+apart from `excluded_ineligible` because the two say different things: an
+ineligible session cannot be sent, and a held one can once someone looks.
+
+Render it through `tc_contribution_withheld_line`, which turns the count into
+a sentence and answers the **empty string** for zero. A button reading
+"Submit all (2)" above a folder showing five rows, with nothing explaining the
+gap, is the same small dishonesty the rest of this surface removes. The
+sentence says how many and **not why**: the reason a particular session cannot
+be sent is that row's own sentence, one level in, and a summary here would
+stand for up to fourteen different reasons and say nothing true about any of
+them.
+
+**One reply, one deadline.** A group `approve` does not fan out. It takes one
+approval instant for the whole call, so every entry it approves shares one
+hold and the single `hold_until` it reports is true of all of them. A client
+must not fan a group submit out into per-entry calls and keep the first
+reply's hold: an undo bar has to outlast every entry it offers to undo, and
+the first reply's deadline retires Undo while something it covers is still
+recoverable. Ask for the group and use the group's deadline.
+
+An entry with no recorded eligibility renders `unknown`. `unknown` IS offered
+the control and IS included by a group selector: it is a session whose
+attestation could not be decided at discovery -- every Responses-API call,
+which is every Codex session, because a hosted and a brokered call come back
+under the same identifier shape -- and the receipt fetch at submission is the
+only thing that can decide it. Nothing is claimed; the state sentence still
+says it has not been worked out. The two `ineligible_*` states are the ones
+that offer nothing and are excluded.
+
+**A single `entry_id` is never filtered.** Naming one entry is an explicit act
+about a session the contributor is looking at, the shell's per-row gate
+already covers it, and the server decides admission either way. The daemon
+reports eligibility on a row; it enforces it only where a shell cannot.
 
 This is the whole signal a one-click submit needs: a client that never calls
 `preview` can still show "Sent -- scrubbing removed 3 things, 1 flagged.
@@ -1257,10 +1556,9 @@ This is the whole signal a one-click submit needs: a client that never calls
   cannot happen. An `entry_id` naming no entry at all is refused before any
   of this runs -- see below.
 - **An unrecognized `entry_id`** is refused the same way `preview` refuses
-  the same input: `bad_params` / `unknown-entry-id`, not a `skipped` entry.
-  This applies only to the single-`entry_id` form. `all` and `project_id`
-  cannot produce this case: their ids are read from the queue itself at
-  selection time, so every id they act on already names a real entry.
+  the same input: `bad_params` / `unknown-entry-id`, before a `skipped` entry
+  can be produced; this applies only to the single-`entry_id` form because
+  `all` and `project_id` select existing ids from the queue.
 - **An unrecognized `project_id`** is refused the same way
   `set_project_mode` refuses it: `bad_params` / `project-id-unrecognized`.
   A handle the daemon cannot resolve is a client bug, and answering it
@@ -1379,11 +1677,172 @@ one entry -- a `cancel` against a project with nothing `approved` appends
 nothing. The single-`entry_id` form of `cancel` stays unaudited, the same
 as the single-`entry_id` form of `approve`.
 
+An `auto-upload-voided` entry records a standing `auto_upload` grant that the
+daemon voided because the terms in force widened past what it was armed under
+-- a new recipient (destination, identity, witness, classifier host or model,
+receipt endpoint) or more leaving the machine (scopes gaining an entry, a
+filter added or removed, attested bodies turning on, a witness measurement
+admitted). `project_label` names the project and `detail` is a comma-separated
+list of fixed reason labels: `destination-changed`, `identity-changed`,
+`scopes-widened`, `privacy-filter-changed`, `receipt-endpoint-changed`,
+`witness-changed`, `witness-measurement-admitted`, `attested-bodies-on`. The
+project is `notify_only` from that pass on; arming it again records the new
+terms. Narrowing voids nothing. Unlike arming, the void is written **after**
+the mode change and a failed write does not undo it, because voiding is the
+safe direction.
+
+Four entries belong to the automatic grant (`grant_automatic`, below):
+`automatic-granted` and `automatic-grant-withdrawn` record it being given and
+withdrawn; `armed-by-default` records a project it armed, with that project's
+`project_label`; `automatic-grant-voided` records the grant itself voided by
+widened terms, with the same `detail` labels as `auto-upload-voided`.
+
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
 `list_history`'s convention. `action` and `detail` are always fixed labels --
 never free text, a path, or a token. See "Authorization" above for what this
 log is (and is not) for.
+
+A `grant-voids-acknowledged` entry records `acknowledge_grant_voids`;
+`detail` is how many notices it cleared.
+
+### Void notices
+
+R6 of the connect-and-forget design makes a void notice a ship condition:
+when widened terms void a grant, every shell tells the contributor, not only
+the audit. `status.grant_voids` lists every void no shell has acknowledged
+yet, oldest first:
+
+```json
+{
+  "grant_voids": [
+    { "id": 4, "kind": "project", "voided_at": "2026-09-26T12:00:00Z",
+      "project_id": "3f1c...", "project_label": "api",
+      "reasons": ["witness-measurement-admitted"] },
+    { "id": 5, "kind": "automatic_grant", "voided_at": "2026-09-26T12:00:00Z",
+      "project_id": null, "project_label": null,
+      "reasons": ["witness-measurement-admitted"] }
+  ]
+}
+```
+
+- `kind` is `project` for an `auto-upload-voided` void and `automatic_grant`
+  for an `automatic-grant-voided` one. `project_id` and `project_label` are
+  the ones `list_projects` gives that project, and are `null` for the grant.
+  No path crosses.
+- `reasons` are the same fixed labels as the audit's `detail`.
+- The list is always present, and `[]` when there is nothing to show, so a
+  shell can tell that from a daemon too old to report voids.
+- A shell does not write the notice. It passes one element to
+  `consent_copy::void_notice_for_wire` (across the C ABI,
+  `tc_grant_void_notice`), which returns the title, body, one sentence per
+  reason, the line after them, and the buttons' labels. An element it
+  cannot place (an unknown `kind`, or a project without a label) still gets
+  a notice, saying automatic contributing stopped without saying for what,
+  so no shell writes a fallback of its own.
+- The list is in the policy file, so a void during a pass no shell saw is
+  shown at the next launch. A sweep that voids publishes `status_changed`.
+
+`acknowledge_grant_voids` takes `ids`, the ids of the notices actually
+shown, and removes them. It is required, and there is no "all": a void
+raised between a shell drawing and the contributor pressing the button would
+otherwise be cleared unseen. An id that is not outstanding is ignored, since
+another shell may have acknowledged it first. It is audited
+(`grant-voids-acknowledged`) before anything is cleared, and refused with
+`audit-write-failed` when that entry cannot be written; it publishes
+`status_changed` when it clears anything. Acknowledging only records that
+the notice was seen: it re-arms nothing.
+
+A project's notice carries a second button, `rearm_action` ("Turn back on"),
+present only when the element has a `project_id`. It is `set_project_mode`
+with that `project_id` and `auto_upload`, nothing more: the same refusals
+(`arming-terms-unavailable`, the unknown bucket, an unrecognised id), the
+same `armed-auto-upload` audit row, and arming under the terms now in
+force. Pressing it is the fresh consent R6 asks for, which the sentence
+beside it says. A refusal changes nothing and leaves the notice; a shell
+shows `rearm_failed`. The automatic grant's notice has no such button: it
+says what happened to projects instead. A shell that can give the grant
+(today only Tauri, through its Flow 1 screens) asks for the notice with
+`consent_copy::void_notice_for_wire_with_regrant`, which adds `regrant` and
+`regrant_action` on the grant's notice only. That button opens the grant
+screens again -- scope, path, both disclosures, the grant -- and gives
+nothing by itself; `grant_automatic` given there clears the notice. Shells
+that cannot give the grant keep `void_notice_for_wire`, which promises no
+re-grant.
+
+A notice also goes when the contributor acts on what it is about: setting
+that project's mode (`set_project_mode`, including re-arming it) clears the
+project's notice, and `grant_automatic` clears the grant's. Ids are never
+reused. Logout clears the policy file and every notice with it.
+
+### `grant_automatic`, `withdraw_automatic_grant`, `automatic_grant`
+
+The Flow 1 grant (the connect-and-forget design, K3 and K4): contribute
+automatically from projects discovered from now on.
+
+```json
+{ "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
+```
+
+`grant_automatic` takes one required param, `witness_signing_address`: the
+signing address of the witness the contributor was shown on the disclosure
+screen, or `null` when that screen showed none. It returns the grant as
+`automatic_grant` reports it. Nothing is granted when it is refused:
+
+- `arming-terms-unavailable` (`ERR_UNAVAILABLE`): there is no config to record
+  terms from.
+- `automatic-grant-scopes-not-chosen` (`bad_params`): the config's
+  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7). A
+  saved scope list is not a choice: every enrollment saves at least the floor
+  scope, which `validate_scopes` adds, and an invite enrollment saves it with
+  nobody having picked it. Only `set_consent_scopes` records a choice.
+- `automatic-grant-witness-required` (`bad_params`): `witness_signing_address`
+  is absent, or neither a string nor `null`.
+- `automatic-grant-witness-changed` (`bad_params`): the witness configured now
+  is not the one named, including one configured where none was shown or none
+  where one was. A witness written between the disclosure screen and the grant
+  would otherwise be bound into the grant's terms unseen, and the void rule
+  would not catch it, since it compares against the terms captured at the
+  grant. The terms are captured from the same config read that was checked.
+- `audit-write-failed`: its `automatic-granted` entry cannot be written.
+
+A second call replaces the first, and records what is on disk again.
+
+**Every shell must call `set_consent_scopes` from its scope picker before
+`grant_automatic`**, even when the contributor keeps the scopes enrollment
+saved. As of this writing only the Tauri app gives the grant; the macOS,
+Windows and GTK shells do not call `grant_automatic`.
+
+**It arms nothing already on disk**, recorded per source. Each source's first
+successful discovery in a full watcher pass under the grant records every
+session in it and the project each belongs to, and arms nothing from them. So
+a harness connected after the grant, one pointed at another root, and one whose
+discovery failed on an earlier pass are all recorded before they can arm
+anything; until a source is recorded, none of its sessions arms a project.
+`on_disk_recorded` is true once any source has been recorded. A grant given
+while a pass is listing the disk is recorded by a later pass.
+
+After a source is recorded, a session from it in a project that no recorded
+source had on disk, with no policy entry of its own, and not the
+unknown-project bucket, arms its project: an explicit `auto_upload` entry, the
+terms it is granted under, and an `armed-by-default` audit row written first.
+A project with any session on disk at the grant keeps asking, for its new
+sessions too. And a session that was on disk at the grant is **never approved
+unattended in a project the grant armed**, whichever project it reads as now;
+it waits for the contributor. That holds after the grant is withdrawn or
+voided, and stops holding for a project once the contributor sets its mode
+themselves.
+
+That is what makes a re-grant after logout safe. Logout wipes the policy,
+including a project set to `ignore`; a re-grant records the disk again, so that
+project asks rather than being armed as new.
+
+Widened terms void the grant itself as well as the projects it armed, with an
+`automatic-grant-voided` entry. `withdraw_automatic_grant` returns
+`{"withdrawn": bool}` and leaves the projects the grant armed as they are;
+each is withdrawn with `set_project_mode`. `automatic_grant` returns
+`{"granted": false}` when none is in force. None of the three returns a path
+or a count of them.
 
 ### `queue_outcome_counts`
 
@@ -1729,8 +2188,8 @@ second edit to the same file, and on a file that did not exist before.
 
 ### `set_settings`
 
-Takes a JSON object of settings to change. Every top-level key must be one
-of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
+Takes a JSON object whose top-level keys must come from
+`quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
 `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
@@ -1741,21 +2200,20 @@ not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
 ignored, so a caller that mistypes a key gets a definite signal rather than
 a daemon that quietly kept the old value. A recognized key holding the
-wrong JSON type is refused the same way (`bad_params` /
-`settings-invalid-value`). An object with no keys at all is refused
-(`bad_params` / `no-known-setting-supplied`).
+wrong JSON type returns `bad_params` / `settings-invalid-value`; an empty
+object returns `bad_params` / `no-known-setting-supplied`.
 
 `opencode_source` takes `{"mode":"watch","path":"/chosen/export-directory"}`,
-`{"mode":"off"}`, or `null`. Absent/null and Off construct no adapter, including
-when loading older settings. Watch reads direct `.json` children exported with
-`opencode export SESSION_ID`; it does not scan OpenCode's database. Export
-version support and routing limits are recorded in
-[the qualification report](superpowers/reports/2026-09-07-opencode-export-qualification.md).
-This source declaration does not enable body capture or remote submission.
+`{"mode":"off"}`, or `null`; absent, null, and Off construct no adapter, including
+when older settings load. Watch reads direct `.json` children exported with
+`opencode export SESSION_ID` without scanning OpenCode's database; the
+[qualification report](superpowers/reports/2026-09-07-opencode-export-qualification.md)
+records version support and routing limits, and the declaration grants neither
+body capture nor remote submission.
 
 `approval_hold_secs` takes a non-negative integer: how long an approval is
-held before the uploader will touch it, i.e. how long the contributor's undo
-really lasts. Default 10; `0` disables the hold, and `approve` then reports
+held before the uploader will touch it, which sets the duration of the
+contributor's undo; the default is 10, while `0` disables the hold and makes `approve` report
 `hold_until: null` so a client knows to offer no undo. It is read at each
 upload pass, so a change applies to approvals already sitting in the queue,
 and a shortened hold can release an entry a client is still counting down
@@ -1764,9 +2222,11 @@ approval it accompanied, and do not change this setting mid-countdown.
 
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user
-location). Setting either here only takes effect from the daemon's *next*
+location); setting either here only takes effect from the daemon's *next*
 supervisor tick onward -- the tick already scheduled or in flight when this
-call returns has already read the old value. A caller that needs the
+call returns has already read the old value.
+
+A caller that needs the
 watcher to scan a non-default location from the very first tick -- most
 importantly a native host embedding the daemon via the C ABI, or a test
 harness that must never scan the real `~/.claude`/`~/.codex` -- cannot get
@@ -1774,26 +2234,26 @@ that through `set_settings`, since it only works on an already-running
 daemon and the first tick fires immediately on start. That is what the C
 ABI's `tc_daemon_start_with_settings` is for: it applies the same object
 this method validates, but before starting the daemon, so the first tick
-already observes the override. See `include/trace_commons.h`.
+already observes the override; see `include/trace_commons.h`.
 
 `ironwire_attested_bodies` takes a boolean, and it is a **second, separate
-answer from `ironwire`** rather than a detail of it. `ironwire` declares a
+answer from `ironwire`** rather than a detail of it; `ironwire` declares a
 local inference proxy whose ledger the daemon may read: metadata about model
 calls -- how many, what they cost, which backend served them. This key says
 that the final call's verbatim request and response bodies -- the
 contributor's own prompt, in the clear -- may additionally be carried to a
 configured redaction witness, which verifies an inference receipt against
-them inside its enclave, strips them, and certifies what is left. Declaring
+them inside its enclave, strips them, and certifies what is left; declaring
 the proxy therefore never switches this on: cost attribution is not consent
 to send a prompt, and a client that sets `ironwire` alone gets routing
 telemetry and no bodies.
 
 Default `false`, and a settings file written before this key existed loads
-with it off. Turning it on moves the approval fingerprint, so approvals
+with it off; turning it on moves the approval fingerprint, so approvals
 already given are re-asked rather than honoured under the new terms. The
 directory read is not configurable and is not this key: it is
 `bodies/` inside whichever proxy home the control token resolved in, so the
-body store and the ledger always belong to the same proxy. With no proxy
+body store and the ledger always belong to the same proxy; with no proxy
 declared, with the proxy declared off, or with no witness configured,
 setting this changes nothing that leaves the machine.
 
@@ -1856,17 +2316,26 @@ dropping the embedded daemon requests cleanup without blocking synchronously.
 Drop-based cleanup requires unwinding; a `panic=abort` build terminates the
 process instead and cannot finish in-flight requests.
 
-Existing-instance discovery reads at most 64 KiB from an opened regular pointer
-file and probes only the fixed IPv4 loopback health path. Accepted hosts are
-`127.0.0.1` and `localhost`; an IPv6-only pointer is not discovered through an
-unrelated IPv4 port. URL-shape restrictions are defense in depth because the
-request URL is constructed from the validated port, not used verbatim. On supported Unix targets,
-the opened object must match the checked device/inode and effective-user owner,
-remain unwritable by others, and is opened with no-follow/nonblocking flags so a
-replacement symlink or FIFO cannot bypass the check or block the open. Windows
-checks regular-file/reparse shape on the opened handle; this is not a DACL or
-Unix ownership guarantee. Advisory discovery fails closed on Unix targets other
-than shipped macOS and Linux x86_64/aarch64. The probe sends no token,
+Existing-instance discovery has two fixed bounds:
+
+- Read at most 64 KiB from an opened regular pointer file.
+- Probe only the fixed IPv4 loopback health path.
+
+Accepted hosts are `127.0.0.1` and `localhost`; an IPv6-only pointer is not
+discovered through an unrelated IPv4 port, while URL-shape restrictions add
+defense in depth because the request URL is constructed from the validated port.
+
+Platform checks differ:
+
+- On supported Unix targets, the opened object must match the checked
+  device/inode and effective-user owner, remain unwritable by others, and use
+  no-follow/nonblocking flags so a replacement symlink or FIFO cannot bypass
+  the check or block the open.
+- Windows checks regular-file/reparse shape on the opened handle. This check
+  supplies neither a DACL nor a Unix ownership guarantee.
+
+Advisory discovery fails closed on Unix targets other than shipped macOS and
+Linux x86_64/aarch64. The probe sends no token,
 ignores environment proxies, and never follows redirects. A successful health
 response is advisory: it conservatively avoids takeover but does not authenticate
 the endpoint. The exclusive home lock remains authoritative when starting.
@@ -1890,7 +2359,8 @@ retained-shutdown producer confirms cleanup; a port alone is metadata, not
 proof that calls can be answered.
 
 The companion C ABI copy payload (`tc_private_inference_copy`, not a daemon
-settings key) supplies these 48 fixed string fields:
+settings key) supplies the fixed string fields for the destination, the proxy
+state, the harness rows and the credential row:
 
 - `destination`, `subtitle`;
 - `offer_title`, `offer_what`, `offer_exposure`, `offer_no_repoint`,
@@ -1914,7 +2384,504 @@ settings key) supplies these 48 fixed string fields:
   `harness_unreadable_config`;
 - `harness_not_installed`;
 - `harness_plan_nothing_to_change`, `harness_plan_entry_unusable`,
-  `harness_plan_no_config_path`.
+  `harness_plan_no_config_path`;
+- `credential_title`, `credential_what`, `credential_cost`;
+- `credential_obtain`, `credential_cancel`, `credential_forget`,
+  `credential_forget_explains`, `credential_migrate`,
+  `credential_migrate_explains`;
+- `credential_absent`, `credential_obtaining`, `credential_failed`,
+  `credential_cancelled`, `credential_present`, `credential_unknown`,
+  `credential_unreported`.
+
+**Those are the fields for those rows, and not the whole payload.** The
+payload also carries a sentence for every state of every per-state family --
+the queue entry's `eligibility_*` and `attestation_*` sentences among them --
+and each family is written down in the section for the field it describes
+rather than repeated here. It grows a set whenever a family is added, and
+the list above is not extended when that happens. So do not read that list as
+an inventory of the payload: a key's absence from it is not evidence the key
+does not exist. The place that settles the question is `private_inference_copy`
+in `trace-commons-contributor`, whose `every_sentence_arrives_finished` pins
+the payload's field count and is what a shell's decoder is checked against.
+This document deliberately does not repeat that number: a count copied into
+prose goes stale in silence, and the test does not.
+
+### Contribution eligibility
+
+Queue entries carry two additive fields. They appear on **every** surface that
+hands a client an entry object -- `list_pending`, the `snapshot` event, and
+the `entry` object both `preview` responses carry (the async-dispatch one and
+the built card) -- and on no other, because `entry_value` is the only thing
+that serialises a queue entry and those are all of its callers.
+
+`approve` and
+the `preview_ready` event do not carry an entry object at all; they carry an
+`entry_id`. A client MUST NOT reconstruct eligibility from an entry it cached
+from some other path.
+
+| Field | Meaning |
+|---|---|
+| `eligibility` | `eligible` \| `ineligible_permanent` \| `ineligible_configuration` \| `unknown` |
+| `eligibility_reason` | a stable label naming why, or absent |
+
+**`eligibility` is ABSENT -- not `unknown`, not null -- whenever the
+contributor is admitted on an invite** rather than on evidence, i.e. whenever
+`admission_evidence_required` is false or could not be read. An invited
+contributor has no eligibility question: everything in their queue is
+contributable, which is why this whole surface stayed invisible for so long.
+A field answering a question they do not have would put three shells to work
+rendering a caveat on work that carries none. A client MUST test for the key,
+never read a missing key as a state.
+
+Show every session. Offer only the eligible ones. Hiding a contributor's own
+work is its own dishonesty and makes the app look as though it had not
+noticed files the contributor knows it can see. An ineligible row is present,
+not offered, and carries its reason.
+
+| `eligibility` | Means | Sentence | Control a shell may offer |
+|---|---|---|---|
+| `eligible` | the cheap checks pass and the marked call is here | `eligibility_eligible` | contribute |
+| `ineligible_permanent` | nothing the contributor changes will alter this | `eligibility_ineligible_permanent` | **none** |
+| `ineligible_configuration` | this session stays ineligible; a setting decides future ones | `eligibility_ineligible_configuration` | **none** |
+| `unknown` | not evaluated | `eligibility_unknown` | **none** |
+| anything else | the state could not be read | `eligibility_unknown` | **none** |
+
+The sentence, the tone and the control come from the shared Rust tables --
+`tc_contribution_eligibility_line`, `tc_contribution_eligibility_tone` and
+`tc_contribution_eligibility_control` -- never from shell-authored branching
+on a variant name, and a shell must not recover any of the three by reading
+another. `TC_CONTRIBUTION_CONTROL_NONE` (50) and
+`TC_CONTRIBUTION_CONTROL_CONTRIBUTE` (51) are the control values.
+
+**An unrecognised state must not borrow an ineligibility sentence.** A state
+this build cannot read is not evidence about a contributor's session, and
+saying it is would stop them offering work that is fine. Every shell carries
+a test for this.
+
+A shell does not have to apply this rule to a group control itself. Ask for
+the project and the daemon returns the honest subset; `list_projects` carries
+`contributable_count` so the button can name it before the press. See "What
+`approve` reports".
+
+`eligible` is a well-founded expectation and not a guarantee. The cheap
+checks -- the ones a list may run -- are answered here; the expensive ones,
+which need every captured body read back and hashed, still run at submit. The
+server decides admission either way, and if this answer and the server's
+decision disagree, **the server is right**. When a submission is refused for
+an admission reason the daemon writes the refusal back into the row, so a row
+that was `eligible` stops saying so. A list that changes while it is being
+read is the cost of that, and it is also just what happened.
+
+`eligibility_reason` is absent on an `eligible` entry -- there is nothing to
+explain -- and is one of these otherwise. Render each through
+`tc_contribution_eligibility_reason_line`, which answers the **empty string**
+for a label this build does not know; render nothing for an empty string
+rather than guessing.
+
+The two unknown-handling rules are deliberately different, and the difference
+is not an inconsistency. An unrecognised **state** degrades to a sentence
+because the row still has to say something -- it is on screen, a contributor
+is reading it, and silence there would leave them to infer a state from an
+empty space. An unrecognised **reason** has nothing honest to say: the state
+sentence beside it has already carried the fact, and a sentence invented for a
+label this build does not know would add a detail nobody established. Silence
+beats a guess exactly where something true has already been said.
+
+| `eligibility_reason` | Sentence | Usually seen with |
+|---|---|---|
+| `no_inference_call` | `eligibility_reason_no_call` | `ineligible_permanent` |
+| `capture_off` | `eligibility_reason_capture_off` | `ineligible_configuration` |
+| `digest_absent` | `eligibility_reason_digest_absent` | `ineligible_permanent` |
+| `upstream_id_absent` | `eligibility_reason_upstream_id_absent` | `ineligible_permanent` |
+| `digest_mismatch` | `eligibility_reason_digest_mismatch` | `ineligible_permanent` |
+| `reference_malformed` | `eligibility_reason_reference_malformed` | `ineligible_permanent` |
+| `bodies_unreadable` | `eligibility_reason_bodies_unreadable` | `ineligible_permanent` |
+| `body_not_utf8` | `eligibility_reason_body_not_utf8` | `ineligible_permanent` |
+| `body_too_large` | `eligibility_reason_body_too_large` | `ineligible_permanent` |
+| `evidence_capture_off` | `eligibility_reason_evidence_capture_off` | `ineligible_configuration` |
+| `marker_absent` | `eligibility_reason_marker_absent` | `ineligible_permanent` |
+| `request_malformed` | `eligibility_reason_request_malformed` | `ineligible_permanent` |
+| `receipt_unavailable` | `eligibility_reason_receipt_unavailable` | `unknown` |
+| `receipt_not_issued` | `eligibility_reason_receipt_not_issued` | `ineligible_permanent` |
+
+Only `ineligible_configuration` names a setting, and it is the only state
+painted `TC_PRIVATE_INFERENCE_TONE_ATTENTION`. `no_inference_call` has no
+actionable answer for the session the row is about, and advice about the
+*next* session is guidance rather than status -- rows stay about their own
+session. A permanent ineligibility is `_NEUTRAL` and never `_REFUSED`:
+nothing was refused and nothing went wrong.
+
+Both fields are additive; the schema version stays
+`trace_commons.daemon.v1_1`, and a client that ignores them behaves exactly
+as before.
+
+The seventeen sentences named above are fields of the `private_inference_copy`
+payload (`tc_private_inference_copy`), which now carries **97** fields.
+
+### The attestation mark
+
+`eligibility` above answers *may I send this?* -- a permission question, and
+one an invited contributor does not have. Underneath it is a second question
+every contributor has, all of the time:
+
+> Does this session carry a checkable copy of its last model call?
+
+That is a fact about the trace rather than about anyone's permission, and it
+is about to stop being provenance metadata: the credit scoring function is
+expected to weight attestations. A contributor who cannot see which of their
+sessions carry one cannot act on it, and an app that showed the same
+classification to one class of user under a different name would be
+withholding a fact that affects what their work is worth.
+
+| Field | Values |
+|---|---|
+| `attestation` | `attested` \| `unattested_permanent` \| `unattested_configuration` \| `unknown` |
+| `attestation_reason` | a stable label naming why not, or absent |
+
+**`attestation` is ALWAYS PRESENT, on every entry, for every contributor.**
+The exact opposite of the `eligibility` rule above, and deliberately: there
+is no contributor for whom the question does not apply, so the only thing an
+absent field could mean is a build too old to answer it. An entry written
+before the field existed reports `unknown`, never an unattested mark.
+
+| `attestation` | Means | Sentence | Tone |
+|---|---|---|---|
+| `attested` | the session carries a checkable copy of its last model call | `attestation_attested` | `_CLEAR` |
+| `unattested_permanent` | it does not, and nothing the contributor changes will add one | `attestation_unattested_permanent` | `_NEUTRAL` |
+| `unattested_configuration` | it does not; a setting decides whether future ones will | `attestation_unattested_configuration` | `_ATTENTION` |
+| `unknown` | not worked out | `attestation_unknown` | `_NEUTRAL` |
+| anything else | the mark could not be read | `attestation_unknown` | `_NEUTRAL` |
+
+Sentence and tone come from `tc_contribution_attestation_line` and
+`tc_contribution_attestation_tone` -- never from shell-authored branching on
+the label.
+
+**There is no control accessor, and that is the contract.** The mark
+describes the trace; it offers nothing to press. A shell that drew a button
+from it would be inventing an action out of a description. Whether a row may
+be sent is `eligibility`'s question and `tc_contribution_eligibility_control`
+answers it.
+
+**The positive case is the one that matters here**, unlike `eligibility`,
+whose surface only ever spoke up to explain a refusal. A session that IS
+attested says so. A surface that only names what is missing teaches a
+contributor that the mark means bad news.
+
+**An unrecognised mark must not read as "no copy".** A mark this build
+cannot read is not evidence about a contributor's session, and telling them
+an attested session carries nothing is the one wrong answer this table can
+give.
+
+**A permanently unattested session is `_NEUTRAL` and never `_REFUSED`.**
+Nothing was refused and nothing went wrong: most of a contributor's history
+was recorded before anything was keeping copies.
+
+`attestation_reason` takes the **same fourteen labels** as
+`eligibility_reason` -- a reason names a fact about the session, not an answer
+to either question -- and is rendered through
+`tc_contribution_attestation_reason_line`, which answers the **empty string**
+for an unfamiliar or absent label. It is absent on an `attested` entry.
+
+**`unknown` may arrive with or without a reason, and a shell MUST branch on
+the key rather than on the mark.** Two different things produce that mark. A
+row the daemon never evaluated has no reason -- nobody worked anything out.
+A row whose send was turned away because the receipt could not be fetched is
+`unknown` **with** `receipt_unavailable`, and that reason is the only thing
+telling the contributor it may work later. Every other mark is
+shape-predictable: `attested` never carries a reason, and the two unattested
+marks always do.
+
+**The sentences are NOT the same, and a shell must not substitute one call
+for the other.** Five of the eligibility sentences say the session cannot be
+sent, which is true for an evidence-admitted contributor and false for an
+invited one, whose session sends perfectly well and merely arrives without a
+copy of its call.
+
+| `attestation_reason` | Sentence | Usually seen with |
+|---|---|---|
+| `no_inference_call` | `attestation_reason_no_call` | `unattested_permanent` |
+| `capture_off` | `attestation_reason_capture_off` | `unattested_configuration` |
+| `digest_absent` | `attestation_reason_digest_absent` | `unattested_permanent` |
+| `upstream_id_absent` | `attestation_reason_upstream_id_absent` | `unattested_permanent` |
+| `digest_mismatch` | `attestation_reason_digest_mismatch` | `unattested_permanent` |
+| `reference_malformed` | `attestation_reason_reference_malformed` | `unattested_permanent` |
+| `bodies_unreadable` | `attestation_reason_bodies_unreadable` | `unattested_permanent` |
+| `body_not_utf8` | `attestation_reason_body_not_utf8` | `unattested_permanent` |
+| `body_too_large` | `attestation_reason_body_too_large` | `unattested_permanent` |
+| `evidence_capture_off` | `attestation_reason_evidence_capture_off` | `unattested_configuration` |
+| `marker_absent` | `attestation_reason_marker_absent` | `unattested_permanent` |
+| `request_malformed` | `attestation_reason_request_malformed` | `unattested_permanent` |
+| `receipt_unavailable` | `attestation_reason_receipt_unavailable` | `unknown` |
+| `receipt_not_issued` | `attestation_reason_receipt_not_issued` | `unattested_permanent` |
+
+A submission turned away for an admission reason writes back here exactly as
+it does to `eligibility`: a row still claiming its session carries proof,
+after a send of that session was refused for want of that proof, is the
+defect this surface removes reproduced one layer up.
+
+Both fields are additive; the schema version stays
+`trace_commons.daemon.v1_1`, and a client that ignores them behaves exactly
+as before.
+
+### The certificate a queue entry holds
+
+| Field | Values |
+|---|---|
+| `holds_certificate` | `true` \| `false` |
+
+True when a witness certificate is held for the bytes this entry was pinned
+to. Both witness routes produce one: `POST /v1/witness` returns a
+certificate, and `POST /v1/witness/admission` returns a certificate AND
+admission evidence. The daemon stores either as a single
+`trace_commons.witness_review.v1` artifact under a single pin, so "did the
+contributor complete step 1 or step 2" is not two questions.
+
+**`holds_certificate` is ALWAYS PRESENT, on every entry, for every
+contributor** -- the `attestation` rule, not the `eligibility` one, and for
+a reason of its own. This is one fact with two readings:
+
+| Contributor | Reads `true` as |
+|---|---|
+| without an invite | this session is a candidate for submission |
+| with an invite | this session is cryptographically attested |
+
+The fact does not differ between them; only the wording does. The shell
+picks the wording from the invite status it already holds for the
+eligibility surface, and MUST NOT ask the daemon a second question to get
+it. Emitting the field only under the signup flag would put the second
+reading out of reach of exactly the contributors it is written for.
+
+**This is not `attestation`, and the two must not be conflated.**
+`attestation` answers whether the session carries a checkable copy of its
+last model call. `holds_certificate` answers whether a witness
+certificate is held over the reviewed bytes. A session can have either
+without the other, and *holds a certificate*, *is attestable* and *was
+attested* are three different facts. A shell deciding what to put in a
+certificate-held list MUST read `holds_certificate` and never the mark.
+
+### `certificate_detail`
+
+`certificate_detail` takes an `entry_id` for a pending entry whose
+`holds_certificate` is true. It verifies the stored artifact still matches its
+queue pin, then returns only:
+
+```json
+{
+  "state": "held",
+  "verification": "verified_at_review",
+  "redacted_sha256": "…",
+  "residual_risk_verdict": "low|medium|high",
+  "redaction_policy_version": "…",
+  "witness_measurement": "…",
+  "issued_at": 0,
+  "expires_at": null,
+  "expiry_state": "not_issued",
+  "signer": "0x…",
+  "signature_present": true,
+  "admission_evidence_present": false,
+  "inference_receipt": {"state": "certified|uncertified", "reason": "…"}
+}
+```
+
+`inference_receipt` is `null` for reviews written before the client recorded
+that fact. `expires_at` is always `null` under current certificate schema; the
+shell must not invent an expiry. Missing, malformed, stale, or unavailable
+artifacts return fixed labels and no partial certificate. The daemon never
+returns `envelope_bytes`, `signature_hex`, or `certificate_json`.
+
+Derived from the pin rather than stored, so it cannot drift from it: the
+artifact is written and the pin recorded under one queue lock. An entry
+re-offered because its bytes moved loses the pin and therefore the claim --
+the certificate covered the old bytes.
+
+The Tauri client calls it from the redacted-view inspector, for an entry
+whose `holds_certificate` is true, to show the measurement and signer the
+witness was checked against at review (K11). The other shells do not call it
+yet.
+
+### `route_disclosure`
+
+K11 of the connect-and-forget consent design ("The disclosure"): the facts
+behind the disclosure screens. Read-only and local -- it reads the config,
+the daemon's settings and the daemon process's environment, and makes no
+network call. Answered by the daemon rather than read by a shell from the
+config file, because the daemon is the process that sends: the privacy filter
+`TRACE_PRIVACY_FILTER_BACKEND` attaches is the daemon's environment, and
+`ironwire_attested_bodies` is the daemon's setting.
+
+```json
+{
+  "route": "witness",
+  "witness": {
+    "state": "pinned",
+    "url": "https://witness.example",
+    "signing_address": "0x…",
+    "pinned_measurements": ["mrtd=…,rtmr0=…"],
+    "origin": "published_at_join"
+  },
+  "local_filter": null,
+  "receipts": { "endpoint_configured": true, "check_attestation": false },
+  "attested_bodies": false
+}
+```
+
+| `route` | Means |
+|---|---|
+| `witness` | a pinned witness: each session is sent unredacted to it, and it redacts inside its enclave |
+| `witness_refusing` | a witness is configured and refusing (nothing pinned, or a pin that does not parse): nothing is sent |
+| `local` | no witness: redaction runs on this machine and the unredacted session does not leave it |
+| `not_enrolled` | no enrollment: nothing is sent |
+| `settings_unreadable` | the config could not be read: nothing is sent |
+
+`witness` is present whenever a witness is configured, pinned or refusing, and
+`null` otherwise. `state` is the same `WitnessTrustState` the witness settings
+card shows; `pinned_measurements` are verbatim, in stored order.
+
+`witness.origin` says how the witness came to be configured:
+
+| `origin` | Written by |
+|---|---|
+| `published_at_join` | a NEAR AI or wallet join, from what the commons publishes, without asking |
+| `connected_inference` | `inference_connection_install`, on the contributor's confirmation |
+| `settings` | a shell's witness settings (Tauri, the C ABI's `tc_witness_configure`, GTK) |
+| `environment` | `TRACE_COMMONS_WITNESS_*` read at enrollment |
+| `not_recorded` | no record, or a record written for a different witness |
+
+The config records the origin beside the witness, keyed by a digest of the
+witness's URL, signing address and pins (`ContributorConfig::witness_origin`),
+so a witness changed later by something that does not record an origin reads
+as `not_recorded` rather than inheriting a stale answer. Configs written before
+the record existed read the same way. The record is not an input to
+`input_fingerprint`.
+
+`local_filter` is present only when `route` is `local`: `none`, `near_ai`,
+`self_hosted`, `sidecar`, or `invalid` (a setting the redactor refuses to
+build, so nothing is sent). It is the config's `pii_filter` when set, and
+otherwise the environment's backend.
+
+**What this does not report, because this client does not know it:** which
+privacy filter the witness itself calls (it is set in the configuration the
+witness's measurement covers, which this client never reads), that filter's
+attestation, and whether a receipt signer is one the witness pins. A shell
+says so rather than implying either way; `consent_copy::route_disclosure_copy`
+has the sentences.
+
+A shell renders the words `consent_copy::route_disclosure_copy` gives for these
+facts and branches on neither. A shape it cannot read -- an unknown `route` or
+`origin` from a newer daemon -- is refused, not rendered as the nearest value.
+
+The native shells get the words through the C ABI rather than linking the
+crate: `tc_route_disclosure_copy(facts_json)` takes this method's result as
+sent and returns `{"facts": .., "copy": ..}`, or NULL for anything it cannot
+read; `tc_route_disclosure_unreadable_copy()` returns the sentences a surface
+shows in that case, under the section title (`title`, `panel`, `session`); and `tc_certificate_detail_copy()`
+returns the labels for `certificate_detail`. GTK calls
+`consent_copy::route_disclosure_for_wire` directly. No shell writes a
+disclosure sentence of its own.
+
+### The attested-inference record
+
+The attestation mark above is computed at discovery, before any receipt is
+fetched and before any witness is contacted. What happened *after* that --
+whether the witness that certified this entry's review was actually handed a
+receipt with the bodies -- was recorded nowhere: the certificate carries no
+such field, the receipt is discarded after the witness call, and ingest
+stores nothing about it. This field is the daemon's own record of that fact.
+
+| Field | Shape |
+|---|---|
+| `attested_inference` | `{"state": "certified"}` or `{"state": "uncertified", "reason": <label>}` |
+
+| `state` | Means |
+|---|---|
+| `certified` | a receipt was offered with the bodies and the witness issued a certificate over them |
+| `uncertified` | the review was certified without attested inference; `reason` says why |
+
+| `reason` | Means |
+|---|---|
+| `no_attested_call` | the session joined no inference hop, or the hop recorded no verbatim bodies |
+| `bodies_withheld` | the session carried an attested call and the review was requested without inference bodies |
+| `receipt_unavailable` | the session carried an attested call and no receipt could be obtained for it; the trace was certified without it |
+
+**`attested_inference` is PRESENT only while a witnessed review is pinned to
+the entry**, and then it is exactly what the stored review records. It is
+ABSENT -- not `unknown`, not null -- for an entry with no witnessed review, an
+entry whose review predates the record, and an entry whose pin is a local
+preview. Absent means *not known*, and a shell MUST render it as nothing: an
+older review may have carried a verified receipt, and nothing says either
+way. Flattening absence into `uncertified` tells a contributor their work is
+worth less than it may be; flattening it into `certified` is the lie this
+field exists to stop.
+
+**Written from the fact, not the intention.** `certified` is set only when a
+receipt was among what the witness was handed *and* the witness answered
+with a certificate. A session whose queue row says `attestation: attested`
+and whose receipt fetch then fails is `uncertified` with
+`receipt_unavailable` -- the mark describes what the session carries, this
+record describes what the witness was given. The two disagreeing is the
+case that matters, not a defect.
+
+What it does not say: whether the receipt's *signer* was one the witness
+pins. That is the witness's configuration, invisible to the client; a
+certificate from a pinning witness and one from a dormant witness read the
+same here.
+
+The record lives and dies with the pin: an undone approval, a released
+preview or a re-preview without a witness clears it, so a row can never
+inherit an answer from a review that is no longer the one it would send.
+
+### The credential state
+
+`near_ai_credential_status` answers ONE label, and it is the only thing a
+shell branches on:
+
+| `state` | Means | Sentence | Action a shell may offer |
+|---|---|---|---|
+| `absent` | no key is kept on this machine | `credential_absent` | obtain |
+| `obtaining` | a ceremony is in flight here | `credential_obtaining` | cancel |
+| `failed` | the last attempt ended without a key | `credential_failed` | obtain |
+| `cancelled` | the last attempt was stopped by the contributor | `credential_cancelled` | obtain |
+| `present` | a key is kept on this machine | `credential_present` | forget |
+| `storage_unavailable` | the store did not answer (locked, denied, platform error) | unlock and restart | forget |
+| `cleanup_required` | sign-in removed locally, but its store entries could not be deleted | unlock, then Forget again | forget |
+| `storage_unentitled` | macOS: this build is not signed to reach the store at all | restarting will not help; use a released build | **none** |
+| `migration_available` | macOS: the sign-in an earlier build kept in the login keychain has not been moved | the sign-in is still in the login keychain; move it | migrate (`near_ai_credential_migrate`), with `credential_migrate_explains` beside it |
+| absent/empty field | this daemon does not answer the question | `credential_unreported` | **none** |
+| anything else | the state could not be read | `credential_unknown` | **none** |
+
+The sentence, the tone and the action are chosen by the shared Rust tables --
+`tc_near_ai_credential_state_line`, `tc_near_ai_credential_state_tone` and
+`tc_near_ai_credential_action` -- never by shell-authored branching, and a
+shell must not recover any of the three by reading another.
+
+**Neither unread case may render as `absent`.** "No key is kept here" in
+front of somebody who has one invites a second sign-in, at a third party,
+that their own account will list and nothing on this screen will ever mention
+again. That is why the unread states also answer *no action*: the action in
+question mints the second key.
+
+The precedence is the daemon's, not a shell's. A ceremony in flight outranks
+a key already stored, because somebody with a browser tab open is waiting on
+that and not on what they had before; a stored key outranks the ending of an
+older attempt; `absent` is the answer only when there is nothing else to say.
+
+`attempt_id` and `attempt_status` are echoed only to a caller that already
+named the current attempt. A caller that names none, or names a stale one,
+still gets `state`, since the resting state may be disclosed. The response reveals nothing
+that would let it cancel somebody else's ceremony, and the browser URL is
+never re-served.
+
+`credential_cost` is the sentence that has to sit in front of the obtain
+action, and it is the counterpart of `offer_exposure`: getting a key opens a
+browser, signs the contributor in to a company that is not this app, and
+mints a key this app then keeps. `credential_forget_explains` is its
+counterpart at the other end -- forgetting is LOCAL, the key stays valid at
+the service until the contributor removes it there, and this app cannot do it
+for them, which is why `near_ai_credential_forget` answers `revoked: false`
+rather than leaving "removed" to be read as "revoked".
+
+No sentence on this surface renders a key, a key prefix, an id or an account
+name, and none of them carries a hole a shell could fill with one.
 
 The three per-harness states are not two. `harness_connected_nothing_seen`
 says a tool's own settings send its calls here; `harness_answering` says a
@@ -1932,7 +2899,7 @@ calls wherever they went before.
 
 `harnesses_spend_scope` is the sentence that has to accompany the amount
 `tc_harness_spend_line` assembles: only calls answered on **this** computer
-are in the figure, and work a monthly plan has already paid for is not. A
+are in the figure. Work already covered by a monthly plan is excluded. A
 contributor signed in to the same account on a second machine, or in a
 browser, has spent more than the figure says, and the number without this
 sentence is a lie of omission. It is drawn beside the amount and only when
@@ -2036,7 +3003,7 @@ per upload, and no two read-backs are ever less than two minutes apart. A
 verdict, a quarantine, or a withdrawal moves the row out of `submitted` on
 the next refresh; the count can go down as well as up.
 
-Render `submitted` in the contributor's words — sent, waiting to hear back —
+Render `submitted` in the contributor's words: sent, waiting to hear back;
 and never as an error.
 
 The answer additionally carries a `community` object when, and only when,
@@ -2124,6 +3091,12 @@ floor scope only) and replaces the enrolled config's consent scopes.
 Requires an existing enrollment (`unavailable` / `not-logged-in` otherwise).
 Appends a `consent-scopes-changed` audit entry.
 
+It also records that the contributor chose the scopes: the config field
+`consent_scopes_chosen` (default `false`) becomes `true` when `scopes` names at
+least one scope, and `false` when it is omitted or empty, since that saves the
+floor scope without naming anything. `grant_automatic` requires it. No
+enrollment path sets it, and a new enrollment writes a config without it.
+
 ### `enroll`
 
 Performs real network I/O against the issuer -- registering this device,
@@ -2146,6 +3119,345 @@ notice on stdout) can get past that gate. Because this asserts, on the
 caller's unverified word, that a disclosure was actually shown to someone,
 it is audited (`near-ai-notice-acknowledged`) -- an application must not
 call it without actually having shown the notice text first.
+
+Acknowledging also re-offers every session the gate had refused, and
+`reoffered` is how many. A session sent while the notice was outstanding is
+refused with `near-ai-notice-not-acknowledged`, which is a refusal about
+timing rather than about the session -- but a refused entry is never moved
+again, and the watcher does not re-offer a session whose file is unchanged,
+so without this those sessions were lost for good. They return as `Pending`
+with their old approval cleared, because that approval was given before the
+disclosure it depended on: an `auto_upload` folder re-approves them on the
+next poll, and any other folder asks again. A `queue_changed` event is
+published when any move.
+
+A refused entry whose file already has a live entry (the session grew while
+it sat refused, and the watcher offered the new content) is not revived: it
+is marked `superseded` with `session-changed-after-offer`, and is not counted
+in `reoffered`. The same step -- clear the label, re-offer, supersede -- also
+runs on every daemon tick once the notice marker exists, so a notice
+acknowledged through the CLI, which writes the marker without calling this
+method, gets the same result. It runs whether or not the daemon is paused,
+quiesced for an update, or in dry-run, since it sends nothing.
+
+### `near_ai_balance`
+
+What the contributor's NEAR AI account has left, read with the session the
+credential ceremony retained. A `state` and a set of numbers:
+
+```json
+{
+  "state": "known",
+  "currency": "USD",
+  "scale": 9,
+  "remaining_nanos": 8500000000,
+  "spend_limit_nanos": 10000000000,
+  "total_spent_nanos": 1500000000,
+  "total_requests": 12,
+  "total_tokens": 3456,
+  "observed_at": "2026-09-08T09:17:15Z"
+}
+```
+
+`state` is one of:
+
+| `state` | What it means | What a client should say |
+|---|---|---|
+| `known` | The service answered. | The figures, with their age. |
+| `no_session` | Nothing is stored. The account was never connected, or was forgotten. | Offer the credential ceremony. |
+| `session_expired` | The stored session was refused. | Offer the ceremony again. It does **not** require forgetting first: the ceremony overwrites both records. |
+| `no_organization` | The account has no active organization, which is a real state -- the service creates one on signup **best effort**. | Point at the contributor's NEAR AI account page. |
+| `unavailable` | The service did not answer, or answered something this daemon cannot read. | Say nothing about the balance. |
+
+Three rules bind a client here, and they are the reason the shape is this
+shape rather than a bare number:
+
+- **Every numeric key is present and `null` in every state but `known`.** An
+  absent key would be ambiguous between "this daemon is too old to know" and
+  "this daemon knows it does not know"; a `null` is only ever the second.
+  **A `null` must never be rendered as `0`.** Zero is a real balance and
+  means the contributor is out of credit.
+- **`remaining_nanos` and `spend_limit_nanos` can be `null` even when `state`
+  is `known`.** They are nullable in the service's own schema: an
+  organization with no credit ceiling configured genuinely has no remaining
+  balance to report. Same rule -- not zero.
+- **`observed_at` is when this daemon asked**, not the service's own
+  `updated_at`. It is there so a client can say how old the figure is.
+  A stale balance presented as current is worse than no balance; the daemon
+  will not serve a cached figure older than a minute, and returns a failure
+  state rather than the last good number when a read fails.
+
+The units are the service's own: fixed scale 9 (nano-dollars) and USD,
+carried on the wire rather than assumed, and not rounded by the daemon.
+
+The call performs network I/O -- it may exchange the stored refresh token
+for an access token before making two management reads -- so it is on the
+async dispatch path and a client should not call it on a paint loop.
+
+#### A shell does not write these sentences, or this arithmetic
+
+Every word and every figure on this row is assembled in
+`trace-commons-contributor`'s `private_inference_copy` and reachable across
+the C ABI. A shell reads `state` and the numbers off this wire and passes
+them straight back; it does not branch on the state string to pick a
+sentence, and it does not divide by `10^scale` itself.
+
+| Call | What it takes | What it gives |
+|---|---|---|
+| `tc_near_ai_balance_state_line` | `state` | The sentence. `known` gives `""`; a state this build cannot read gets its own sentence and borrows nobody's. |
+| `tc_near_ai_balance_state_tone` | `state` | `TC_PRIVATE_INFERENCE_TONE_*`. `known` is the only `_CLEAR`, and it means the READ succeeded -- nothing judges the amount. |
+| `tc_near_ai_balance_action` | `state` | `TC_CREDENTIAL_ACTION_*`. `OBTAIN` for `no_session` and `session_expired`, `NONE` for everything else. |
+| `tc_near_ai_balance_amount` | `present`, `nanos`, `scale` | The bare amount, e.g. `$8.50`. |
+| `tc_near_ai_balance_remaining_line` | `present`, `nanos`, `scale` | `Left to spend: $8.50.`, or the no-limit sentence when `present == 0`. |
+| `tc_near_ai_balance_limit_line` | `present`, `nanos`, `scale` | The ceiling, or `""`. |
+| `tc_near_ai_balance_spent_line` | `present`, `nanos`, `scale` | What the account has spent, or `""`. |
+| `tc_near_ai_balance_observed_line` | `seconds_ago` | How long ago **this daemon** asked. Negative gives `""`. |
+
+`present` is `0` for a `null` on the wire and non-zero otherwise. It is a
+separate argument rather than the out-of-range-integer convention the other
+money exports use, because these amounts are **signed**: an overdrawn account
+is a negative figure, and folding `null` onto `negative` would render a real
+debt as no figure at all.
+
+The rounding is **down**, toward minus infinity, so a printed figure is never
+larger than the one that arrived; a nonzero amount under a cent is
+`less than $0.01` and not `$0.00`.
+
+#### Three neighbouring fields, three different meanings for a missing key
+
+Read this before writing a client that touches more than one of them. They
+share a wire and nothing else: each is an answer to its own question, and
+knowing one tells you nothing about the next.
+
+- **`attestation_reason`: branch on the key's presence, not on the mark.**
+  This is the one that catches people, because the mark does not determine
+  the shape. `attested` never carries a reason and both unattested marks
+  always do -- but `unknown` has two sources, and they differ: a row written
+  before the field existed has **no** reason, while a send refused with
+  `admission_receipt_unavailable` carries `receipt_unavailable`. The second
+  is a retraction rather than a refusal -- the receipt comes from a service
+  that can be down -- and that reason is the only thing telling the
+  contributor it may work later. Do not "simplify" it to always-absent.
+- **`eligibility`: an absent key means the question does not apply.** A
+  present `unknown` means the question applies and was not answered.
+- **`near_ai_balance`: every numeric key is present and `null`**, and the
+  `null` is load-bearing -- it means "this daemon knows it does not know". An
+  **absent** key here means only "this daemon is too old to answer", and a
+  client that treats it as a `null` is asserting a state the daemon never
+  reported. **A `null` must never be rendered as `0`.**
+
+Each of these answers its own question and they happen to share a wire.
+There is no convention here to generalise from: read the contract for the
+field you are touching, and do not carry a habit across from another one.
+A field added later is a fourth answer to a fourth question, not a fourth
+instance of a pattern.
+
+### Session detail and publication
+
+These methods use the account session held in the operating system credential
+store. `history_detail` returns a bounded server projection of the owned,
+permanently redacted record.
+
+It includes the creator outcome, contributed
+correction, version labels, owner publication version, and up to 24 redacted evidence candidates, with each excerpt capped at 700 characters. The response
+excludes raw trace content, credentials, tenant or account identifiers, and
+server error bodies.
+
+`publish_public_run` accepts the exact reviewed public fields, one to four
+evidence selections, reuse permission, and an optional source slug. The daemon
+binds the approval digest to the displayed outcome, contributed version, and
+owner publication version; before writing, the server verifies ownership,
+acceptance, metadata, evidence, correction, and public-text privacy.
+Withdrawing a page advances the version, so an earlier approval cannot restore
+it; publication consent remains separate from contribution and profile consent.
+
+Every authenticated account response may rotate the native session token,
+including an error response. The daemon persists that header before handling
+the route result. A committed publication or withdrawal remains successful if
+the credential store fails afterward; the response carries
+`commons_credential_storage_unavailable` so the app can show the required
+sign-in action.
+
+Fixed route labels include `account-session-required`,
+`public-run-trace-not-found`, `public-run-source-not-found`,
+`public-run-conflict`, `public-run-invalid`, `public-run-publish-failed`, and
+`public-run-unpublish-failed`. They contain no contributed text, wallet
+material, identifier, URL, or response body.
+
+### Tested skill workflow
+
+The seven `skill_*` methods form one account-bound state machine. Every call
+requires the current account session from the operating system credential
+store. The daemon derives an opaque owner-scope SHA-256 from the ingest origin,
+tenant, instance, user subject, device key id, and NEAR account id; the source
+values stay inside the daemon. A changed scope clears held candidates, reviews,
+evaluations, plans, and in-memory installation receipts before the new owner can
+name them. Evaluation snapshots this scope and checks it again after all Cloud
+calls, returning `skill-owner-changed` rather than retaining a result for a
+different owner.
+
+Install methods also load the existing `DeviceIdentity` and require its key id
+to match the enrolled configuration. The public identity verifies markers
+after a restart. Its Ed25519 private key remains inside `DeviceIdentity` and is
+never serialized, logged, placed in a marker, or returned over IPC.
+
+#### Candidate and review
+
+`skill_candidate {submission_id}` re-reads the submission through the same
+account-authenticated owner route as `history_detail`. It accepts only an
+`accepted` record whose feedback is `correction`, whose correction matches the
+generated-source-repair family, and whose task can produce a bounded text-free
+fingerprint. This call performs no model inference.
+
+The candidate may return session-derived text from that owned record under
+these limits:
+
+- `source_correction` is the exact contributed correction, bounded by the
+  2,000-character approval limit and admitted only after credential-shape
+  screening. The correction is deliberately preserved as the owner's decisive
+  instruction; it never enters an evaluation prompt.
+- `source_evidence` contains no more than six items selected from the
+  permanently redacted envelope. Each excerpt remains within the session-detail
+  limit of 700 characters and retains its event id and fixed label.
+- The source task text is absent. `source_task_fingerprint` contains a SHA-256,
+  a 128-bit similarity hash, and a bounded token count so local fixture
+  selection can reject exact and lexical near-overlap.
+
+The response also carries the default draft, the disclosed simple control,
+the evaluation contract, and `replaces_review_id` when this source already has
+a review. At most 12 workflows remain in memory. When capacity is full, the
+daemon may evict an idle candidate, review, or completed evaluation; it refuses
+with `skill-workflow-capacity` when every slot has active or unexpired work.
+
+`skill_review {candidate_id, draft, replaces_review_id?}` validates and freezes
+the owner-edited draft locally. Names contain at most 64 lowercase ASCII
+letters, digits, or single internal hyphens. Descriptions contain 1 to 1,024
+characters, procedures contain 1 to 12,000 characters, and both pass the public
+text privacy validator and control-character checks. The response contains the
+rendered `SKILL.md`, its SHA-256, and source submission and evidence lineage.
+Changing an existing review requires its current `review_id`; an identical
+draft returns the frozen review.
+
+#### Evaluation
+
+`skill_evaluate {review_id, skill_sha256}` checks the supplied digest against
+the rendered review before the first catalog or completion request. A completed
+report for that review is idempotently returned. One comparison may run per
+daemon; another request receives `skill-evaluation-in-progress` for the same
+review or `skill-evaluation-busy` for a different review.
+
+The held-out contract is fixed and inspectable:
+
+- A client-shipped public fixture pool contains seven repository incidents.
+  Local SHA-256 and 128-bit SimHash comparison excludes exact or lexical
+  near-overlap with the source task. The first six eligible fixtures are scored,
+  remaining eligible ids are disclosed as reserves, and evaluation refuses
+  unless six remain.
+- Two metadata-only probes test whether the skill applies to one relevant task
+  and stays inactive for one unrelated task. Together with the six repository
+  plans, they produce eight tasks.
+- Every task runs through baseline, the disclosed simple manual instruction,
+  and the candidate skill, for 24 Cloud completion requests. Plan scheduling
+  starts independently at position zero and puts each arm twice in every
+  position.
+- Every request uses temperature zero, structured JSON, disabled reasoning, a
+  900-output-token ceiling, and a 90-second timeout. At most two requests run
+  concurrently.
+
+The daemon selects one model from the live NEAR AI catalog. An eligible record
+must report `ownedBy: nearai`, `isReady: true`, JSON-mode or structured-output
+support, and text output. `/v1/models` is consulted only when the current
+`/v1/model/list` route is unavailable. A deterministic compatibility list
+prefers models already exercised against the fixture contract, then falls back
+to the lexically first eligible model. Updating the list requires rerunning the
+transport and scoring suites. The selected id is pinned for the whole comparison;
+each completion response must report that same model or the daemon aborts with
+`skill-evaluation-model-changed`.
+
+Prompts contain public fixture evidence and the arm-specific control. The
+baseline receives neither instruction, the manual arm receives the fixed
+one-line instruction, and the candidate arm receives the frozen generic skill.
+They contain no session task, correction, evidence excerpt, account id, wallet
+material, host rule, host skill, or local repository file. Fixture selection is
+explicit through `selected_plan_task_ids`, `excluded_source_overlap_task_ids`,
+and `reserve_plan_task_ids`. Each trial carries its model output and scoring
+failures; the response also records model identity, usage, aggregate scores,
+and regressions. The catalog is capped at 2 MiB. A completion response is capped
+at 128 KiB, retained raw model output at 8 KiB, and the serialized report at
+768 KiB.
+
+Installation is allowed only when the candidate passes more of the six plan
+tasks than baseline and manual control, passes both applicability probes, and
+has no failure on a task either control passed. Replacing or forgetting the
+inference credential increments its local revision, races the active operation,
+and discards the result with `skill-evaluation-credential-changed`.
+
+#### Installation and recovery
+
+`skill_install_plan {evaluation_id}` requires a passing report whose digest
+still matches its review; the daemon resolves the absolute Codex skills root
+internally and never accepts a client path. Its response uses only
+`$CODEX_HOME/skills/<name>` symbolic locations and contains the exact
+`skill_md`, canonical signed `marker_json`, `skill_sha256`, and separate
+`marker_file_sha256`.
+
+`occupied: true` makes `can_install` false without
+changing the destination. An installable plan is held for ten minutes.
+
+The schema-v2 marker binds the install id, evaluation id, source submission and
+evidence ids, tool, name, skill digest, installation time, owner-scope SHA-256,
+and device key id. It contains a digest over the domain-separated canonical
+signing bytes and an Ed25519 device signature; unknown fields or non-canonical
+JSON fail verification.
+
+`skill_install_commit` accepts only `plan_id`, `as_previewed_sha256`, and
+`as_previewed_marker_sha256`. Both digests must match the exact bytes returned
+by the plan, and the signed marker must still match the identity, owner scope,
+review, and evaluation. A plan is single-use, including after a refused commit;
+the client must request another plan before retrying.
+
+Commit assembles and syncs the complete marker and `SKILL.md` package in a
+private sibling directory, then publishes it with one exclusive atomic
+directory rename. Platform-specific publication refuses to replace an existing
+target, and the daemon verifies the staged directory identity after the rename.
+Failures before publication clean only the unchanged staging directory created
+by that transaction. `skill_install_status` repeats exact signed-package
+verification after restart and refuses multiple matching lineage records. A
+root scan stops after 512 entries.
+
+`skill_install_rollback {install_id, source_submission_id}` first resolves the
+signed status and validates the exact two-file package. It then renames the
+whole target directory to an ignored quarantine name, which is the logical
+rollback commit. Validation or namespace failure before that rename leaves the
+loadable target in place. After the rename, the daemon retains the package in
+quarantine and renames `SKILL.md` and the marker to names Codex and status do
+not recognize. Success returns `removed: true, retained_directory: true`; a
+post-rename cleanup race never deletes the retained package.
+
+#### Errors, dispatch, and interruption
+
+Errors use the ordinary response code plus a fixed `error.message`; contributed
+text, paths, model bodies, credentials, and private keys never enter a label.
+The method-specific labels are:
+
+| Phase | Fixed labels |
+|---|---|
+| Account and ownership | `account-session-required`, `commons_credential_storage_unavailable`, `session-detail-not-found`, `session-detail-unavailable`, `skill-owner-changed`, `skill-install-identity-unavailable` |
+| Candidate | `submission_id-invalid`, `skill-session-not-accepted`, `skill-correction-required`, `skill-family-not-supported`, `skill-source-task-fingerprint-unavailable`, `skill-workflow-capacity`, `skill-candidate-unavailable` |
+| Review | `skill-review-invalid`, `skill-candidate-unknown`, `skill-name-invalid`, `skill-description-required`, `skill-description-too-long`, `skill-procedure-required`, `skill-procedure-too-long`, `skill-control-character`, `skill-sensitive-text`, `skill-review-unavailable` |
+| Evaluation | `skill-evaluation-invalid`, `skill-review-unknown`, `skill-review-changed`, `skill-evaluation-in-progress`, `skill-evaluation-busy`, `skill-evaluation-credential-changed`, `skill-evaluation-credential-required`, `skill-evaluation-client-unavailable`, `skill-evaluation-catalog-unavailable`, `skill-evaluation-private-model-unavailable`, `skill-evaluation-request-unavailable`, `skill-evaluation-provider-rejected`, `skill-evaluation-funding-required`, `skill-evaluation-response-too-large`, `skill-evaluation-model-changed`, `skill-evaluation-held-out-set-unavailable`, `skill-evaluation-internal`, `skill-evaluation-unavailable` |
+| Install plan and commit | `evaluation_id-invalid`, `skill-evaluation-unknown`, `skill-evaluation-did-not-pass`, `skill-install-plan-unknown`, `skill-install-commit-invalid`, `skill-home-unavailable`, `skill-install-root-invalid`, `skill-install-occupied`, `skill-install-plan-changed`, `skill-install-write-failed`, `skill-install-plan-unavailable`, `skill-install-commit-unavailable`, `skill-install-rollback-incomplete` |
+| Status and rollback | `skill-install-status-invalid`, `install_id-invalid`, `skill-install-unknown`, `skill-install-not-owned`, `skill-install-modified`, `skill-install-extra-files`, `skill-install-multiple-matches`, `skill-install-scan-limit`, `skill-install-status-unavailable`, `skill-rollback-unavailable` |
+
+Candidate, evaluation, and all four install methods require async dispatch; a
+synchronous call returns the matching `skill-*-requires-async` label. Review is
+local and remains available through the synchronous dispatcher.
+
+There is no separate skill cancellation method. A credential revision cancels
+evaluation as described above, an owner change drops the previous owner's held
+state, and operation guards restore `Reviewed` or `Evaluated` when evaluation,
+planning, or installation exits before its success transition. Expired and
+consumed plans return `skill-install-plan-unknown` and require a fresh preview.
 
 ### The public profile
 
@@ -2171,7 +3483,7 @@ a client parses one profile whichever call it made.
 `public_attribution` added to the scope list, and then
 `set_public_profile`. Neither implies the other: the scope records what the
 contributor agreed to, and the second call is what actually puts a row on
-the roster. A dialog that only sets the scope leaves the contributor
+the roster; a dialog that only sets the scope leaves the contributor
 believing they are listed when nothing was published.
 
 **The server authorizes against the claim's grant ceiling, not the local
@@ -2351,6 +3663,174 @@ account sign-in exists to route to. Acquiring an account session is separate
 work, tracked outside this document; nothing in this contract should be
 read as that flow already existing.
 
+### Connecting inference
+
+K12 of the connect-and-forget consent design
+(`docs/superpowers/specs/2026-09-23-connect-and-forget-consent-design.md`):
+an invited contributor gets a redaction witness by deliberately connecting
+inference, never as a side effect of joining. The five
+`inference_connection_*` methods call the server routes described in
+`docs/operator/inference-connection.md`. All five are asynchronous only (the
+synchronous entry point answers `inference-connection-requires-async`) and all
+five present the **account session**, never the device key; without a live
+one they answer `unavailable` / `account-session-required` before any network
+call, exactly as withdrawal does, so a shell routes the contributor to account
+sign-in. A session the server rejects (expired, or a device bearer) is the same
+label. A rotated session the server hands back is kept whatever the outcome,
+and a result carries `credential_warning` when it could not be stored.
+
+The flow a shell drives:
+
+1. `inference_connection_offers` lists the operator's offers. Each offer is
+   identifiers and digests only; the daemon refuses the whole list
+   (`inference-connection-response-invalid`) if any offer is malformed, rather
+   than showing a subset. The disclosure copy is the shell's own; the server's
+   description text is not passed through. Shells take it from
+   `consent_copy::inference_connection_disclosure(disclosure_version)`, which
+   answers `None` for a version the build cannot describe; such an offer is
+   not offered. The Tauri onboarding's optional connect-inference step
+   (`consent_copy::inference_connection_copy`) is the first caller.
+2. The shell shows one offer and the disclosure its `disclosure_version`
+   names, and on the contributor's choice calls `inference_connection_select`
+   with **exactly** that offer's `offer_id`, `provider_id`, `revision`,
+   `config_digest` and `disclosure_version`. The daemon sends those values
+   unchanged (`provider_id` is not sent; it is bound into the digest check
+   below) and fills in nothing. Pass `expected_current_version` as the `state_version` from
+   `inference_connection_current` when replacing an existing selection
+   (including selecting again from a new device); omit it when there is none.
+   Pass `idempotency_key` to make a retry of the same choice safe; the daemon
+   generates one when it is absent. A response naming any other revision,
+   digest or disclosure is refused (`inference-connection-response-invalid`).
+   The daemon then recomputes `config_digest` from the witness URL, signing
+   address, pins and receipt endpoint the response carries, and `revision`
+   from that digest with the offer's `offer_id` and `provider_id`, using the
+   protocol crate's `encode_config` / `encode_revision` -- the same functions
+   the server publishes digests with. Material that does not hash to the
+   chosen digest is refused (`inference-connection-digest-mismatch`) and
+   nothing is held. A successful select on this device also removes this
+   device's previously installed witness at once (`previous_witness_removed:
+   true`), because the server has just revoked that connection.
+3. **Selecting installs nothing.** The witness material the server returns is
+   held on this device only. The shell then asks the contributor, separately,
+   whether to use this witness on this device, and on confirmation calls
+   `inference_connection_install` with the `connection_id` and
+   `config_digest` from the select result. The daemon re-checks the held
+   material against its digest (`inference-connection-digest-mismatch`), then
+   re-reads the account's selection; if it was disconnected or replaced since,
+   the answer is `inference-connection-not-current`, and if its revision was
+   retired, or the account reports it with another revision, digest or
+   disclosure, it is `connection_reselection_required`. Either way nothing is
+   written and the held selection is discarded. If this device selected again
+   while the install was asking the server, the install answers
+   `inference-connection-selection-replaced`, writes nothing, and the newer
+   selection stays held. The daemon re-reads the config and its state file
+   after the network call and changes only the witness fields, so config
+   written meanwhile is kept.
+4. Install writes `witness` (`url`, `signing_address`,
+   `expected_measurements`, exactly as returned) and, when the selection
+   carries one, `inference_receipt_endpoint`. Nothing else in the config
+   changes; `admission_evidence` keeps an existing witness's value and is off
+   on a first installation. An absent receipt endpoint leaves the configured
+   one alone and carries no inference provenance claim. The pins must parse
+   and an operator allowlist, when set, must admit the witness host
+   (`inference-connection-witness-refused`); a receipt endpoint must pass the
+   same checks a published one does at signup
+   (`inference-connection-receipt-endpoint-refused`).
+
+**Installing changes the witness, so it voids armed grants.** A new witness is
+a new recipient under R6: the watcher's next grant sweep voids every armed
+`auto_upload` project and the automatic grant made under the old terms,
+writes `auto-upload-voided` / `automatic-grant-voided`, and raises void
+notices (see "Void notices"). That is intended. A shell should say so before
+the contributor confirms installation, and must not re-arm on their behalf.
+
+**One installed device per account.** A selection is an account record, not
+permission for a device to install anything, and the server returns witness
+material only in the select response -- `inference_connection_current`
+carries identifiers and digests, never a URL or pin. So a device can install
+only what it selected itself: on a device that did not select,
+`inference_connection_current` reports the selection with
+`installed_on_this_device: false` and `pending_install: false`, and
+`inference_connection_install` answers `inference-connection-select-required`.
+Because every select revokes the account's live connection and mints a new
+`connection_id`, **at most one device per account holds an installed
+witness, and installing on another device replaces it.** When device B
+selects, device A's connection is revoked; A's next
+`inference_connection_current` reports `revocation_applied: true`, A's
+witness is removed, and -- being a witness change -- A's armed grants are
+voided (see above). If A selects again, B loses its witness the same way. A
+shell should say so before a contributor selects on a second device. Login,
+invite redemption and the capability reads never select.
+
+**A selection grants no other consent.** No folder, trace, raw-session,
+consent-scope or standing contribution consent follows from selecting or
+installing, and none of these methods changes a project mode.
+
+**A retired revision.** When the operator replaces the selected entry,
+`inference_connection_current` reports `selection.reselection_required: true`
+and changes nothing on this device; select and install answer
+`connection_reselection_required` and install nothing. The current operator
+configuration is never substituted for what the contributor chose: the shell
+shows the current offers and the contributor chooses again. A witness already
+installed from a retired revision stays installed until the contributor
+reselects or disconnects, because the connection is still the account's live,
+unrevoked selection -- retirement only means the operator now offers
+something else -- and removing it unprompted would void the contributor's
+grants for a change they did not make; an operator who must stop use of a
+witness revokes the connection, which every device applies.
+
+**Disconnect.** `inference_connection_disconnect` first removes from this
+device exactly what the installation wrote -- the witness and receipt
+endpoint, where the config still holds those values -- and only then asks the
+server to revoke the named connection. The local step never waits on the
+server: with no account session, an unreachable commons, or a refusal, the
+witness is still removed and the call succeeds with `disconnected: false`,
+`server_disconnect: "pending"` and `server_refusal` set to the label
+(`account-session-required`, `inference-connection-unavailable`, ...); the
+shell resolves that (for example by signing in) and calls disconnect again to
+finish the server side. `server_disconnect: "revoked"` (with `disconnected:
+true`) is a completed revocation, and `"not-found"` means the server holds no
+such live connection. A witness configured some other way is left alone
+(`local_witness_removed: false`). When the connection this device installed is
+found no longer live -- disconnected or replaced from another device, or
+reported with a different revision, digest or disclosure --
+`inference_connection_current` removes what it wrote the same way and reports
+`revocation_applied: true`. New use stops once the revocation is observed; an
+offline device keeps its settings until it next asks. Nothing already
+disclosed is recalled, and no provider credential is revoked.
+
+Refusal labels, all `unavailable` unless noted: `account-session-required`,
+`not-logged-in`, `connection_reselection_required`,
+`inference-connection-version-conflict` (the account changed; re-read
+`inference_connection_current`), `inference-connection-idempotency-conflict`,
+`inference-connection-account-ineligible`,
+`inference-connection-offer-invalid` (no such offer, or not its current
+revision), `inference-connection-not-found`,
+`inference-connection-response-invalid`,
+`inference-connection-digest-mismatch`, `inference-connection-unavailable`,
+`inference-connection-select-required`,
+`inference-connection-selection-replaced`,
+`inference-connection-confirmation-mismatch`,
+`inference-connection-not-current`, `inference-connection-witness-refused`,
+`inference-connection-receipt-endpoint-refused`,
+`inference-connection-state-unreadable`,
+`inference-connection-state-write-failed`, `config-write-failed`,
+`audit-write-failed`. A missing or malformed param is `bad_params` with the
+param's name (or the protocol's label, such as `digest_invalid`) as message.
+
+Audit rows, label-only: `inference-connection-selected` (`detail`: the
+`offer_id`), `inference-connection-installed` (`detail`: `witness` or
+`witness,receipt-endpoint`; written before the config), and
+`inference-connection-disconnected` (`detail`: `local-witness-removed` or
+`nothing-installed-here`, then `,server-revoked`, `,server-not-found` or
+`,server-pending`), plus `inference-connection-revocation-applied` when an
+installed witness is removed other than by disconnect (`detail`: `not-live`,
+`configuration-changed`, or `replaced-by-selection` for a select on this
+device). No URL, signing address, pin, token or
+connection id is written. The per-device state (a selection awaiting install,
+and what was installed) is in `daemon-inference-connection.json` and is
+removed at logout.
+
 ## Events
 
 | Event | When | Data |
@@ -2371,10 +3851,10 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 `pending`, `approved`, `uploading`, `uploaded`, `refused`, `failed`,
 `expired`, `superseded`.
 
-- `expired` — aged out after the TTL (14 days) without a decision. The clock
+- `expired` means the entry aged out after the TTL (14 days) without a decision. The clock
   is **suspended** while the daemon is unhealthy, so an outage does not
   silently discard traces.
-- `superseded` — the session changed after it was offered. The daemon re-hashes
+- `superseded` means the session changed after it was offered. The daemon re-hashes
   before uploading; on a mismatch it sends nothing and creates a fresh
   `pending` entry for the new content. An approval covers content, not a
   filename.
@@ -2406,6 +3886,7 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 | `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
+| `witness-saturated` | approved sessions held because the privacy witness is at capacity; also the `reason_label` on each held entry | yes |
 | `session-too-large` | at least one session on disk is past the byte budget its source will read, so it is not being offered | no |
 | `dismissed-by-contributor` | declined by hand | n/a |
 | `expired-without-decision` | aged out | n/a |
@@ -2428,8 +3909,11 @@ listed highest first:
 5. `claim-mint-failed`
 6. `ingest-unreachable`
 7. `queue-full`
-8. `daily-cap-reached`
-9. `session-too-large`
+8. `witness-saturated`
+9. `automatic-contribution-held`
+10. `admission-limit-reached`
+11. `daily-cap-reached`
+12. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an
@@ -2444,7 +3928,7 @@ trust.
 
 Because `daily-cap-reached` is last, it is the label most often masked by
 another condition. That is why the daily caps are also reported in full on
-`status.daily_budget`, outside the precedence order — see above. A client
+`status.daily_budget`, outside the precedence order described above. A client
 should render the budget condition from `daily_budget`, not by waiting for
 `daily-cap-reached` to reach the health slot.
 
@@ -2481,3 +3965,94 @@ about the call -- an unparseable config, a tool that is not installed -- is
 compatibility but is no longer returned by any method in this version --
 the `v1` terminal-only gate that used it was removed (see "Authorization"
 above).
+
+### Token distribution contribution
+
+`token_distributions_contribution` is a boolean, default `false`. It grants
+permission to include token probabilities and alternatives in explicit witness
+reviews. It does not enable Ironwire capture. Capture must be configured for an
+exact supported backend/model pair, and `ironwire_attested_bodies` must also be
+allowed before raw evidence goes to the configured, pinned witness.
+
+When enabled, review requires an exact capture digest match, a bounded snapshot
+lease, a verified provider receipt, and an ingest endpoint advertising the
+restricted bundle policy. Missing support is a refusal, never a transcript-only
+fallback. Changing this setting invalidates incompatible queued approvals.
+
+The certified manifest and payload are pinned locally before approval. Upload
+reuses those exact bytes and resumes missing objects. Only a destination-bound
+durable receipt authorizes successful-submission cleanup. A separate three-day unapproved (seven-day approved)
+review expiry abandons old local payloads and releases their own leases; it does
+not imply successful submission. Logout deletes local token review state. Agent
+session files are never deleted by this mechanism.
+
+### Local token storage
+
+`token_capture_enabled` is an optional boolean override for the hosted Ironwire
+proxy. `false` stops future token captures; `true` requires explicitly configured
+backend/model targets. An absent override honors the proxy configuration. This
+setting does not authorize contribution or sending raw bodies to the witness.
+Changing it cycles the hosted proxy. External proxies keep their own settings.
+
+| Method | Parameters | Result |
+| --- | --- | --- |
+| `token_storage_status` | none | Content-free local byte counts, pending releases, review counts and lease renewal status |
+| `remove_token_local_copies` | none | Updated status after removing submitted local payloads |
+| `discard_token_reviews` | `confirmed: true` | Updated status after discarding unsubmitted token reviews; approved/uploading reviews require undoing approval first |
+
+The CLI exposes these through `daemon token-storage`, `--cleanup`, and
+`--discard --confirm`. Capture intent can be set with
+`daemon settings --set token_capture_enabled=true` after configuring qualified
+targets. Lease expiry is reported only when confirmed by the capture store.
+Failed renewals and releases remain durable and retry with bounded backoff.
+Server withdrawal is a separate action; local cleanup never deletes original
+agent session files or another destination's capture lease.
+
+Single-submission `withdraw` also returns an optional `token_deletion_note` from
+shared Rust copy. It distinguishes pending deletion, a retention hold, completed
+server-managed deletion and an unknown result. This does not claim deletion from
+backups or previously distributed copies. Older servers omit the field.
+
+## Moving a legacy invite identity
+
+A daemon enrolled with a legacy `tenant-…` invite can move to the
+contributor's NEAR AI account, only when the contributor asks
+(`legacy_invite_migrate`). `status.legacy_invite_migration.offered` is true
+while the config is a legacy invite identity enrolled without an instance
+and no move has happened. Nothing moves otherwise: coexistence is the
+default, and a pooled (shared event) invite is refused by the server with
+`legacy_migration_tenant_pooled` and keeps working.
+
+The daemon, in order: stages a second device key; provisions it into the
+NEAR AI account with the retained NEAR AI login; requires an affirmative,
+`ready` `/v1/account/contribution-status` for that account; asks ingest for a
+challenge, signs the #1066 statement with the legacy device key, and
+verifies the countersigned record against its own legacy key and the account
+it signed into; then, under the watcher's pass lock, writes the new config,
+promotes the staged key and stores the new session together, re-records
+every armed folder's grant with the new identity term and nothing else, and
+retires the legacy key last. Once committed, it revokes the legacy account
+session on the server (`POST /v1/account/logout` with that session;
+best effort, audited as `legacy-account-session-revoked` or
+`-revocation-failed`, and reported as `legacy_session_revoked`). A failure
+at any step leaves the legacy
+identity as it was; a daemon that dies mid-switch is rolled back, or
+finished once committed, at its next start. There is no IPC method for the
+re-baseline itself.
+
+The invite is named by its subject hash: from `invite` when given, else the
+hash saved at invite enrollment, else the issuer
+(`POST /v1/device/invite-subject`, signed by the legacy key). When none can
+say, the answer is `legacy_migration_invite_needed` and a shell asks for the
+invite link.
+
+Queued sessions already approved return to pending after the move, because
+their approval was bound to the old identity; armed folders re-approve them
+on the next pass. The move is audited label-only (`auto-upload-rebaselined`
+per folder, `legacy-invite-migrated`), and
+`status.legacy_invite_migration.notice` stays until
+`acknowledge_legacy_invite_migration`. The words are
+`consent_copy::legacy_migration_*`. Every shell shows the notice: Tauri
+through its copy commands, macOS and Windows through
+`tc_legacy_migration_notice`, GTK directly; each passes the `notice` object
+through unread and acknowledges with `acknowledge_legacy_invite_migration`.

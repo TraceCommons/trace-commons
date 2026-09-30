@@ -35,10 +35,19 @@ struct AdmissionPreparationView: View {
         working = true
         message = ""
         Task {
-            let result = await model.prepareAdmissionSession(entryID: entryID, backend: backend.trimmingCharacters(in: .whitespacesAndNewlines))
+            let outcome = await model.prepareAdmissionSession(
+                entryID: entryID,
+                backend: backend.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
             working = false
-            refused = result?.view?.ready != true
-            message = result?.view?.message ?? model.witnessCopy?.admission?.failed ?? ""
+            refused = !outcome.succeeded
+            // The daemon classifies the cause and picks the words; this
+            // rendered one sentence for every refusal, so a missing receipt
+            // service read exactly like an agent this build cannot read.
+            // `admission.failed` stays as the fallback for a response
+            // carrying no sentence: a transport failure, or a daemon older
+            // than this shell.
+            message = outcome.sentence ?? model.witnessCopy?.admission?.failed ?? ""
         }
     }
 }

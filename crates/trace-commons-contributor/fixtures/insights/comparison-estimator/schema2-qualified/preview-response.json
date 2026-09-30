@@ -1,0 +1,224 @@
+{
+  "result": {
+    "audit_digest": "d06126b77bb5a3e06179f3f32ca2c94f8737e31d2c4ae05294c262538d6d4bc8",
+    "cohorts": [
+      {
+        "cohort_label": "model-a",
+        "included_tasks": 3,
+        "outcomes": {
+          "accepted": 1,
+          "assessed": 2,
+          "partial": 1,
+          "pending": 0,
+          "rejected": 0,
+          "unassessed": 1,
+          "unknown": 0
+        },
+        "usage": {
+          "observed_attributed_tokens": 0,
+          "tasks_with_observed_attributed_tokens": 0,
+          "tasks_without_observed_attributed_tokens": 3
+        }
+      },
+      {
+        "cohort_label": "model-b",
+        "included_tasks": 2,
+        "outcomes": {
+          "accepted": 0,
+          "assessed": 2,
+          "partial": 1,
+          "pending": 0,
+          "rejected": 1,
+          "unassessed": 0,
+          "unknown": 0
+        },
+        "usage": {
+          "observed_attributed_tokens": 0,
+          "tasks_with_observed_attributed_tokens": 0,
+          "tasks_without_observed_attributed_tokens": 2
+        }
+      }
+    ],
+    "estimation_input_digest": "e7eae75d51171e9bb8cea4e9322525c682fcc5aa1639050709201ac912341e76",
+    "exact_estimation": {
+      "assessed_counts": [
+        {
+          "accepted": 1,
+          "partial": 1,
+          "rejected": 0,
+          "total": 2
+        },
+        {
+          "accepted": 0,
+          "partial": 1,
+          "rejected": 1,
+          "total": 2
+        }
+      ],
+      "assessed_estimation_input_digest": "c80f8cbd78d0d24de839e886f905b5d7ab0856e39bd48f9e6848380542a3ba4e",
+      "cohort_labels": [
+        "model-a",
+        "model-b"
+      ],
+      "evaluation": {
+        "contrasts": [
+          {
+            "decision": "insufficient_precision",
+            "lower_millionths": -997915,
+            "upper_millionths": 933366,
+            "width_millionths": 1931281
+          },
+          {
+            "decision": "insufficient_precision",
+            "lower_millionths": -995830,
+            "upper_millionths": 995830,
+            "width_millionths": 1991660
+          },
+          {
+            "decision": "insufficient_precision",
+            "lower_millionths": -933366,
+            "upper_millionths": 997915,
+            "width_millionths": 1931281
+          }
+        ],
+        "first_components": [
+          {
+            "lower_millionths": 2085,
+            "upper_millionths": 997915
+          },
+          {
+            "lower_millionths": 2085,
+            "upper_millionths": 997915
+          },
+          {
+            "lower_millionths": 0,
+            "upper_millionths": 935451
+          }
+        ],
+        "second_components": [
+          {
+            "lower_millionths": 0,
+            "upper_millionths": 935451
+          },
+          {
+            "lower_millionths": 2085,
+            "upper_millionths": 997915
+          },
+          {
+            "lower_millionths": 2085,
+            "upper_millionths": 997915
+          }
+        ],
+        "status": "supported"
+      },
+      "output_digest": "388518a41983e0b7d9715718cd22dfd56acd2a43662f33f2c5084f627624ae84"
+    },
+    "excluded_tasks": [],
+    "included_task_ids": [
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+      "00000000-0000-4000-8000-000000000003",
+      "00000000-0000-4000-8000-000000000004",
+      "00000000-0000-4000-8000-000000000005"
+    ],
+    "schema_version": 2,
+    "specification_digest": "515d24bea3506e9c5c8a578edb49c53f5efb1af52539add9539da093dd3c6f27",
+    "specification_id": "00000000-0000-4000-8000-000000000010",
+    "specification_record_digest": "4756ee473285ae9fd30ac93ce6bbd622ee2b8d092795289be5fd166c1f7013a5"
+  },
+  "specification": {
+    "attempt_rule": "canonical-snapshot-union-v1",
+    "category": "refactor",
+    "cohort_labels": [
+      "model-a",
+      "model-b"
+    ],
+    "created_at": "2026-09-12T12:00:00Z",
+    "cutoff_task_evidence": [
+      {
+        "material_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "material_revision": 2,
+        "outcome": "accepted",
+        "outcome_recorded_at": "2026-09-09T12:00:00Z",
+        "substantive_material_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "task_id": "00000000-0000-4000-8000-000000000001"
+      },
+      {
+        "material_digest": "0202020202020202020202020202020202020202020202020202020202020202",
+        "material_revision": 2,
+        "outcome": "partial",
+        "outcome_recorded_at": "2026-09-09T12:00:00Z",
+        "substantive_material_digest": "0202020202020202020202020202020202020202020202020202020202020202",
+        "task_id": "00000000-0000-4000-8000-000000000002"
+      },
+      {
+        "material_digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "material_revision": 2,
+        "outcome": "rejected",
+        "outcome_recorded_at": "2026-09-09T12:00:00Z",
+        "substantive_material_digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "task_id": "00000000-0000-4000-8000-000000000003"
+      },
+      {
+        "material_digest": "0404040404040404040404040404040404040404040404040404040404040404",
+        "material_revision": 2,
+        "outcome": "unassessed",
+        "outcome_recorded_at": null,
+        "substantive_material_digest": "0404040404040404040404040404040404040404040404040404040404040404",
+        "task_id": "00000000-0000-4000-8000-000000000004"
+      },
+      {
+        "material_digest": "0505050505050505050505050505050505050505050505050505050505050505",
+        "material_revision": 2,
+        "outcome": "partial",
+        "outcome_recorded_at": "2026-09-09T12:00:00Z",
+        "substantive_material_digest": "0505050505050505050505050505050505050505050505050505050505050505",
+        "task_id": "00000000-0000-4000-8000-000000000005"
+      },
+      {
+        "material_digest": "0606060606060606060606060606060606060606060606060606060606060606",
+        "material_revision": 2,
+        "outcome": "rejected",
+        "outcome_recorded_at": "2026-09-09T12:00:00Z",
+        "substantive_material_digest": "0606060606060606060606060606060606060606060606060606060606060606",
+        "task_id": "00000000-0000-4000-8000-000000000006"
+      }
+    ],
+    "date_end": "2026-09-10",
+    "date_start": "2026-09-01",
+    "estimands": [
+      "categorical-outcome-distribution-v1"
+    ],
+    "estimator_state": {
+      "qualified_exact_categorical_v1": {
+        "contrast_orientation": "second_canonical_cohort_minus_first",
+        "interval_grid_denominator": 1000000,
+        "maximum_interval_width_millionths": 500000,
+        "maximum_total_assessed_tasks": 256,
+        "method": "exact_binomial_components_bonferroni_v1",
+        "minimum_assessed_tasks_per_cohort": 2,
+        "one_sided_tail_denominator": 240,
+        "outcome_order": [
+          "accepted",
+          "partial",
+          "rejected"
+        ],
+        "protocol_sha256": "d257605993aaa94220ce31144203c0c05a28ff6c33cc129d678f90a8986e26c8"
+      }
+    },
+    "evidence_cutoff": "2026-09-11T12:00:00Z",
+    "id": "00000000-0000-4000-8000-000000000010",
+    "outcome_rubric_version": "categorical-user-report-v1",
+    "provenance": "retrospective_user_specification",
+    "saved_record_digest": "4756ee473285ae9fd30ac93ce6bbd622ee2b8d092795289be5fd166c1f7013a5",
+    "schema_version": 1,
+    "specification_digest": "515d24bea3506e9c5c8a578edb49c53f5efb1af52539add9539da093dd3c6f27",
+    "stratum": {
+      "configuration_fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "language": "rust",
+      "project_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "task_rule": "one-user-confirmed-work-item-v1"
+  },
+  "type": "comparison_preview_spec"
+}

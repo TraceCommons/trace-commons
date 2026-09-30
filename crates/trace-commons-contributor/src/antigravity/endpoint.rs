@@ -314,21 +314,45 @@ mod tests {
     use super::*;
     use axum::{Json, Router, response::IntoResponse, routing::post};
 
-    /// Binds a port, then drops the listener, so the port is known-closed.
-    async fn closed_port() -> u16 {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        port
+    /// Reserves a real loopback port without listening on it.
+    ///
+    /// Keeping the bound socket alive makes the fixture stay closed and keeps
+    /// another parallel test from acquiring the port between allocation and
+    /// the connection attempt.
+    struct ClosedPort {
+        _socket: tokio::net::TcpSocket,
+        port: u16,
+    }
+
+    fn closed_port() -> ClosedPort {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = socket.local_addr().unwrap().port();
+        ClosedPort {
+            _socket: socket,
+            port,
+        }
+    }
+
+    #[test]
+    fn closed_port_fixture_keeps_its_address_reserved() {
+        let closed = closed_port();
+        let competing = tokio::net::TcpSocket::new_v4().unwrap();
+        assert!(
+            competing
+                .bind((std::net::Ipv4Addr::LOCALHOST, closed.port).into())
+                .is_err(),
+            "a concurrent test must not be able to reuse the closed fixture port"
+        );
     }
 
     #[tokio::test]
     async fn open_ports_reports_only_the_ports_with_a_listener() {
         let live_a = spawn(Router::new()).await;
         let live_b = spawn(Router::new()).await;
-        let dead = closed_port().await;
+        let dead = closed_port();
 
-        let mut asked = vec![live_a, live_b, dead];
+        let mut asked = vec![live_a, live_b, dead.port];
         asked.sort_unstable();
         let open = open_ports(asked).await;
 
@@ -359,15 +383,9 @@ mod tests {
         // sequential cost -- roughly 4x under what a serialized sweep must
         // exceed and many times over what a concurrent one needs -- so it
         // separates the two behaviours without measuring scheduling noise.
-        let ports: Vec<u16> = {
-            let mut v = Vec::new();
-            for _ in 0..PROBE_WINDOW.count() {
-                v.push(closed_port().await);
-            }
-            v.sort_unstable();
-            v.dedup();
-            v
-        };
+        let closed: Vec<ClosedPort> = PROBE_WINDOW.map(|_| closed_port()).collect();
+        let mut ports: Vec<u16> = closed.iter().map(|fixture| fixture.port).collect();
+        ports.sort_unstable();
         let asked = ports.len();
         let serialized_cost = PROBE_TIMEOUT * u32::try_from(asked).unwrap();
 
@@ -516,13 +534,11 @@ mod tests {
         // everywhere: a port with nothing on it is not the API. `probe_port`
         // is still reachable with one, because nothing stops a port closing
         // between the liveness pass and this one.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let closed = closed_port();
 
         let client = probe_client();
         assert!(
-            !probe_port(&client, port, TEST_TOKEN).await,
+            !probe_port(&client, closed.port, TEST_TOKEN).await,
             "a port with nothing listening must never identify as the API"
         );
     }

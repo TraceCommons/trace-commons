@@ -78,6 +78,8 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         // receipt fetch would disclose an exchange to the provider for a
         // submission that is not going to happen.
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
     }
 }
@@ -128,7 +130,9 @@ pub(crate) async fn enroll_core(
         anyhow::bail!("--grant and --invite are alternative enrollment paths; pass only one");
     }
 
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
 
     if let Some(invite) = invite {
         let cfg =
@@ -167,6 +171,7 @@ pub(crate) async fn enroll_core(
     let client = IssuerClient::new(allowlist).context("building issuer client")?;
     let response = client.enroll(&grant.issuer_url, &req).await?;
 
+    let env_witness = crate::config::witness_settings_from_env();
     let cfg = ContributorConfig {
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
         issuer_url: grant.issuer_url.clone(),
@@ -185,11 +190,13 @@ pub(crate) async fn enroll_core(
         // Enrollment never turns the witness on. It is opt-in, from config or
         // the environment, and a server-supplied enablement is exactly the
         // "no server-pushed enablement" rule this field exists under.
-        witness: crate::config::witness_settings_from_env(),
+        witness: env_witness.clone(),
         // Same rule, same reason: the receipt endpoint is opt-in from the
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
+        consent_scopes_chosen: false,
+        witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
@@ -604,6 +611,7 @@ pub(crate) fn logout_with(
             );
         }
     }
+    crate::daemon::nearai_credential::ceremony::forget(store)?;
     store.wipe().context("wiping contributor state")?;
     let _ = store.remove_daemon_file(crate::config::DAEMON_SOCK_FILE);
     let _ = store.remove_daemon_file(crate::config::DAEMON_LOCK_FILE);
@@ -667,6 +675,12 @@ fn stop_running_daemon(store: &ConfigStore) -> Result<DaemonStopOutcome> {
         }
         if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&lock_path) {
             if f.try_lock().is_ok() {
+                // Probing takes the lock. Release it rather than closing over
+                // it: `flock` belongs to the open file description, and a
+                // child forked from another thread between `fork` and `exec`
+                // carries a copy of this descriptor, so a close alone can
+                // leave the lock held against the next daemon start.
+                let _ = f.unlock();
                 return Ok(DaemonStopOutcome::Stopped);
             }
         }
@@ -1561,6 +1575,11 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             SubmitOutcome::Failed { reason_label } => {
                 println!("{preview_prefix}failed ({reason_label})");
             }
+            // Only the daemon asks for a hold; listed so a CLI run that ever
+            // got one says so rather than failing to compile it away.
+            SubmitOutcome::HeldForReview { reason_label, .. } => {
+                println!("{preview_prefix}held ({reason_label})");
+            }
         }
     }
 
@@ -2159,6 +2178,8 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let existing = ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2304,6 +2325,8 @@ mod tests {
     fn enrolled_with_a_claimed_handle(device_key_id: &str) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2419,6 +2442,7 @@ mod tests {
             subagents_dropped: 0,
             routing: Vec::new(),
             attested_call: None,
+            attested_refusal: None,
         };
         super::strip_reasoning(&mut t);
         let kinds: Vec<_> = t.events.iter().map(|e| e.kind.clone()).collect();
@@ -2795,6 +2819,7 @@ async fn enroll_with_invite_core(
         IssuerClient::new(allowlist_for(allowed_hosts)).context("building issuer client")?;
     let response = client.onboard(&parsed.issuer_url, &req).await?;
 
+    let env_witness = crate::config::witness_settings_from_env();
     let cfg = ContributorConfig {
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
         issuer_url: parsed.issuer_url.clone(),
@@ -2818,17 +2843,23 @@ async fn enroll_with_invite_core(
         // Enrollment never turns the witness on. It is opt-in, from config or
         // the environment, and a server-supplied enablement is exactly the
         // "no server-pushed enablement" rule this field exists under.
-        witness: crate::config::witness_settings_from_env(),
+        witness: env_witness.clone(),
         // Same rule, same reason: the receipt endpoint is opt-in from the
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
+        consent_scopes_chosen: false,
+        witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
     store
         .save_config(&cfg)
         .context("saving contributor config")?;
+    // The invite's subject hash -- never the code -- so a later move to a
+    // NEAR AI account can name the invite without asking anyone for it.
+    // Best effort: the migration asks the issuer when it is missing.
+    crate::daemon::legacy_migration::remember_invite_subject(store, &parsed.code);
     Ok(cfg)
 }
 
@@ -4046,6 +4077,8 @@ mod daemon_command_tests {
     #[test]
     fn setting_a_project_to_auto_from_the_cli_is_persisted() {
         let (_d, store) = crate::config::tests_support::temp_store();
+        // Arming records the terms in force, so it needs a config.
+        store.save_config(&unenrolled_preview_config()).unwrap();
         let project = tempfile::tempdir().unwrap();
         daemon_set_project(&store, project.path(), "auto", false).unwrap();
         let key = std::fs::canonicalize(project.path())
@@ -4827,4 +4860,31 @@ mod daemon_liveness_tests {
             "not paused (daemon not reachable; recorded in local state)"
         );
     }
+}
+
+/// Explicit local lifecycle operations, separate from server withdrawal.
+pub fn daemon_token_storage(
+    store: &ConfigStore,
+    cleanup: bool,
+    discard: bool,
+    confirmed: bool,
+    json: bool,
+) -> Result<()> {
+    anyhow::ensure!(!discard || confirmed, "discard requires --confirm");
+    let method = if discard {
+        "discard_token_reviews"
+    } else if cleanup {
+        "remove_token_local_copies"
+    } else {
+        "token_storage_status"
+    };
+    let response = daemon_call(store, method, serde_json::json!({"confirmed":confirmed}))?;
+    render(response, json, |value| {
+        if let Some(line) = value.get("state_line").and_then(serde_json::Value::as_str) {
+            println!("{line}");
+        }
+        if let Some(line) = value.get("scope_note").and_then(serde_json::Value::as_str) {
+            println!("{line}");
+        }
+    })
 }
