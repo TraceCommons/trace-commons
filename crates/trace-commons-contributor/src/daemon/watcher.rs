@@ -1355,6 +1355,9 @@ fn visit_session(
         attestation_reason: attestation.reason.map(str::to_string),
         attested_inference: None,
         kept_from_reason: None,
+        // Not yet scrubbed: nothing has previewed this offer. Never zero,
+        // which would read as "nothing matched". See `second_look::Scrub`.
+        scrub: None,
     };
     let entry_id = entry.entry_id;
 

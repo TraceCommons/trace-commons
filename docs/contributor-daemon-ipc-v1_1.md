@@ -387,6 +387,11 @@ and a project name is not an informed one. This content is bounded:
   history record, notification text, or a receipt. Not truncated, not
   summarized, not hashed-with-a-sample. Nothing copies it into any of those.
 
+`preview_unsure_spans` is outside the exemption for the same reason as
+`preview_turns` below: it carries fixed labels and byte offsets into the body
+the caller already holds, never the text at those offsets, and is served
+under the same `unknown-entry-id` rule.
+
 `preview_turns` is **not** part of the exemption and does not need to be: it
 carries event-type labels, tool names the envelope already records as
 metadata, and byte offsets, never redacted text. It is still served only for
@@ -465,12 +470,13 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before |
+| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
-| `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
+| `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
+| `preview_unsure_spans` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `span_count`, `spans[]`, `spans_truncated` | byte ranges **into the body `preview_body` returns** that look like personal data the scrubber did not mark, each with a fixed label; offsets and labels only, never the text. See "`preview_unsure_spans`" below |
 | `prepare_admission_session` | `entry_id`, `backend`, `confirmed: true` | `status: "ready_for_next_inference"`, `expires_at`, `view` | consent-gated challenge registration for the next inference; no funding or routing changes |
 | `native_wallet_flow` | `action: open/check/start/wait/cancel`; `flow_id` after open; `ingest_url` for check/start; `account_id` for start | shared wallet view (see below) | owns capability checks, origin validation, polling cadence and cancellation; no new C ABI |
 | `near_account_capabilities` | `ingest_url` | validated `ready`, issuer, audience and witness settings; on `ready: false` a `reason` of `address_refused`, `unreachable` or `unsupported` | checks allowlisted HTTPS service; no signup or funding. With `TRACE_COMMONS_ALLOWED_HOSTS` unset the allowlist is derived from `ingest_url` plus the issuer and witness hosts that origin publishes |
@@ -999,6 +1005,64 @@ preview a local file; that requirement was incidental and is gone.
 are real in both cases; an unenrolled preview understates nothing about
 redaction except what an external filter would additionally have removed.
 
+### The scrub state and `second_look`
+
+The Flow 2 design shows each pending session with its scrub state
+("Scrubbed · 7 marks") and marks some "worth a second look": sessions the
+scrubber was unsure about, which wait for a person. The daemon decides that
+once, in `daemon::second_look::second_look_reasons`, and publishes the answer
+in additive fields on every queue entry (`list_pending`, `snapshot`, the
+`entry` inside a `preview` response) and on every preview summary
+(`preview`, `preview_request`'s `ready` summary, the `preview_ready` event):
+
+| Field | Presence | Meaning |
+|---|---|---|
+| `scrub` | always | `scrubbed` or `not-yet-scrubbed` (see below). A summary is always `scrubbed`: it describes its own build. |
+| `marks` | **only when `scrubbed`** | how many values the scrubber took out: the sum of `redactions` over labels that removed something. A `residual_secret_at:*` survivor is not a mark. |
+| `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
+| `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
+| `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
+
+The reasons:
+
+- **`nothing-matched`**: `content_marks` is `0`. The scrubber took out no
+  personal detail -- only file paths, or nothing at all. Path removals are
+  deliberately left out of this test: nearly every real session carries
+  absolute paths, so counting them would make the reason almost never fire,
+  and a session whose only marks were paths has had nothing personal found
+  in it.
+- **`looks-unsure`**: the unsure-span detector found at least one span (an
+  email, phone number or key shape the scrubber did not mark), or could not
+  index the body at all, which counts as unsure.
+- **`trimmed-to-fit`**: `subagents_dropped > 0`; part of the conversation is
+  not in what would be sent.
+
+**Not yet scrubbed is not zero marks.** On a queue entry, `scrub` is
+`scrubbed` only while the entry is pinned to an envelope **and** the counts
+were taken from that exact envelope: they are stored beside its digest, and
+only the pinning build (`preview_body`, `preview_turns`,
+`preview_unsure_spans`, `approve`, a witnessed review) writes them. A card
+(`preview`, `preview_request`) pins nothing and so records nothing, and an
+unenrolled build is never pinned. When the pin is released, replaced or
+revoked -- a re-enrolment, a privacy-filter change, an approval revoked and
+re-offered, a stale pin released after three days -- the entry reads as
+`not-yet-scrubbed` again, with nothing to clear by hand. Before then `marks`,
+`content_marks` and `unsure_spans` are **absent** -- never `0`, never `null`
+-- and `second_look` never contains `nothing-matched` or `looks-unsure`. A
+shell must not render an unscrubbed session as "0 marks" or as clean; test
+for the key. `trimmed-to-fit` can appear before any preview, because the
+trim is decided at discovery.
+
+**An empty `second_look` is an all-clear only when `scrub` is `scrubbed`.**
+For a `not-yet-scrubbed` entry it means no reason is known yet. A caller that
+would move a session on its own (the Scrub check's Automatic mode) must pin
+and count it first.
+
+Recording the counts publishes no event: the next `list_pending` or
+`snapshot` carries them.
+
+Neither state is a colour: a shell renders the reason.
+
 ### Explicit witnessed review
 
 The daemon exposes `witness_preview_request` through authenticated local IPC.
@@ -1081,7 +1145,10 @@ with an object whose `state` is one of:
 | `too_large` | `raw_session_bytes`, `limit_bytes` | refused by admission control; nothing was parsed |
 | `failed` | `code`, `label` | the pipeline refused; same fixed labels `preview` uses |
 
-`summary` carries exactly the fields `preview` returns -- `would_send_bytes`,
+`summary` also carries `scrub`, `marks`, `content_marks`, `unsure_spans`
+and `second_look`, describing that build (see "The scrub state and
+`second_look`" above). Beyond those, it carries exactly the fields
+`preview` returns -- `would_send_bytes`,
 `raw_session_bytes`, `event_count`, `opening_prompt`, `redactions`,
 `pii_labels_present`, `consent_scopes`, `residual_risk`, `envelope_digest`,
 `input_fingerprint`, `enrolled` -- with one deliberate omission: it does
@@ -1536,6 +1603,130 @@ truncated index is a transcript with turns silently missing from the end --
 so `turn_count` always equals `turns.length`. A client that wants a
 `144 more turns` footer computes it from `turn_count` and what it chose to
 render, not from anything the daemon left out.
+
+#### `leaves_this_mac`
+
+`preview_turns` also returns the review sheet's "Leaves this Mac" line, so no
+shell writes its own claim about what the envelope carries:
+
+```json
+"leaves_this_mac": {
+  "fields": ["conversation", "tool", "tool-version", "timing", "outcome",
+             "uses", "redaction-summary", "session-id", "trace-ids",
+             "contributor-id", "tenant", "revocation-handle",
+             "folder-fingerprint", "replay", "scores", "format-version"],
+  "would_send_bytes": 19456,
+  "turn_count": 12,
+  "folder_named_in_conversation": false,
+  "folder_named_in_metadata": false,
+  "line": "19 KB · 12 turns · tool, tool version, timing, outcome, …. The metadata never carries the path or the folder name."
+}
+```
+
+`fields` is derived by **walking every key of the serialized envelope** that
+would be sent (`consent_copy::leaves_this_mac_fields`) and naming it, so it
+is complete by construction. The set is closed and listed in this order:
+`conversation`, `tool`, `tool-version`, `model`, `timing`,
+`usage-and-cost` (per-event token counts and cost), `routing` (routing
+rows), `outcome`, `correction`, `uses`, `redaction-summary`
+(`privacy.redaction_counts` and the rest of the privacy block),
+`session-id` (`conversation_id`, the tool's own session id, and
+`source_session`), `trace-ids`, `contributor-id`, `tenant`
+(`contributor.tenant_scope_ref`), `credit-account`, `revocation-handle`,
+`folder-fingerprint` (`cwd_hash`), `replay`, `scores`, `format-version`, and
+`other`. A label appears only when the envelope carries a non-null key for
+it. A key this build has no name for is reported as `other` -- over-described,
+never dropped -- and a test fails the build on any such key. Labels, never
+values.
+
+`would_send_bytes` is the envelope's size, `preview`'s figure; `turn_count`
+equals the method's own. `line` is the finished sentence (**DRAFT, NEEDS
+APPROVAL**), absent only if the envelope could not be measured.
+
+**What the line promises about the folder is only what is true.** Only
+absolute paths are scrubbed out of the conversation, so a relative path
+(`../myproj/src/main.rs`) or a sentence can still name the folder. The daemon
+looks for the folder's own names (the basenames of the project root, the
+unfolded path and the session's working directory) as standalone,
+case-insensitive words, separately in the conversation (`events`) and in
+everything else, and reports both as booleans:
+
+- the line always says "The metadata never carries the path or the folder
+  name." -- unless `folder_named_in_metadata` is true, when it says "The
+  folder's name appears in what would be sent." instead;
+- when `folder_named_in_conversation` is true it adds "The conversation
+  itself names the folder."
+
+The list does **not** say "project label", which the design's mock does: the
+envelope has carried no project name, in the clear or hashed, since #207.
+
+### `preview_unsure_spans`
+
+Where the redacted body holds something that looks like personal data the
+scrubber did not mark, so the review sheet can put "looks like an email. Not
+matched. Your call." under that line. **Offsets and labels, never the
+text**: the shell already holds the body from `preview_body` and renders the
+span from it.
+
+Request:
+
+```json
+{ "entry_id": "…", "body_digest": "sha256:…" }
+```
+
+Response:
+
+```json
+{
+  "entry_id": "…",
+  "body_digest": "sha256:…",
+  "envelope_digest": "sha256:…",
+  "span_count": 1,
+  "spans": [
+    { "label": "looks-like-email", "byte_offset": 1408, "byte_len": 11 }
+  ],
+  "spans_truncated": false
+}
+```
+
+`label` is one of `looks-like-email` (an address, or a bracket-obfuscated one
+such as `name [at] example [dot] com`), `looks-like-phone` (international
+`+44 20 7946 0958`, or North American `(415) 555-0100` / `415-555-0100`) and
+`looks-like-key` (a well-known credential prefix such as `sk-`, `ghp_`,
+`AKIA`). The set is closed. `byte_offset` and `byte_len` are a half-open
+range of **UTF-8 byte** offsets into the body, on character boundaries,
+sorted and never overlapping.
+
+**Conservative.** Only the contents of JSON strings are scanned, and a span
+never crosses a JSON escape (`\n`, `\"`, `é`), so an offset can never
+point into the middle of one. A redaction placeholder
+(`<PRIVATE_EMAIL_1>`, `[REDACTED]`) never matches, so an email the scrubber
+took yields no hint. A bare run of digits is never a phone. A hint is a
+pointer for a person, not a second scrubber: nothing is redacted and nothing
+waits because of one.
+
+**`body_digest` is required, on every call,** on exactly `preview_turns`'
+rule: omitted is `bad_params` / `body-digest-required`, a non-string is
+`bad_params` / `body-digest-invalid`, and one that does not match the body
+the daemon resolved is `unavailable` / `preview-body-changed` -- re-read the
+body from `offset: 0` and ask again. The body is resolved through the same
+path as `preview_body` and `preview_turns`, with the same refusals
+(`unknown-entry-id`, `approved-envelope-unavailable`).
+
+**Fail-closed.** A body the detector cannot index exactly, or any span that
+does not re-verify against the bytes it points at, refuses the whole
+response with `unavailable` / `preview-unsure-index-failed`. `spans` holds at
+most 2000 entries; `span_count` is always the total, and `spans_truncated`
+is `true` when the list was cut. A shell must not present a cut list as the
+whole one.
+
+`preview_unsure_spans` is answered on the async dispatcher only; the
+synchronous entry point refuses it with `preview-unsure-spans-requires-async`.
+
+The C ABI's `tc_preview_unsure_spans_json(handle, entry_id, body_digest,
+err)` returns the same object, from the same function, under the same
+anchoring and refusals, and like `tc_preview_turns_json` refuses an attached
+handle with `preview-requires-embedded`.
 
 ### `list_projects`
 
