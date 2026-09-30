@@ -263,8 +263,15 @@ impl BrowserSignIn {
 /// the port and receive the session.
 pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Value> {
     // Before anything that reaches the network or a browser: a ceremony this
-    // process could not store is a wasted sign-in at the service.
-    crate::daemon::cloud_credential_lifecycle::store_is_reachable(store)?;
+    // process could not store is a wasted sign-in at the service. The probe
+    // is an OS read that can wait on a prompt or a locked store, so it runs
+    // on a blocking worker, construction included, never on this runtime.
+    let probe_store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::daemon::cloud_credential_lifecycle::store_is_reachable(&probe_store)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("near_ai_credential_storage_unavailable"))??;
     let api = CloudApi::live()?;
     let attempt_id = loopback::random_state()?;
     let dir = store.dir().to_path_buf();
@@ -861,6 +868,65 @@ mod tests {
         assert_eq!(status(dir.path(), Some(id)).unwrap().status, "cancelled");
     }
 
+    /// `begin`'s reachability probe is an OS read, which can wait on a
+    /// keychain prompt or a slow Secret Service. It must run on a blocking
+    /// worker, not on the IPC runtime's thread.
+    ///
+    /// On a current-thread runtime a probe run inline holds the only thread,
+    /// so the task spawned here cannot run until the probe returns; the
+    /// backend waits for that task and reports whether it ever ran.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_reachability_probe_does_not_hold_the_runtime_thread() {
+        use crate::daemon::credential_store::{
+            CredentialError, CredentialReference, SecretBackend,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct WaitingBackend {
+            released: Arc<AtomicBool>,
+            saw_release: AtomicBool,
+        }
+        impl SecretBackend for WaitingBackend {
+            fn read(&self, _: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while std::time::Instant::now() < deadline {
+                    if self.released.load(Ordering::SeqCst) {
+                        self.saw_release.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                // Unentitled either way, so `begin` stops before the network.
+                Err(CredentialError::Unentitled)
+            }
+            fn write(&self, _: &CredentialReference, _: &[u8]) -> Result<(), CredentialError> {
+                Err(CredentialError::Unavailable)
+            }
+            fn delete(&self, _: &CredentialReference) -> Result<(), CredentialError> {
+                Err(CredentialError::Unavailable)
+            }
+        }
+
+        let (_dir, store) = temp_store();
+        let released = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(WaitingBackend {
+            released: released.clone(),
+            saw_release: AtomicBool::new(false),
+        });
+        crate::daemon::cloud_credential_test_support::install_backend(&store, backend.clone());
+        let releaser = tokio::spawn(async move { released.store(true, Ordering::SeqCst) });
+
+        let error = begin(&store, "github").await.unwrap_err();
+        releaser.await.unwrap();
+
+        assert_eq!(error.to_string(), "near_ai_credential_storage_unentitled");
+        assert!(
+            backend.saw_release.load(Ordering::SeqCst),
+            "the probe ran on the runtime thread and starved every other task"
+        );
+    }
+
     /// `persist_checked`'s sweep is a distinct site from the journal-walking
     /// one in `cloud_credential_lifecycle.rs`, and it is macOS-only for the
     /// same reason `sweep_legacy_cloud_entries`'s body is: elsewhere it is a
@@ -982,29 +1048,73 @@ mod tests {
             );
         }
 
-        /// A re-sign-in that happens after the migration already ran once:
-        /// the superseded credential lives in the data-protection store, not
-        /// the legacy one, so deleting its reference from the legacy backend
-        /// is a harmless `NoEntry`-mapped no-op. The legacy backend still
-        /// receives the delete call (it cannot know in advance that it holds
-        /// nothing for that reference), but nothing observable breaks.
-        #[test]
-        fn a_second_re_sign_in_after_migration_is_a_harmless_legacy_miss() {
-            let (dir, store) = temp_store();
-            let mut settings = preexisting_credentials();
-            settings.save_for_test(&store).unwrap();
+        /// A legacy backend whose every delete fails with one fixed error.
+        struct RefusingLegacyBackend {
+            error: CredentialError,
+            deletes: Mutex<Vec<CredentialReference>>,
+        }
 
-            // No legacy backend installed at all: the reference this
-            // supersedes was never written to the legacy store, matching a
-            // contributor whose credential has already migrated once. The
-            // sweep must still swallow this rather than propagate an error.
-            persist(
-                dir.path(),
-                minted(),
-                "rt-second-session-secret".into(),
-                "Mozilla/5.0 Test".into(),
-            )
-            .unwrap();
+        impl SecretBackend for RefusingLegacyBackend {
+            fn read(&self, _reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+                Err(CredentialError::NoEntry)
+            }
+            fn write(
+                &self,
+                _reference: &CredentialReference,
+                _bytes: &[u8],
+            ) -> Result<(), CredentialError> {
+                Err(CredentialError::Unavailable)
+            }
+            fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError> {
+                self.deletes.lock().unwrap().push(*reference);
+                Err(self.error)
+            }
+        }
+
+        /// A re-sign-in that happens after the credential already left the
+        /// legacy store (migrated, or a second re-sign-in): the legacy
+        /// backend answers the sweep's delete with `NoEntry`. And a legacy
+        /// store that refuses outright -- the contributor denied the
+        /// keychain prompt -- answers `Unavailable`. Neither may fail a
+        /// ceremony whose new credential is already published.
+        ///
+        /// The delete is asserted to have been attempted, so this cannot
+        /// pass by never reaching the sweep (as it did with no legacy
+        /// backend installed at all).
+        #[test]
+        fn a_legacy_delete_that_fails_does_not_fail_the_ceremony() {
+            for error in [CredentialError::NoEntry, CredentialError::Unavailable] {
+                let (dir, store) = temp_store();
+                let mut settings = preexisting_credentials();
+                settings.save_for_test(&store).unwrap();
+                let superseded = settings.cloud_credentials.as_ref().unwrap().reference();
+
+                let legacy = Arc::new(RefusingLegacyBackend {
+                    error,
+                    deletes: Mutex::default(),
+                });
+                install_legacy_backend(&store, legacy.clone());
+
+                persist(
+                    dir.path(),
+                    minted(),
+                    "rt-second-session-secret".into(),
+                    "Mozilla/5.0 Test".into(),
+                )
+                .unwrap_or_else(|e| panic!("persist failed on a legacy {error:?}: {e}"));
+
+                assert_eq!(
+                    *legacy.deletes.lock().unwrap(),
+                    vec![superseded],
+                    "the sweep must have reached the legacy backend ({error:?})"
+                );
+                let stored = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
+                assert_eq!(
+                    stored.near_ai_session.unwrap().refresh_token,
+                    "rt-second-session-secret",
+                    "the new credential is published ({error:?})"
+                );
+            }
         }
     }
 }
