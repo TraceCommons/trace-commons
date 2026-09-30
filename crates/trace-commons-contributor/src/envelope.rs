@@ -1099,6 +1099,40 @@ mod tests {
         src.load(&refs[0]).unwrap()
     }
 
+    fn tool_pair_transcript(
+        call_success: Option<bool>,
+        result_id: &str,
+        result_content: &str,
+        result_success: Option<bool>,
+    ) -> crate::source::SessionTranscript {
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                served_by: None,
+                kind: crate::source::SessionEventKind::ToolCall,
+                timestamp: None,
+                content: None,
+                structured: serde_json::json!({"file_path": "cfg.toml"}),
+                tool_name: Some("Read".to_string()),
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: call_success,
+            },
+            crate::source::SessionEvent {
+                served_by: None,
+                kind: crate::source::SessionEventKind::ToolResult,
+                timestamp: None,
+                content: Some(result_content.to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+                tool_call_id: Some(result_id.to_string()),
+                success: result_success,
+            },
+        ];
+        t
+    }
+
     fn sample_routed_exchange() -> crate::routing::RoutedExchange {
         crate::routing::RoutedExchange {
             id: None,
@@ -1887,31 +1921,7 @@ mod tests {
     #[test]
     fn a_result_names_the_call_it_answers() {
         let cfg = test_config();
-        let mut t = fixture_transcript();
-        t.events = vec![
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolCall,
-                timestamp: None,
-                content: None,
-                structured: serde_json::json!({"file_path": "cfg.toml"}),
-                tool_name: Some("Read".to_string()),
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: None,
-            },
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolResult,
-                timestamp: None,
-                content: Some("port = 8080".to_string()),
-                structured: serde_json::Value::Null,
-                tool_name: None,
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: Some(true),
-            },
-        ];
+        let t = tool_pair_transcript(None, "tu_1", "port = 8080", Some(true));
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
 
@@ -1927,31 +1937,7 @@ mod tests {
     #[test]
     fn a_result_with_no_matching_call_is_left_unparented() {
         let cfg = test_config();
-        let mut t = fixture_transcript();
-        t.events = vec![
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolCall,
-                timestamp: None,
-                content: None,
-                structured: serde_json::json!({"file_path": "cfg.toml"}),
-                tool_name: Some("Read".to_string()),
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: None,
-            },
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolResult,
-                timestamp: None,
-                content: Some("port = 8080".to_string()),
-                structured: serde_json::Value::Null,
-                tool_name: None,
-                token_counts: None,
-                tool_call_id: Some("tu_other".to_string()),
-                success: None,
-            },
-        ];
+        let t = tool_pair_transcript(None, "tu_other", "port = 8080", None);
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
 
@@ -2651,31 +2637,7 @@ mod tests {
     #[test]
     fn a_paired_result_inherits_the_tool_that_ran() {
         let cfg = test_config();
-        let mut t = fixture_transcript();
-        t.events = vec![
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolCall,
-                timestamp: None,
-                content: None,
-                structured: serde_json::json!({"file_path": "cfg.toml"}),
-                tool_name: Some("Read".to_string()),
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: None,
-            },
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolResult,
-                timestamp: None,
-                content: Some("port = 8080".to_string()),
-                structured: serde_json::Value::Null,
-                tool_name: None,
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: Some(true),
-            },
-        ];
+        let t = tool_pair_transcript(None, "tu_1", "port = 8080", Some(true));
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
 
@@ -2687,31 +2649,7 @@ mod tests {
     #[test]
     fn an_unpaired_result_names_no_tool() {
         let cfg = test_config();
-        let mut t = fixture_transcript();
-        t.events = vec![
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolCall,
-                timestamp: None,
-                content: None,
-                structured: serde_json::json!({"file_path": "cfg.toml"}),
-                tool_name: Some("Read".to_string()),
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: None,
-            },
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolResult,
-                timestamp: None,
-                content: Some("port = 8080".to_string()),
-                structured: serde_json::Value::Null,
-                tool_name: None,
-                token_counts: None,
-                tool_call_id: Some("tu_other".to_string()),
-                success: Some(true),
-            },
-        ];
+        let t = tool_pair_transcript(None, "tu_other", "port = 8080", Some(true));
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
 
@@ -2728,31 +2666,7 @@ mod tests {
     #[test]
     fn a_failed_result_marks_the_call_that_failed() {
         let cfg = test_config();
-        let mut t = fixture_transcript();
-        t.events = vec![
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolCall,
-                timestamp: None,
-                content: None,
-                structured: serde_json::json!({"file_path": "cfg.toml"}),
-                tool_name: Some("Read".to_string()),
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: None,
-            },
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolResult,
-                timestamp: None,
-                content: Some("permission denied".to_string()),
-                structured: serde_json::Value::Null,
-                tool_name: None,
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: Some(false),
-            },
-        ];
+        let t = tool_pair_transcript(None, "tu_1", "permission denied", Some(false));
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
 
@@ -2764,31 +2678,7 @@ mod tests {
     #[test]
     fn a_calls_own_verdict_wins() {
         let cfg = test_config();
-        let mut t = fixture_transcript();
-        t.events = vec![
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolCall,
-                timestamp: None,
-                content: None,
-                structured: serde_json::json!({"file_path": "cfg.toml"}),
-                tool_name: Some("Read".to_string()),
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: Some(false),
-            },
-            crate::source::SessionEvent {
-                served_by: None,
-                kind: crate::source::SessionEventKind::ToolResult,
-                timestamp: None,
-                content: Some("ok".to_string()),
-                structured: serde_json::Value::Null,
-                tool_name: None,
-                token_counts: None,
-                tool_call_id: Some("tu_1".to_string()),
-                success: Some(true),
-            },
-        ];
+        let t = tool_pair_transcript(Some(false), "tu_1", "ok", Some(true));
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
 

@@ -231,9 +231,9 @@ fn rust_surface() -> BTreeMap<String, Signature> {
     }
 
     assert!(
-        !out.is_empty(),
-        "parsed zero exported symbols from src/lib.rs -- the parser has gone \
-         blind, which would make this whole test vacuous"
+        out.len() > 10,
+        "parsed only {} exported symbols -- the parser has gone blind",
+        out.len()
     );
     out
 }
@@ -442,24 +442,6 @@ fn every_header_copy_matches_the_rust_abi_surface() {
              error. Update the header -- or if the Rust changed deliberately, \
              update BOTH copies this test checks.\n",
             path.display(),
-            diff.join("\n")
-        );
-    }
-}
-
-#[test]
-fn the_two_header_copies_declare_the_same_surface() {
-    let paths = header_paths();
-    let first = header_surface(&paths[0]);
-    for path in &paths[1..] {
-        let diff = differences(&header_surface(path), "macos copy", &first, "ffi copy");
-        assert!(
-            diff.is_empty(),
-            "\n{} and {} declare different C ABIs:\n\n{}\n\nThe macOS Swift \
-             package names its own copy as the `CTraceCommons` umbrella \
-             header, so a divergence here is what the app compiles against.\n",
-            path.display(),
-            paths[0].display(),
             diff.join("\n")
         );
     }

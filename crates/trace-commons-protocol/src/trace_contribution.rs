@@ -8103,6 +8103,8 @@ mod tests {
     // build failure instead of a discovery.
     #![deny(dead_code)]
 
+    use super::*;
+
     /// #225 lowered the cued-secret length floor from 16 to 8; the #267
     /// squash reverted it to 16, reopening the band. See #326 for the wider
     /// conflict-resolution reversion.
@@ -8129,7 +8131,6 @@ mod tests {
     /// widening rather than an accident.
     #[test]
     fn cued_secrets_in_the_ten_to_fifteen_character_band_are_redacted() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
 
         let pool = "Q7vM2xP9sL4nR8kT6wZ3bY5uH1cJ0dG9";
@@ -8167,7 +8168,6 @@ mod tests {
     /// the test above so the two move together.
     #[test]
     fn lowering_the_length_floor_does_not_widen_the_false_positive_budget() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
 
         for text in [
@@ -8205,8 +8205,6 @@ mod tests {
     /// account for a secret that was found and successfully removed.
     #[test]
     fn privacy_warnings_describe_scrub_outcome_not_mere_detection() {
-        use super::*;
-
         let high = privacy_warnings(ResidualPiiRisk::High).join(" ");
         assert!(
             high.contains("survived scrub")
@@ -8243,6 +8241,19 @@ mod tests {
             correction_included: false,
             routing_metadata_included: false,
             revocable: true,
+        }
+    }
+
+    fn empty_filter_summary() -> super::SafePrivacyFilterSummary {
+        super::SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "redacted_text_only".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: None,
+            events_examined: 0,
+            events_skipped_by_policy: 0,
         }
     }
 
@@ -8575,14 +8586,8 @@ mod tests {
             Ok(Some(super::SafePrivacyFilterRedaction {
                 redacted_text: text.replace(CLASSIFIER_ONLY_PII, "<CLASSIFIER_NAME>"),
                 summary: super::SafePrivacyFilterSummary {
-                    schema_version: 1,
-                    output_mode: "redacted_text_only".to_string(),
                     span_count: 1,
-                    by_label: std::collections::BTreeMap::new(),
-                    decoded_mismatch: false,
-                    classify_policy: None,
-                    events_examined: 0,
-                    events_skipped_by_policy: 0,
+                    ..empty_filter_summary()
                 },
                 report,
             }))
@@ -8923,15 +8928,7 @@ mod tests {
             report.coverage_incomplete,
             "a filter fallback must mark the pass as not covering the text"
         );
-        let consent = super::ConsentMetadata {
-            policy_version: super::TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![super::ConsentScope::DebuggingEvaluation],
-            message_text_included: false,
-            tool_payloads_included: false,
-            correction_included: false,
-            routing_metadata_included: false,
-            revocable: true,
-        };
+        let consent = clean_consent();
         assert_eq!(
             super::residual_risk(&consent, &report),
             super::ResidualPiiRisk::High,
@@ -8996,7 +8993,6 @@ mod tests {
 
     #[test]
     fn redact_text_strips_broadened_secret_shapes() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // JWT (three base64url segments)
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
@@ -9012,7 +9008,6 @@ mod tests {
 
     #[test]
     fn redact_text_removes_entire_pem_block_not_just_header() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234secretbody5678\nabcDEFghiJKL==\n-----END RSA PRIVATE KEY-----";
         let (out, rep) = r.redact_text(&format!("here is a key:\n{pem}\ntrailing"));
@@ -9030,7 +9025,6 @@ mod tests {
 
     #[test]
     fn redact_text_catches_orphan_pem_header_without_end() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let truncated = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAsecretbytes";
         let (out, _) = r.redact_text(truncated);
@@ -9042,7 +9036,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_redacts_unknown_key_after_cue() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // opaque high-entropy token, no known prefix, but preceded by a cue
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
@@ -9053,7 +9046,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_redacts_unspaced_assignment() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         // Same secret and cue as the spaced case above; only the space is gone.
@@ -9091,7 +9083,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_redacts_cue_named_values_consistently_across_spellings() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // Opaque cursors carry the `token` cue and are now redacted in the
         // glued spelling too. That is over-redaction of non-secret content,
@@ -9110,7 +9101,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_still_redacts_credential_named_tokens_when_glued() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         for name in ["access_token", "refresh_token", "client_secret"] {
@@ -9124,7 +9114,6 @@ mod tests {
     /// never a real credential.
     #[test]
     fn contextual_entropy_redacts_passphrase_and_passcode_cues() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // `passphrase` and `passcode` are the two members of the `pass*`
         // credential family that the cue alternation did not name, and
@@ -9156,7 +9145,6 @@ mod tests {
     /// identifiers that merely contain the word must stay untouched.
     #[test]
     fn passphrase_and_passcode_cues_do_not_redact_innocent_text() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         for text in [
             // The English word, with no value after it at all.
@@ -9187,7 +9175,6 @@ mod tests {
     /// generated for the fixture, never a real credential.
     #[test]
     fn cursor_api_key_redacts_uncued_cursor_key() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // A cue word in front already redacted this via the contextual
         // entropy sweep. The gap was the bare, standing-alone spelling: no
@@ -9226,7 +9213,6 @@ mod tests {
     /// The literal below is SYNTHETIC -- shape-preserving, never a real key.
     #[test]
     fn cursor_api_key_redacts_a_bare_key_abutted_by_more_identifier_chars() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let secret = "crsr_1234567890abcdef1234567890abcdef12345678";
         let text = format!("{secret}gremlin");
@@ -9271,7 +9257,6 @@ mod tests {
     /// for it here would be asserting against the pattern's own design.
     #[test]
     fn cursor_api_key_leaves_ordinary_crsr_identifiers_alone() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         for text in [
             // snake_case and SCREAMING_SNAKE -- the class the loose tail ate.
@@ -9317,7 +9302,6 @@ mod tests {
     /// Every literal here is SYNTHETIC.
     #[test]
     fn cued_cursor_key_is_covered_even_when_the_pattern_does_not_fire() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // Not hex, and shorter than the pattern's floor: no named pattern
         // may claim this on its own.
@@ -9348,7 +9332,6 @@ mod tests {
     /// quietly widen.
     #[test]
     fn cursor_keys_are_published_under_their_own_detector_name() {
-        use super::*;
         assert!(
             secret_leak_pattern_names().contains(&"cursor_api_key"),
             "cursor coverage must be published under its own name"
@@ -9403,7 +9386,6 @@ mod tests {
     /// so a regression shows up as the thing that actually costs something.
     #[test]
     fn ordinary_crsr_identifiers_do_not_raise_residual_risk() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let (out, rep) = r.redact_text(
             "crsr_state_machine advances crsr_position_after_wrap; \
@@ -9431,7 +9413,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_split_restores_the_identifier_allowlist() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // None of these has a cue before the whole candidate (the key name is
         // glued to the value, so the candidate itself starts at the key
@@ -9473,7 +9454,6 @@ mod tests {
     }
     #[test]
     fn contextual_entropy_reads_past_junk_assignments_to_reach_the_cue() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // Readings are not capped. A cap would let an attacker push the real
         // cue past it with junk `k0=k1=...` prefixes and keep the secret,
@@ -9492,7 +9472,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_measures_material_beyond_the_sample_window() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // A value whose entropy sits past ENTROPY_SAMPLE_BYTES. The whole-token
         // reading measures the whole token, so the spaced form keeps the
@@ -9522,7 +9501,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_measures_both_ends_of_a_long_value() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // A single sample anchor has a blind spot at the opposite end. These
         // three arrangements put the opaque material at the start, the end, and
@@ -9550,7 +9528,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_finds_a_secret_between_sample_windows_on_a_long_candidate() {
-        use super::*;
         // A fixed number of windows spread evenly across a long candidate
         // leaves a gap between windows that grows with the candidate's
         // length: at ~500 KB with 16 fixed 512-byte windows the gap is
@@ -9585,7 +9562,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_stays_bounded_on_many_separate_assignments() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // Thousands of separate glued assignments, at the tripwire size.
         // Each one contributes a range, and comparing every new range against
@@ -9606,7 +9582,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_stays_bounded_on_equals_dense_input() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // At only 1024 repetitions these payloads are far too small to
         // distinguish "entropy is bounded per reading" from "entropy is
@@ -9630,7 +9605,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_gates_on_cue_before_entropy_on_equals_dense_input_near_max_size() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // Every `=` in the input starts another reading in
         // `contextual_entropy_secret_ranges`, and the regex class
@@ -9668,7 +9642,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_stays_bounded_when_a_cue_repeats_densely_through_a_long_candidate() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // Gating entropy on `has_secret_cue` (the fix above) only removes the
         // cost when there is no cue at all. An attacker can trivially make a
@@ -9701,7 +9674,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_fires_when_the_cue_word_is_embedded_in_a_longer_name() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let value = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         // The cue word is followed by further identifier characters before the
@@ -9721,7 +9693,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_fires_for_an_embedded_cue_passed_as_a_command_line_argument() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let value = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         let (out, rep) = r.redact_text(&format!("acmectl --acme-secret-key-v2 {value}"));
@@ -9734,7 +9705,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_leaves_a_low_entropy_value_after_an_embedded_cue_alone() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // Same cue shape as above; only the entropy of the value differs, so
         // this proves the entropy gate still governs after the widened cue.
@@ -9747,7 +9717,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_still_fires_for_bare_cues_and_named_prefixes() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let value = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         for text in [
@@ -9780,7 +9749,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_keeps_cue_name_when_redacting_assigned_value() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         let (out, _) = r.redact_text(&format!("api_key={secret}"));
@@ -9794,7 +9762,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_spares_ids_and_hashes_and_uncued_tokens() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         // message id after a cue-shaped word must NOT be redacted (allowlisted prefix)
         let (o1, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
@@ -9820,7 +9787,6 @@ mod tests {
     /// decisions with false-positive tradeoffs (see PR discussion for Fix 4).
     #[test]
     fn contextual_entropy_documents_the_glued_assignment_boundary() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
 
         // 1. Zero-separator glue: no `=` between the cue word and the value,
@@ -9887,7 +9853,6 @@ mod tests {
     /// found and redacted something.
     #[test]
     fn contextual_entropy_spares_its_own_report_metric_labels() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         for label in REPORT_METRIC_LABELS {
             let json_like = format!("\"secret:{label}\":1");
@@ -9941,7 +9906,6 @@ mod tests {
     }
 
     fn sample_envelope_with_event_content(content: &str) -> super::TraceContributionEnvelope {
-        use super::*;
         let now = Utc::now();
         TraceContributionEnvelope {
             schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
@@ -9981,21 +9945,10 @@ mod tests {
                 warnings: Vec::new(),
             },
             events: vec![TraceContributionEvent {
-                event_id: Uuid::new_v4(),
-                parent_event_id: None,
                 event_type: TraceContributionEventType::UserMessage,
                 timestamp: now,
                 redacted_content: Some(content.to_string()),
-                structured_payload: Value::Null,
-                tool_name: None,
-                tool_category: None,
-                tool_call_id: None,
-                latency_ms: None,
-                token_counts: None,
-                cost_usd: None,
-                success: None,
-                failure_modes: Vec::new(),
-                side_effect: SideEffectLevel::None,
+                ..empty_event()
             }],
             outcome: OutcomeMetadata::default(),
             replay: ReplayMetadata {
@@ -10022,24 +9975,13 @@ mod tests {
         // not a tool payload, and declaring it as one floors the envelope at
         // Medium residual risk and quarantines it on a default deployment for
         // content it does not carry.
-        use super::*;
         let mut envelope = sample_envelope_with_event_content("seed");
         envelope.events = vec![TraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
             event_type: TraceContributionEventType::RoutingDecision,
             timestamp: Utc::now(),
-            redacted_content: None,
             structured_payload: serde_json::json!({"backend": "nearai", "rung": "same_model"}),
-            tool_name: None,
-            tool_category: None,
-            tool_call_id: None,
             latency_ms: Some(1200),
-            token_counts: None,
-            cost_usd: None,
-            success: None,
-            failure_modes: Vec::new(),
-            side_effect: SideEffectLevel::None,
+            ..empty_event()
         }];
 
         let presence = derive_envelope_content_presence(&envelope);
@@ -10052,24 +9994,14 @@ mod tests {
     fn a_tool_result_payload_is_still_a_tool_payload() {
         // The regression guard for the change above: routing must be carved out
         // without loosening the rule for everything else.
-        use super::*;
         let mut envelope = sample_envelope_with_event_content("seed");
         envelope.events = vec![TraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
             event_type: TraceContributionEventType::ToolResult,
             timestamp: Utc::now(),
-            redacted_content: None,
             structured_payload: serde_json::json!({"stdout": "hello"}),
             tool_name: Some("Bash".to_string()),
-            tool_category: None,
-            tool_call_id: None,
-            latency_ms: None,
-            token_counts: None,
-            cost_usd: None,
             success: Some(true),
-            failure_modes: Vec::new(),
-            side_effect: SideEffectLevel::None,
+            ..empty_event()
         }];
 
         let presence = derive_envelope_content_presence(&envelope);
@@ -10080,45 +10012,12 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn backstop_reredacts_prose_and_marks_pipeline() {
-        use crate::trace_contribution::*;
-        struct Stub;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for Stub {
-            async fn redact_text(
-                &self,
-                text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                if text.contains("jane@example.com") {
-                    // Mirrors NearAiPrivacyFilterAdapter::apply_spans: report.counts
-                    // uses the "privacy_filter:{label}" key while summary.by_label
-                    // uses the bare label for the SAME span, as two parallel tallies.
-                    let mut report = RedactionReport::default();
-                    report.increment("privacy_filter:private_email");
-                    report.add_pii_label("private_email");
-                    Ok(Some(SafePrivacyFilterRedaction {
-                        redacted_text: text.replace("jane@example.com", "[REDACTED:private_email]"),
-                        summary: SafePrivacyFilterSummary {
-                            schema_version: 1,
-                            output_mode: "redacted_text_only".into(),
-                            span_count: 1,
-                            by_label: std::collections::BTreeMap::from([(
-                                "private_email".into(),
-                                1,
-                            )]),
-                            decoded_mismatch: false,
-                            classify_policy: None,
-                            events_examined: 0,
-                            events_skipped_by_policy: 0,
-                        },
-                        report,
-                    }))
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+        let filter = EmailFilter {
+            address: "jane@example.com",
+            include_summary_label: true,
+        };
         let mut env = sample_envelope_with_event_content("email jane@example.com now");
-        rescrub_envelope_prose_pii_with(&Stub, &mut env, PiiClassifyPolicy::AllEvents)
+        rescrub_envelope_prose_pii_with(&filter, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert!(
@@ -10154,7 +10053,7 @@ mod tests {
         let summary = env.privacy.privacy_filter_summary.as_ref().unwrap();
         assert_eq!(summary.by_label.get("private_email").copied(), Some(1));
         // Idempotent suffix: running again does not double-append.
-        rescrub_envelope_prose_pii_with(&Stub, &mut env, PiiClassifyPolicy::AllEvents)
+        rescrub_envelope_prose_pii_with(&filter, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_eq!(
@@ -10174,6 +10073,110 @@ mod tests {
                 .copied(),
             Some(1)
         );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    struct EmailFilter {
+        address: &'static str,
+        include_summary_label: bool,
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[async_trait::async_trait]
+    impl PrivacyFilterAdapter for EmailFilter {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            if !text.contains(self.address) {
+                return Ok(None);
+            }
+            let mut report = RedactionReport::default();
+            report.increment("privacy_filter:private_email");
+            report.add_pii_label("private_email");
+            let mut summary = SafePrivacyFilterSummary {
+                span_count: 1,
+                ..empty_filter_summary()
+            };
+            // The report counter and the optional bare-label summary tally
+            // describe the same span, as in the adapter's real response.
+            if self.include_summary_label {
+                summary.by_label.insert("private_email".into(), 1);
+            }
+            Ok(Some(SafePrivacyFilterRedaction {
+                redacted_text: text.replace(self.address, "[REDACTED:private_email]"),
+                summary,
+                report,
+            }))
+        }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    struct NeverFindsAnything;
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[async_trait::async_trait]
+    impl PrivacyFilterAdapter for NeverFindsAnything {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            Ok(None)
+        }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    struct AlwaysEmptySpans;
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[async_trait::async_trait]
+    impl PrivacyFilterAdapter for AlwaysEmptySpans {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            // Mirrors `{"data":[{"spans":[]}]}`: a real 200 response
+            // that found nothing, on both the real field AND the
+            // canary probe text. Text is returned unchanged.
+            Ok(Some(SafePrivacyFilterRedaction {
+                redacted_text: text.to_string(),
+                summary: SafePrivacyFilterSummary {
+                    ..empty_filter_summary()
+                },
+                report: RedactionReport::default(),
+            }))
+        }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    struct CanaryHealthyButFindsNoRealPii;
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[async_trait::async_trait]
+    impl PrivacyFilterAdapter for CanaryHealthyButFindsNoRealPii {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            let canary_values = synthetic_privacy_filter_canary_values();
+            if !canary_values.iter().any(|v| text.contains(v.as_str())) {
+                return Ok(None);
+            }
+            let mut redacted = text.to_string();
+            let mut report = RedactionReport::default();
+            for v in &canary_values {
+                if redacted.contains(v.as_str()) {
+                    redacted = redacted.replace(v.as_str(), "[REDACTED:unknown]");
+                    report.increment("privacy_filter:unknown");
+                    report.add_pii_label("unknown");
+                }
+            }
+            Ok(Some(SafePrivacyFilterRedaction {
+                redacted_text: redacted,
+                summary: SafePrivacyFilterSummary {
+                    span_count: canary_values.len() as u32,
+                    ..empty_filter_summary()
+                },
+                report,
+            }))
+        }
     }
 
     /// Builds a JSON value nested `depth` levels deep, used to trip the
@@ -10199,7 +10202,6 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[test]
     fn residual_scan_failure_forces_high_risk() {
-        use crate::trace_contribution::*;
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
         // Nested well past RESIDUAL_SCAN_MAX_DEPTH, in a field the async
@@ -10226,17 +10228,6 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn residual_scan_failure_forces_high_in_async_backstop() {
-        use crate::trace_contribution::*;
-        struct NeverFindsAnything;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for NeverFindsAnything {
-            async fn redact_text(
-                &self,
-                _text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                Ok(None)
-            }
-        }
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
         // Same isolation as the sync test above: nested in a field the
@@ -10269,33 +10260,6 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn zero_span_classifier_response_cannot_lower_high_risk() {
-        use crate::trace_contribution::*;
-        struct AlwaysEmptySpans;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for AlwaysEmptySpans {
-            async fn redact_text(
-                &self,
-                text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                // Mirrors `{"data":[{"spans":[]}]}`: a real 200 response
-                // that found nothing, on both the real field AND the
-                // canary probe text. Text is returned unchanged.
-                Ok(Some(SafePrivacyFilterRedaction {
-                    redacted_text: text.to_string(),
-                    summary: SafePrivacyFilterSummary {
-                        schema_version: 1,
-                        output_mode: "redacted_text_only".into(),
-                        span_count: 0,
-                        by_label: std::collections::BTreeMap::new(),
-                        decoded_mismatch: false,
-                        classify_policy: None,
-                        events_examined: 0,
-                        events_skipped_by_policy: 0,
-                    },
-                    report: RedactionReport::default(),
-                }))
-            }
-        }
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::High;
         env.consent.message_text_included = false;
@@ -10325,41 +10289,18 @@ mod tests {
     /// quarantine backlog.
     #[tokio::test]
     async fn backstop_removes_a_credential_the_classifier_does_not_span() {
-        use crate::trace_contribution::*;
-
-        struct NoSpans;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for NoSpans {
-            async fn redact_text(
-                &self,
-                text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                // A real 200 that found nothing: text returned unchanged.
-                Ok(Some(SafePrivacyFilterRedaction {
-                    redacted_text: text.to_string(),
-                    summary: SafePrivacyFilterSummary {
-                        schema_version: 1,
-                        output_mode: "redacted_text_only".into(),
-                        span_count: 0,
-                        by_label: std::collections::BTreeMap::new(),
-                        decoded_mismatch: false,
-                        classify_policy: None,
-                        events_examined: 0,
-                        events_skipped_by_policy: 0,
-                    },
-                    report: RedactionReport::default(),
-                }))
-            }
-        }
-
         const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
         let mut env = sample_envelope_with_event_content(
             "deploy failed, the key AKIAIOSFODNN7EXAMPLE was rejected",
         );
 
-        super::rescrub_envelope_prose_pii_with(&NoSpans, &mut env, PiiClassifyPolicy::AllEvents)
-            .await
-            .expect("backstop pass succeeds");
+        super::rescrub_envelope_prose_pii_with(
+            &AlwaysEmptySpans,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .expect("backstop pass succeeds");
 
         let content = env.events[0]
             .redacted_content
@@ -10378,17 +10319,6 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn missing_classifier_result_cannot_lower_high_risk() {
-        use crate::trace_contribution::*;
-        struct NeverFindsAnything;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for NeverFindsAnything {
-            async fn redact_text(
-                &self,
-                _text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                Ok(None)
-            }
-        }
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::High;
         env.consent.message_text_included = false;
@@ -10416,44 +10346,6 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn canary_healthy_but_no_findings_cannot_lower_high_risk() {
-        use crate::trace_contribution::*;
-        struct CanaryHealthyButFindsNoRealPii;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for CanaryHealthyButFindsNoRealPii {
-            async fn redact_text(
-                &self,
-                text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                let canary_values = synthetic_privacy_filter_canary_values();
-                if !canary_values.iter().any(|v| text.contains(v.as_str())) {
-                    return Ok(None);
-                }
-                let mut redacted = text.to_string();
-                let mut report = RedactionReport::default();
-                for v in &canary_values {
-                    if redacted.contains(v.as_str()) {
-                        redacted = redacted.replace(v.as_str(), "[REDACTED:unknown]");
-                        report.increment("privacy_filter:unknown");
-                        report.add_pii_label("unknown");
-                    }
-                }
-                Ok(Some(SafePrivacyFilterRedaction {
-                    redacted_text: redacted,
-                    summary: SafePrivacyFilterSummary {
-                        schema_version: 1,
-                        output_mode: "redacted_text_only".into(),
-                        span_count: canary_values.len() as u32,
-                        by_label: std::collections::BTreeMap::new(),
-                        decoded_mismatch: false,
-                        classify_policy: None,
-                        events_examined: 0,
-                        events_skipped_by_policy: 0,
-                    },
-                    report,
-                }))
-            }
-        }
-
         // Ordinary content, well inside every budget, so coverage is
         // complete: the only thing between this and a downgrade is whether a
         // zero-finding pass counts as evidence.
@@ -10483,7 +10375,6 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn structured_payload_budget_overrun_cannot_lower_high_risk() {
-        use crate::trace_contribution::*;
         // A canary-aware stub: it DOES redact the synthetic canary probe
         // (so a canary round-trip reports healthy) but never finds
         // anything in real content. This isolates the budget/coverage gate
@@ -10491,42 +10382,6 @@ mod tests {
         // canary-aware stub, `NeverFindsAnything` would also fail the
         // canary check on its own and the test would not distinguish
         // "coverage incomplete" from "classifier result not useful".
-        struct CanaryHealthyButFindsNoRealPii;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for CanaryHealthyButFindsNoRealPii {
-            async fn redact_text(
-                &self,
-                text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                let canary_values = synthetic_privacy_filter_canary_values();
-                if !canary_values.iter().any(|v| text.contains(v.as_str())) {
-                    return Ok(None);
-                }
-                let mut redacted = text.to_string();
-                let mut report = RedactionReport::default();
-                for v in &canary_values {
-                    if redacted.contains(v.as_str()) {
-                        redacted = redacted.replace(v.as_str(), "[REDACTED:unknown]");
-                        report.increment("privacy_filter:unknown");
-                        report.add_pii_label("unknown");
-                    }
-                }
-                Ok(Some(SafePrivacyFilterRedaction {
-                    redacted_text: redacted,
-                    summary: SafePrivacyFilterSummary {
-                        schema_version: 1,
-                        output_mode: "redacted_text_only".into(),
-                        span_count: canary_values.len() as u32,
-                        by_label: std::collections::BTreeMap::new(),
-                        decoded_mismatch: false,
-                        classify_policy: None,
-                        events_examined: 0,
-                        events_skipped_by_policy: 0,
-                    },
-                    report,
-                }))
-            }
-        }
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::High;
         env.consent.message_text_included = false;
@@ -10569,36 +10424,10 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn uncovered_prose_field_blocks_downgrade() {
-        use crate::trace_contribution::*;
-        struct FindsRealEmail;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for FindsRealEmail {
-            async fn redact_text(
-                &self,
-                text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                if !text.contains("ada@example.com") {
-                    return Ok(None);
-                }
-                let mut report = RedactionReport::default();
-                report.increment("privacy_filter:private_email");
-                report.add_pii_label("private_email");
-                Ok(Some(SafePrivacyFilterRedaction {
-                    redacted_text: text.replace("ada@example.com", "[REDACTED:private_email]"),
-                    summary: SafePrivacyFilterSummary {
-                        schema_version: 1,
-                        output_mode: "redacted_text_only".into(),
-                        span_count: 1,
-                        by_label: std::collections::BTreeMap::new(),
-                        decoded_mismatch: false,
-                        classify_policy: None,
-                        events_examined: 0,
-                        events_skipped_by_policy: 0,
-                    },
-                    report,
-                }))
-            }
-        }
+        let filter = EmailFilter {
+            address: "ada@example.com",
+            include_summary_label: false,
+        };
 
         let build = || {
             let mut env = sample_envelope_with_event_content("mail ada@example.com");
@@ -10613,7 +10442,7 @@ mod tests {
         // the only difference between the two cases is the note.
         let mut clean = build();
         clean.replay.replay_notes.clear();
-        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut clean, PiiClassifyPolicy::AllEvents)
+        rescrub_envelope_prose_pii_with(&filter, &mut clean, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_ne!(
@@ -10625,7 +10454,7 @@ mod tests {
         let mut gapped = build();
         gapped.replay.replay_notes =
             vec!["they asked about their mother Mary in Baltimore".to_string()];
-        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut gapped, PiiClassifyPolicy::AllEvents)
+        rescrub_envelope_prose_pii_with(&filter, &mut gapped, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_eq!(
@@ -10642,48 +10471,17 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn structured_payload_leaves_and_keys_reach_classifier() {
-        use crate::trace_contribution::*;
-        struct DetectsEmail;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for DetectsEmail {
-            async fn redact_text(
-                &self,
-                text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                if text.contains("alice@example.com") {
-                    let mut report = RedactionReport::default();
-                    report.increment("privacy_filter:private_email");
-                    report.add_pii_label("private_email");
-                    Ok(Some(SafePrivacyFilterRedaction {
-                        redacted_text: text
-                            .replace("alice@example.com", "[REDACTED:private_email]"),
-                        summary: SafePrivacyFilterSummary {
-                            schema_version: 1,
-                            output_mode: "redacted_text_only".into(),
-                            span_count: 1,
-                            by_label: std::collections::BTreeMap::from([(
-                                "private_email".into(),
-                                1,
-                            )]),
-                            decoded_mismatch: false,
-                            classify_policy: None,
-                            events_examined: 0,
-                            events_skipped_by_policy: 0,
-                        },
-                        report,
-                    }))
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+        let filter = EmailFilter {
+            address: "alice@example.com",
+            include_summary_label: true,
+        };
         let mut env = sample_envelope_with_event_content("no prose PII here");
         env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
         env.events[0].structured_payload = serde_json::json!({
             "reviewer_alice@example.com": "argument value with alice@example.com inside",
         });
 
-        rescrub_envelope_prose_pii_with(&DetectsEmail, &mut env, PiiClassifyPolicy::AllEvents)
+        rescrub_envelope_prose_pii_with(&filter, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
 
@@ -10748,89 +10546,34 @@ mod tests {
     }
 
     fn bare_envelope() -> super::TraceContributionEnvelope {
-        use super::*;
-        let now = Utc::now();
-        TraceContributionEnvelope {
-            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
-            trace_id: Uuid::new_v4(),
-            submission_id: Uuid::new_v4(),
-            created_at: now,
-            ironclaw: IronclawTraceMetadata {
-                version: "1".to_string(),
-                engine_version: None,
-                feature_flags: BTreeMap::new(),
-                channel: TraceChannel::Cli,
-                model_name: None,
-            },
-            consent: ConsentMetadata {
-                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-                scopes: vec![ConsentScope::DebuggingEvaluation],
-                message_text_included: false,
-                tool_payloads_included: false,
-                correction_included: false,
-                routing_metadata_included: false,
-                revocable: true,
-            },
-            contributor: ContributorMetadata {
-                pseudonymous_contributor_id: Some("sha256:contributor".to_string()),
-                tenant_scope_ref: None,
-                credit_account_ref: None,
-                revocation_handle: Uuid::new_v4(),
-            },
-            privacy: PrivacyMetadata {
-                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
-                redaction_counts: BTreeMap::new(),
-                redaction_distinct_counts: BTreeMap::new(),
-                privacy_filter_summary: None,
-                pii_labels_present: Vec::new(),
-                residual_pii_risk: ResidualPiiRisk::Low,
-                redaction_hash: "sha256:placeholder".to_string(),
-                warnings: Vec::new(),
-            },
-            events: Vec::new(),
-            outcome: OutcomeMetadata::default(),
-            replay: ReplayMetadata {
-                replayable: false,
-                required_tools: Vec::new(),
-                tool_manifest_hashes: BTreeMap::new(),
-                expected_assertions: Vec::new(),
-                replay_notes: Vec::new(),
-            },
-            embedding_analysis: None,
-            value: ValueMetadata::default(),
-            conversation_id: None,
-            trace_card: TraceCard::default(),
-            value_card: TraceValueCard::default(),
-            hindsight: None,
-            training_dynamics: None,
-            process_evaluation: None,
-        }
+        let mut envelope = sample_envelope_with_event_content("");
+        envelope.consent = clean_consent();
+        envelope.contributor.pseudonymous_contributor_id = Some("sha256:contributor".to_string());
+        envelope.events.clear();
+        envelope
+    }
+
+    fn empty_event() -> super::TraceContributionEvent {
+        replay_event(
+            super::TraceContributionEventType::UserMessage,
+            None,
+            None,
+            None,
+            super::Value::Null,
+        )
     }
 
     fn message_event(content: &str) -> super::TraceContributionEvent {
-        use super::*;
         TraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
             event_type: TraceContributionEventType::UserMessage,
             timestamp: Utc::now(),
             redacted_content: Some(content.to_string()),
-            structured_payload: Value::Null,
-            tool_name: None,
-            tool_category: None,
-            tool_call_id: None,
-            latency_ms: None,
-            token_counts: None,
-            cost_usd: None,
-            success: None,
-            failure_modes: Vec::new(),
-            side_effect: SideEffectLevel::None,
+            ..empty_event()
         }
     }
 
     #[test]
     fn reconcile_consent_raises_message_text_for_prose_events() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope
             .events
@@ -10853,24 +10596,12 @@ mod tests {
 
     #[test]
     fn reconcile_consent_raises_tool_payloads_for_structured_payload_alone() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.events.push(TraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
             event_type: TraceContributionEventType::AssistantMessage,
             timestamp: Utc::now(),
-            redacted_content: None,
             structured_payload: serde_json::json!({"command": "ls"}),
-            tool_name: None,
-            tool_category: None,
-            tool_call_id: None,
-            latency_ms: None,
-            token_counts: None,
-            cost_usd: None,
-            success: None,
-            failure_modes: Vec::new(),
-            side_effect: SideEffectLevel::None,
+            ..empty_event()
         });
 
         let presence = reconcile_consent_declarations(&mut envelope);
@@ -10882,24 +10613,14 @@ mod tests {
 
     #[test]
     fn reconcile_consent_raises_tool_payloads_for_a_structured_payload() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.events.push(TraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
             event_type: TraceContributionEventType::ToolCall,
             timestamp: Utc::now(),
-            redacted_content: None,
             structured_payload: serde_json::json!({"command": "ls -la"}),
             tool_name: Some("Bash".to_string()),
             tool_category: Some("shell".to_string()),
-            tool_call_id: None,
-            latency_ms: None,
-            token_counts: None,
-            cost_usd: None,
-            success: None,
-            failure_modes: Vec::new(),
-            side_effect: SideEffectLevel::None,
+            ..empty_event()
         });
 
         let presence = reconcile_consent_declarations(&mut envelope);
@@ -10923,24 +10644,13 @@ mod tests {
     /// honestly gets corrected upward anyway and is penalised for it.
     #[test]
     fn reconcile_consent_leaves_a_bare_tool_name_alone() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.events.push(TraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
             event_type: TraceContributionEventType::ToolCall,
             timestamp: Utc::now(),
-            redacted_content: None,
-            structured_payload: Value::Null,
             tool_name: Some("Bash".to_string()),
             tool_category: Some("shell".to_string()),
-            tool_call_id: None,
-            latency_ms: None,
-            token_counts: None,
-            cost_usd: None,
-            success: None,
-            failure_modes: Vec::new(),
-            side_effect: SideEffectLevel::None,
+            ..empty_event()
         });
 
         let presence = reconcile_consent_declarations(&mut envelope);
@@ -10959,7 +10669,6 @@ mod tests {
     // ABOUT a session, not session message text.
     #[test]
     fn reconcile_consent_raises_correction_for_human_correction() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.outcome.human_correction = Some("use the other API key".to_string());
 
@@ -10982,7 +10691,6 @@ mod tests {
     // the other two flags already follow.
     #[test]
     fn empty_correction_does_not_force_the_correction_flag() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.outcome.human_correction = Some(String::new());
 
@@ -10996,7 +10704,6 @@ mod tests {
     // correction declaration on an envelope carrying none is left alone.
     #[test]
     fn reconcile_consent_never_lowers_an_over_reported_correction_flag() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.consent.correction_included = true;
 
@@ -11013,7 +10720,6 @@ mod tests {
     // No correction: behaviour is exactly 0.5.0's.
     #[test]
     fn absent_correction_leaves_the_correction_flag_alone() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.events.push(message_event("hello"));
         assert!(envelope.outcome.human_correction.is_none());
@@ -11030,16 +10736,9 @@ mod tests {
     // hold entirely, and a correction is stored as written (S5).
     #[test]
     fn correction_only_consent_floors_residual_risk_at_medium() {
-        use super::*;
-
         let consent = ConsentMetadata {
-            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![ConsentScope::DebuggingEvaluation],
-            message_text_included: false,
-            tool_payloads_included: false,
             correction_included: true,
-            routing_metadata_included: false,
-            revocable: true,
+            ..clean_consent()
         };
 
         assert_eq!(
@@ -11049,32 +10748,9 @@ mod tests {
         );
     }
 
-    // Non-vacuity for the case above: with no content flag at all the same
-    // clean report is still Low, so the Medium above comes from the flag.
-    #[test]
-    fn no_content_flag_at_all_stays_low() {
-        use super::*;
-
-        let consent = ConsentMetadata {
-            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![ConsentScope::DebuggingEvaluation],
-            message_text_included: false,
-            tool_payloads_included: false,
-            correction_included: false,
-            routing_metadata_included: false,
-            revocable: true,
-        };
-
-        assert_eq!(
-            residual_risk(&consent, &RedactionReport::default()),
-            ResidualPiiRisk::Low,
-        );
-    }
-
     /// One turn of session content, so a test can assert that the general
     /// redaction path is still doing its job beside a correction.
     fn raw_contribution_with_content(text: &str) -> super::RawTraceContribution {
-        use super::*;
         let started = Utc::now();
         RawTraceContribution::from_capture_turns(
             &[RawTraceCaptureTurn {
@@ -11118,8 +10794,6 @@ mod tests {
     /// identity does not leave the machine for a third-party classifier.
     #[tokio::test]
     async fn typed_metadata_and_contributor_identity_never_reach_the_classifier() {
-        use super::*;
-
         let mut raw = raw_contribution_with_content("ran the build");
         raw.conversation_id = Some("a note the contributor typed".to_string());
         raw.contributor.pseudonymous_contributor_id = Some("pseudonymous-contributor-0001".into());
@@ -11166,8 +10840,6 @@ mod tests {
     /// every submission path, not just admission.
     #[tokio::test]
     async fn metadata_beyond_the_scan_budget_degrades_instead_of_refusing() {
-        use super::*;
-
         let mut raw = raw_contribution_with_content("ran the build");
         raw.replay.expected_assertions = vec![Value::Null; STRUCTURED_PAYLOAD_MAX_NODES + 1];
         let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
@@ -11186,8 +10858,6 @@ mod tests {
     /// nodes, which is a routine agent session.
     #[tokio::test]
     async fn a_long_session_is_scanned_completely() {
-        use super::*;
-
         let started = Utc::now();
         let turns: Vec<_> = (0..400)
             .map(|i| RawTraceCaptureTurn {
@@ -11222,8 +10892,6 @@ mod tests {
     /// that succeeds never tells the contributor to rotate it.
     #[tokio::test]
     async fn a_credential_in_metadata_is_refused_not_masked() {
-        use super::*;
-
         let mut raw = raw_contribution_with_content("ran the build");
         raw.ironclaw.model_name = Some("sk-ant-EXPOSEDsecret0123456789abcdefghij".to_string());
         let error = DeterministicTraceRedactor::deterministic_only(Vec::new())
@@ -11249,8 +10917,6 @@ mod tests {
     /// This fails when the schema grows, so both choices get made on purpose.
     #[test]
     fn metadata_schema_fields_are_pinned() {
-        use super::*;
-
         // Every optional field populated, so `skip_serializing_if` hides
         // nothing. Dynamic maps carry one `DYNAMIC` key, filtered below --
         // those are contributor-chosen, not schema.
@@ -11405,8 +11071,6 @@ mod tests {
     // the path is a placeholder, so the semantic passes do not run over it.
     #[tokio::test]
     async fn correction_keeps_a_local_path_verbatim() {
-        use super::*;
-
         let correction = "the agent used /Users/zaki/proj/config.toml instead of the staging one";
         let mut raw = raw_contribution_with_content("ran the build");
         raw.outcome.human_correction = Some(correction.to_string());
@@ -11428,8 +11092,6 @@ mod tests {
     // loses its point once the name is a placeholder.
     #[tokio::test]
     async fn correction_keeps_an_email_verbatim() {
-        use super::*;
-
         let correction = "ask alice@example.com which staging bucket the job should write to";
         let mut raw = raw_contribution_with_content("ran the build");
         raw.outcome.human_correction = Some(correction.to_string());
@@ -11451,8 +11113,6 @@ mod tests {
     // in the same envelope.
     #[tokio::test]
     async fn session_content_beside_a_correction_is_still_redacted() {
-        use super::*;
-
         let correction = "the agent edited /Users/zaki/proj/config.toml; ask alice@example.com";
         let mut raw = raw_contribution_with_content(
             "edit /Users/zaki/proj/config.toml and mail alice@example.com",
@@ -11492,8 +11152,6 @@ mod tests {
     // difference to a correction.
     #[tokio::test]
     async fn correction_is_unaffected_by_an_attached_privacy_filter() {
-        use super::*;
-
         struct RewritesEverything;
         #[async_trait::async_trait]
         impl PrivacyFilterAdapter for RewritesEverything {
@@ -11507,14 +11165,9 @@ mod tests {
                 Ok(Some(SafePrivacyFilterRedaction {
                     redacted_text: text.replace("staging", "[REDACTED:person_name]"),
                     summary: SafePrivacyFilterSummary {
-                        schema_version: 1,
-                        output_mode: "redacted_text_only".into(),
                         span_count: 1,
                         by_label: std::collections::BTreeMap::from([("person_name".into(), 1)]),
-                        decoded_mismatch: false,
-                        classify_policy: None,
-                        events_examined: 0,
-                        events_skipped_by_policy: 0,
+                        ..empty_filter_summary()
                     },
                     report,
                 }))
@@ -11556,8 +11209,6 @@ mod tests {
     // masked, because a masked credential has still been typed and sent.
     #[tokio::test]
     async fn correction_carrying_a_credential_is_refused_not_masked() {
-        use super::*;
-
         let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
         let mut raw = raw_contribution_with_content("ran the build");
         raw.outcome.human_correction = Some(format!("it should have used {secret} instead"));
@@ -11579,8 +11230,6 @@ mod tests {
     // the text handed back is never the rewritten copy.
     #[test]
     fn correction_credential_detection_blocks_without_rewriting() {
-        use super::*;
-
         let redactor = DeterministicTraceRedactor::bare();
 
         let clean = redactor.detect_correction_credentials(
@@ -11604,43 +11253,16 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn prose_pii_backstop_leaves_a_correction_verbatim() {
-        use crate::trace_contribution::*;
-
-        struct RedactsJane;
-        #[async_trait::async_trait]
-        impl PrivacyFilterAdapter for RedactsJane {
-            async fn redact_text(
-                &self,
-                text: &str,
-            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-                if !text.contains("jane@example.com") {
-                    return Ok(None);
-                }
-                let mut report = RedactionReport::default();
-                report.increment("privacy_filter:private_email");
-                report.add_pii_label("private_email");
-                Ok(Some(SafePrivacyFilterRedaction {
-                    redacted_text: text.replace("jane@example.com", "[REDACTED:private_email]"),
-                    summary: SafePrivacyFilterSummary {
-                        schema_version: 1,
-                        output_mode: "redacted_text_only".into(),
-                        span_count: 1,
-                        by_label: std::collections::BTreeMap::from([("private_email".into(), 1)]),
-                        decoded_mismatch: false,
-                        classify_policy: None,
-                        events_examined: 0,
-                        events_skipped_by_policy: 0,
-                    },
-                    report,
-                }))
-            }
-        }
+        let filter = EmailFilter {
+            address: "jane@example.com",
+            include_summary_label: true,
+        };
 
         let correction = "jane@example.com owns the staging bucket, not the agent";
         let mut envelope = sample_envelope_with_event_content("email jane@example.com now");
         envelope.outcome.human_correction = Some(correction.to_string());
 
-        rescrub_envelope_prose_pii_with(&RedactsJane, &mut envelope, PiiClassifyPolicy::AllEvents)
+        rescrub_envelope_prose_pii_with(&filter, &mut envelope, PiiClassifyPolicy::AllEvents)
             .await
             .expect("the backstop pass succeeds");
 
@@ -11660,32 +11282,9 @@ mod tests {
     }
 
     #[cfg(feature = "near-ai-privacy-filter")]
-    use super::*;
-
-    /// Records every string handed to the classifier so a test can assert
-    /// what was and was not submitted.
-    #[cfg(feature = "near-ai-privacy-filter")]
-    struct RecordingAdapter {
-        seen: std::sync::Mutex<Vec<String>>,
-    }
-
-    #[cfg(feature = "near-ai-privacy-filter")]
-    #[async_trait::async_trait]
-    impl PrivacyFilterAdapter for RecordingAdapter {
-        async fn redact_text(
-            &self,
-            text: &str,
-        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-            self.seen.lock().unwrap().push(text.to_string());
-            Ok(None)
-        }
-    }
-
-    #[cfg(feature = "near-ai-privacy-filter")]
     fn envelope_with_events(
         events: Vec<(TraceContributionEventType, &str)>,
     ) -> super::TraceContributionEnvelope {
-        use super::*;
         let mut envelope = sample_envelope_with_event_content("seed");
         // The fixture ships exactly one UserMessage event; reuse it as a
         // template so every required field stays populated.
@@ -11707,9 +11306,7 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn prose_only_policy_does_not_submit_tool_result_text() {
-        let adapter = RecordingAdapter {
-            seen: Default::default(),
-        };
+        let adapter = RecordingFilter::default();
         let mut envelope = envelope_with_events(vec![
             (
                 TraceContributionEventType::UserMessage,
@@ -11725,7 +11322,7 @@ mod tests {
             .await
             .expect("rescrub succeeds");
 
-        let seen = adapter.seen.lock().unwrap().clone();
+        let seen = adapter.0.lock().unwrap().clone();
         assert!(
             seen.iter().any(|t| t.contains("my name is")),
             "prose event must be submitted"
@@ -11742,9 +11339,7 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn all_events_policy_still_submits_tool_result_text() {
-        let adapter = RecordingAdapter {
-            seen: Default::default(),
-        };
+        let adapter = RecordingFilter::default();
         let mut envelope = envelope_with_events(vec![(
             TraceContributionEventType::ToolResult,
             "file says Dana Ruiz, 12 Oak Street",
@@ -11756,7 +11351,7 @@ mod tests {
 
         assert!(
             adapter
-                .seen
+                .0
                 .lock()
                 .unwrap()
                 .iter()
@@ -11767,19 +11362,12 @@ mod tests {
 
     #[test]
     fn summary_without_policy_serializes_unchanged() {
-        use super::*;
         // The envelope digest is pinned in the contributor crate. A summary
         // that does not set the new fields must serialize byte-identically
         // to before.
         let summary = SafePrivacyFilterSummary {
-            schema_version: 1,
             output_mode: "spans".to_string(),
-            span_count: 0,
-            by_label: Default::default(),
-            decoded_mismatch: false,
-            classify_policy: None,
-            events_examined: 0,
-            events_skipped_by_policy: 0,
+            ..empty_filter_summary()
         };
         let json = serde_json::to_string(&summary).expect("serializes");
         assert!(
@@ -11794,30 +11382,19 @@ mod tests {
 
     #[test]
     fn merge_privacy_filter_summary_keeps_policy_and_counts_from_the_same_pass() {
-        use super::*;
-
         let mut target: Option<SafePrivacyFilterSummary> = None;
         let first_pass = SafePrivacyFilterSummary {
-            schema_version: 1,
-            output_mode: "redacted_text_only".to_string(),
-            span_count: 0,
-            by_label: Default::default(),
-            decoded_mismatch: false,
             classify_policy: Some("all-events".to_string()),
             events_examined: 3,
-            events_skipped_by_policy: 0,
+            ..empty_filter_summary()
         };
         merge_privacy_filter_summary(&mut target, &first_pass);
 
         let second_pass = SafePrivacyFilterSummary {
-            schema_version: 1,
-            output_mode: "redacted_text_only".to_string(),
-            span_count: 0,
-            by_label: Default::default(),
-            decoded_mismatch: false,
             classify_policy: Some("prose-only".to_string()),
             events_examined: 1,
             events_skipped_by_policy: 2,
+            ..empty_filter_summary()
         };
         merge_privacy_filter_summary(&mut target, &second_pass);
 
@@ -11834,14 +11411,7 @@ mod tests {
         // is None, counts zero, as adapter-level summaries construct them)
         // must not clobber the previously recorded policy pass.
         let no_policy_pass = SafePrivacyFilterSummary {
-            schema_version: 1,
-            output_mode: "redacted_text_only".to_string(),
-            span_count: 0,
-            by_label: Default::default(),
-            decoded_mismatch: false,
-            classify_policy: None,
-            events_examined: 0,
-            events_skipped_by_policy: 0,
+            ..empty_filter_summary()
         };
         merge_privacy_filter_summary(&mut target, &no_policy_pass);
         let merged = target.expect("summary recorded");
@@ -11853,9 +11423,7 @@ mod tests {
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn prose_only_records_policy_and_counts() {
-        let adapter = RecordingAdapter {
-            seen: Default::default(),
-        };
+        let adapter = RecordingFilter::default();
         let mut envelope = envelope_with_events(vec![
             (
                 TraceContributionEventType::UserMessage,
@@ -11887,8 +11455,6 @@ mod tests {
     // pass either, while the events beside it still are.
     #[test]
     fn rescrub_leaves_a_correction_verbatim() {
-        use super::*;
-
         let correction = "the agent edited /Users/zaki/proj/config.toml; ask alice@example.com";
         let mut envelope = bare_envelope();
         envelope.events.push(message_event(
@@ -11918,7 +11484,6 @@ mod tests {
 
     #[test]
     fn reconcile_consent_never_lowers_over_reported_flags() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.consent.message_text_included = true;
         envelope.consent.tool_payloads_included = true;
@@ -11934,25 +11499,14 @@ mod tests {
 
     #[test]
     fn empty_content_does_not_force_consent_flags() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.events.push(message_event(""));
         envelope.events.push(TraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
             event_type: TraceContributionEventType::ToolResult,
             timestamp: Utc::now(),
             redacted_content: Some(String::new()),
-            structured_payload: Value::Null,
             tool_name: Some(String::new()),
-            tool_category: None,
-            tool_call_id: None,
-            latency_ms: None,
-            token_counts: None,
-            cost_usd: None,
-            success: None,
-            failure_modes: Vec::new(),
-            side_effect: SideEffectLevel::None,
+            ..empty_event()
         });
 
         let presence = reconcile_consent_declarations(&mut envelope);
@@ -11965,7 +11519,6 @@ mod tests {
 
     #[test]
     fn rescrub_raises_risk_for_clean_prose_under_reported_as_low() {
-        use super::*;
         // The reproduction from issue #208: ordinary prose matches no
         // deterministic detector, consent says false/false, and without
         // concordance residual_risk would stay Low → Accepted.
@@ -12012,7 +11565,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_applies_cued_secret_shape_decisions() {
-        use super::*;
         // `bare()` rather than `new()`: this asserts redaction shape, for which
         // the env-selected privacy filter is irrelevant, and `new()` reads
         // process env and races the fail-closed tests (#431).
@@ -12070,7 +11622,6 @@ mod tests {
     /// proving it. The detector has now been hardened, so here is that case.
     #[test]
     fn a_cued_lowercase_hex_bearer_value_is_no_longer_an_evasion() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
 
         let value = "9f86d081884c7d659a2feaa0c55ad015";
@@ -12085,7 +11636,6 @@ mod tests {
 
     #[test]
     fn contextual_entropy_fp_budget_for_cued_shape_changes() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
 
         // Uncued content hashes / shas must still survive (row 4 narrows the
@@ -12166,8 +11716,6 @@ mod tests {
     /// it just stops setting the tier on its own.
     #[test]
     fn a_redacted_local_path_alone_does_not_raise_the_tier() {
-        use super::*;
-
         let report = RedactionReport {
             counts: BTreeMap::from([("local_path".to_string(), 7)]),
             pii_labels_present: vec!["local_path".to_string()],
@@ -12186,8 +11734,6 @@ mod tests {
     /// so a path cannot dilute a real finding sitting beside it.
     #[test]
     fn local_path_does_not_mask_a_real_finding_in_the_same_report() {
-        use super::*;
-
         for (label, count) in [
             ("secret", 1),
             ("secret:contextual_entropy", 1),
@@ -12229,8 +11775,6 @@ mod tests {
     /// another.
     #[test]
     fn local_path_is_still_redacted_and_still_counted() {
-        use super::*;
-
         let r = DeterministicTraceRedactor::deterministic_only(vec!["/Users/someone".to_string()]);
         let (out, report) = r.redact_text("opened /Users/someone/code/secret-project/main.rs");
 
@@ -12250,8 +11794,6 @@ mod tests {
     /// exemption must not let a declared-content trace fall to Low.
     #[test]
     fn local_path_exemption_does_not_bypass_consent_flags() {
-        use super::*;
-
         let report = RedactionReport {
             counts: BTreeMap::from([("local_path".to_string(), 4)]),
             pii_labels_present: vec!["local_path".to_string()],
@@ -12270,8 +11812,6 @@ mod tests {
     /// High is unaffected: the exemption sits below both High conditions.
     #[test]
     fn local_path_exemption_does_not_soften_high() {
-        use super::*;
-
         for report in [
             RedactionReport {
                 counts: BTreeMap::from([("local_path".to_string(), 2)]),
@@ -12294,8 +11834,6 @@ mod tests {
 
     #[test]
     fn successfully_redacted_secret_is_medium_not_high() {
-        use super::*;
-
         let report = RedactionReport {
             counts: BTreeMap::from([
                 ("secret".to_string(), 1),
@@ -12305,15 +11843,7 @@ mod tests {
             ..Default::default()
         };
 
-        let consent = ConsentMetadata {
-            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![ConsentScope::DebuggingEvaluation],
-            message_text_included: false,
-            tool_payloads_included: false,
-            correction_included: false,
-            routing_metadata_included: false,
-            revocable: true,
-        };
+        let consent = clean_consent();
 
         assert_eq!(
             residual_risk(&consent, &report),
@@ -12323,35 +11853,7 @@ mod tests {
     }
 
     #[test]
-    fn unredactable_key_finding_still_forces_high() {
-        use super::*;
-
-        let report = RedactionReport {
-            key_finding_detected: true,
-            ..Default::default()
-        };
-
-        let consent = ConsentMetadata {
-            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![ConsentScope::DebuggingEvaluation],
-            message_text_included: false,
-            tool_payloads_included: false,
-            correction_included: false,
-            routing_metadata_included: false,
-            revocable: true,
-        };
-
-        assert_eq!(
-            residual_risk(&consent, &report),
-            ResidualPiiRisk::High,
-            "unredactable key findings must stay High"
-        );
-    }
-
-    #[test]
     fn residual_secret_hit_still_forces_high() {
-        use super::*;
-
         let findings = RedactionReport {
             counts: BTreeMap::from([("secret".to_string(), 1)]),
             blocked_secret_detected: true,
@@ -12387,21 +11889,11 @@ mod tests {
     /// "clean", so an otherwise empty report must still be High.
     #[test]
     fn coverage_gap_alone_forces_high() {
-        use super::*;
-
         let report = RedactionReport {
             coverage_incomplete: true,
             ..Default::default()
         };
-        let consent = ConsentMetadata {
-            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![ConsentScope::DebuggingEvaluation],
-            message_text_included: false,
-            tool_payloads_included: false,
-            correction_included: false,
-            routing_metadata_included: false,
-            revocable: true,
-        };
+        let consent = clean_consent();
 
         // Same consent + empty findings, minus the coverage gap, is Low.
         // That contrast is the point: the gap is doing the work.
@@ -12421,17 +11913,7 @@ mod tests {
     /// counts, not a fully-covered pass.
     #[test]
     fn key_finding_forces_high_regardless_of_everything_else() {
-        use super::*;
-
-        let consent = ConsentMetadata {
-            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![ConsentScope::DebuggingEvaluation],
-            message_text_included: false,
-            tool_payloads_included: false,
-            correction_included: false,
-            routing_metadata_included: false,
-            revocable: true,
-        };
+        let consent = clean_consent();
         let report = RedactionReport {
             key_finding_detected: true,
             ..Default::default()
@@ -12463,8 +11945,6 @@ mod tests {
     /// floor rather than terminal High.
     #[tokio::test]
     async fn originating_scrub_of_a_secret_lands_medium_not_high() {
-        use super::*;
-
         let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
         let started = Utc::now();
         let turn = RawTraceCaptureTurn {
@@ -12517,8 +11997,6 @@ mod tests {
     /// redaction is a value that reached storage.
     #[test]
     fn tool_manifest_hash_values_are_redacted_not_just_their_keys() {
-        use super::*;
-
         let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
         let mut env = sample_envelope_with_event_content("please list the files");
         env.replay.tool_manifest_hashes.insert(
@@ -12546,8 +12024,6 @@ mod tests {
     /// that cue.
     #[test]
     fn tool_manifest_hash_values_that_really_are_digests_pass_through_unchanged() {
-        use super::*;
-
         let digests = [
             (
                 "plain_sha256",
@@ -12607,8 +12083,6 @@ mod tests {
     /// prose in them and have it stored.
     #[test]
     fn the_server_rescrub_rewrites_conversation_id_and_the_value_explanation() {
-        use super::*;
-
         let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
         let mut env = sample_envelope_with_event_content("please list the files");
         env.conversation_id = Some(format!("export OPENAI_API_KEY={secret}"));
@@ -12630,8 +12104,6 @@ mod tests {
 
     #[test]
     fn a_secret_that_survives_the_rescrub_forces_high() {
-        use super::*;
-
         let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
@@ -12663,8 +12135,6 @@ mod tests {
     /// number is a floor the server may raise and never silently lower.
     #[test]
     fn a_high_from_an_older_client_is_not_downgraded_by_a_clean_rescrub() {
-        use super::*;
-
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::High;
 
@@ -12684,8 +12154,6 @@ mod tests {
     /// operator flag acts on is the one the server stores.
     #[test]
     fn a_medium_from_a_current_client_survives_the_server_rescrub() {
-        use super::*;
-
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
 
@@ -12701,8 +12169,6 @@ mod tests {
 
     #[test]
     fn scrub_pass_secret_alone_does_not_block_downgrade_to_medium() {
-        use super::*;
-
         let findings = RedactionReport {
             counts: BTreeMap::from([("secret".to_string(), 1)]),
             blocked_secret_detected: true,
@@ -12728,88 +12194,15 @@ mod tests {
     }
 
     fn scoring_envelope(risk: super::ResidualPiiRisk) -> super::TraceContributionEnvelope {
-        use super::*;
-
-        let now = Utc::now();
-        TraceContributionEnvelope {
-            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
-            trace_id: Uuid::new_v4(),
-            submission_id: Uuid::new_v4(),
-            created_at: now,
-            ironclaw: IronclawTraceMetadata {
-                version: "1".to_string(),
-                engine_version: None,
-                feature_flags: BTreeMap::new(),
-                channel: TraceChannel::Cli,
-                model_name: None,
-            },
-            consent: ConsentMetadata {
-                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-                scopes: vec![ConsentScope::DebuggingEvaluation],
-                message_text_included: true,
-                tool_payloads_included: false,
-                correction_included: false,
-                routing_metadata_included: false,
-                revocable: true,
-            },
-            contributor: ContributorMetadata {
-                pseudonymous_contributor_id: None,
-                tenant_scope_ref: None,
-                credit_account_ref: None,
-                revocation_handle: Uuid::new_v4(),
-            },
-            privacy: PrivacyMetadata {
-                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
-                redaction_counts: BTreeMap::new(),
-                redaction_distinct_counts: BTreeMap::new(),
-                privacy_filter_summary: None,
-                pii_labels_present: Vec::new(),
-                residual_pii_risk: risk,
-                redaction_hash: "sha256:placeholder".to_string(),
-                warnings: Vec::new(),
-            },
-            events: vec![TraceContributionEvent {
-                event_id: Uuid::new_v4(),
-                parent_event_id: None,
-                event_type: TraceContributionEventType::UserMessage,
-                timestamp: now,
-                redacted_content: Some("ordinary work".to_string()),
-                structured_payload: Value::Null,
-                tool_name: None,
-                tool_category: None,
-                tool_call_id: None,
-                latency_ms: None,
-                token_counts: None,
-                cost_usd: None,
-                success: None,
-                failure_modes: Vec::new(),
-                side_effect: SideEffectLevel::None,
-            }],
-            outcome: OutcomeMetadata::default(),
-            // replayable: false is the realistic case for a recorded session,
-            // and it is what makes the medium band unreachable under the old
-            // formula: 0.20 of the weight is gone before anything is measured.
-            replay: ReplayMetadata {
-                replayable: false,
-                required_tools: Vec::new(),
-                tool_manifest_hashes: BTreeMap::new(),
-                expected_assertions: Vec::new(),
-                replay_notes: Vec::new(),
-            },
-            embedding_analysis: None,
-            value: ValueMetadata::default(),
-            conversation_id: None,
-            trace_card: TraceCard::default(),
-            value_card: TraceValueCard::default(),
-            hindsight: None,
-            training_dynamics: None,
-            process_evaluation: None,
-        }
+        // A recorded session is not replayable: its missing 0.20 weight made
+        // the medium band unreachable under the old double-penalty formula.
+        let mut envelope = sample_envelope_with_event_content("ordinary work");
+        envelope.privacy.residual_pii_risk = risk;
+        envelope
     }
 
     #[test]
     fn privacy_gate_and_risk_score_are_the_same_signal() {
-        use super::*;
         // The reason the subtractive term was redundant: these are
         // complementary functions of one enum. If they ever stop being
         // complementary, the argument for applying only the gate needs
@@ -12828,7 +12221,6 @@ mod tests {
 
     #[test]
     fn medium_risk_work_can_earn_credit() {
-        use super::*;
         // Every medium-risk submission in the pilot corpus scored exactly
         // zero - ten of ten - because risk was penalised twice: a 0.5 gate
         // and a flat -0.30. Accepting medium-risk work while guaranteeing it
@@ -12843,7 +12235,6 @@ mod tests {
 
     #[test]
     fn dropping_the_double_penalty_leaves_low_risk_untouched() {
-        use super::*;
         // The change is confined to the medium band, and this is why rather
         // than a pinned number: the term that was removed evaluated to
         // `0.60 * privacy_risk_score(Low)`, and that factor is zero. So the
@@ -12864,7 +12255,6 @@ mod tests {
 
     #[test]
     fn risk_bands_stay_ordered_and_high_earns_nothing() {
-        use super::*;
         let low = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
         let medium = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Medium));
         let high = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::High));
@@ -12897,81 +12287,9 @@ mod tests {
 
     #[test]
     fn rescrub_of_successfully_redacted_secret_lands_medium() {
-        use super::*;
-
-        let now = Utc::now();
         let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
-        let mut env = TraceContributionEnvelope {
-            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
-            trace_id: Uuid::new_v4(),
-            submission_id: Uuid::new_v4(),
-            created_at: now,
-            ironclaw: IronclawTraceMetadata {
-                version: "1".to_string(),
-                engine_version: None,
-                feature_flags: BTreeMap::new(),
-                channel: TraceChannel::Cli,
-                model_name: None,
-            },
-            consent: ConsentMetadata {
-                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-                scopes: vec![ConsentScope::DebuggingEvaluation],
-                message_text_included: true,
-                tool_payloads_included: false,
-                correction_included: false,
-                routing_metadata_included: false,
-                revocable: true,
-            },
-            contributor: ContributorMetadata {
-                pseudonymous_contributor_id: None,
-                tenant_scope_ref: None,
-                credit_account_ref: None,
-                revocation_handle: Uuid::new_v4(),
-            },
-            privacy: PrivacyMetadata {
-                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
-                redaction_counts: BTreeMap::new(),
-                redaction_distinct_counts: BTreeMap::new(),
-                privacy_filter_summary: None,
-                pii_labels_present: Vec::new(),
-                residual_pii_risk: ResidualPiiRisk::Low,
-                redaction_hash: "sha256:placeholder".to_string(),
-                warnings: Vec::new(),
-            },
-            events: vec![TraceContributionEvent {
-                event_id: Uuid::new_v4(),
-                parent_event_id: None,
-                event_type: TraceContributionEventType::UserMessage,
-                timestamp: now,
-                redacted_content: Some(format!("export OPENAI_API_KEY={secret}")),
-                structured_payload: Value::Null,
-                tool_name: None,
-                tool_category: None,
-                tool_call_id: None,
-                latency_ms: None,
-                token_counts: None,
-                cost_usd: None,
-                success: None,
-                failure_modes: Vec::new(),
-                side_effect: SideEffectLevel::None,
-            }],
-            outcome: OutcomeMetadata::default(),
-            replay: ReplayMetadata {
-                replayable: false,
-                required_tools: Vec::new(),
-                tool_manifest_hashes: BTreeMap::new(),
-                expected_assertions: Vec::new(),
-                replay_notes: Vec::new(),
-            },
-            embedding_analysis: None,
-            value: ValueMetadata::default(),
-            conversation_id: None,
-            trace_card: TraceCard::default(),
-            value_card: TraceValueCard::default(),
-            hindsight: None,
-            training_dynamics: None,
-            process_evaluation: None,
-        };
+        let mut env =
+            sample_envelope_with_event_content(&format!("export OPENAI_API_KEY={secret}"));
 
         let redactor = DeterministicTraceRedactor::bare();
         rescrub_trace_envelope_with(&redactor, &mut env);
@@ -13072,7 +12390,6 @@ mod tests {
         content: Option<&str>,
         payload: super::Value,
     ) -> super::TraceContributionEvent {
-        use super::*;
         TraceContributionEvent {
             event_id: Uuid::new_v4(),
             parent_event_id: None,
@@ -13095,7 +12412,6 @@ mod tests {
     /// The shape the web-history capture path actually emits: tool names and
     /// nothing else, with `replayable` asserted true.
     fn web_history_shaped_envelope() -> super::TraceContributionEnvelope {
-        use super::*;
         let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
         envelope.replay.replayable = true;
         envelope.replay.required_tools = vec!["gmail__list_messages".to_string()];
@@ -13128,7 +12444,6 @@ mod tests {
     /// The shape a benchmark item needs: a prompt, arguments on the call, and
     /// a result carrying what the agent observed.
     fn seedable_envelope() -> super::TraceContributionEnvelope {
-        use super::*;
         let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
         envelope.replay.replayable = true;
         envelope.replay.required_tools = vec!["gmail__list_messages".to_string()];
@@ -13167,7 +12482,6 @@ mod tests {
 
     #[test]
     fn replayability_is_zero_when_nothing_replayable_survived_redaction() {
-        use super::*;
         // The exact corpus finding: `replayable: true`, tool names recorded,
         // no prompt, no arguments, no results. Nothing here can be replayed,
         // so nothing here may score as replayable.
@@ -13180,7 +12494,6 @@ mod tests {
 
     #[test]
     fn replayability_is_one_for_a_seedable_trace() {
-        use super::*;
         let scored = compute_value_scorecard(&seedable_envelope());
         assert_eq!(
             scored.replayability, 1.0,
@@ -13190,7 +12503,6 @@ mod tests {
 
     #[test]
     fn replayability_beats_the_metadata_only_shape() {
-        use super::*;
         // The property that matters more than either endpoint: the metric has
         // to separate these two at all. The old one scored them equal.
         let seedable = compute_value_scorecard(&seedable_envelope());
@@ -13205,7 +12517,6 @@ mod tests {
 
     #[test]
     fn replayability_degrades_when_only_some_calls_carry_arguments() {
-        use super::*;
         // Partial coverage is partial credit, not all-or-nothing: a trace half
         // of whose calls are seedable is worth more than one with none and
         // less than one that is fully seedable.
@@ -13227,7 +12538,6 @@ mod tests {
 
     #[test]
     fn a_result_on_a_call_does_not_pass_for_its_arguments() {
-        use super::*;
         // The measure read `redacted_content` as evidence of arguments, and
         // the web-history path put the tool's RESULT in a call's content. So
         // the arguments third could be earned by a trace that never recorded
@@ -13260,7 +12570,6 @@ mod tests {
 
     #[test]
     fn an_emitter_declaring_a_trace_unreplayable_is_still_believed() {
-        use super::*;
         // Sufficiency can only ever lower the score. An emitter that knows the
         // trace cannot be replayed keeps the last word.
         let mut envelope = seedable_envelope();
@@ -13274,7 +12583,6 @@ mod tests {
 
     #[test]
     fn a_trace_with_no_tool_calls_needs_only_a_prompt() {
-        use super::*;
         // The tool-free traces in the corpus: there are no calls to carry
         // arguments, so the prompt is the whole of what replay needs. Absent
         // guarding, dividing by zero calls would score them 0 or NaN.
@@ -13301,7 +12609,6 @@ mod tests {
 
     #[test]
     fn quality_does_not_reward_redacted_length() {
-        use super::*;
         // `quality` was `event_count / 8.0`, so the more content redaction
         // stripped, the higher a trace scored. Forty empty events must not
         // out-score four that carry what they claim to.
@@ -13322,7 +12629,6 @@ mod tests {
 
     #[test]
     fn padding_a_trace_with_empty_events_cannot_raise_its_score() {
-        use super::*;
         // The sharper form of the same property: appending contentless events
         // is the cheapest thing an emitter can do, so it must never pay. This
         // is what carried the pilot corpus to a 0.813 mean.
@@ -13343,7 +12649,6 @@ mod tests {
 
     #[test]
     fn the_scorecard_explains_which_replay_inputs_are_missing() {
-        use super::*;
         // The consumer's complaint was not only the number but that "Replay
         // metadata is present." told them nothing. Make the explanation name
         // what is absent.
@@ -13447,7 +12752,6 @@ mod tests {
     // `Reasoning` event the schema defines.
 
     fn capture_turn_with_tool_call() -> super::RawTraceCaptureTurn {
-        use super::*;
         let started = Utc::now();
         RawTraceCaptureTurn {
             user_input: "summarise my unread mail".to_string(),
@@ -13468,7 +12772,6 @@ mod tests {
 
     #[test]
     fn capture_tool_calls_carry_their_arguments_when_payloads_are_consented() {
-        use super::*;
         // The single field that decides whether a trace can become a
         // benchmark item. Before this it did not exist on the capture type,
         // so no consent setting could produce it.
@@ -13492,7 +12795,6 @@ mod tests {
 
     #[test]
     fn capture_tool_calls_withhold_arguments_without_consent() {
-        use super::*;
         // The flag still governs the content. Absent consent the envelope
         // reports only that arguments existed, which is shape, not payload.
         let raw = RawTraceContribution::from_capture_turns(
@@ -13518,7 +12820,6 @@ mod tests {
 
     #[test]
     fn capture_turns_record_their_duration() {
-        use super::*;
         // `started_at` and `completed_at` were both captured and neither was
         // ever turned into a latency. The corpus consequently had no duration
         // anywhere in it.
@@ -13540,7 +12841,6 @@ mod tests {
 
     #[test]
     fn capture_turns_without_a_completion_time_have_no_duration() {
-        use super::*;
         // Do not invent one. A turn that never recorded completion has no
         // measurable duration, and a fabricated zero would be worse than an
         // absent field.
@@ -13563,7 +12863,6 @@ mod tests {
 
     #[test]
     fn capture_rationale_becomes_a_reasoning_event() {
-        use super::*;
         // `Reasoning` is defined in the schema and was never emitted. The
         // rationale existed all along, buried on the tool call, where a
         // consumer could not see that a reasoning step had occurred or where
@@ -13603,7 +12902,6 @@ mod tests {
 
     #[test]
     fn capture_reasoning_withholds_text_without_message_consent() {
-        use super::*;
         // Reasoning is prose, so it is governed by message-text consent
         // rather than tool payloads. The event still appears: knowing a
         // reasoning step happened is shape, and shape is not content.
@@ -13631,29 +12929,17 @@ mod tests {
     // envelope to Medium and quarantined it for content it does not have.
 
     fn marker_event(payload: super::Value) -> super::TraceContributionEvent {
-        use super::*;
         TraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
             event_type: TraceContributionEventType::ToolCall,
             timestamp: Utc::now(),
-            redacted_content: None,
             structured_payload: payload,
             tool_name: Some("gmail__list_messages".to_string()),
-            tool_category: None,
-            tool_call_id: None,
-            latency_ms: None,
-            token_counts: None,
-            cost_usd: None,
-            success: None,
-            failure_modes: Vec::new(),
-            side_effect: SideEffectLevel::None,
+            ..empty_event()
         }
     }
 
     #[test]
     fn a_boolean_marker_payload_declares_nothing() {
-        use super::*;
         // The exact shape `from_capture_turns` emits when
         // `include_tool_payloads` is false.
         let mut envelope = bare_envelope();
@@ -13685,7 +12971,6 @@ mod tests {
 
     #[test]
     fn capture_tool_calls_emit_the_result_they_returned() {
-        use super::*;
         // `ToolResult` is defined in the schema and this path never emitted
         // one: the observation the agent acted on was folded into the call,
         // so a consumer had a call with no answer to grade against.
@@ -13728,7 +13013,6 @@ mod tests {
 
     #[test]
     fn a_payload_carrying_arguments_still_declares_them() {
-        use super::*;
         // The fix must not under-declare: that is the fail-open direction,
         // where a trace carrying payloads takes the Low-risk acceptance path
         // and skips the backstop.
@@ -13745,7 +13029,6 @@ mod tests {
 
     #[test]
     fn a_content_bearing_key_is_content() {
-        use super::*;
         // Values were the only thing inspected, so an emitter that put the
         // content in the KEY declared nothing: all-boolean values, no
         // payload, no PII-backstop hold, Low-risk acceptance. The rescrub
@@ -13766,7 +13049,6 @@ mod tests {
 
     #[test]
     fn a_key_borne_payload_is_declared() {
-        use super::*;
         let mut envelope = bare_envelope();
         envelope.events.push(marker_event(
             serde_json::json!({"someone@example.com": true}),
@@ -13780,7 +13062,6 @@ mod tests {
 
     #[test]
     fn every_literal_key_the_emitters_write_stays_a_marker() {
-        use super::*;
         // The allow-list is exactly what `from_capture_turns` and the
         // contributor crate's `raw_event_for` write as source literals.
         // Anything else is content by default.
@@ -13807,7 +13088,6 @@ mod tests {
 
     #[test]
     fn a_nested_marker_is_still_a_marker() {
-        use super::*;
         // Containers are walked: an object whose every leaf is a boolean
         // carries nothing, however deeply it is wrapped.
         assert!(!payload_carries_readable_content(&serde_json::json!({
@@ -13818,7 +13098,6 @@ mod tests {
 
     #[test]
     fn anything_that_could_be_content_counts() {
-        use super::*;
         // Fail-closed on every value that might carry something: a number
         // could be an amount or an id, a string could be anything. Only
         // provably-empty values are ignored.
@@ -13851,7 +13130,6 @@ mod tests {
 
     #[test]
     fn a_failed_tool_call_names_itself() {
-        use super::*;
         // The corpus finding: 86 traces were labelled `failure` and the only
         // trace of it was `state: "Failed"` on a user message, which named no
         // tool. `success` is a boolean, not content, so it is set whatever
@@ -13882,7 +13160,6 @@ mod tests {
 
     #[test]
     fn a_tool_call_with_no_recorded_outcome_claims_none() {
-        use super::*;
         // `None` is not failure. A capture that recorded neither a result nor
         // an error does not know how the call went, and guessing would put a
         // fabricated outcome on a real trace.
@@ -13909,7 +13186,6 @@ mod tests {
 
     #[test]
     fn capture_turns_carry_the_model_they_ran_on() {
-        use super::*;
         // Hardcoded `None` before this, which is why `model_name` was present
         // on 3 of 330 pilot envelopes.
         let options = RecordedTraceContributionOptions {
@@ -13923,7 +13199,6 @@ mod tests {
 
     #[tokio::test]
     async fn redaction_preserves_event_metadata() {
-        use super::*;
         // The conversion from raw to envelope hardcoded all four of these,
         // so an emitter that populated them had them silently dropped on the
         // way through redaction.
@@ -14002,7 +13277,6 @@ mod tests {
 
     #[test]
     fn a_recorded_step_keeps_its_own_timestamp() {
-        use super::*;
         // A recorded trace whose steps carry times must not collapse to one
         // instant. Every event sharing `created_at` is the identical-timestamp
         // finding in issue #298.
@@ -14025,7 +13299,6 @@ mod tests {
     /// A source with no times behaves exactly as before. Nothing is invented.
     #[test]
     fn a_recorded_step_without_a_timestamp_falls_back() {
-        use super::*;
         let trace = recorded_trace_with_step_times(&[]);
         let raw = RawTraceContribution::from_recorded_trace(
             &trace,
@@ -14037,7 +13310,6 @@ mod tests {
 
     #[test]
     fn a_recorded_trace_pairs_its_results_with_its_calls() {
-        use super::*;
         // The recorded-trace path already had ids on both halves and used
         // them for nothing.
         let trace = crate::llm::recording::TraceFile {
@@ -14083,7 +13355,6 @@ mod tests {
 
     #[test]
     fn argument_key_names_survive_the_arguments_wrapper() {
-        use super::*;
         // The canonical text is what duplicate and novelty scores are
         // computed over. Arguments live under an `arguments` key, so a
         // top-level-only summary renders every call in the corpus as
@@ -14107,7 +13378,6 @@ mod tests {
 
     #[test]
     fn two_calls_with_different_arguments_do_not_canonicalise_alike() {
-        use super::*;
         let call = |payload| {
             let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
             envelope.events = vec![replay_event(
@@ -14128,7 +13398,6 @@ mod tests {
 
     #[test]
     fn payload_values_never_reach_the_canonical_text() {
-        use super::*;
         // Key names only, at both levels. This text is stored and embedded.
         let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
         envelope.events = vec![replay_event(
@@ -14159,7 +13428,6 @@ mod tests {
     /// so a test written against that name would pass vacuously.
     #[test]
     fn a_shell_command_survives_payload_redaction() {
-        use super::*;
         let payload = serde_json::json!({"command": "cargo test -p foo --lib"});
         let mut report = RedactionReport::default();
         let out = redact_tool_specific_payload(
@@ -14177,7 +13445,6 @@ mod tests {
     /// against; a diff is the change itself.
     #[test]
     fn command_output_and_diffs_survive_payload_redaction() {
-        use super::*;
         let payload = serde_json::json!({
             "stdout": "test result: FAILED. 411 passed; 1 failed",
             "stderr": "error[E0308]: mismatched types",
@@ -14214,7 +13481,6 @@ mod tests {
     /// `[REDACTED:local_path]`.
     #[test]
     fn a_field_named_profile_is_not_treated_as_a_path() {
-        use super::*;
         assert!(!field_matches("profile", FILESYSTEM_PATH_MATCHER));
         assert!(!field_matches("file_count", FILESYSTEM_PATH_MATCHER));
         assert!(field_matches("file_path", FILESYSTEM_PATH_MATCHER));
@@ -14227,7 +13493,6 @@ mod tests {
     /// changed the JSON type of the value it hit.
     #[test]
     fn a_payload_count_keeps_its_type_and_value() {
-        use super::*;
         let payload = serde_json::json!({"file_count": 3, "profile": "release"});
         let mut report = RedactionReport::default();
         let out = redact_tool_specific_payload(
@@ -14242,7 +13507,6 @@ mod tests {
     /// Unchanged: credentials and auth headers are still replaced wholesale.
     #[test]
     fn credentials_are_still_replaced() {
-        use super::*;
         let payload = serde_json::json!({
             "headers": {"authorization": "Bearer abc123"},
             "cookies": {"session": "s3cr3t"},
@@ -14262,7 +13526,6 @@ mod tests {
     /// the general passes still run over what the profile now leaves alone.
     #[test]
     fn a_secret_inside_a_preserved_field_is_still_redacted() {
-        use super::*;
         let redactor = DeterministicTraceRedactor::deterministic_only(vec![
             "/Users/example/code/project".to_string(),
         ]);
@@ -14323,7 +13586,6 @@ mod tests {
 
     #[test]
     fn an_unrecognised_tool_name_does_not_carry_raw_prose() {
-        use super::*;
         // `inference` matches no arm of `tool_payload_profile`.
         assert!(
             matches!(
@@ -14366,7 +13628,6 @@ mod tests {
     /// carry it.
     #[test]
     fn raw_prose_under_an_unrecognised_tool_never_reaches_the_envelope() {
-        use super::*;
         let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
         envelope.events = vec![replay_event(
             TraceContributionEventType::HttpExchange,
@@ -14394,7 +13655,6 @@ mod tests {
     /// down, so any long free-text leaf goes.
     #[test]
     fn a_long_free_text_leaf_goes_whatever_its_field_is_called() {
-        use super::*;
         let payload = serde_json::json!({"xyzzy": UNSHAPED_PROSE});
         let mut report = RedactionReport::default();
         let out = redact_tool_specific_payload(
@@ -14415,7 +13675,6 @@ mod tests {
     /// `UNRECOGNIZED_RULES` can.
     #[test]
     fn short_prose_under_a_content_field_still_goes() {
-        use super::*;
         const SHORT: &str = "Tell my landlord I am moving out of the flat on the third.";
         assert!(
             SHORT.chars().count() < UNRECOGNIZED_FREE_TEXT_LIMIT,
@@ -14440,7 +13699,6 @@ mod tests {
     /// bug, and falls closed the same way.
     #[test]
     fn a_payload_with_no_tool_name_falls_closed() {
-        use super::*;
         let payload = serde_json::json!({"prompt": UNSHAPED_PROSE});
         let mut report = RedactionReport::default();
         let out =
@@ -14456,7 +13714,6 @@ mod tests {
     /// an unrecognised tool as under a recognised one.
     #[test]
     fn an_unrecognised_tool_url_keeps_its_host_and_loses_its_path() {
-        use super::*;
         let payload =
             serde_json::json!({"url": "https://api.example.invalid/v1/users/42?token=abc"});
         let mut report = RedactionReport::default();
@@ -14480,7 +13737,6 @@ mod tests {
     /// types. A payload of nothing but markers is worthless to a consumer.
     #[test]
     fn the_restrictive_fallback_keeps_short_structured_values() {
-        use super::*;
         let payload = serde_json::json!({
             "status": "ok",
             "attempts": 3,
@@ -14506,7 +13762,6 @@ mod tests {
     /// the general passes still do.
     #[test]
     fn replay_assertions_are_not_a_tool_payload() {
-        use super::*;
         let assertion = serde_json::json!({"expects": UNSHAPED_PROSE});
         let mut report = RedactionReport::default();
         let out =
@@ -14522,7 +13777,6 @@ mod tests {
     /// it to fall through.
     #[test]
     fn a_shell_tool_named_bash_selects_the_permissive_profile() {
-        use super::*;
         assert!(matches!(
             tool_payload_profile("Bash"),
             ToolPayloadProfile::Filesystem
@@ -14564,8 +13818,6 @@ mod tests {
     /// first-wins implementation.
     #[test]
     fn the_basis_records_every_condition_that_held_not_just_the_first() {
-        use super::*;
-
         let report = RedactionReport {
             key_finding_detected: true,
             coverage_incomplete: true,
@@ -14596,8 +13848,6 @@ mod tests {
     /// future edit to one that does not touch the other fails the suite.
     #[test]
     fn the_basis_agrees_with_the_risk_it_describes() {
-        use super::*;
-
         let severity_label = "secret:pem_private_key";
         for key_finding in [false, true] {
             for coverage_incomplete in [false, true] {
@@ -14722,8 +13972,6 @@ mod tests {
     }
     #[test]
     fn a_survivor_from_the_residual_scan_is_its_own_condition() {
-        use super::*;
-
         let residual = RedactionReport {
             blocked_secret_detected: true,
             ..Default::default()
@@ -14756,8 +14004,6 @@ mod tests {
     /// folded into `CoverageIncomplete`.
     #[test]
     fn a_residual_scan_that_could_not_run_is_recorded_separately() {
-        use super::*;
-
         let basis =
             residual_risk_basis_for_failed_scan(&clean_consent(), &RedactionReport::default());
         assert_eq!(basis, vec![ResidualRiskCondition::ResidualScanUnavailable]);
@@ -14772,8 +14018,6 @@ mod tests {
     /// column holds an allowlist of `&'static str`, never caller text.
     #[test]
     fn every_condition_round_trips_through_its_label() {
-        use super::*;
-
         let mut seen = std::collections::BTreeSet::new();
         for condition in ResidualRiskCondition::ALL {
             let label = condition.as_label();
@@ -14789,7 +14033,6 @@ mod tests {
 
     #[test]
     fn pii_classify_policy_parses_known_labels() {
-        use super::*;
         assert_eq!(
             PiiClassifyPolicy::from_label("prose-only"),
             Some(PiiClassifyPolicy::ProseOnly)
@@ -14804,7 +14047,6 @@ mod tests {
 
     #[test]
     fn pii_classify_policy_label_round_trips() {
-        use super::*;
         for policy in [PiiClassifyPolicy::AllEvents, PiiClassifyPolicy::ProseOnly] {
             assert_eq!(
                 PiiClassifyPolicy::from_label(policy.as_label()),
@@ -14815,13 +14057,11 @@ mod tests {
 
     #[test]
     fn pii_classify_policy_defaults_to_all_events() {
-        use super::*;
         assert_eq!(PiiClassifyPolicy::default(), PiiClassifyPolicy::AllEvents);
     }
 
     #[test]
     fn all_events_policy_examines_every_event_type() {
-        use super::*;
         for event_type in [
             TraceContributionEventType::UserMessage,
             TraceContributionEventType::AssistantMessage,
@@ -14841,7 +14081,6 @@ mod tests {
 
     #[test]
     fn prose_only_policy_examines_authored_prose() {
-        use super::*;
         for event_type in [
             TraceContributionEventType::UserMessage,
             TraceContributionEventType::AssistantMessage,
@@ -14857,7 +14096,6 @@ mod tests {
 
     #[test]
     fn prose_only_policy_skips_tool_traffic() {
-        use super::*;
         for event_type in [
             TraceContributionEventType::ToolCall,
             TraceContributionEventType::ToolResult,
@@ -14885,7 +14123,6 @@ mod tests {
     /// secret had been handled while half of it was still on the wire.
     #[test]
     fn a_split_secret_no_longer_defeats_the_cue_gate() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
 
         // 1. Prefix and body in separate literals, no cue word anywhere.
@@ -14942,7 +14179,6 @@ mod tests {
     /// later shows up here as a failing expectation rather than as silence.
     #[test]
     fn split_literal_joiners_covered_and_the_shapes_still_missed() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
         let body = "1a9c4e77b0d3f5628ac1be40d9f7302e5cb86a14df20918e7c35bb6604ea77d9";
 
@@ -14998,7 +14234,6 @@ mod tests {
     /// redacted. Re-run this before widening the class.
     #[test]
     fn split_literal_fp_budget() {
-        use super::*;
         let r = DeterministicTraceRedactor::bare();
 
         let innocent = [
@@ -15063,8 +14298,6 @@ mod tests {
     /// secret behind, and both spell correctly in a passing end-to-end test.
     #[test]
     fn split_literal_mapping_keeps_the_joiner_and_the_quotes() {
-        use super::*;
-
         let source = "passphrase = \"QvR7dTnLbXk2\" + \"MwZ9pAsE4uYcH6jFgN3t\"";
         let view = LiteralJoinView::build(source).expect("seam present");
         assert_eq!(

@@ -5217,26 +5217,14 @@ mod tests {
                 serde_json::json!({"project_key": work_api, "mode": "notify_only"}),
             ),
         );
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: work_api.clone(),
-                        project_label: "api".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                project_key: work_api.clone(),
+                project_label: "api".to_string(),
+                ..queue_entry_fixture()
+            },
+        );
 
         // A colliding project shows up via a policy edit -- no tick runs.
         let r = handle_request(
@@ -5307,26 +5295,7 @@ mod tests {
         // audit; approving one entry at a time is the default, always-was
         // path and does not need a new log entry per click.
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
         let r = handle_request_async(
             &s,
             &req(
@@ -5342,31 +5311,17 @@ mod tests {
     #[tokio::test]
     async fn an_approval_carries_its_verdict_to_the_entry() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        // Already pinned, so `handle_approve` does not try to
-                        // build a real preview for a path that does not
-                        // exist -- this test is about the verdict, not the
-                        // envelope pipeline.
-                        previewed_envelope_digest: Some("sha256:preview".to_string()),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                // Already pinned, so `handle_approve` does not try to
+                // build a real preview for a path that does not
+                // exist -- this test is about the verdict, not the
+                // envelope pipeline.
+                previewed_envelope_digest: Some("sha256:preview".to_string()),
+                ..queue_entry_fixture()
+            },
+        );
 
         let r = handle_request_async(
             &s,
@@ -5436,26 +5391,7 @@ mod tests {
     #[tokio::test]
     async fn an_unrecognised_verdict_is_refused_and_approves_nothing() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
 
         let r = handle_request_async(
             &s,
@@ -6122,26 +6058,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_approval_is_rolled_back_when_its_audit_entry_cannot_be_written() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
         break_the_audit_log(&s.store);
 
         let r = handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
@@ -7746,6 +7663,26 @@ mod tests {
         );
     }
 
+    fn queue_entry_fixture() -> super::super::queue::QueueEntry {
+        super::super::queue::QueueEntry {
+            entry_id: Uuid::new_v4(),
+            session_hash: "sha256:seed".to_string(),
+            source: "claude-code".to_string(),
+            project_key: "/tmp/p".to_string(),
+            project_label: "p".to_string(),
+            path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+            size_bytes: 1,
+            discovered_at: Utc::now(),
+            ..Default::default()
+        }
+    }
+
+    fn seed_queue_entry(s: &DaemonShared, entry: super::super::queue::QueueEntry) -> Uuid {
+        let id = entry.entry_id;
+        s.queue.lock().unwrap().upsert(entry, 500).unwrap();
+        id
+    }
+
     fn seed_entry_in_state(s: &DaemonShared, state: QueueState) -> Uuid {
         let entry_id = uuid::Uuid::new_v4();
         let mut queue = s.queue.lock().unwrap();
@@ -8082,27 +8019,13 @@ mod tests {
     #[tokio::test]
     async fn quiesce_times_out_rather_than_forcing_its_way_past_an_upload() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        state: QueueState::Uploading,
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                state: QueueState::Uploading,
+                ..queue_entry_fixture()
+            },
+        );
         let r =
             handle_request_async(&s, &req("quiesce", serde_json::json!({"timeout_secs": 1}))).await;
         let err = r.error.expect("an in-flight upload must not be abandoned");
@@ -8116,27 +8039,13 @@ mod tests {
     #[tokio::test]
     async fn quiesce_completes_once_the_in_flight_upload_finishes() {
         let s = std::sync::Arc::new(shared());
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        state: QueueState::Uploading,
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                state: QueueState::Uploading,
+                ..queue_entry_fixture()
+            },
+        );
         let finisher = std::sync::Arc::clone(&s);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;

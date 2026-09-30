@@ -905,6 +905,29 @@ mod tests {
             Some("/first/answer"),
             "an unchanged file must be answered from the memo, not re-read"
         );
+
+        let changed_mtime = meta.modified().unwrap() + std::time::Duration::from_secs(1);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(changed_mtime).unwrap();
+        let changed_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let changed_stamp = Some(chrono::DateTime::<chrono::Utc>::from(changed_mtime));
+        assert_ne!(changed_stamp, mtime);
+        assert_eq!(
+            peek_cwd_memoized(&path, size, changed_stamp).as_deref(),
+            Some("/secnd/answer"),
+            "a changed mtime must invalidate a same-size cached answer"
+        );
+
+        std::fs::write(&path, format!("{first}\n\n")).unwrap();
+        file.set_modified(changed_mtime).unwrap();
+        let grown = std::fs::metadata(&path).unwrap();
+        assert_eq!(grown.len(), size + 1);
+        assert_eq!(grown.modified().unwrap(), changed_mtime);
+        assert_eq!(
+            peek_cwd_memoized(&path, grown.len(), changed_stamp).as_deref(),
+            Some("/first/answer"),
+            "a changed size must invalidate an answer even when the mtime holds"
+        );
     }
 
     #[test]
