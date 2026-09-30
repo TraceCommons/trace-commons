@@ -7450,6 +7450,16 @@ impl PipelineService {
                 } else {
                     None
                 };
+                // Zaki review 1, minor item M-e: `guard` was read once,
+                // before this loop, and only the Trace Credit leg reads it
+                // again under the submission's row lock (its ledger
+                // transaction, `settle_internal_credit`). Every other leg's
+                // adapter call below is not re-checked under that lock, so a
+                // withdrawal that lands after the one read does not stop it.
+                // Before a second non-Trace-Credit adapter is registered,
+                // this call must re-check the guard under the submission row
+                // lock first, as the Trace Credit leg does.
+                //
                 // Every adapter call is fenced by the lease this attempt
                 // still holds, the same check Step 5 runs before the index
                 // write.

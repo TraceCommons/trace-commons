@@ -256,6 +256,14 @@ not the trace's fault:
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
 
+Settle reads whether the submission is still operable once, before its legs.
+Only the Trace Credit leg checks it again, under the submission's row lock,
+in the transaction that writes its ledger row. Any other leg's adapter call
+is not re-checked under the lock, so a withdrawal that lands after that one
+read does not stop it. Before a second adapter besides Trace Credit is
+registered, its leg must re-check the guard under the lock, as the Trace
+Credit leg does.
+
 The adapter's answer decides what happens to a dispatched leg:
 
 - A receipt that answers the request completes the leg. The leg records the
