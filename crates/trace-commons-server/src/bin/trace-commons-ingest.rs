@@ -56884,6 +56884,15 @@ async fn gate_evaluate_worker_handler(
 ///   minted, but the prior emission is the audit trail
 /// - `(false, Some(label))` — credit withheld; the decision row records the
 ///   stable label-only reason
+///
+/// The versioned pipeline applies the same checks, in the same order and
+/// under the same labels, to a compatibility run's Trace Credit leg at
+/// Settle: `PipelineService::novelty_utility_withheld_reason` in
+/// `versioned_pipeline.rs` (Ruling T15-6). It cannot call this function (the
+/// library has no `AppState` or `TenantAuth`), so it holds its own copy. A
+/// change to the production-gate, central-issuer, tenant-policy or
+/// allowed-use rule here must be made there too, or the two paths credit
+/// differently.
 async fn attempt_emit_novelty_utility_credit(
     state: &AppState,
     tenant: &TenantAuth,

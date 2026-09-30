@@ -14951,6 +14951,88 @@ async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
     );
 }
 
+/// Ruling T15-8: a tenant policy's non-empty consent-scope allowlist must
+/// hold one of the submission's consent scopes, as `main`'s policy check
+/// requires (any one of them). A policy that allows model training as a use
+/// but lists only another consent scope is withheld `policy_mismatch`; the
+/// same policy listing the submission's scope credits the award. The policy
+/// is set after the receipt, so the receipt admits the submission either way
+/// and only Settle's check decides.
+#[tokio::test]
+async fn a_compatibility_award_needs_a_consent_scope_the_tenant_policy_allows() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (allowed_consent_scope, credited) in [
+        (ConsentScope::DebuggingEvaluation, false),
+        (ConsentScope::ModelTraining, true),
+    ] {
+        let authority = Arc::new(SwitchableAuthority(std::sync::Mutex::new(
+            SubmissionAuthority {
+                tenant: SubmissionAllowlists::default(),
+                policy: Some(SubmissionAllowlists::default()),
+                require_policy: true,
+            },
+        )));
+        let service = checked_compatibility_service(
+            &backend,
+            &dir,
+            authority.clone(),
+            PipelineNoveltyUtilityChecks::default(),
+        )
+        .await;
+        let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
+        let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+        assert_eq!(env.consent.scopes, vec![ConsentScope::ModelTraining]);
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) =
+            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+        else {
+            panic!("the receipt creates a run")
+        };
+        for phase in ["Review", "Score"] {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{phase} runs"));
+        }
+        *authority.0.lock().unwrap() = SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: Some(SubmissionAllowlists {
+                allowed_consent_scopes: BTreeSet::from([allowed_consent_scope]),
+                allowed_uses: BTreeSet::from([TraceAllowedUse::ModelTraining]),
+            }),
+            require_policy: true,
+        };
+        let settled = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs");
+        assert_eq!(settled.state, PipelineRunState::Complete);
+        let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+        let rows = count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await;
+        let status = PipelineProductStore::new(backend.clone())
+            .contributor_statuses(&tenant, RECEIPT_PRINCIPAL, &[env.submission_id])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let committed = committed_trace_credit_operation(&service, &tenant, created.run_id).await;
+        let award = (leg, rows, status, committed);
+        if credited {
+            assert_credited(&award);
+        } else {
+            assert_withheld(&award, PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL);
+        }
+    }
+}
+
 /// The `(reason, actor_role)` of `credit_event_id`'s `trace_credit_ledger`
 /// row.
 async fn credit_event_reason_and_actor(

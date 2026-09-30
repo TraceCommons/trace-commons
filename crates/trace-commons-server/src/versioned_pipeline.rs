@@ -7971,6 +7971,10 @@ impl PipelineService {
     ///   non-empty allowlists (`policy_mismatch`). `main` also requires the
     ///   submission to be `accepted`; the leg's operability re-check, which
     ///   runs first, already does (Ruling T15-8).
+    ///
+    /// This is a copy of `main`'s checks in `attempt_emit_novelty_utility_credit`
+    /// (`bin/trace-commons-ingest.rs`), which the library cannot call; a
+    /// change to either must be made to both.
     async fn novelty_utility_withheld_reason(
         &self,
         tx: &Transaction<'_>,

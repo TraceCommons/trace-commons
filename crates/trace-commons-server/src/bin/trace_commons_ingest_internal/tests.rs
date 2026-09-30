@@ -10471,6 +10471,58 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
     }
 }
 
+/// Ruling T15-10: `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is
+/// held to the canonical hashed form the central-issuer allowlist requires.
+/// Unset is no issuer; a canonical ref is the issuer; a raw principal, a
+/// short hash, or an uppercase one refuses startup, naming the variable.
+#[test]
+fn the_pipeline_credit_issuer_ref_must_be_canonical() {
+    // SAFETY: env mutation in tests is OK here -- no other test in this
+    // suite reads this variable (only startup does, and no test runs it).
+    unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF) };
+    assert_eq!(
+        parse_pipeline_credit_issuer_principal_ref_from_env().expect("unset parses"),
+        None
+    );
+
+    let canonical = format!("principal_sha256:{}", "a".repeat(64));
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF,
+            &canonical,
+        )
+    };
+    assert_eq!(
+        parse_pipeline_credit_issuer_principal_ref_from_env().expect("a canonical ref parses"),
+        Some(canonical)
+    );
+
+    for non_canonical in [
+        "gate-worker-token".to_string(),
+        format!("principal_sha256:{}", "a".repeat(63)),
+        format!("principal_sha256:{}", "A".repeat(64)),
+        format!("sha256:{}", "a".repeat(64)),
+    ] {
+        unsafe {
+            std::env::set_var(
+                TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF,
+                &non_canonical,
+            )
+        };
+        let error = parse_pipeline_credit_issuer_principal_ref_from_env()
+            .expect_err("a non-canonical ref refuses startup");
+        assert!(
+            error
+                .to_string()
+                .contains(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF),
+            "{error}"
+        );
+        assert!(!error.to_string().contains(&non_canonical), "{error}");
+    }
+
+    unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF) };
+}
+
 /// Ruling F-I2: startup reads
 /// `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS` for the
 /// pipeline only when a pipeline runtime is assembled. With no pipeline, a
