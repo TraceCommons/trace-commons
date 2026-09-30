@@ -618,6 +618,13 @@ pub struct DaemonShared {
     /// started a daemon has none, and falls back to the ambient runtime --
     /// which for those callers is the only one there is.
     proxy_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
+    /// The NEAR AI measurement pins in force: the operator override when
+    /// `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` was set at daemon start,
+    /// else what ingest publishes, cached with a bounded TTL
+    /// (`crate::routing::proof_attestor`). One instance for the daemon's
+    /// life, shared with every attestor it builds, so the cache survives
+    /// reconcile passes and proxy restarts.
+    pub(crate) near_ai_pins: Arc<crate::routing::proof_attestor::PinProvider>,
     /// The last state the instance above reported.
     ///
     /// Kept beside it, under a `std` mutex, because `get_settings` and
@@ -751,6 +758,7 @@ impl DaemonShared {
         });
         let (events, _) = broadcast::channel(256);
         let paused = state.paused;
+        let pin_store = store.clone();
         Ok(Self {
             store,
             queue: Mutex::new(queue),
@@ -787,6 +795,18 @@ impl DaemonShared {
             private_inference_changed: tokio::sync::Notify::new(),
             private_inference_stop_task: Mutex::new(None),
             proxy_runtime: std::sync::OnceLock::new(),
+            near_ai_pins: Arc::new(crate::routing::proof_attestor::PinProvider::new(
+                crate::routing::proof_attestor::pins_from_env(),
+                // Tests never reach ingest from here; a test that needs pins
+                // installs its own provider.
+                if cfg!(test) {
+                    None
+                } else {
+                    Some(Box::new(
+                        crate::routing::proof_attestor::IngestPinSource::new(pin_store),
+                    ))
+                },
+            )),
             private_inference_state: Arc::new(Mutex::new(
                 super::private_inference::PrivateInferenceState::Off,
             )),
@@ -907,7 +927,7 @@ impl DaemonShared {
         let mut held = self.private_inference.lock().await;
         // Read after acquiring lifecycle ownership: a queued reconciliation
         // must not replay a setting superseded while it waited for that lock.
-        let (on, generation, credential, capture_enabled) = {
+        let (on, generation, credential, capture_enabled, attestor_key) = {
             let settings = self.settings.lock().expect("settings lock");
             (
                 !self.private_inference_terminating.load(Ordering::Acquire)
@@ -922,6 +942,9 @@ impl DaemonShared {
                     .as_ref()
                     .map(|c| ironwire_proxy::embed::HostSecret::from(c.key.clone())),
                 settings.token_capture_enabled,
+                // The same key, for the attestor's gateway fetch. Never
+                // logged; it goes where IronWire already sends it.
+                settings.near_ai_inference.as_ref().map(|c| c.key.clone()),
             )
         };
         let Some(host) = held.as_mut() else {
@@ -942,6 +965,11 @@ impl DaemonShared {
             return;
         };
         host.set_runtime(self.proxy_runtime.get().cloned());
+        host.set_signer_attestor(signer_attestor_for(
+            &self.store,
+            attestor_key,
+            Arc::clone(&self.near_ai_pins),
+        ));
         host.set_credential(credential);
         host.set_token_capture(capture_enabled);
         if host.accept_generation(generation) {
@@ -1404,6 +1432,20 @@ impl DaemonShared {
         (previous != has_rows).then_some(has_rows)
     }
 
+    /// Publish `status_changed` when a policy change moved
+    /// `status.decisions_owed` away from `before` (K6).
+    ///
+    /// A policy change -- `set_project_mode`, the watcher arming a new
+    /// project under the grant -- can change the badge without touching the
+    /// queue, so no `queue_changed` follows it, and a shell that refreshes
+    /// status only on `queue_changed` would keep drawing the old count.
+    /// Takes the policy lock, then the queue lock: call it with neither held.
+    pub(crate) fn publish_if_decisions_owed_changed(&self, before: usize) {
+        if self.decisions_owed_value() != before {
+            self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
+    }
+
     pub fn publish(&self, event: &str, data: serde_json::Value) {
         // A send with no subscribers is not an error: the daemon runs happily
         // with no application attached.
@@ -1519,7 +1561,14 @@ impl DaemonShared {
         let automatic_contribution_held = self.gate_held_value();
         // Before the queue lock: it takes the queue lock itself.
         let witness_capacity = self.witness_capacity();
+        // Policy, then queue: the order every method above follows. Both
+        // counts below come from this one queue guard, so `decisions_owed`
+        // and `queue_depth` can never describe two different queues. The
+        // policy guard is dropped straight away; nothing below needs it.
+        let policy = self.policy.lock().expect("policy lock");
         let queue = self.queue.lock().expect("queue lock");
+        let decisions_owed = super::queue::decisions_owed(&queue, &policy);
+        drop(policy);
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
         serde_json::json!({
@@ -1529,6 +1578,15 @@ impl DaemonShared {
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             "paused": self.is_paused(now),
             "queue_depth": queue.pending().len(),
+            // Additive (K6). The badge's exact count: `Pending` entries that
+            // need a decision from this person. Unlike `queue_depth`, this
+            // excludes armed folders' `Pending` entries that will go out
+            // unattended once they settle or the gate clears -- "armed
+            // folders never move it" -- except the two kinds that still need
+            // a person: `held_for_review` and a grant's pre-grant hold-back.
+            // See `queue::decisions_owed`. `queue_depth` is kept unchanged
+            // for compatibility; do not derive it from this field.
+            "decisions_owed": decisions_owed,
             "next_digest_at": self.next_digest_at(now),
             "health": {
                 "last_error_label": health.last_error_label,
@@ -1624,6 +1682,17 @@ impl DaemonShared {
             })
             .collect();
         serde_json::Value::Array(notices)
+    }
+
+    /// The `decisions_owed` count of [`Self::status_value`] (K6), on its own.
+    /// See [`super::queue::decisions_owed`] for the exact rule; this only
+    /// takes the locks in the order every other status helper above does:
+    /// policy, then queue. For a caller comparing the count across a policy
+    /// change (see [`Self::publish_if_decisions_owed_changed`]).
+    pub(crate) fn decisions_owed_value(&self) -> usize {
+        let policy = self.policy.lock().expect("policy lock");
+        let queue = self.queue.lock().expect("queue lock");
+        super::queue::decisions_owed(&queue, &policy)
     }
 
     /// The `automatic_contribution_held` object of [`Self::status_value`].
@@ -3276,6 +3345,9 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let cfg = shared.store.load_config().ok().flatten();
         super::arming_wording::project_arming_claim(super::automatic_gate::disclosure(cfg.as_ref()))
     });
+    // The badge before the change, so a change that moves it -- arming a
+    // folder with entries waiting, say -- is announced (K6).
+    let decisions_owed_before = shared.decisions_owed_value();
     let mut policy = shared.policy.lock().expect("policy lock");
     let (key, audit_label) = {
         let queue = shared.queue.lock().expect("queue lock");
@@ -3457,6 +3529,7 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     if queue_changed || purged > 0 || retracted > 0 {
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
     Response::ok(
         req.id,
         serde_json::json!({ "ok": true, "purged": purged, "retracted": retracted }),
@@ -6444,6 +6517,37 @@ fn routed_tools(body: &[u8]) -> Vec<serde_json::Value> {
 #[path = "cloud_credential_recovery_tests.rs"]
 mod cloud_credential_recovery_tests;
 
+/// The receipt-proof attestor for the embedded IronWire, or none.
+///
+/// Built whenever both hold: a NEAR AI key (the gateway refuses the
+/// attestation registry without one, and it is the key IronWire already sends
+/// there), and an enrolled config (ingest serves the collateral, and its
+/// allowlist governs egress).
+///
+/// Whether any pins are in force does not matter here. The attestor reads
+/// `pins` on every question: with none it answers `Unavailable` without
+/// fetching anything, so no row becomes `verified`, and pins that ingest
+/// starts publishing after the proxy started take effect without a restart.
+/// A set that lapses stops earning keys at once. Reconcile therefore never
+/// asks ingest for pins itself. The cost is that IronWire's receipt checks
+/// run for every NEAR AI answer even while nothing is pinned.
+fn signer_attestor_for(
+    store: &ConfigStore,
+    key: Option<String>,
+    pins: Arc<crate::routing::proof_attestor::PinProvider>,
+) -> Option<std::sync::Arc<dyn ironwire_proxy::proof::SignerAttestor>> {
+    use crate::routing::proof_attestor::{HttpAttestationSource, NearAiQuoteAttestor};
+    let key = key?;
+    let cfg = store.load_config().ok().flatten()?;
+    let source =
+        HttpAttestationSource::new(&crate::config::config_allowlist(&cfg), &cfg.ingest_url, key)
+            .ok()?;
+    Some(std::sync::Arc::new(NearAiQuoteAttestor::new(
+        Box::new(source),
+        pins,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     mod witnessed_flow {
@@ -8816,6 +8920,96 @@ mod tests {
                 .contains_key("contributable_count"),
             "the key must be absent, not null: {row}"
         );
+    }
+
+    /// K6 review: the `status` wiring, on the wire. A mixed queue -- an
+    /// Ask-me pending, an armed pending that is settling, and a grant
+    /// backlog entry (on disk when the grant armed its folder) -- owes two
+    /// decisions while `queue_depth` stays three. Swapping `decisions_owed`
+    /// for `queue.pending().len()` in `status_value` fails here.
+    #[test]
+    fn status_reports_decisions_owed_apart_from_queue_depth_for_a_mixed_queue() {
+        let s = shared();
+        let now = Utc::now();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/k6armed", ProjectMode::AutoUpload, now)
+                .unwrap();
+            policy
+                .set_mode("/tmp/k6grant", ProjectMode::AutoUpload, now)
+                .unwrap();
+            policy.armed_by_grant.insert("/tmp/k6grant".to_string());
+            // `seed_entry` puts every entry at this path; only the grant
+            // folder's entry is held back, because only that folder was
+            // armed by the grant.
+            policy
+                .sessions_on_disk_at_grant
+                .insert("/tmp/seed.jsonl".to_string());
+        }
+        seed_entry(&s, "/tmp/k6ask");
+        seed_entry(&s, "/tmp/k6armed");
+        seed_entry(&s, "/tmp/k6grant");
+
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(status["queue_depth"], 3, "{status}");
+        assert_eq!(
+            status["decisions_owed"], 2,
+            "the Ask-me pending and the grant backlog, not the settling armed one: {status}"
+        );
+    }
+
+    /// K6 review: arming a folder with an entry waiting moves the badge
+    /// (1 -> 0) without any queue change, so `status_changed` must follow,
+    /// or a shell refreshing status only on `queue_changed` keeps the old
+    /// count.
+    #[test]
+    fn arming_a_folder_with_a_waiting_entry_publishes_status_changed() {
+        let key = "/tmp/k6arm-publishes";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.decisions_owed_value(), 0);
+        let mut saw_status = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_status |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(saw_status, "the badge moved; status_changed must say so");
+    }
+
+    /// And a policy change that leaves the badge where it was publishes no
+    /// extra `status_changed`.
+    #[test]
+    fn a_policy_change_that_leaves_the_badge_alone_publishes_no_status_changed() {
+        let key = "/tmp/k6arm-quiet";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        let mut rx = s.events.subscribe();
+
+        // Ask-me to Ask-me: nothing moves.
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "notify_only" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(event.event, EVENT_STATUS_CHANGED);
+        }
     }
 
     /// K7's upsell: "27 scrubbed sessions are sitting on this Mac under
@@ -11438,6 +11632,114 @@ mod tests {
         assert!(!absent_home.exists());
     }
 
+    /// The attestor needs a key and an enrollment, and nothing else: with no
+    /// pins in force it is still built, because it reads the pins on every
+    /// question and answers `Unavailable` until some arrive.
+    #[test]
+    fn an_attestor_is_built_with_a_key_and_an_enrollment_pinned_or_not() {
+        let unpinned = || Arc::new(crate::routing::proof_attestor::PinProvider::new(None, None));
+        let bare = shared();
+        let enrolled = enrolled_shared();
+        let key = || Some("sk-minted".to_string());
+        assert!(signer_attestor_for(&enrolled.store, None, unpinned()).is_none());
+        assert!(signer_attestor_for(&bare.store, key(), unpinned()).is_none());
+        assert!(signer_attestor_for(&enrolled.store, key(), unpinned()).is_some());
+    }
+
+    /// Reconcile never asks for the pins: the attestor reads them itself on
+    /// every question. So reconcile costs no ingest round trip, pinned or
+    /// not, and private inference being off costs none either.
+    #[tokio::test]
+    async fn reconcile_never_asks_ingest_for_pins() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use trace_commons_protocol::near_ai_measurements::{NearAiMeasurementPins, PinState};
+        struct Counting(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl crate::routing::proof_attestor::PinSource for Counting {
+            async fn fetch(
+                &self,
+            ) -> Result<NearAiMeasurementPins, crate::routing::proof_attestor::SourceUnavailable>
+            {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(NearAiMeasurementPins::new(
+                    PinState::Configured,
+                    vec![format!("mrconfigid={}", "aa".repeat(48))],
+                ))
+            }
+        }
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut s = enrolled_shared();
+        s.near_ai_pins = Arc::new(crate::routing::proof_attestor::PinProvider::new(
+            None,
+            Some(Box::new(Counting(Arc::clone(&asked)))),
+        ));
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-minted".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        // Private inference off: no proxy host held.
+        s.reconcile_private_inference().await;
+        assert_eq!(asked.load(AtomicOrdering::SeqCst), 0, "asked with it off");
+
+        let home = tempfile::tempdir().unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().join("never-created"),
+                0,
+            ),
+        );
+        s.reconcile_private_inference().await;
+        assert!(
+            s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_signer_attestor()
+        );
+        assert_eq!(asked.load(AtomicOrdering::SeqCst), 0, "asked on reconcile");
+    }
+
+    /// With no pins in force -- nothing published and no override --
+    /// reconcile still hands IronWire the attestor, so pins that arrive later
+    /// take effect without a proxy restart. Until then it answers
+    /// `Unavailable` and no row can become `verified`.
+    #[tokio::test]
+    async fn reconcile_hands_ironwire_the_attestor_without_pins() {
+        assert!(
+            std::env::var_os(crate::routing::proof_attestor::NEAR_AI_EXPECTED_MEASUREMENTS_ENV)
+                .is_none(),
+            "the premise: nothing is pinned in the test environment"
+        );
+        let s = enrolled_shared();
+        let home = tempfile::tempdir().unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().join("never-created"),
+                0,
+            ),
+        );
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-minted".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        s.reconcile_private_inference().await;
+        let held = s.private_inference.lock().await;
+        let host = held.as_ref().unwrap();
+        assert!(host.holds_credential());
+        assert!(host.holds_signer_attestor());
+    }
+
     /// A key obtained after the daemon started still reaches the proxy, and
     /// a key removed stops reaching it. The reconcile pass reads it from the
     /// same lock as the switch, so neither needs a daemon restart.
@@ -13038,6 +13340,31 @@ mod tests {
         // no readable ledger, so nothing is claimed at all.
         assert_eq!(result["activity"]["readable"], serde_json::json!(false));
         assert!(result["activity"]["last_call_at"].is_null());
+    }
+
+    /// `answers_at` names the same vendor `source::discovery` would for the
+    /// same tool, derived through the SAME table (`source::vendor_label`) so
+    /// the two surfaces cannot drift apart.
+    #[test]
+    fn harness_list_names_the_vendor_each_built_in_tool_answers_at() {
+        let shared = shared();
+        let req = Request {
+            id: 1,
+            method: "harness_list".to_string(),
+            params: serde_json::Value::Null,
+        };
+        let result = handle_request(&shared, &req).result.expect("an answer");
+        let harnesses = result["harnesses"].as_array().expect("a list");
+
+        let answers_at = |id: &str| {
+            harnesses
+                .iter()
+                .find(|h| h["id"] == id)
+                .unwrap_or_else(|| panic!("no {id} row"))["answers_at"]
+                .clone()
+        };
+        assert_eq!(answers_at("claude"), serde_json::json!("Anthropic"));
+        assert_eq!(answers_at("codex"), serde_json::json!("OpenAI"));
     }
 
     /// With no ledger, the amount is UNKNOWN and not zero, and the wire says

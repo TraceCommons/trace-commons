@@ -416,6 +416,7 @@ mod tests {
             output_tokens: Some(1),
             cost_usd: Some(0.0),
             status: 200,
+            ..Default::default()
         }
     }
 

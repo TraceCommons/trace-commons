@@ -16,7 +16,9 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use trace_commons_protocol::legacy_invite_link::legacy_invite_link_record_bytes;
+use trace_commons_protocol::legacy_invite_link::{
+    LegacyInviteLinkRecordKind, legacy_invite_link_record_bytes,
+};
 
 const INVITE_CODE: &str = "INVITECODE000001";
 const PROJECT: &str = "/Users/invitee/code/armed-project";
@@ -37,8 +39,12 @@ enum LinkMode {
     /// original record, naming and signed by that device.
     FirstDeviceRecord,
     /// The same, on a V91 server: this device's own attestation under the
-    /// existing link, with an attestation id of its own.
+    /// existing link, with an attestation id of its own, countersigned as an
+    /// attestation rather than a link (V104).
     SecondDeviceAttestation,
+    /// The tenant is already linked to this account, but under another of
+    /// its invites: 409 `legacy_link_invite_not_linked` (V104).
+    SecondDeviceOtherInvite,
 }
 
 struct Ingest {
@@ -132,6 +138,12 @@ async fn link_route(
             Json(serde_json::json!({"error": "legacy_link_tenant_pooled"})),
         );
     }
+    if ingest.mode == LinkMode::SecondDeviceOtherInvite {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "legacy_link_invite_not_linked"})),
+        );
+    }
     // The account half comes from the session, never the body.
     let statement = LegacyInviteLinkStatement {
         legacy_tenant_id: request.legacy_tenant_id.clone(),
@@ -161,9 +173,15 @@ async fn link_route(
         device_signature: request.signature.clone(),
         linked_at: Utc::now().timestamp(),
         server_kid: "ingest-test".into(),
+        kind: LegacyInviteLinkRecordKind::Link,
     };
     match ingest.mode {
         LinkMode::OtherAccount => record.statement.account_id = Uuid::new_v4(),
+        // What V104 returns: this device's own statement, under an id of the
+        // attestation's own, countersigned under the attestation domain.
+        LinkMode::SecondDeviceAttestation => {
+            record.kind = LegacyInviteLinkRecordKind::DeviceAttestation;
+        }
         LinkMode::FirstDeviceRecord => {
             let first = Ed25519KeyPair::from_pkcs8(
                 Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
@@ -738,6 +756,7 @@ async fn an_uncommitted_switch_is_rolled_back_at_the_next_start() {
                 device_signature: String::new(),
                 linked_at: 1,
                 server_kid: "k".into(),
+                kind: LegacyInviteLinkRecordKind::Link,
             },
             server_signature: String::new(),
             migrated_at: Utc::now(),
@@ -1023,7 +1042,29 @@ async fn a_second_device_of_a_linked_tenant_moves_on_its_own_attestation() {
     assert_eq!(answer["migrated"], true);
     let link = load_link(&f.shared.store).unwrap();
     assert_eq!(link.record.statement.device_key_id, f.legacy.device_key_id);
+    assert_eq!(
+        link.record.kind,
+        LegacyInviteLinkRecordKind::DeviceAttestation,
+        "the kept record says it is an attestation, not the link"
+    );
     assert!(f.sweep().voided.is_empty());
+}
+
+/// A second device that joined the linked tenant under a different invite is
+/// refused by name (V104), and nothing changes: the invite identity keeps
+/// working and the move is still offered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_device_under_another_invite_is_refused_by_name() {
+    let f = fixture(LinkMode::SecondDeviceOtherInvite, true).await;
+    let error = f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+    assert_eq!(label(&error), "legacy_migration_invite_not_linked");
+    f.assert_legacy_intact();
+    assert!(f.ingest.logouts.lock().unwrap().is_empty());
+    assert_eq!(
+        status_value(&f.shared.store, Some(&f.cfg))["offered"],
+        true,
+        "still offered: nothing was recorded"
+    );
 }
 
 /// Against a server that predates V91 the second device is handed the first

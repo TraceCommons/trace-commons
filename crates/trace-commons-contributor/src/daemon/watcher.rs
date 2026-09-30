@@ -323,10 +323,30 @@ fn arm_by_default(
         tracing::warn!("could not record arming a new project; it asks first");
         return ProjectMode::NotifyOnly;
     }
+    // Arming can move the badge with no queue change (entries already
+    // waiting in this project stop needing a decision), so compare across
+    // it (K6).
+    let decisions_owed_before = shared.decisions_owed_value();
+    let mode = arm_under_grant(shared, ctx, project_key, &path, &source_key, terms);
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
+    mode
+}
+
+/// The locked half of [`arm_by_default`]: re-check and arm under the policy
+/// lock, then persist. Split out so the caller can compare the badge count
+/// on either side of it with no lock held.
+fn arm_under_grant(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    project_key: &str,
+    path: &str,
+    source_key: &str,
+    terms: super::grant_terms::GrantTerms,
+) -> ProjectMode {
     let mut policy = shared.policy.lock().expect("policy lock");
     // Re-checked: the grant or the project may have changed while the audit
     // row was written.
-    if !policy.arms_by_default(project_key, &path, &source_key)
+    if !policy.arms_by_default(project_key, path, source_key)
         || policy.arm_by_grant(project_key, ctx.now, terms).is_err()
     {
         return ProjectMode::NotifyOnly;

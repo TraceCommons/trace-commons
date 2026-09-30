@@ -862,6 +862,12 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_tenant_claimed" => {
             "This invite has already been moved to a different account. Nothing changed here."
         }
+        // Copy for Zaki's approval (V104): another of this person's devices
+        // moved the same invite tenant onto this account under a different
+        // invite code, which was never granted to the account.
+        "legacy_migration_invite_not_linked" => {
+            "This device joined with a different invite than the one already moved to your account, so it can't be moved. It keeps working as it does now."
+        }
         "legacy_migration_invite_revoked" => {
             "This invite was revoked, so it can't be moved. Nothing changed here."
         }

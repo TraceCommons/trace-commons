@@ -260,6 +260,21 @@ impl ExpectedMeasurements {
     pub fn pinned_fields(&self) -> Vec<MeasurementField> {
         self.pins.keys().copied().collect()
     }
+
+    /// This set in the syntax [`Self::from_env_value`] reads, canonically:
+    /// fields in [`MeasurementField`] order, lowercase hex, no whitespace.
+    ///
+    /// What ingest publishes to a client so it pins exactly what ingest
+    /// pins; the round trip is exact. Measurement values are public image
+    /// identifiers, not secrets.
+    #[must_use]
+    pub fn to_pin_string(&self) -> String {
+        self.pins
+            .iter()
+            .map(|(field, value)| format!("{}={value}", field.as_str()))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 /// One register whose verified value is not the pinned one.
@@ -406,6 +421,38 @@ pub fn check_measurements_opt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pin set rendered for the wire must parse back to the same set, so a
+    /// client reading what ingest enforces pins exactly what ingest pins.
+    #[test]
+    fn a_rendered_pin_set_parses_back_to_itself() {
+        let raw = format!(
+            "RTMR0={}, mrtd={},mrconfigid={}",
+            "AA".repeat(48),
+            "bb".repeat(48),
+            "cc".repeat(48)
+        );
+        let set = ExpectedMeasurements::from_env_value(Some(&raw))
+            .unwrap()
+            .unwrap();
+        let rendered = set.to_pin_string();
+        assert_eq!(
+            rendered,
+            format!(
+                "mrtd={},mrconfigid={},rtmr0={}",
+                "bb".repeat(48),
+                "cc".repeat(48),
+                "aa".repeat(48)
+            ),
+            "canonical field order, lowercase, no whitespace"
+        );
+        assert_eq!(
+            ExpectedMeasurements::from_env_value(Some(&rendered))
+                .unwrap()
+                .unwrap(),
+            set
+        );
+    }
     use crate::quote::{parse_collateral, verify_quote};
 
     const FIXTURE: &str = include_str!("../tests/fixtures/near_ai_attestation_report.json");

@@ -231,11 +231,11 @@ pub fn insert_fields(value: &mut serde_json::Value, scrub: Scrub, subagents_drop
 ///
 /// One of `queue::REASONS_NEEDING_A_PERSON`: the watcher does not approve it
 /// again and a group approve leaves it out. The particular reasons are not
-/// in the label. The hold records no counts: the envelope it was decided on
-/// is not pinned, and a count is only ever stored beside the digest of the
-/// bytes it describes (`QueueEntry::scrub`). So the held entry reads
-/// `not-yet-scrubbed` until the person's review pins and counts it, and its
-/// `second_look` then comes from that build.
+/// in the label. When the local envelope can be saved, the hold pins it and
+/// records its counts beside the digest of the bytes they describe
+/// (`QueueEntry::scrub`), so the held entry reads `scrubbed` and its
+/// `second_look` comes from that build. Without a saved local envelope it
+/// stays held and reads `not-yet-scrubbed` until a review pins and counts it.
 pub const REASON_SECOND_LOOK_REVIEW_REQUIRED: &str = "second-look-review-required";
 
 /// The label an unattended approval is revoked under while the Scrub check

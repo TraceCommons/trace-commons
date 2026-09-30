@@ -491,6 +491,11 @@ pub struct PrivateInference {
     /// credentials once, when the registry is built.
     credential: Option<HostSecret>,
     token_capture_enabled: Option<bool>,
+    /// Who IronWire asks whether a receipt's signer is bound by a verified,
+    /// pinned TDX quote (`crate::routing::proof_attestor`). `None` leaves
+    /// IronWire without one, so no answer it records can be `verified`.
+    /// Like the credential, it reaches the proxy at its next start.
+    signer_attestor: Option<std::sync::Arc<dyn ironwire_proxy::proof::SignerAttestor>>,
     state: PrivateInferenceState,
     /// A proxy this daemon started has ended on its own. Sticky until the
     /// switch is turned off and on again: restarting it every poll tick
@@ -536,6 +541,7 @@ impl PrivateInference {
             runtime: None,
             credential: None,
             token_capture_enabled: None,
+            signer_attestor: None,
             state: PrivateInferenceState::Off,
             crashed: false,
             #[cfg(test)]
@@ -618,6 +624,22 @@ impl PrivateInference {
 
     pub fn set_credential(&mut self, credential: Option<HostSecret>) {
         self.credential = credential;
+    }
+
+    /// Hand the proxy an attestor for receipt proof, or none. Takes effect at
+    /// the next start, as the credential does -- and the attestor is only
+    /// ever built beside a credential, so a changed key restarts both.
+    pub fn set_signer_attestor(
+        &mut self,
+        attestor: Option<std::sync::Arc<dyn ironwire_proxy::proof::SignerAttestor>>,
+    ) {
+        self.signer_attestor = attestor;
+    }
+
+    /// Whether an attestor is held, for the reconcile test.
+    #[cfg(test)]
+    pub(crate) fn holds_signer_attestor(&self) -> bool {
+        self.signer_attestor.is_some()
     }
 
     /// Whether a credential is held, for the reconcile test that proves one
@@ -868,9 +890,17 @@ impl PrivateInference {
             let port = self.port;
             let credential = self.credential.clone();
             let capture_enabled = self.token_capture_enabled;
+            let attestor = self.signer_attestor.clone();
             self.starting = Some(runtime.spawn(async move {
                 let mut options = embed_options(credential);
                 options.token_capture_enabled = capture_enabled;
+                if let Some(attestor) = attestor {
+                    // Also turns IronWire's receipt checks on: request and
+                    // response digests are taken as bytes stream past (no
+                    // body is kept), and each NEAR AI answer is settled off
+                    // the response path.
+                    options = options.with_signer_attestor(attestor);
+                }
                 embed::start_with_options(&home, port, options, |_, _| {}).await
             }));
         }
