@@ -82,12 +82,15 @@ the macOS app keeps `main`'s behaviour. In particular:
    (`#178F70`), which came from the community site. Confirm the macOS app
    moves to purple, and that the community site either follows or is
    deliberately left behind.
-3. **Minimum OS.** The app targets macOS 14. Liquid Glass (`.glassEffect`)
-   needs macOS 26. The options are:
-   - (a) keep 14 and build two material paths;
-   - (b) raise the floor to 26.
-
-   Recommendation: (a). The fallback is specified below and is not large.
+3. **Minimum OS: decided 2026-09-30, keep macOS 14 with a fallback.** The
+   app is built with the macOS 26 SDK (Xcode 26) and keeps
+   `.macOS(.v14)` as its deployment target.
+   - Glass-only APIs sit behind `#available(macOS 26, *)` inside the tier
+     modifiers.
+   - Standard controls pick up Liquid Glass from the SDK on 26 and keep
+     their earlier look on 14–25.
+   - Every custom surface therefore has two renderings, both tested (see
+     Acceptance).
 4. **Settings.** #1146 opens Settings as a modal over the window. On macOS
    the expected place is a `Settings` scene (⌘,). Recommendation: a
    `Settings` scene.
@@ -227,6 +230,30 @@ These are exact, from `tauri-desktop/frontend/src/design-system/tokens/` at
 - **Specular edges** (the multi-inset CSS edges) are drawn only before 26.
   On 26 the system draws its own rim, and adding ours doubles it.
 - **Saturation** (`saturate(180%)`) has no public SwiftUI control. Omit it.
+- **One place for the branch.** Each tier is one view modifier (`tcPane()`,
+  `tcCard()`, `tcControl()`, and so on) that holds the
+  `#available(macOS 26, *)` check. Screens never branch on the OS
+  themselves. For example:
+
+  ```swift
+  extension View {
+      @ViewBuilder func tcPane() -> some View {
+          if #available(macOS 26, *) {
+              self.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+          } else {
+              self.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                  .overlay(TCPaneEdge())
+          }
+      }
+  }
+  ```
+
+- **Glass-only APIs** are used only inside those modifiers and the button
+  styles: `.glassEffect`, `GlassEffectContainer`, `.buttonStyle(.glass)`
+  and `.glassProminent`.
+- **The fallback is not pixel-identical.** Materials look flatter than
+  Liquid Glass. The fallback is judged on layout, radii, colour and
+  legibility, not on refraction.
 
 ## Window and layout
 
@@ -384,6 +411,13 @@ Each step is a PR of its own.
   painted scene, because real glass shows the desktop.
 - On macOS 14, the same screens render with the material fallback, with no
   missing panes or controls.
+- CI runs the Swift suite on both sides of the branch: the existing
+  `macos-26` job, plus a job on a macOS runner below 26. That keeps the
+  fallback path compiling and exercised.
+- The package still declares `.macOS(.v14)`, and a check fails the build if
+  a glass-only API is used outside the tier modifiers without an
+  `#available` guard. The compiler's availability errors cover most of
+  this; the check covers the rest.
 - VoiceOver reaches and names every control, including flow-map nodes and
   tree rows. Full Keyboard Access can operate the tree with arrow keys.
 - Reduce Transparency, Increase Contrast and Reduce Motion each change what
