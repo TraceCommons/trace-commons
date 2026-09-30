@@ -53,6 +53,10 @@ pub struct InviteGrantWrite {
     pub issued_by_label: Option<String>,
     pub credential_binding_hash: Option<String>,
     pub note_label: Option<String>,
+    /// Public issuer name shown by the non-redeeming lookup (V103).
+    pub issuer_display_name: Option<String>,
+    /// Operator-set `(min, max)` credit points per accepted trace (V103).
+    pub credit_range: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
