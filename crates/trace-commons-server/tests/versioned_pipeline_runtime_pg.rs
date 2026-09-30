@@ -18455,107 +18455,189 @@ async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
     assert!(disabled.is_ok(), "a disabled payout pays nothing");
 }
 
-/// Zaki review 1, item 2: `main` refuses a live settlement whose policy
-/// version is not on `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`
-/// (an empty list allows any). A pipeline batch carries its policy version,
-/// so the payout applies the same list before it submits: a batch whose
-/// version is not listed is not sent, and its payout is `failed` under
-/// `main`'s label. With the version listed, it is paid.
+/// Zaki review 1, fix round, item 1: two more of `main`'s live settlement
+/// controls have no equivalent the payout can apply to a pipeline batch.
+/// `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY` gates each
+/// settlement run on recorded rollout-smoke evidence, and
+/// `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` caps an
+/// account's line per settlement run by leaving events for a later run. The
+/// runtime refuses to build with NEAR payout enabled while either is set,
+/// each under its own label; with payout disabled it builds.
+#[tokio::test]
+async fn an_enabled_payout_is_refused_while_main_requires_smoke_readiness_or_an_account_cap() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (checks, label) in [
+        (
+            PipelineNoveltyUtilityChecks {
+                settlement_require_rollout_smoke_ready: true,
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            "credit_settlement_rollout_smoke_not_ready",
+        ),
+        (
+            PipelineNoveltyUtilityChecks {
+                settlement_max_micros_per_account: Some(5_000_000),
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            "credit_settlement_account_cap_unsupported",
+        ),
+    ] {
+        let near = Arc::new(RecordingNearAdapter::new());
+        let refused = payout_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            None,
+            enabled_test_payout(),
+        )
+        .with_novelty_utility_checks(checks.clone())
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("an enabled payout is refused ({label})"));
+        assert_eq!(refused.to_string(), label);
+
+        let disabled = payout_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near,
+            None,
+            PipelinePayoutConfig {
+                enabled: false,
+                ..enabled_test_payout()
+            },
+        )
+        .with_novelty_utility_checks(checks)
+        .build();
+        assert!(disabled.is_ok(), "a disabled payout pays nothing ({label})");
+    }
+}
+
+/// Zaki review 1, item 2 and fix round item 2: `main` refuses a live
+/// settlement whose policy version is not on
+/// `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` (an empty list
+/// allows any), and a later run settles the same events once the list is
+/// fixed. A pipeline batch carries its policy version, so the payout applies
+/// the same list before it submits: a batch whose version is not listed is
+/// not sent, and its payout stays `pending` under `main`'s label, so the next
+/// pass checks it again. Once the configuration lists the version, the next
+/// pass pays it.
 #[tokio::test]
 async fn the_payout_applies_mains_allowed_policy_versions() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
-    for (allowed, paid) in [
-        (vec!["main-policy-v1"], false),
-        (
-            vec!["main-policy-v1", PIPELINE_SETTLEMENT_POLICY_VERSION],
-            true,
-        ),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let near = Arc::new(RecordingNearAdapter::new());
-        let service = payout_test_service_with_checks(
-            backend.clone(),
-            artifact_store(&dir),
-            near.clone(),
-            PipelineNoveltyUtilityChecks {
-                settlement_allowed_policy_versions: allowed
-                    .iter()
-                    .map(|version| version.to_string())
-                    .collect(),
-                ..PipelineNoveltyUtilityChecks::default()
-            },
-        )
-        .await;
-        let tenant = format!("payout-policy-version-{}", uuid::Uuid::new_v4());
-        let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
-        assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
-        let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
-        if paid {
-            assert_eq!(near.requests().len(), 1, "a listed version is paid");
-            assert_eq!(leg.payout_state, "submitted");
-        } else {
-            assert!(near.requests().is_empty(), "nothing is submitted");
-            assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
-            assert_eq!(leg.payout_state, "failed");
-            assert_eq!(
-                leg.last_error_label.as_deref(),
-                Some("credit_settlement_policy_version_not_allowed")
-            );
-        }
-    }
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let checks = |allowed: &[&str]| PipelineNoveltyUtilityChecks {
+        settlement_allowed_policy_versions: allowed
+            .iter()
+            .map(|version| version.to_string())
+            .collect(),
+        ..PipelineNoveltyUtilityChecks::default()
+    };
+    let refusing = payout_test_service_with_checks(
+        backend.clone(),
+        artifact_store(&dir),
+        near.clone(),
+        checks(&["main-policy-v1"]),
+    )
+    .await;
+    let tenant = format!("payout-policy-version-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&refusing, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(refusing.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert!(near.requests().is_empty(), "nothing is submitted");
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    let leg = trace_credit_settlement(&refusing, &tenant, run.run_id).await;
+    assert_eq!(
+        leg.payout_state, "pending",
+        "a configuration refusal is not final"
+    );
+    assert_eq!(
+        leg.last_error_label.as_deref(),
+        Some("credit_settlement_policy_version_not_allowed")
+    );
+    assert_eq!(
+        refusing.process_payouts(&tenant, 32).await.unwrap(),
+        1,
+        "the next pass checks it again"
+    );
+    assert!(near.requests().is_empty());
+
+    let fixed = payout_test_service_with_checks(
+        backend.clone(),
+        artifact_store(&dir),
+        near.clone(),
+        checks(&["main-policy-v1", PIPELINE_SETTLEMENT_POLICY_VERSION]),
+    )
+    .await;
+    assert_eq!(fixed.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.requests().len(), 1, "a listed version is paid");
+    let leg = trace_credit_settlement(&fixed, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "submitted");
+    assert_eq!(leg.last_error_label, None);
 }
 
-/// Zaki review 1, item 2: with `main`'s central-issuer allowlist set
-/// (`TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`), `main`
-/// settles only for a listed principal. The pipeline settles as its
+/// Zaki review 1, item 2 and fix round item 2: with `main`'s central-issuer
+/// allowlist set (`TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`),
+/// `main` settles only for a listed principal. The pipeline settles as its
 /// configured issuer, so the paid leg applies the same list to it before it
 /// submits, as the `NoveltyUtility` leg does: an issuer that is missing or
-/// not listed sends nothing, and the payout is `failed` under
-/// `central_issuer_denied`. A listed issuer is paid.
+/// not listed sends nothing, and the payout stays `pending` under
+/// `central_issuer_denied`. Once the issuer is listed, the next pass pays it.
 #[tokio::test]
 async fn the_paid_leg_applies_mains_central_issuer_allowlist() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
     let listed = credit_account_hash("pipeline-issuer");
-    for (issuer, paid) in [
-        (None, false),
-        (Some(credit_account_hash("another-issuer")), false),
-        (Some(listed.clone()), true),
-    ] {
+    for refused_issuer in [None, Some(credit_account_hash("another-issuer"))] {
         let dir = tempfile::tempdir().unwrap();
         let near = Arc::new(RecordingNearAdapter::new());
-        let service = payout_test_service_with_checks(
+        let checks = |issuer: Option<String>| PipelineNoveltyUtilityChecks {
+            central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
+            issuer_principal_ref: issuer,
+            ..PipelineNoveltyUtilityChecks::default()
+        };
+        let refusing = payout_test_service_with_checks(
             backend.clone(),
             artifact_store(&dir),
             near.clone(),
-            PipelineNoveltyUtilityChecks {
-                central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
-                issuer_principal_ref: issuer.clone(),
-                ..PipelineNoveltyUtilityChecks::default()
-            },
+            checks(refused_issuer.clone()),
         )
         .await;
         let tenant = format!("payout-central-issuer-{}", uuid::Uuid::new_v4());
-        let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
-        assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
-        let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
-        if paid {
-            assert_eq!(near.requests().len(), 1, "a listed issuer is paid");
-            assert_eq!(leg.payout_state, "submitted");
-        } else {
-            assert!(
-                near.requests().is_empty(),
-                "nothing is submitted ({issuer:?})"
-            );
-            assert_eq!(leg.payout_state, "failed");
-            assert_eq!(
-                leg.last_error_label.as_deref(),
-                Some("central_issuer_denied")
-            );
-        }
+        let run = submit_and_complete(&refusing, &tenant, RECEIPT_PRINCIPAL).await;
+        assert_eq!(refusing.process_payouts(&tenant, 32).await.unwrap(), 1);
+        assert!(
+            near.requests().is_empty(),
+            "nothing is submitted ({refused_issuer:?})"
+        );
+        let leg = trace_credit_settlement(&refusing, &tenant, run.run_id).await;
+        assert_eq!(leg.payout_state, "pending", "{refused_issuer:?}");
+        assert_eq!(
+            leg.last_error_label.as_deref(),
+            Some("central_issuer_denied")
+        );
+
+        let fixed = payout_test_service_with_checks(
+            backend.clone(),
+            artifact_store(&dir),
+            near.clone(),
+            checks(Some(listed.clone())),
+        )
+        .await;
+        assert_eq!(fixed.process_payouts(&tenant, 32).await.unwrap(), 1);
+        assert_eq!(near.requests().len(), 1, "a listed issuer is paid");
+        let leg = trace_credit_settlement(&fixed, &tenant, run.run_id).await;
+        assert_eq!(leg.payout_state, "submitted");
+        assert_eq!(leg.last_error_label, None);
     }
 }
 

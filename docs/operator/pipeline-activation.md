@@ -437,32 +437,27 @@ to NEAR.
   stored, the call is not sent again (it could pay twice, on two
   contracts): the payout is `failed` with `near_contract_changed`. A call
   already submitted is still confirmed through its stored key.
-- The payout applies `main`'s settlement controls, from `main`'s own
-  configuration:
-  - `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`: ingest refuses
-    to start a runtime whose payout is enabled, with
-    `issuer_approval_evidence_hash_missing`. `main`'s approval is evidence
-    an operator records for one batch's source list and names in the
-    settlement request; Settle finalizes a pipeline batch with no request,
-    and `main`'s own automated settlement does not run live under this flag
-    either. `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS`
-    needs this flag, so it takes the same case. A pipeline batch records no
-    issuer approval evidence.
-  - `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`: a batch whose
-    policy version (`pipeline-internal-v1`) is not listed is not sent. Its
-    payout is `failed` with `credit_settlement_policy_version_not_allowed`.
-    An empty list allows any version, as on `main`.
-  - `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`: the
-    pipeline settles as its issuer,
-    `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`. When the list is
-    set and that issuer is missing or not listed, nothing is sent and the
-    payout is `failed` with `central_issuer_denied`.
-  - `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE`: ingest
-    does not start while the profile is incomplete
-    (`credit_settlement_central_issuer_profile_incomplete` in the drill), and
-    a complete profile sets
-    `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`, so an enabled
-    payout is refused as above.
+- The payout applies every control `main`'s live credit settlement reads
+  from its configuration, from `main`'s own values. A control the payout
+  can apply to a pipeline batch is applied before a line is sent. A control
+  it cannot apply refuses to start a runtime whose payout is enabled while
+  the control is set (ingest does not start). A payout a control refuses at
+  dispatch stays `pending` under the control's label, and every pass checks
+  it again, so it is paid once the configuration is fixed.
+
+  | `main`'s control | Case | What the pipeline does |
+  |---|---|---|
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` | applied at dispatch | A batch whose policy version (`pipeline-internal-v1`) is not listed is not sent: `pending`, `credit_settlement_policy_version_not_allowed`. An empty list allows any version, as on `main`. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` | applied at dispatch | The pipeline settles as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`. With the list set and that issuer missing or not listed, nothing is sent: `pending`, `central_issuer_denied`. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL` | refuses an enabled payout | `issuer_approval_evidence_hash_missing`. `main`'s approval is evidence an operator records for one batch's source list and names in the settlement request; Settle has no request, and `main`'s own automated settlement does not run live under this flag either. A pipeline batch records no issuer approval evidence. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS` | refuses an enabled payout | It needs `..._REQUIRE_ISSUER_APPROVAL`, so the row above applies. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY` | refuses an enabled payout | `credit_settlement_rollout_smoke_not_ready`. `main` checks recorded rollout-smoke evidence at each settlement run; Settle has no run to check it at. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` | refuses an enabled payout | `credit_settlement_account_cap_unsupported`. `main` keeps an account's line under the cap by leaving events for a later run; a pipeline leg settles its own event in one batch. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE` | refuses an enabled payout | Ingest does not start while the profile is incomplete (`credit_settlement_central_issuer_profile_incomplete` in the drill). A complete profile sets `..._REQUIRE_ISSUER_APPROVAL`, `..._MAX_POINTS_PER_ACCOUNT` and `..._REQUIRE_ROLLOUT_SMOKE_READY`, so the rows above refuse. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`, `..._REQUIRE_NEAR_CONTRACT` | applied at startup | An enabled payout must name `main`'s contract (`pipeline_runtime_near_contract_mismatch`, `payout_near_contract_missing`). |
+  | Credit holds (`credit_holds`) | applied at Settle | A held principal's leg is `held` and is not settled, as `main` leaves held accounts out. |
+  | Ranking calibration gates (`TRACE_COMMONS_RANKING_*`) | not applicable | They apply only to `RankingUtility` events; a pipeline leg writes an `accepted` event. |
+
 - A contributor is paid as `main` pays them. A principal linked to an
   account settles under the account (`account:{account_id}`), so its batch
   line has the same credit-account hash as the account's legacy credit, and

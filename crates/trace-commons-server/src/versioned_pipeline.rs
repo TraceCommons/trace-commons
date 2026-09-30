@@ -117,6 +117,14 @@ pub const PIPELINE_PAYOUT_ISSUER_APPROVAL_MISSING_LABEL: &str =
     "issuer_approval_evidence_hash_missing";
 pub const PIPELINE_PAYOUT_POLICY_VERSION_NOT_ALLOWED_LABEL: &str =
     "credit_settlement_policy_version_not_allowed";
+/// An enabled payout is refused while `main` requires rollout-smoke readiness
+/// for a live settlement (`main`'s own label for that gap), or while `main`
+/// caps an account's settlement (a pipeline label: `main` has no refusal
+/// label for a configured cap).
+pub const PIPELINE_PAYOUT_ROLLOUT_SMOKE_NOT_READY_LABEL: &str =
+    "credit_settlement_rollout_smoke_not_ready";
+pub const PIPELINE_PAYOUT_ACCOUNT_CAP_UNSUPPORTED_LABEL: &str =
+    "credit_settlement_account_cap_unsupported";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 /// The reason code of an index invalidation a withdrawal queues.
 const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
@@ -4678,6 +4686,11 @@ pub struct PipelinePayoutConfig {
 ///   as on `main`.
 /// - `settlement_require_issuer_approval` is `main`'s
 ///   `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`.
+/// - `settlement_require_rollout_smoke_ready` is `main`'s
+///   `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY`, and
+///   `settlement_max_micros_per_account` its
+///   `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` in
+///   microcredits. Either refuses an enabled payout.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineNoveltyUtilityChecks {
     pub central_issuer_principal_refs: std::collections::BTreeSet<String>,
@@ -4685,6 +4698,8 @@ pub struct PipelineNoveltyUtilityChecks {
     pub require_production_gate: bool,
     pub settlement_allowed_policy_versions: std::collections::BTreeSet<String>,
     pub settlement_require_issuer_approval: bool,
+    pub settlement_require_rollout_smoke_ready: bool,
+    pub settlement_max_micros_per_account: Option<i64>,
 }
 
 /// `main`'s withheld-reason labels for a `NoveltyUtility` credit its checks
@@ -4954,6 +4969,25 @@ impl PipelineServiceBuilder {
                     .novelty_utility_checks
                     .settlement_require_issuer_approval,
                 PIPELINE_PAYOUT_ISSUER_APPROVAL_MISSING_LABEL
+            );
+            // Zaki review 1, fix round, item 1: two more of `main`'s live
+            // settlement controls have no equivalent for a pipeline batch.
+            // `main` gates each settlement run on recorded rollout-smoke
+            // evidence, which Settle has no run to check against; and it caps
+            // an account's line per settlement run by leaving events for a
+            // later run, which the pipeline's one-batch-per-leg settlement
+            // cannot do. Each refuses an enabled payout while it is set.
+            anyhow::ensure!(
+                !self
+                    .novelty_utility_checks
+                    .settlement_require_rollout_smoke_ready,
+                PIPELINE_PAYOUT_ROLLOUT_SMOKE_NOT_READY_LABEL
+            );
+            anyhow::ensure!(
+                self.novelty_utility_checks
+                    .settlement_max_micros_per_account
+                    .is_none(),
+                PIPELINE_PAYOUT_ACCOUNT_CAP_UNSUPPORTED_LABEL
             );
         }
         let service = PipelineService {
@@ -8888,11 +8922,17 @@ impl PipelineService {
                 )
                 .await?;
             } else if let Some(label) = refused_by_control {
+                // Zaki review 1, fix round, item 2: a refusal by one of
+                // `main`'s settlement controls is configuration, not a
+                // failure of this payout. `main` writes nothing when it
+                // refuses and settles the same events once the operator fixes
+                // the configuration; here the payout stays `pending` under
+                // the control's label, and the next pass checks it again.
                 set_payout_state_on(
                     client,
                     &run.tenant_id,
                     run.run_id,
-                    TraceCreditSettlementNearStatus::Failed,
+                    TraceCreditSettlementNearStatus::Pending,
                     Some(label),
                 )
                 .await?;

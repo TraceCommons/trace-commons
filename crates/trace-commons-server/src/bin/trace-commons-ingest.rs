@@ -3865,6 +3865,8 @@ impl AppState {
             require_production_gate: novelty_utility_require_production_gate,
             settlement_allowed_policy_versions: credit_settlement_allowed_policy_versions.clone(),
             settlement_require_issuer_approval: credit_settlement_require_issuer_approval,
+            settlement_require_rollout_smoke_ready: credit_settlement_require_rollout_smoke_ready,
+            settlement_max_micros_per_account: credit_settlement_max_micros_per_account,
         };
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
