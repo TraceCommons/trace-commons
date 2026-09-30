@@ -249,6 +249,13 @@ jobs:
         run: |
           ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
 
+      # The signed app is launched here, not merely inspected. An app carrying
+      # the keychain entitlement without its provisioning profile is killed by
+      # the kernel at exec, and nothing else in this pipeline would notice: the
+      # DMG builds, signs, notarizes and staples exactly as it should.
+      - name: Verify entitlements and reach the credential store
+        run: ./scripts/ci/verify-macos-entitlements.sh macos/.build/TraceCommons.app
+
       # make-app-bundle.sh lipos the FFI dylib and passes
       # `swift build --arch arm64 --arch x86_64`, so the DMG is universal and
       # the artifact name no longer carries an arch suffix.

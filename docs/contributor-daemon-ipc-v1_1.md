@@ -461,6 +461,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
 | `near_ai_credential_cancel` | `attempt_id` (**required**) | `attempt_id`, `status` | stops this machine waiting on the browser; `near_ai_credential_unknown` if the id is not the current attempt |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
+| `near_ai_credential_migrate` | — | `migrated`, `state` | asynchronous only; macOS. Copies the sign-in an earlier build kept in the login keychain into the data-protection store under the same reference, and never deletes the legacy entry. The one read of the login keychain, so it may raise a password prompt, which is why only a contributor's action sends it. `migrated: false` means neither store held it, and the dangling reference was dropped (`state` becomes `absent`). A refused legacy read is an error and changes nothing. See "The credential state" below |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
@@ -2386,7 +2387,8 @@ state, the harness rows and the credential row:
   `harness_plan_no_config_path`;
 - `credential_title`, `credential_what`, `credential_cost`;
 - `credential_obtain`, `credential_cancel`, `credential_forget`,
-  `credential_forget_explains`;
+  `credential_forget_explains`, `credential_migrate`,
+  `credential_migrate_explains`;
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
   `credential_cancelled`, `credential_present`, `credential_unknown`,
   `credential_unreported`.
@@ -2840,6 +2842,10 @@ shell branches on:
 | `failed` | the last attempt ended without a key | `credential_failed` | obtain |
 | `cancelled` | the last attempt was stopped by the contributor | `credential_cancelled` | obtain |
 | `present` | a key is kept on this machine | `credential_present` | forget |
+| `storage_unavailable` | the store did not answer (locked, denied, platform error) | unlock and restart | forget |
+| `cleanup_required` | sign-in removed locally, but its store entries could not be deleted | unlock, then Forget again | forget |
+| `storage_unentitled` | macOS: this build is not signed to reach the store at all | restarting will not help; use a released build | **none** |
+| `migration_available` | macOS: the sign-in an earlier build kept in the login keychain has not been moved | the sign-in is still in the login keychain; move it | migrate (`near_ai_credential_migrate`), with `credential_migrate_explains` beside it |
 | absent/empty field | this daemon does not answer the question | `credential_unreported` | **none** |
 | anything else | the state could not be read | `credential_unknown` | **none** |
 
