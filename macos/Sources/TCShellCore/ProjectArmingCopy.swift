@@ -33,7 +33,8 @@ public enum ProjectArmingCopy {
     /// that only opens one way.
     public static let confirmationBody = """
         Sessions from this project will be scrubbed and contributed without asking \
-        you, including any already waiting. You won't review them first.
+        you, from now on. You won't review them first. Sessions already on this Mac \
+        keep waiting for you to pick them.
 
         No session is sent until it has been quiet for a day.
 

@@ -119,8 +119,8 @@ pub struct RoutedExchange {
     pub status: i64,
     /// Whether the proxy proved which model answered this hop: IronWire's own
     /// label for the row, read verbatim (`ironwire_proxy::proof`). It is the
-    /// field the Inference tab (K8, #1133) should consume once it lands --
-    /// nothing reads it yet -- because it is the stored verdict, not
+    /// field the Inference tab (`inference_calls`, K8) passes through
+    /// verbatim, because it is the stored verdict, not
     /// something to re-derive.
     ///
     /// - `None` means an older proxy, or a row that predates proof tracking,

@@ -118,7 +118,7 @@ impl TraceSource for OpenCodeSource {
         SOURCE_OPENCODE
     }
     fn discover(&self) -> Result<Vec<SessionRef>> {
-        let Ok(entries) = std::fs::read_dir(&self.root) else {
+        let Some(entries) = super::read_dir_for_discovery(&self.root)? else {
             return Ok(Vec::new());
         };
         let mut refs = Vec::new();

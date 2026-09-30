@@ -470,7 +470,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | — | `pending[]` of queue entries | each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
+| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -494,11 +494,14 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
 | `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
+| `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
+| `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
+| `list_kept` | — | `kept[]` of queue entries | every kept entry, in the `list_pending` shape, so a shell can show them and offer the undo |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>`, `retracted: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended` and `approved_verdict` | see "History provenance (K7)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
@@ -1225,6 +1228,84 @@ path, size, and mtime, the entry's whole-group size, and a fingerprint of
 the local configuration. Any of those changing rebuilds. The cache lives in
 the daemon process and does not survive a daemon restart.
 
+### `keep`: Keep on this Mac
+
+Open decision #4 in #1118 asked whether the review sheet's "Keep on this Mac"
+is a permanent dismissal or leaves the session pending. `keep` is the
+reversible answer, built beside `dismiss`, which is unchanged.
+
+A kept session, exactly:
+
+- **Stays on this Mac, and is not sent.** The entry moves `pending` to
+  `refused` with `reason_label: "kept-on-this-mac"`. An entry the watcher
+  approved **unattended** can be kept too: the keep revokes that approval in
+  the same step, so a keep pressed while the folder's rule re-approves the
+  card does not lose the race. A person's own approval is `cancel`led first.
+  Nothing uploads a
+  `refused` entry, and `approve` -- by `entry_id`, `project_id` or `all` --
+  acts only on `pending`, so an `approve` naming a kept entry sends nothing
+  and answers `not-pending` until the keep is undone. Any preview pin goes with the keep; an
+  undo previews afresh.
+- **Is not owed.** It is out of `list_pending`, so out of the Ask-me list and
+  out of `status.queue_depth` (the badge), and out of every group `approve`.
+- **Stays kept across passes.** Like a dismissal it is a decision about the
+  **conversation**, answered from the session's path: while it is kept the
+  watcher skips that session -- no new `pending` card, no re-read -- however
+  much it grows.
+- **Is never sent unattended**, including after its folder is armed, plainly
+  or from now: arming applies only to sessions without a ruling, and the path
+  skip sits ahead of it.
+- **Never expires.** Expiry applies to `pending` entries only, and nothing
+  compacts `refused` (only `superseded` is compacted), so a kept session is
+  not silently lost to the 14-day clock or to compaction.
+- **Is undoable**, with `undo_keep`. The entry returns to `pending` with
+  `reason_label: "returned-from-keep"`, dated now, so the expiry clock
+  restarts from the undo rather than from when it was first offered. It then
+  **waits for a person**: the watcher does not approve it on anyone's behalf,
+  in an armed folder included. A person's `approve` -- single or group --
+  sends it and clears the label; `keep` or `dismiss` rules on it again. If
+  the session grew while it was kept, the next pass re-offers the grown
+  content as a fresh `pending` entry that carries the same label, and waits
+  in the same way.
+- **Cannot clear a hold.** An entry held for a person when it was kept --
+  a witness risk review, a token-distribution review, any reason that keeps
+  a session out of unattended and group approval -- comes back from the undo
+  with that same label, not `returned-from-keep`. The label is remembered on
+  the entry while it is kept. Its preview pin is not: the undone entry is
+  reviewed afresh.
+- **Comes back only where it can be offered.** `undo_keep` is refused with
+  `queue-full` when the queue is at its cap, like any new offer, and with
+  `project-ignored` when the session's folder is now Never; either way the
+  session stays kept, and the undo can be asked for again.
+
+**Expiry after an undo, and of the backlog.** A `returned-from-keep` entry,
+and a backlog entry an arming from now leaves waiting, are ordinary waiting
+cards: they expire on the normal 14-day clock, which for the first starts at
+the undo and for the second is the clock the card already had (an unattended
+approval returned by an arming is re-dated to the arming). They are not
+exempt, on purpose. The cap counts waiting cards, so exempting a whole disk's
+history would fill the queue for good and stop new sessions being offered;
+and a card the contributor has not decided in 14 days is the case expiry
+exists for, in an Ask-me folder or not. An expired entry is not re-offered
+while its file is unchanged, as for every expired card. A contributor who
+wants a session kept past that uses `keep`, which never expires.
+
+What it is not:
+
+- **Not a dismissal.** `keep` never writes `dismissed-by-contributor`, and
+  `undo_keep` refuses a dismissed entry with `not-kept`. There is still no
+  un-dismiss.
+- **Not a withdrawal.** It acts on sessions not yet sent. A session already
+  uploaded is taken back with `withdraw`.
+- **Not kept across logout.** Logout clears the queue, keeps included, as it
+  clears dismissals.
+
+`queue_outcome_counts` counts kept sessions under `kept-on-this-mac`.
+`list_kept` returns them in the entry shape `list_pending` uses. `keep`
+cancels any scheduled preview for the entry, as `dismiss` does. Neither
+method writes an audit row, as `dismiss` does not: they are decisions about
+one session, not autonomy changes.
+
 ### `set_project_mode` and the ignore purge
 
 Setting a project to `ignore` also clears whatever it has waiting. Two
@@ -1281,6 +1362,82 @@ queue cap.
 
 A client MUST NOT present the purge as irreversible, and MUST NOT rely on
 the entries reappearing within any particular time.
+
+### Arming from now
+
+**Arming is from now by default.** `set_project_mode` with
+`mode: "auto_upload"` arms a folder for **new** sessions; what is already on
+disk waits for the contributor, who sends it by picking it in the
+past-session picker. That applies the Flow 1 grant's rule ("it arms nothing
+already on disk", `grant_automatic` below) to every folder a contributor arms,
+whatever shell arms it. Only `include_backlog: true` sends the backlog too:
+
+- **A session already on disk when the folder was armed -- queued as
+  `pending` or not yet seen -- is never approved unattended in it**, whichever
+  project it reads as later. It stays `pending`, waiting for the contributor.
+- A session that first appears **after** the arming is approved unattended,
+  as in any armed folder, through the same settle window and gate.
+- What is on disk is recorded **per source** by the next full watcher pass,
+  before any session is visited, and only for an arming made before that pass
+  listed the disk. Until a source is recorded for the arming, nothing from it
+  is approved unattended in the folder, so a harness connected or re-rooted
+  after the arming has its history recorded before it can send anything. A
+  session created between the arming and that pass waits too: fail closed.
+  A source whose listing cannot be read -- its root, or any directory under
+  it, unreadable for a reason other than not existing -- reports a failed
+  discovery rather than an empty one, so it stays unrecorded for that pass
+  and holds everything. The automatic grant's recording follows the same
+  rule.
+- **Defence in depth for content at a new path.** The record is by path, so a
+  conversation older than the arming that turns up in a new file -- a resume
+  into a fresh file, a restore, a sync -- is also held when its first event,
+  or its file's birth time, is earlier than the arming. Where the filesystem
+  reports no birth time and the session no first-event time, the path record
+  alone applies.
+- **A re-arm keeps the hold.** `auto_upload` without `include_backlog` over a
+  folder already armed from now keeps the record of the first arming: the
+  backlog still waits, and a session that arrived in between is still new.
+- Arming from now over an arming **with** the backlog returns what that
+  arming approved unattended and has not sent yet to `pending`, counted in
+  `retracted`. It was on disk, so it is backlog. An `approved` entry a
+  **person** approved is untouched, as for every mode change.
+- The send path re-checks too: an unattended approval that comes back from
+  `uploading` to `approved`, whose session must wait for a person -- on disk
+  when its folder was armed from now, or on disk at the automatic grant in a
+  folder the grant armed -- returns to `pending` rather than being sent.
+- The arming writes the `armed-auto-upload` audit row with
+  `detail: "from-now"`; an arming with the backlog writes it with no detail.
+  Labels only, as every audit row. The result's `from_now` says which it was.
+- `list_projects` reports `from_now: true` on an armed row armed from now and
+  `from_now: false` on any other armed row; the key is absent on rows that
+  are not armed, like `automatic_disclosure`.
+- Setting the folder to ask-first or Never ends the from-now record, and
+  `include_backlog: true` replaces it: the backlog is then approved
+  unattended. Recorded paths no arming can still hold are pruned.
+
+**Folders armed before this default are left as they are.** A folder armed
+with the old meaning has no from-now record, so it keeps sending what it
+did; nothing is migrated. Setting its mode again -- `auto_upload` included --
+applies the rule in force at that call.
+
+`include_backlog` is a boolean. Any other type is refused with
+`include-backlog-invalid`, and `include_backlog: true` with a mode other than
+`auto_upload` with `include-backlog-requires-auto-upload`: a backlog means
+nothing for ask-first or Never, and ignoring it would let a shell believe it
+had set a rule it had not. Both are `bad_params`, and a refusal records and
+changes nothing. The CLI's `daemon project --mode auto` arms from now and
+says the backlog waits; `--include-backlog` sends it.
+
+#### The past-session picker
+
+"Past sessions, by folder" needs no new consent. It lists `pending` entries
+grouped by `project_id` -- `list_pending` with a `project_id` returns one
+folder's -- and each session the contributor ticks is an ordinary per-entry
+`approve`, which is a person's decision and goes through the approval hold
+like any other. A folder armed from now leaves exactly those entries waiting,
+so the picker and the rule compose: the rule covers what comes next, the
+picker what is already there. Unticked sessions stay `pending`; "Keep on this
+Mac" (`keep`) takes one out of the list without deciding it for good.
 
 ### `preview_body`
 
@@ -1649,6 +1806,12 @@ Every project the daemon knows about, in two kinds:
 - **discovered** (`configured: false`, `added_at: null`) means the daemon has
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
+
+An armed row also carries `from_now`: `true` when it was armed from now,
+the `set_project_mode` default, so its backlog waits for the contributor,
+and `false` when it was armed with `include_backlog: true` or before that
+default existed. Absent on rows that are not armed. See
+"Arming from now" above.
 
 #### `is_unresolved_bucket`
 
@@ -2549,6 +2712,167 @@ A plan id is **single use** and expires after ten minutes. Refusals:
 was written. Only the **first** backup of a file is kept -- it is the only copy
 holding the file as it was before any of our edits -- so this is `null` on a
 second edit to the same file, and on a file that did not exist before.
+
+### The map and the Inference tab
+
+K8 of #1118, the client half. `tool_destinations` feeds the map and
+`inference_calls` feeds the Inference tab's routing table. Both are
+synchronous and local. They read state this daemon already holds -- the
+harness list, the private-inference state, the route `route_disclosure`
+reports, the source settings, the project policy and the local routing
+ledger -- and make no network call and read no body.
+
+Every value on the wire is a fixed label, a count, a time or a ledger row id,
+with one exception: `model` is free text (see below). No prompt, response,
+body reference, body digest, provider exchange identifier, session id, token
+or URL crosses the socket, and nothing here is logged.
+
+#### `tool_destinations`
+
+```json
+{
+  "private_ai": "running",
+  "sessions_route": "witness",
+  "folders": { "armed": 1, "ask_first": 3, "ignored": 0 },
+  "tools": [
+    {
+      "tool": "claude-code",
+      "name": "Claude Code",
+      "sessions": { "watch": "watched", "to": ["commons", "witness"] },
+      "model_calls": { "to": "near_ai", "basis": "observed" }
+    }
+  ]
+}
+```
+
+No parameters. One row per session source this build has (`claude-code`,
+`codex`, `gemini-cli`, `cline`, `opencode`).
+
+`sessions.watch` is `watched` when an adapter is actually built for the tool
+(an undeclared Claude Code or Codex still falls back to its conventional
+folder, and reads `watched`), `off` when the contributor said they do not use
+it, and `not_watched` otherwise. `sessions.to` is empty unless the tool is
+watched, and then it is what `sessions_route` sends: `["commons", "witness"]`
+on `witness`, `["commons"]` on `local`, and nothing on `witness_refusing`,
+`not_enrolled` or `settings_unreadable`. `sessions_route` is the same value
+`route_disclosure.route` carries, so the map cannot draw a witness disclosure
+does not name; the witness a connected inference offer installs
+(`inference_connection_install`) reaches the map through it. `folders` counts
+the per-repository rules (`auto_upload`, `notify_only`, `ignore`). They are
+per repository across tools, so they say *when* a session goes, not *where*.
+
+`model_calls.to` and `basis`:
+
+| `to` | `basis` | when |
+|---|---|---|
+| `near_ai` | `observed` | connected to this daemon's port, `private_ai` is `running`, and every labelled call in the window in the tool's protocol family was routed |
+| `near_ai` | `configured` | as above, but the window has no labelled call in the family to confirm it. **A shell must not draw this as confirmed** |
+| vendor | `answered_elsewhere` | connected, and the proxy answers with the tool's own credentials (`running_answered_elsewhere`) |
+| vendor | `tool_default` | the tool's config names no local proxy |
+| `unknown` | `unknown` | connected while any labelled call in the family went `outside`, or while the proxy is in any other state; or wired to a local proxy that is not this daemon's |
+
+`running` says NEAR AI reports a credential, not that a given family is
+answered there -- the proxy can hold other backends -- which is why it is
+confirmed against the ledger's own labels rather than trusted on its own.
+
+The vendor is a fixed label: `anthropic` (Claude Code), `openai` (Codex),
+`google` (Gemini CLI), and `unknown` for Cline and OpenCode, which talk to
+many providers. It is the tool's **default**, not a reading of its config: a
+tool whose own config names another gateway is still drawn at its default.
+Which tool has a fixed default is now read from K2's `source_default_family`
+and confirmed against `source::vendor_label` (#1130), rather than kept in a
+separate local table. The word on the wire stays the family's own lowercase
+spelling above, not `vendor_label`'s returned word (`Anthropic`, `OpenAI`,
+`Google`), which is capitalized for the "answers at" display and is a
+different surface from this one. `private_ai` is the
+`private_inference_state.state` label `status` carries.
+
+#### `inference_calls`
+
+```json
+{
+  "readable": true,
+  "window_hours": 24,
+  "calls": [
+    {
+      "id": 412,
+      "at": "2026-09-28T18:04:11+00:00",
+      "tool": "codex",
+      "family": "openai",
+      "model": "Qwen/Qwen3.6-27B-FP8",
+      "route": "routed",
+      "cost": { "known": true, "priced_micros": 12300 },
+      "proof": "gateway_only"
+    }
+  ],
+  "next_cursor": "1790000000000:411"
+}
+```
+
+Newest first. `limit` is 1 to 200 (default 50); out of range or not an
+integer is `bad_params` / `limit-invalid`, refused rather than capped so a
+caller paging by the size it asked for never skips rows. `cursor` is the
+previous page's `next_cursor`, passed back unread; anything else is
+`bad_params` / `cursor-invalid`. `next_cursor` is `null` on the last page.
+The order is `(started_at, id)`, which is total; rows from a proxy too old to
+expose an `id` are not listed.
+
+`readable: false` means no ledger has answered, which is not evidence of no
+calls and must not be drawn as an empty table. The window is the ledger's
+own 24 hours.
+
+- `tool` is named only when exactly one tool connected **now** speaks the
+  call's protocol family (the rule `harness_list` applies to `answering`);
+  otherwise `unknown`. It is approximate: a row from before a connection
+  changed can carry the wrong name. `family` is `anthropic`, `openai` or
+  `unknown`.
+- `model` is **free text, not a fixed label**: the served model as recorded,
+  else the requested one, passed through when it is at most 128 characters of
+  `[A-Za-z0-9._:/@-]` and names no URL; else `unknown`. It comes from a proxy
+  the contributor can patch.
+- `cost.priced_micros` is the ledger's price in millionths of a dollar. It is
+  **priced, not billed** -- work a plan already paid for is priced at the
+  meter -- and must not be drawn as money spent. `known: false` is not zero.
+
+`proof` is IronWire's own label for the row (`RoutedExchange.proof`),
+passed through unchanged -- the stored verdict of IronWire's receipt check,
+never re-derived here -- or `unrecorded`:
+
+| `proof` | Means |
+|---|---|
+| `verified` | proof: a model receipt over this call's digests, signed by a key a verified, measurement-pinned TDX quote binds |
+| `gateway_only` | a valid receipt, but the gateway's; it names the relay, not the model. Not proof |
+| `unattested` | a valid model receipt whose key nothing tied to a verified quote. Not proof |
+| `pending` | a NEAR AI call not checked yet, or receipt checks are off |
+| `unavailable` | no receipt to be had or checked |
+| `failed` | a receipt that does not check out -- possibly tampering |
+| `outside` | not a NEAR AI backend: an outside call, never checked |
+| `unrecorded` | IronWire recorded no label: an older proxy, a row that predates proof tracking, or a label this build does not know. Not `outside`, not `pending` |
+
+Only `verified` is proof. The labels are deliberately not collapsed: a shell
+that wants fewer buckets maps them itself, and must keep `failed` distinct.
+
+`route` is taken from that label and nothing else: `outside` for `outside`,
+`routed` (through NEAR AI) for any other label, and `unknown` for
+`unrecorded`. It is never taken from the backend id, which is whatever the
+contributor named it.
+
+#### What the ledger does not record (Z4)
+
+The table the design draws is work x model x calls x cost with a proof per
+routed answer. These are not in the local ledger, and nothing here invents
+them:
+
+- **kind of work** -- no field records it; there is no classifier;
+- **tool** -- the ledger records a facade, so a call is attributable only
+  when one connected tool speaks that family;
+- **billed cost** -- the ledger prices every call; only the day's metered
+  total (`harness_list.spend`) is billed spend;
+- **outside calls that bypass the proxy** -- a tool not connected to Private
+  AI never reaches the ledger, so it is not in this list at all;
+  interception (Stop / Send anyway) needs the proxy in the path;
+- **the smart router's choice** -- nothing records which model a router
+  picked or why.
 
 ### `set_settings`
 
@@ -4460,6 +4784,10 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 - `expired` means the entry aged out after the TTL (14 days) without a decision. The clock
   is **suspended** while the daemon is unhealthy, so an outage does not
   silently discard traces.
+- A session kept on this Mac is `refused` with `reason_label:
+  "kept-on-this-mac"`. It never expires, and `undo_keep` returns it to
+  `pending`; see "`keep`: Keep on this Mac" above. It is the only `refused`
+  entry a contributor can undo.
 - `superseded` means the session changed after it was offered. The daemon re-hashes
   before uploading; on a mismatch it sends nothing and creates a fresh
   `pending` entry for the new content. An approval covers content, not a

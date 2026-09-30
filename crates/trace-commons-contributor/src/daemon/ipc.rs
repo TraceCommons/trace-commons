@@ -340,9 +340,14 @@ pub const METHODS: &[&str] = &[
     "inference_connection_select",
     "inference_connection_install",
     "inference_connection_disconnect",
+    "inference_calls",
+    "tool_destinations",
     "list_audit",
     "list_history",
     "list_pending",
+    "list_kept",
+    "keep",
+    "undo_keep",
     "list_projects",
     "project_automatic_copy",
     "pause",
@@ -1222,6 +1227,31 @@ impl DaemonShared {
             "state": state.label_for(destination),
             "port": state.port(),
         })
+    }
+
+    /// The label `private_inference_state.state` carries right now.
+    ///
+    /// For `inference_map`, which must draw the same answer `status` gives.
+    pub(crate) fn private_inference_label(&self) -> &'static str {
+        let state = self
+            .private_inference_state
+            .lock()
+            .expect("private inference state lock")
+            .clone();
+        let destination = self
+            .routing_ledger()
+            .and_then(|ledger| ledger.nearai_authenticated());
+        state.label_for(destination)
+    }
+
+    /// Hold `ledger` as the routing ledger, for tests.
+    #[cfg(test)]
+    pub(crate) fn install_routing_ledger_for_test(
+        &self,
+        ledger: crate::routing::ironwire::IronWireLedger,
+    ) {
+        let mut held = self.routing.write().expect("routing lock");
+        held.ledger = Some(Arc::new(ledger));
     }
 
     /// The port a tool's config would be pointed at, or `None`.
@@ -2392,7 +2422,12 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "status" => Response::ok(req.id, shared.status_value()),
         "certificate_detail" => handle_certificate_detail(shared, req),
         "route_disclosure" => handle_route_disclosure(shared, req),
+        "tool_destinations" => super::inference_map::handle_destinations(shared, req),
+        "inference_calls" => super::inference_map::handle_calls(shared, req),
         "list_pending" => handle_list_pending(shared, req),
+        "list_kept" => handle_list_kept(shared, req),
+        "keep" => handle_keep(shared, req),
+        "undo_keep" => handle_undo_keep(shared, req),
         "list_projects" => handle_list_projects(shared, req),
         "project_automatic_copy" => handle_project_automatic_copy(shared, req),
         // The one project worth offering to arm right now, or nothing.
@@ -2782,13 +2817,106 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // config file, and holding the queue across that would put a file read
     // in front of every other queue caller.
     let admission_evidence = shared.admission_evidence();
+    // K5: an optional `project_id`, for Customize's past-session picker,
+    // which lists one folder's waiting sessions at a time. Matched by the id
+    // `entry_value` publishes, and refused rather than answered with an empty
+    // list when the daemon does not know the project, so a stale id cannot
+    // read as "nothing waiting". Absent is every project, as before.
+    let project_filter = match req.params.get("project_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) => {
+            let policy = shared.policy.lock().expect("policy lock");
+            let queue = shared.queue.lock().expect("queue lock");
+            let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+            match project_key_for_id(id, &known) {
+                Some(key) => Some(key),
+                None => {
+                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+                }
+            }
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid"),
+    };
     let queue = shared.queue.lock().expect("queue lock");
     let entries: Vec<serde_json::Value> = queue
         .pending()
         .iter()
+        .filter(|e| project_filter.as_deref().is_none_or(|k| e.project_key == k))
         .map(|e| entry_value(e, admission_evidence))
         .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
+}
+
+/// K5: every session kept on this Mac, in the `list_pending` entry shape,
+/// so a shell can show them and offer the undo. See `queue::REASON_KEPT`.
+fn handle_list_kept(shared: &DaemonShared, req: &Request) -> Response {
+    let admission_evidence = shared.admission_evidence();
+    let queue = shared.queue.lock().expect("queue lock");
+    let entries: Vec<serde_json::Value> = queue
+        .kept()
+        .iter()
+        .map(|e| entry_value(e, admission_evidence))
+        .collect();
+    Response::ok(req.id, serde_json::json!({ "kept": entries }))
+}
+
+/// K5: "Keep on this Mac" (open decision #4 in #1118), the reversible
+/// sibling of `dismiss`. The entry must be `pending`; see `Queue::keep` and
+/// `queue::REASON_KEPT` for exactly what a kept session is.
+fn handle_keep(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match entry_id_param(req) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    // A kept entry is never previewed while kept, as for `dismiss`.
+    shared.previews.cancel(id);
+    let mut queue = shared.queue.lock().expect("queue lock");
+    if let Err(e) = queue.keep(id) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if queue.save(&shared.store).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+    }
+    // The pin went with the keep, so the stored envelope goes too.
+    let _ = super::approved_envelope::sweep(&shared.store, &queue.pinned_entry_ids());
+    drop(queue);
+    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, serde_json::json!({ "kept": true }))
+}
+
+/// K5: undo a keep. The entry returns to `pending`, waiting for a person.
+fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match entry_id_param(req) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let max_entries = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .max_queue_entries;
+    // Lock order is policy before queue, as everywhere else.
+    let policy = shared.policy.lock().expect("policy lock");
+    let mut queue = shared.queue.lock().expect("queue lock");
+    // A session in a folder now set to Never is not brought back as a
+    // waiting card: the folder rule says not to offer it. The keep stays,
+    // and the undo can be asked for again once the rule changes.
+    if queue
+        .get(id)
+        .is_some_and(|e| e.is_kept() && policy.resolve(&e.project_key) == ProjectMode::Ignore)
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, "project-ignored");
+    }
+    drop(policy);
+    if let Err(e) = queue.undo_keep(id, Utc::now(), max_entries) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if queue.save(&shared.store).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+    }
+    drop(queue);
+    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, serde_json::json!({ "kept": false }))
 }
 
 // Every project the daemon knows about -- configured *and* merely
@@ -2970,6 +3098,10 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                         super::automatic_gate::Disclosure::PatternsOnly => "patterns_only",
                     },
                 );
+                // K5: whether the arming left the backlog waiting
+                // (`set_project_mode` with `from_now: true`). Armed rows
+                // only, like the disclosure.
+                row["from_now"] = serde_json::Value::Bool(policy.is_armed_from_now(&key));
             }
             row
         })
@@ -3325,6 +3457,29 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         Some(Ok(m)) => m,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
     };
+    // K5: arming is **from now** by default. `auto_upload` arms the project
+    // for sessions that appear from here on, and what is already on disk
+    // waits for the contributor -- the spec's rule that automatic
+    // contribution arms nothing already on disk, applied to every shell at
+    // once. See `policy::ArmedFromNow`. Only an explicit
+    // `include_backlog: true` sends the backlog too, which is what
+    // `auto_upload` meant before. Only a boolean is accepted, and only with
+    // `auto_upload`: a backlog means nothing for ask-first or Never, and
+    // silently ignoring it there would let a shell believe it had set a rule
+    // it had not.
+    let include_backlog = match req.params.get("include_backlog") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "include-backlog-invalid"),
+    };
+    if include_backlog && mode != ProjectMode::AutoUpload {
+        return Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            "include-backlog-requires-auto-upload",
+        );
+    }
+    let from_now = mode == ProjectMode::AutoUpload && !include_backlog;
     // A `label` param is accepted on the wire for compatibility with
     // older clients and then IGNORED. It used to be stored verbatim
     // and echoed back by `list_projects` and written into
@@ -3424,7 +3579,10 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
                 at: Utc::now(),
                 action: "armed-auto-upload".to_string(),
                 project_label: Some(audit_label),
-                detail: None,
+                // The same action either way, so every shell's audit
+                // sentence still reads right; the detail label says the
+                // backlog was not included.
+                detail: from_now.then(|| "from-now".to_string()),
             },
         ) {
             return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
@@ -3432,9 +3590,26 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         policy = shared.policy.lock().expect("policy lock");
     }
 
-    if let Err(e) = policy.set_mode(&key, mode, Utc::now()) {
+    let now = Utc::now();
+    // A re-arm from now over an arming from now keeps the record it had:
+    // the hold covers what was on disk at the FIRST arming, and a shell
+    // re-sending the same setting must neither release that backlog nor
+    // start holding sessions that arrived since.
+    let prior_arming = policy.armed_from_now.get(&key).cloned();
+    let rearm_from_now = from_now && prior_arming.is_some();
+    if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
+    // Under the same policy lock as the mode, so no pass can see the project
+    // armed without the arming's hold.
+    if from_now {
+        match prior_arming {
+            Some(prior) => policy.restore_arming_from_now(&key, prior),
+            None => policy.arm_from_now(&key, now),
+        }
+    }
+    // Whatever this change left no arming able to hold.
+    policy.prune_arming_record();
     if let Some(claim) = arming_claim {
         policy.record_arming_claim(&key, claim);
     }
@@ -3510,6 +3685,15 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             ProjectMode::NotifyOnly => {
                 queue.return_unattended_to_waiting_for_project(&key, Utc::now())
             }
+            // Arming from now over an earlier plain arming: whatever that
+            // arming approved unattended and has not sent yet was on disk
+            // now, so it is backlog, and it goes back to waiting for the
+            // contributor exactly as turning automatic off would put it. Not
+            // over an arming from now: what that approved arrived after it,
+            // and is not backlog.
+            ProjectMode::AutoUpload if from_now && !rearm_from_now => {
+                queue.return_unattended_to_waiting_for_project(&key, Utc::now())
+            }
             ProjectMode::AutoUpload => 0,
         };
         let restored = if mode == ProjectMode::Ignore {
@@ -3532,7 +3716,12 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     shared.publish_if_decisions_owed_changed(decisions_owed_before);
     Response::ok(
         req.id,
-        serde_json::json!({ "ok": true, "purged": purged, "retracted": retracted }),
+        serde_json::json!({
+            "ok": true,
+            "purged": purged,
+            "retracted": retracted,
+            "from_now": from_now,
+        }),
     )
 }
 
@@ -13255,7 +13444,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 50, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 55, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
