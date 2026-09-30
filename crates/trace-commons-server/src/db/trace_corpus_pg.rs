@@ -1342,7 +1342,32 @@ impl PgBackend {
     }
 }
 
-async fn insert_credit_settlement_batch_on_tx(
+/// `list_trace_credit_holds` inside the caller's tenant-scoped transaction
+/// (the caller has already set `trace_commons.trace_tenant_id`), so a hold
+/// check can sit in the same transaction as the ledger write it guards.
+pub(crate) async fn list_trace_credit_holds_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> {
+    let rows = tx
+        .query(
+            &format!(
+                "SELECT {TRACE_CREDIT_HOLD_COLUMNS}
+                 FROM trace_credit_holds
+                 WHERE tenant_id = $1
+                 ORDER BY created_at ASC, hold_id ASC"
+            ),
+            &[&tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    rows.iter().map(row_to_credit_hold).collect()
+}
+
+/// The settlement-batch upsert of `upsert_trace_credit_settlement_batch`,
+/// inside the caller's tenant-scoped transaction (the caller has already set
+/// `trace_commons.trace_tenant_id` and ensured the tenant row).
+pub(crate) async fn insert_credit_settlement_batch_on_tx(
     tx: &Transaction<'_>,
     batch: &TraceCreditSettlementBatchWrite,
 ) -> Result<(), DatabaseError> {
@@ -5022,19 +5047,7 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let rows = tx
-            .query(
-                &format!(
-                    "SELECT {TRACE_CREDIT_HOLD_COLUMNS}
-                     FROM trace_credit_holds
-                     WHERE tenant_id = $1
-                     ORDER BY created_at ASC, hold_id ASC"
-                ),
-                &[&tenant_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        let records = rows.iter().map(row_to_credit_hold).collect();
+        let records = list_trace_credit_holds_on_tx(&tx, tenant_id).await;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
     }

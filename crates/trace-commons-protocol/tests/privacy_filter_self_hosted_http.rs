@@ -144,6 +144,31 @@ async fn a_server_error_fails_closed_and_is_transient() {
     );
 }
 
+/// 429 and 408 are the two 4xx statuses that say "not now" rather than
+/// "not this": rate limiting and a request timeout are about the classifier's
+/// load, not the trace, so they are typed transient like a 5xx.
+#[tokio::test]
+async fn rate_limiting_and_request_timeout_are_transient() {
+    for status in [429, 408] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/privacy/classify"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+
+        let err = adapter(format!("{}/v1", server.uri()))
+            .redact_text("contact bob@example.com")
+            .await
+            .expect_err("a refused classification must not be reported as a clean field");
+
+        assert!(
+            err.is_transient(),
+            "{status} is the classifier's load, not the trace: {err}"
+        );
+    }
+}
+
 /// A 4xx is our misconfiguration, not a passing outage, so it must NOT be
 /// typed transient -- retrying it forever would hide the bug.
 #[tokio::test]

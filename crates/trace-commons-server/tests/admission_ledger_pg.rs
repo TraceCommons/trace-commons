@@ -14,6 +14,24 @@ use trace_commons_server::{
 };
 use uuid::Uuid;
 
+/// The fixed-period bucket the admission ledger would use now, on the
+/// database clock and by the same epoch arithmetic
+/// (`account_policy_period`), and the milliseconds until the next one.
+async fn fixed_bucket_ms_until_next(client: &tokio_postgres::Client, seconds: i64) -> (i64, i64) {
+    let row = client
+        .query_one(
+            "WITH now AS (SELECT extract(epoch FROM clock_timestamp()) AS epoch)
+             SELECT floor(epoch / ($1::bigint)::numeric)::bigint,
+                    ceil(((floor(epoch / ($1::bigint)::numeric) + 1) * $1::bigint - epoch)
+                         * 1000)::bigint
+               FROM now",
+            &[&seconds],
+        )
+        .await
+        .unwrap();
+    (row.get(0), row.get(1))
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
 async fn account_admission_atomicity_replay_and_revocation() {
@@ -552,31 +570,48 @@ async fn account_admission_atomicity_replay_and_revocation() {
         r#"{"version":"admission-test-fixed","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"fixed","seconds":2},"growth_rule":"none"}"#,
         &["admission-test-fixed"],
     ).unwrap();
-    let mut fixed = request(&principal);
-    fixed.policy = fixed_policy.clone();
-    assert_eq!(
-        restarted
+    // A fixed period is an epoch-aligned bucket on the database clock, so the
+    // two reservations and the status read below must all land in one bucket.
+    // Start each attempt at a fresh boundary, and retry the attempt if the
+    // bucket still moved under it, rather than trust the runner to finish in
+    // under two seconds.
+    let mut attempts = 0;
+    let (next, status) = loop {
+        attempts += 1;
+        assert!(
+            attempts <= 5,
+            "five attempts each crossed a fixed-period boundary"
+        );
+        let wait = fixed_bucket_ms_until_next(&admin, 2).await.1;
+        tokio::time::sleep(std::time::Duration::from_millis((wait + 50) as u64)).await;
+        let (bucket_before, _) = fixed_bucket_ms_until_next(&admin, 2).await;
+        let mut fixed = request(&principal);
+        fixed.policy = fixed_policy.clone();
+        let first = restarted
             .reserve_account_admission(&fixed)
             .await
             .unwrap()
-            .decision,
-        D::Reserved
-    );
-    let mut next = request(&other);
-    next.policy = fixed_policy.clone();
-    assert_eq!(
-        restarted
+            .decision;
+        let mut next = request(&other);
+        next.policy = fixed_policy.clone();
+        let second = restarted
             .reserve_account_admission(&next)
             .await
             .unwrap()
-            .decision,
-        D::Exhausted
-    );
-    let status = restarted
-        .account_admission_status(&trust_account, &principal, &fixed_policy)
-        .await
-        .unwrap()
-        .unwrap();
+            .decision;
+        let status = restarted
+            .account_admission_status(&trust_account, &principal, &fixed_policy)
+            .await
+            .unwrap()
+            .unwrap();
+        let (bucket_after, _) = fixed_bucket_ms_until_next(&admin, 2).await;
+        if bucket_before != bucket_after {
+            continue;
+        }
+        assert_eq!(first, D::Reserved);
+        assert_eq!(second, D::Exhausted);
+        break (next, status);
+    };
     assert!(!status.ready);
     let delay = status
         .retry_after_seconds

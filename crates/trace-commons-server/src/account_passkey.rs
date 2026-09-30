@@ -70,12 +70,43 @@ pub const CEREMONY_TTL: Duration = Duration::from_secs(3 * 60);
 /// builder rejects) surfaces as an `Err`, so a misconfigured relying party fails
 /// at startup rather than producing broken ceremonies. Uses the webauthn-rs 0.5
 /// builder: `WebauthnBuilder::new(rp_id, &rp_origin)?.rp_name(rp_name).build()`.
+///
+/// `rp_origin` is a comma-separated list (Z2 S2): the first entry is the
+/// primary origin handed to `WebauthnBuilder::new`, and each further entry is
+/// added with `append_allowed_origin`. A single value parses exactly as before.
+/// Blank entries are skipped. Every entry must parse as a URL whose host is
+/// the rp_id or a subdomain of it; webauthn-rs checks that only for the
+/// primary, so it is checked here for the rest, and a stray origin fails
+/// startup. `allow_subdomains` is deliberately NOT set: only listed origins
+/// are accepted, never a future subdomain someone else might serve.
 pub fn build_webauthn(cfg: &WebauthnConfig) -> anyhow::Result<Webauthn> {
-    let rp_origin = Url::parse(&cfg.rp_origin)?;
-    let webauthn = WebauthnBuilder::new(&cfg.rp_id, &rp_origin)?
-        .rp_name(&cfg.rp_name)
-        .build()?;
-    Ok(webauthn)
+    let origins = parse_rp_origins(&cfg.rp_id, &cfg.rp_origin)?;
+    let (primary, rest) = origins
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("webauthn relying-party origin list is empty"))?;
+    let mut builder = WebauthnBuilder::new(&cfg.rp_id, primary)?.rp_name(&cfg.rp_name);
+    for origin in rest {
+        builder = builder.append_allowed_origin(origin);
+    }
+    Ok(builder.build()?)
+}
+
+/// Split and validate the `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` list. The error
+/// names no value (an origin may be deployment-sensitive), only what is wrong.
+fn parse_rp_origins(rp_id: &str, list: &str) -> anyhow::Result<Vec<Url>> {
+    let mut origins = Vec::new();
+    for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let origin = Url::parse(entry)
+            .map_err(|_| anyhow::anyhow!("webauthn relying-party origin is not a URL"))?;
+        let within_rp = origin
+            .domain()
+            .is_some_and(|host| host == rp_id || host.ends_with(&format!(".{rp_id}")));
+        if !within_rp {
+            anyhow::bail!("webauthn relying-party origin is outside the rp_id");
+        }
+        origins.push(origin);
+    }
+    Ok(origins)
 }
 
 /// In-flight WebAuthn ceremony state held between challenge issuance and
@@ -93,6 +124,11 @@ pub enum CeremonyState {
     /// Pending discoverable authentication (consumed by
     /// `finish_discoverable_authentication`).
     DiscoverableAuthentication(DiscoverableAuthentication),
+    /// Pending browser discoverable sign-in for the step-up page (Z2 S7): the
+    /// same ceremony as [`Self::DiscoverableAuthentication`], started with
+    /// `purpose=step_up`, so its `finish` mints a short-lived session. The
+    /// purpose is bound here at `start` and cannot be chosen at `finish`.
+    StepUpDiscoverable(DiscoverableAuthentication),
     /// Pending NEAR sign-in (Slice 3a): the server-issued NEP-413 challenge
     /// nonce and the `recipient` the signed message must bind to. Issued by the
     /// NEAR login-begin handler and consumed by login-finish in later Slice 3a
@@ -103,6 +139,30 @@ pub enum CeremonyState {
         nonce: [u8; 32],
         /// NEP-413 `recipient` the signed message must bind to.
         recipient: String,
+    },
+    /// Pending native passkey CREATION (Z2 S2): an unauthenticated
+    /// registration for an account that does not exist yet. The account id is
+    /// drawn at `start` (it is the WebAuthn user handle and cannot change), but
+    /// nothing is written until `finish` verifies the attestation. The label
+    /// is fixed at `start`; `finish` does not accept one.
+    ///
+    /// The native variants are the body-bound siblings of the cookie-bound
+    /// browser ones. Each handler accepts exactly its own variant, so a
+    /// ceremony started on one surface can never be finished on the other.
+    NativeCreate {
+        reg_state: PasskeyRegistration,
+        account_id: uuid::Uuid,
+        label: Option<String>,
+    },
+    /// Pending native discoverable sign-in (Z2 S2).
+    NativeDiscoverable(DiscoverableAuthentication),
+    /// Pending native passkey registration on an already signed-in account
+    /// (Z2 S2), bound to the account that started it: `finish` refuses a
+    /// session for any other `(tenant, account)`.
+    NativeRegistration {
+        reg_state: PasskeyRegistration,
+        tenant_id: String,
+        account_id: uuid::Uuid,
     },
 }
 
@@ -191,6 +251,92 @@ mod tests {
             rp_name: "TraceCommons".to_string(),
         };
         assert!(build_webauthn(&cfg).is_ok());
+    }
+
+    fn origin_list_config(rp_origin: &str) -> WebauthnConfig {
+        WebauthnConfig {
+            rp_id: "tracecommons.ai".to_string(),
+            rp_origin: rp_origin.to_string(),
+            rp_name: "TraceCommons".to_string(),
+        }
+    }
+
+    /// Register a software passkey whose client data claims `origin`, and
+    /// report whether the relying party accepted it.
+    fn registration_accepted_from(webauthn: &Webauthn, origin: &str) -> bool {
+        let (challenge, reg_state) = webauthn
+            .start_passkey_registration(uuid::Uuid::new_v4(), "t", "t", None)
+            .expect("start");
+        let mut authenticator = webauthn_authenticator_rs::WebauthnAuthenticator::new(
+            webauthn_authenticator_rs::softpasskey::SoftPasskey::new(true),
+        );
+        let credential = authenticator
+            .do_registration(Url::parse(origin).expect("origin"), challenge)
+            .expect("software authenticator registers");
+        webauthn
+            .finish_passkey_registration(&credential, &reg_state)
+            .is_ok()
+    }
+
+    #[test]
+    fn a_single_origin_is_still_accepted_alone() {
+        let webauthn = build_webauthn(&origin_list_config("https://tracecommons.ai")).expect("rp");
+        assert!(registration_accepted_from(
+            &webauthn,
+            "https://tracecommons.ai"
+        ));
+        assert!(!registration_accepted_from(
+            &webauthn,
+            "https://ingest.tracecommons.ai"
+        ));
+    }
+
+    #[test]
+    fn every_listed_origin_is_accepted_and_nothing_else() {
+        let webauthn = build_webauthn(&origin_list_config(
+            "https://tracecommons.ai, https://ingest.tracecommons.ai",
+        ))
+        .expect("rp");
+        assert!(registration_accepted_from(
+            &webauthn,
+            "https://tracecommons.ai"
+        ));
+        assert!(registration_accepted_from(
+            &webauthn,
+            "https://ingest.tracecommons.ai"
+        ));
+        // Subdomains are not implied: only listed origins pass.
+        assert!(!registration_accepted_from(
+            &webauthn,
+            "https://other.tracecommons.ai"
+        ));
+    }
+
+    #[test]
+    fn an_origin_outside_the_rp_id_fails_startup() {
+        for rp_origin in [
+            "https://tracecommons.ai,https://evil.example",
+            "https://evil.example,https://tracecommons.ai",
+            "https://tracecommons.ai,not a url",
+            " , ",
+        ] {
+            assert!(
+                build_webauthn(&origin_list_config(rp_origin)).is_err(),
+                "{rp_origin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blank_entries_in_the_origin_list_are_skipped() {
+        let webauthn = build_webauthn(&origin_list_config(
+            "https://tracecommons.ai,,https://ingest.tracecommons.ai,",
+        ))
+        .expect("rp");
+        assert!(registration_accepted_from(
+            &webauthn,
+            "https://ingest.tracecommons.ai"
+        ));
     }
 
     #[test]

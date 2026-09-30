@@ -138,6 +138,12 @@ pub struct QueueEntry {
     pub reason_label: Option<String>,
     pub attempts: u32,
     pub retry_after: Option<DateTime<Utc>>,
+    /// Transient classifier failures since this entry was last approved.
+    /// `attempts` counts every try for the entry's whole life; this counts
+    /// only the run the daemon caps (`MAX_TRANSIENT_REDACTION_FAILURES`), and
+    /// an approval (a person's, or a standing opt-in's) starts it again.
+    #[serde(default)]
+    pub transient_redaction_failures: u32,
     pub submission_id: Option<Uuid>,
     /// The consent scopes in force at the moment this entry was approved.
     ///
@@ -619,6 +625,9 @@ pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-
 pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED,
     crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
+    // Re-approving it unattended would restart the retry budget the cap
+    // just spent, and the classifier would get the session every hour again.
+    crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
 ];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
@@ -634,6 +643,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         reason_label: None,
         attempts: 0,
         retry_after: None,
+        transient_redaction_failures: 0,
         submission_id: None,
         // Provenance carries over; the approval and every term it was given
         // under -- scopes, envelope-determining inputs, and the artifact
@@ -1298,6 +1308,9 @@ impl Queue {
         e.state = QueueState::Approved;
         e.reason_label = None;
         e.retry_after = None;
+        // A fresh approval gets a whole retry budget, or a session a person
+        // re-approved after the cap would be held again after one try.
+        e.transient_redaction_failures = 0;
         // The latest approver wins. An entry can be auto-approved, revoked
         // back to `Pending` by a scope change or an Undo, and then approved
         // by hand; without this reset it would still be marked unattended
@@ -1596,6 +1609,18 @@ impl Queue {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Count one more transient classifier failure against the entry's
+    /// current approval, returning the new count (0 for an unknown id).
+    pub fn record_transient_redaction_failure(&mut self, entry_id: Uuid) -> u32 {
+        match self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            Some(e) => {
+                e.transient_redaction_failures = e.transient_redaction_failures.saturating_add(1);
+                e.transient_redaction_failures
+            }
+            None => 0,
         }
     }
 

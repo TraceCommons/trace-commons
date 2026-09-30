@@ -20,13 +20,13 @@ use trace_commons_server::legacy_invite_link::{
 
 pub(super) const NOT_ENABLED: &str = "legacy_invite_link_not_enabled";
 
-pub(super) fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
+pub(super) fn routes() -> crate::account_routes::AccountRoutes {
+    crate::account_routes::AccountRoutes::new()
+        .post(
             "/v1/account/invites/legacy-link/challenge",
-            post(challenge_handler),
+            challenge_handler,
         )
-        .route("/v1/account/invites/legacy-link", post(link_handler))
+        .post("/v1/account/invites/legacy-link", link_handler)
 }
 
 fn no_store() -> HeaderMap {

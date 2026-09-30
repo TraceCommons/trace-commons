@@ -225,7 +225,55 @@ pub struct PreparedBundleArtifact {
     pub artifact: EncryptedTraceArtifact,
 }
 
+/// A serialized-JSON artifact encrypted but not yet written
+/// (`TraceArtifactStore::prepare_serialized_json`). Its receipt names the
+/// exact object `publish_serialized_json` writes -- the object key and the
+/// ciphertext hash -- so a caller can record both durably before any
+/// content is stored, and delete the object by that record if the caller
+/// fails after the write. Only a store builds one, so the receipt always
+/// matches the artifact it carries. It has no public constructor on
+/// purpose: a store outside this module implements
+/// `prepare_serialized_json` and `publish_serialized_json` by delegating to
+/// a built-in store.
+#[derive(Clone)]
+pub struct PreparedSerializedJsonArtifact {
+    receipt: EncryptedTraceArtifactReceipt,
+    artifact: EncryptedTraceArtifact,
+}
+
+impl PreparedSerializedJsonArtifact {
+    /// The receipt `publish_serialized_json` returns for this artifact.
+    pub fn receipt(&self) -> &EncryptedTraceArtifactReceipt {
+        &self.receipt
+    }
+}
+
 pub trait TraceArtifactStore: Send + Sync {
+    /// Encrypts `serialized_json` for `object_id` without writing it: the
+    /// first half of `put_serialized_json`. A store that cannot split its
+    /// write refuses with `serialized_json_prepare_unavailable` (the
+    /// default), so a caller that must record an object before writing it
+    /// fails closed instead of writing an untracked one.
+    fn prepare_serialized_json(
+        &self,
+        _tenant_storage_ref: &str,
+        _artifact_kind: TraceArtifactKind,
+        _object_id: &str,
+        _serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        anyhow::bail!("serialized_json_prepare_unavailable")
+    }
+
+    /// Writes a prepared artifact: the second half of `put_serialized_json`.
+    /// Returns the prepared receipt. The default refuses with
+    /// `serialized_json_publish_unavailable`.
+    fn publish_serialized_json(
+        &self,
+        _prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        anyhow::bail!("serialized_json_publish_unavailable")
+    }
+
     /// Binary bundle support is explicit; legacy stores cannot claim it.
     fn supports_bundle_bytes(&self) -> bool {
         false
@@ -934,6 +982,49 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
         })
     }
 
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        serde_json::from_slice::<serde_json::Value>(serialized_json)
+            .context("failed to parse serialized trace artifact")?;
+        let scope = legacy_trace_artifact_scope(tenant_storage_ref);
+        let prepared =
+            self.prepare_scoped_bytes(&scope, artifact_kind, object_id, serialized_json)?;
+        Ok(PreparedSerializedJsonArtifact {
+            receipt: EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: prepared.object_ref.tenant_storage_ref,
+                artifact_kind: prepared.object_ref.artifact_kind,
+                object_key: prepared.object_ref.object_key,
+                ciphertext_sha256: prepared.object_ref.ciphertext_sha256,
+                encrypted_at: prepared.artifact.receipt.encrypted_at,
+            },
+            artifact: prepared.artifact,
+        })
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let receipt = &prepared.receipt;
+        let scope = legacy_trace_artifact_scope(&receipt.tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_receipt(&self.config, &scope, receipt)?;
+        verify_encrypted_artifact(
+            &prepared.artifact,
+            &scope.tenant_storage_ref,
+            &object_ref.artifact_kind,
+            &object_ref.object_key,
+            &object_ref.ciphertext_sha256,
+        )?;
+        self.provider
+            .put_encrypted_artifact(object_ref, prepared.artifact.clone())?;
+        Ok(receipt.clone())
+    }
+
     fn read_artifact(
         &self,
         expected_tenant_storage_ref: &str,
@@ -1061,6 +1152,25 @@ impl LocalEncryptedTraceArtifactStore {
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let prepared = self.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )?;
+        self.publish_serialized_json(&prepared)
+    }
+
+    /// Encrypts `serialized_json` for `object_id` without writing it. The
+    /// artifact path is resolved here too, so a prepared artifact always
+    /// names a key this store can write.
+    pub fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
         serde_json::from_slice::<serde_json::Value>(serialized_json)
             .context("failed to parse serialized trace artifact")?;
         let (ciphertext, salt) = self
@@ -1076,6 +1186,7 @@ impl LocalEncryptedTraceArtifactStore {
             ciphertext_sha256,
             encrypted_at: Utc::now(),
         };
+        self.artifact_path(&receipt.tenant_storage_ref, &receipt.object_key)?;
         let artifact = EncryptedTraceArtifact {
             schema_version: TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION.to_string(),
             receipt: receipt.clone(),
@@ -1083,11 +1194,22 @@ impl LocalEncryptedTraceArtifactStore {
             ciphertext_base64: base64::engine::general_purpose::STANDARD.encode(ciphertext),
             wrapped_dek: None,
         };
+        Ok(PreparedSerializedJsonArtifact { receipt, artifact })
+    }
+
+    /// Writes an artifact `prepare_serialized_json` prepared.
+    pub fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
         write_json_file(
-            &self.artifact_path(&receipt.tenant_storage_ref, &receipt.object_key)?,
-            &artifact,
+            &self.artifact_path(
+                &prepared.receipt.tenant_storage_ref,
+                &prepared.receipt.object_key,
+            )?,
+            &prepared.artifact,
         )?;
-        Ok(receipt)
+        Ok(prepared.receipt.clone())
     }
 
     pub fn get_json<T: DeserializeOwned>(
@@ -1265,6 +1387,29 @@ impl TraceArtifactStore for LocalEncryptedTraceArtifactStore {
             object_id,
             serialized_json,
         )
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        Self::prepare_serialized_json(
+            self,
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::publish_serialized_json(self, prepared)
     }
 
     fn read_artifact(
@@ -2064,6 +2209,46 @@ mod tests {
                 .delete_artifact("tenant:sha256:trait", &receipt)
                 .expect("artifact deletes through trait")
         );
+
+        // Prepare names the object and its ciphertext before anything is
+        // stored; publish writes exactly that object.
+        let prepared = store
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "trait-contract-prepared",
+                &serialized_payload,
+            )
+            .expect("artifact prepares through trait");
+        assert!(
+            store
+                .read_artifact("tenant:sha256:trait", prepared.receipt())
+                .is_err(),
+            "a prepared artifact is not stored"
+        );
+        assert!(
+            !store
+                .delete_artifact("tenant:sha256:trait", prepared.receipt())
+                .expect("deleting an unwritten artifact succeeds")
+        );
+        let published = store
+            .publish_serialized_json(&prepared)
+            .expect("artifact publishes through trait");
+        assert!(published.matches_identity(prepared.receipt()));
+        let prepared_round_trip: serde_json::Value = store
+            .read_json_by_object_key(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                &prepared.receipt().object_key,
+                &prepared.receipt().ciphertext_sha256,
+            )
+            .expect("published artifact reads by the prepared key and hash");
+        assert_eq!(prepared_round_trip, payload);
+        assert!(
+            store
+                .delete_artifact("tenant:sha256:trait", prepared.receipt())
+                .expect("published artifact deletes by the prepared receipt")
+        );
     }
 
     #[test]
@@ -2171,6 +2356,84 @@ mod tests {
             TraceArtifactStore::read_json(&store, "tenant:sha256:alpha", &drifted)
                 .expect("remote read tolerates encrypted_at drift");
         assert_eq!(round_trip, payload);
+    }
+
+    /// A store that implements only the required methods.
+    struct UnsplitStore;
+
+    impl TraceArtifactStore for UnsplitStore {
+        fn put_serialized_json(
+            &self,
+            _tenant_storage_ref: &str,
+            _artifact_kind: TraceArtifactKind,
+            _object_id: &str,
+            _serialized_json: &[u8],
+        ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_artifact(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<EncryptedTraceArtifact> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_json(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<serde_json::Value> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_json_by_object_key(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _expected_artifact_kind: TraceArtifactKind,
+            _object_key: &str,
+            _expected_ciphertext_sha256: &str,
+        ) -> anyhow::Result<serde_json::Value> {
+            anyhow::bail!("unused")
+        }
+
+        fn delete_artifact(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<bool> {
+            anyhow::bail!("unused")
+        }
+    }
+
+    /// A store that cannot split its write refuses both halves with a label.
+    #[test]
+    fn an_unsplit_store_refuses_prepare_and_publish_with_labels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let prepared = test_store(&temp)
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "unsplit",
+                b"{}",
+            )
+            .expect("the local store prepares");
+        let store = UnsplitStore;
+        let prepare = store
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "unsplit",
+                b"{}",
+            )
+            .err()
+            .expect("prepare refuses");
+        assert_eq!(prepare.to_string(), "serialized_json_prepare_unavailable");
+        let publish = store
+            .publish_serialized_json(&prepared)
+            .expect_err("publish refuses");
+        assert_eq!(publish.to_string(), "serialized_json_publish_unavailable");
     }
 
     #[test]

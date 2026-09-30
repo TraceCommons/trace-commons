@@ -5,6 +5,8 @@
 
 use std::collections::HashSet;
 
+#[path = "postgres_account_binding.rs"]
+mod account_binding;
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
 #[path = "postgres_account_trust.rs"]
@@ -15,6 +17,8 @@ mod account_trust_growth;
 mod legacy_invite_link;
 #[path = "postgres_mission_catalog.rs"]
 mod mission_catalog;
+#[cfg(test)]
+mod pipeline_upgrade_tests;
 #[path = "postgres_public_run.rs"]
 mod public_run;
 #[path = "postgres_reward_participant.rs"]
@@ -219,6 +223,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_legacy_invite_links",
     "trace_legacy_invite_link_conflicts",
     "trace_legacy_invite_link_devices",
+    "trace_account_bindings",
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
@@ -238,6 +243,14 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_near_provisioned_devices",
     "trace_account_merge_proposals",
     "trace_community_withdrawal_evictions",
+    "pipeline_runs",
+    "phase_outcomes",
+    "pipeline_bundle_packages",
+    "pipeline_active_bundles",
+    "pipeline_bundle_policy_status",
+    "pipeline_receipt_artifacts",
+    "pipeline_run_settlements",
+    "pipeline_admission_usage",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1495,6 +1508,57 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         91,
         "legacy_invite_link_devices",
         include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+    ),
+    // V92 to V95 add the versioned pipeline's run queue, fenced leases,
+    // retained bundles, instrument operations, and receipt content. Every
+    // table forces RLS; there is no cross-tenant claim function.
+    (
+        92,
+        "versioned_pipeline_runs",
+        include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
+    ),
+    (
+        93,
+        "versioned_pipeline_durability",
+        include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
+    ),
+    (
+        94,
+        "versioned_pipeline_settlement",
+        include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
+    ),
+    (
+        95,
+        "versioned_pipeline_receipt_content",
+        include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
+    ),
+    // V96 is claimed by a pull request in flight; V97 depends only on V30
+    // (trace_accounts) and V90 (trace_ingest_runtime).
+    (
+        97,
+        "account_bindings",
+        include_str!("../../../../migrations/V97__account_bindings.sql"),
+    ),
+    // Z2 S2: the binding-row INSERT grant and the unbound-account count.
+    (
+        98,
+        "native_passkey_creation",
+        include_str!("../../../../migrations/V98__native_passkey_creation.sql"),
+    ),
+    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V100 depends
+    // only on V97 and V90. V99 was never used: S5 held it in flight and took
+    // V101 when it rebased onto main.
+    (
+        100,
+        "near_ai_bind",
+        include_str!("../../../../migrations/V100__near_ai_bind.sql"),
+    ),
+    // Z2 S5: the unbound passkey-account reaper. Depends only on V30, V32
+    // and V97.
+    (
+        101,
+        "unbound_account_reaper",
+        include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
     ),
 ];
 
@@ -3597,6 +3661,43 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn store_near_ai_bind_ceremony(
+        &self,
+        ceremony_hash: &str,
+        pending: &crate::account_onboarding::NearAiBindPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.near_ai_bind_store_ceremony(ceremony_hash, pending, expires_at)
+            .await
+    }
+
+    async fn take_near_ai_bind_ceremony(
+        &self,
+        ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
+        self.near_ai_bind_take_ceremony(ceremony_hash).await
+    }
+
+    async fn bind_near_ai_login(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: crate::db::NewSession<'_>,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
+        self.near_ai_login_bind(
+            tenant_id,
+            account_id,
+            login,
+            device_public_key,
+            session,
+            identity,
+        )
+        .await
+    }
+
     async fn get_near_provisioned_anchor(
         &self,
         tenant: &str,
@@ -3743,12 +3844,19 @@ impl Database for PgBackend {
         let row = tx
             .query_opt(
                 "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
+                        s.expires_at,
                         (s.token_hash = $1) AS matched_current,
-                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate
+                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate,
+                        b.state AS binding_state
                    FROM trace_sessions s
                    JOIN trace_accounts a
                      ON a.tenant_id = s.tenant_id
                     AND a.account_id = s.account_id
+                   -- Z2 S1: the unbound gate's input, folded into this query.
+                   -- LEFT JOIN because no row means a legacy account.
+                   LEFT JOIN trace_account_bindings b
+                     ON b.tenant_id = s.tenant_id
+                    AND b.account_id = s.account_id
                   WHERE s.tenant_id = trace_current_tenant_id()
                     AND a.closed_at IS NULL
                     AND (s.token_hash = $1
@@ -3786,9 +3894,16 @@ impl Database for PgBackend {
         let account_id: Uuid = row.get("account_id");
         let auth_credential_id: Option<String> = row.get("auth_credential_id");
         let client_kind: String = row.get("client_kind");
+        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
         let needs_rotate: bool = row.get("needs_rotate");
+        // A state this build does not know refuses the session (the error
+        // drops the transaction before any write) rather than guessing.
+        let binding_state: Option<String> = row.get("binding_state");
+        let binding =
+            crate::account_binding::AccountBindingState::from_stored(binding_state.as_deref())
+                .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
 
         // Rotate only on a CURRENT-token match that has aged past the interval. A
         // prev-token (within-grace) request slides the idle window forward but must
@@ -3853,6 +3968,8 @@ impl Database for PgBackend {
             auth_credential_id,
             client_kind,
             rotated_secret,
+            binding,
+            expires_at,
         }))
     }
 
@@ -4282,6 +4399,17 @@ impl Database for PgBackend {
         account_id: Uuid,
         credential_id: &str,
     ) -> Result<crate::db::RevokeCredentialResult, DatabaseError> {
+        self.revoke_account_credential_sparing_session(tenant_id, account_id, credential_id, None)
+            .await
+    }
+
+    async fn revoke_account_credential_sparing_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+        caller_token_hash: Option<&str>,
+    ) -> Result<crate::db::RevokeCredentialResult, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
@@ -4299,6 +4427,30 @@ impl Database for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        if removed > 0 {
+            // Z2 S2: every live session this credential minted -- a browser
+            // `passkey` cookie or a native `tcn1_` from passkey create or
+            // sign-in -- dies with it, in the same transaction, EXCEPT the
+            // session making the removal request (`caller_token_hash`). The
+            // caller is matched on its current token or its within-grace
+            // previous one, since rotation may have fired on this very
+            // request. A session with no recorded credential (loopback, NEAR
+            // AI, device-link, or one minted before credentials were recorded)
+            // is not touched.
+            tx.execute(
+                "UPDATE trace_sessions
+                    SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND auth_credential_id = $2
+                    AND revoked_at IS NULL
+                    AND ($3::text IS NULL
+                         OR NOT (token_hash = $3 OR COALESCE(prev_token_hash, '') = $3))",
+                &[&account_id, &credential_id, &caller_token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
         let remaining_row = tx
             .query_one(
                 "SELECT count(*) AS remaining
@@ -4540,6 +4692,25 @@ impl Database for PgBackend {
             .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(row.get("strong_count"))
+    }
+
+    async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
+        self.unbound_passkey_account_count().await
+    }
+
+    async fn create_passkey_origin_account(
+        &self,
+        account: crate::db::NewPasskeyOriginAccount<'_>,
+    ) -> Result<crate::db::PasskeyOriginAccountOutcome, DatabaseError> {
+        self.create_passkey_origin_account_in_tx(account).await
+    }
+
+    async fn account_binding_state(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<crate::account_binding::AccountBindingState, DatabaseError> {
+        self.binding_state_for_account(tenant_id, account_id).await
     }
 
     async fn designate_payout_near_identity(
@@ -6680,6 +6851,10 @@ mod tests {
         (54, 2),
         (55, 3),
         (56, 4),
+        (92, 4),
+        (93, 4),
+        (94, 4),
+        (95, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7272,47 +7447,6 @@ mod tests {
         );
     }
 
-    /// Two changes that each add a `V75` pass every check on their own branch
-    /// and collide on merge. On a fresh database the second insert fails its
-    /// primary key; on a database that already applied the first, the runner
-    /// used to skip the second silently. Refuse the table outright instead.
-    #[test]
-    fn migration_versions_are_unique_and_strictly_increasing() {
-        for pair in super::MIGRATIONS.windows(2) {
-            let ((earlier, earlier_name, _), (later, later_name, _)) = (&pair[0], &pair[1]);
-            assert!(
-                later > earlier,
-                "MIGRATIONS must be strictly increasing by version: V{earlier}                  ({earlier_name}) is followed by V{later} ({later_name})"
-            );
-        }
-    }
-
-    /// The directory can hold two files with one version and different stems
-    /// (two branches, both merged); the table test above only sees the one the
-    /// table lists. Catch the duplicate at the file level too.
-    #[test]
-    fn no_two_migration_files_share_a_version() {
-        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
-        let mut seen: std::collections::BTreeMap<i32, String> = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(MIGRATIONS_DIR).expect("read migrations/") {
-            let name = entry
-                .expect("dir entry")
-                .file_name()
-                .into_string()
-                .expect("utf-8 name");
-            let Some(rest) = name.strip_prefix('V') else {
-                continue;
-            };
-            let Some((version, _)) = rest.split_once("__") else {
-                continue;
-            };
-            let version: i32 = version.parse().expect("numeric migration version");
-            if let Some(previous) = seen.insert(version, name.clone()) {
-                panic!("V{version} is claimed by both {previous} and {name}");
-            }
-        }
-    }
-
     #[test]
     fn an_unrecorded_version_is_applied() {
         assert!(!super::recorded_migration_state(None, 75, "account_trust").expect("not an error"));
@@ -7340,6 +7474,12 @@ mod tests {
         );
     }
 
+    /// Also the check for two migrations claiming one version, whether from
+    /// two branches that each added a `V75` or from a hand-edited table:
+    /// `migrations_on_disk` lists every file, duplicates included, so a second
+    /// `V75__*.sql` makes the table and the directory disagree, and a second
+    /// `V75` row in `MIGRATIONS` fails the strictly-increasing loop. A separate
+    /// test for either would repeat this one.
     #[test]
     fn every_migration_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
@@ -7450,6 +7590,10 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7474,8 +7618,13 @@ mod tests {
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+            include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7504,6 +7653,7 @@ mod tests {
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+            include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
@@ -7546,6 +7696,79 @@ mod tests {
             TRACE_COMMONS_RLS_TABLES.len(),
             "central RLS policy migration and diagnostics registry drifted"
         );
+    }
+
+    #[test]
+    fn versioned_pipeline_migration_shape_is_pinned() {
+        let runs = include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql");
+        let durability =
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql");
+        let settlement =
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql");
+        let content =
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql");
+        for required in [
+            "UNIQUE (tenant_id, request_idempotency_key)",
+            "UNIQUE (tenant_id, run_id, phase)",
+            "CREATE TRIGGER phase_outcomes_reject_update",
+            "CREATE TRIGGER phase_outcomes_reject_delete",
+            "admission_decision TEXT NOT NULL",
+        ] {
+            assert!(runs.contains(required), "V92 is missing `{required}`");
+        }
+        for required in [
+            "pipeline_runs_lease_shape",
+            "pipeline_runs_attempt_limit",
+            "reject_pipeline_run_identity_mutation",
+            "CREATE TABLE pipeline_bundle_packages",
+            "CREATE TABLE pipeline_receipt_artifacts",
+            // One staging row per receipt attempt, each naming
+            // its own object, and at most one committed attempt per run.
+            "PRIMARY KEY (tenant_id, run_id, attempt_id)",
+            "UNIQUE (tenant_id, object_key)",
+            "ciphertext_sha256 TEXT NOT NULL",
+            "ON pipeline_receipt_artifacts (tenant_id, run_id)\n    WHERE state = 'committed'",
+        ] {
+            assert!(durability.contains(required), "V93 is missing `{required}`");
+        }
+        for forbidden in [
+            "claim_pipeline_run",
+            "pipeline_claimer",
+            "SECURITY DEFINER",
+            // A per-key unique row would make two attempts for one key
+            // share (and overwrite) one staging record.
+            "UNIQUE (tenant_id, request_idempotency_key)",
+        ] {
+            assert!(
+                !durability.contains(forbidden),
+                "V93 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_run_settlements",
+            "PRIMARY KEY (tenant_id, run_id, instrument_id)",
+            "UNIQUE (tenant_id, operation_ref_hash)",
+            "'forfeited'",
+            "pipeline_run_settlements_result_shape",
+            "pipeline_run_settlements_external_receipt_shape",
+            "external_receipt_hash ~ '^sha256:[0-9a-f]{64}$'",
+            "ON pipeline_run_settlements (tenant_id, external_receipt_hash)\n    WHERE external_receipt_hash IS NOT NULL",
+            "pipeline_run_settlements_atomic_units_bound",
+            "atomic_units <= 340282366920938463463374607431768211455",
+            "settle_selection JSONB",
+            "ALTER TABLE pipeline_run_settlements FORCE ROW LEVEL SECURITY;",
+        ] {
+            assert!(settlement.contains(required), "V94 is missing `{required}`");
+        }
+        for required in [
+            "approved_object_ref_id UUID",
+            "approved_content_hash TEXT",
+            "CREATE TABLE pipeline_admission_usage",
+            "principal_ref_hash TEXT NOT NULL",
+            "ALTER TABLE pipeline_admission_usage FORCE ROW LEVEL SECURITY;",
+        ] {
+            assert!(content.contains(required), "V95 is missing `{required}`");
+        }
     }
 
     /// The eviction drain is the one write path on

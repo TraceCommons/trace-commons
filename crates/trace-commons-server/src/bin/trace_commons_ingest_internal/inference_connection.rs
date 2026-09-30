@@ -23,21 +23,16 @@ async fn no_store_middleware(request: Request, next: Next) -> axum::response::Re
     response
 }
 
-pub(super) fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/v1/account/inference-connection/offers",
-            get(offers_handler),
-        )
-        .route(
-            "/v1/account/inference-connection",
-            get(current_handler).post(select_handler),
-        )
-        .route(
+pub(super) fn routes() -> crate::account_routes::AccountRoutes {
+    crate::account_routes::AccountRoutes::new()
+        .get("/v1/account/inference-connection/offers", offers_handler)
+        .get("/v1/account/inference-connection", current_handler)
+        .post("/v1/account/inference-connection", select_handler)
+        .delete(
             "/v1/account/inference-connection/{connection_id}",
-            delete(disconnect_handler),
+            disconnect_handler,
         )
-        .route_layer(axum::middleware::from_fn(no_store_middleware))
+        .route_layer_fn(no_store_middleware)
 }
 
 #[derive(Deserialize)]
