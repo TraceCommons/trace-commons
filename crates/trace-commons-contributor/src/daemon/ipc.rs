@@ -338,7 +338,6 @@ pub const METHODS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "inference_calls",
-    "inference_call_proof",
     "tool_destinations",
     "list_audit",
     "list_history",
@@ -639,9 +638,6 @@ pub struct DaemonShared {
     /// shown, which is exactly what stops a shell asking for a write it did
     /// not preview. See `daemon::harness`.
     pub(crate) harness_plans: super::harness::PlanStore,
-    /// Receipt checks `inference_call_proof` has run. In memory only; see
-    /// `daemon::inference_map::ProofCache`.
-    pub(crate) inference_proofs: super::inference_map::ProofCache,
     /// Reviewed skill state held between explicit steps. The installed marker
     /// is the durable recovery source; these queues are bounded and local to
     /// the daemon process.
@@ -805,7 +801,6 @@ impl DaemonShared {
                 super::private_inference::PrivateInferenceState::Off,
             )),
             harness_plans: super::harness::PlanStore::default(),
-            inference_proofs: super::inference_map::ProofCache::default(),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
         })
     }
@@ -1231,18 +1226,6 @@ impl DaemonShared {
             .routing_ledger()
             .and_then(|ledger| ledger.nearai_authenticated());
         state.label_for(destination)
-    }
-
-    /// Where the proxy this daemon reads keeps captured bodies, or `None`.
-    ///
-    /// Derived from the effective declaration -- the one the ledger was built
-    /// for -- and not gated on `ironwire_attested_bodies`: that switch governs
-    /// carrying bodies to a witness, and `inference_call_proof` only hashes
-    /// them in this process.
-    pub(crate) fn routing_bodies_dir(&self) -> Option<std::path::PathBuf> {
-        let held = self.routing.read().ok()?;
-        held.ledger.as_ref()?;
-        super::settings::attested_bodies_dir_for(held.declaration.as_ref(), true)
     }
 
     /// Hold `ledger` as the routing ledger, for tests.
@@ -2289,10 +2272,6 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     (
         "inference_connection_disconnect",
         "inference-connection-requires-async",
-    ),
-    (
-        "inference_call_proof",
-        "inference-call-proof-requires-async",
     ),
     ("history_detail", "session-detail-requires-async"),
     ("skill_candidate", "skill-candidate-requires-async"),
@@ -3695,7 +3674,6 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "inference_connection_disconnect" => {
             super::inference_connection::handle_disconnect(shared, req).await
         }
-        "inference_call_proof" => super::inference_map::handle_call_proof(shared, req).await,
         "history_detail" => super::public_run::handle_detail(shared, req).await,
         "skill_candidate" => super::skill_loop::handle_candidate(shared, req).await,
         "skill_evaluate" => super::skill_loop::handle_evaluate(shared, req).await,
@@ -12146,7 +12124,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 34);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 33);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -12576,7 +12554,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 52, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 41, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 40, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
