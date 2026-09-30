@@ -41,6 +41,12 @@ pub struct CwdCacheEntry {
     pub size_bytes: u64,
     pub modified_at: DateTime<Utc>,
     pub cwd: Option<String>,
+    /// The project key `cwd` resolves to, recorded when the entry is written
+    /// so that answering "sessions per project" never canonicalizes a path.
+    /// `None` on an entry written before this existed; it is filled in the
+    /// first time it is needed.
+    #[serde(default)]
+    pub project_key: Option<String>,
 }
 
 /// What `save` last actually wrote, and where: the store directory it was

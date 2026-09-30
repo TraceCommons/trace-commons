@@ -251,6 +251,49 @@ pub fn near_ai_provisioning_device_bytes(
     bytes
 }
 
+/// Device proof preimage for binding an existing passkey account to a NEAR AI
+/// login (Z2 native passkey identity, slice S3).
+///
+/// The bind ceremony runs the same device proof as
+/// [`near_ai_provisioning_device_bytes`] -- same nonce, ceremony id, device key,
+/// PKCE challenge and expiry -- but it proves something different: that the
+/// device holder wants THIS signed-in account to take the NEAR AI identity,
+/// rather than whatever account the identity already resolves to. So it has
+/// its own domain string, and a signature made for one ceremony is useless for
+/// the other. Neither domain string is a prefix of the other, which is what
+/// makes the two preimages unequal for every input, not merely for the ones a
+/// test tries.
+///
+/// The account id is a sixth part, its sixteen raw bytes behind the same
+/// `u64` length prefix as every other part (the rule
+/// [`near_ai_provisioning_device_bytes`] documents), so a bind signature is
+/// also bound to one account.
+///
+/// Both halves call this function; neither writes the layout itself.
+pub fn near_ai_bind_device_bytes(
+    nonce: &[u8; 32],
+    ceremony_id: &str,
+    device: &[u8; 32],
+    code_challenge: &str,
+    expires_at: i64,
+    account_id: &uuid::Uuid,
+) -> Vec<u8> {
+    let expiry = expires_at.to_be_bytes();
+    let mut bytes = b"trace_commons.near_ai_bind_device.v1\n".to_vec();
+    for part in [
+        &nonce[..],
+        ceremony_id.as_bytes(),
+        &device[..],
+        code_challenge.as_bytes(),
+        &expiry[..],
+        account_id.as_bytes(),
+    ] {
+        bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(part);
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +404,105 @@ mod tests {
             base,
             near_ai_provisioning_device_bytes(&nonce, "ab", &device, "cd", 6)
         );
+    }
+
+    /// The bind preimage (Z2 S3) and the provisioning preimage can never be
+    /// equal, for ANY inputs, not just the ones a test picks.
+    ///
+    /// The argument, asserted rather than described: both preimages start
+    /// with their domain string, and neither domain string is a prefix of the
+    /// other, so the two byte strings differ within the first
+    /// `min(len)` bytes whatever follows. Then the sampled cases below check
+    /// the function honours that, including the one input an attacker would
+    /// try: every shared argument identical.
+    #[test]
+    fn near_ai_bind_bytes_never_collide_with_the_provisioning_bytes() {
+        let provisioning = b"trace_commons.near_ai_provisioning_device.v1\n";
+        let bind = b"trace_commons.near_ai_bind_device.v1\n";
+        assert!(!provisioning.starts_with(bind) && !bind.starts_with(provisioning));
+        let shared = provisioning
+            .iter()
+            .zip(bind.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(shared < provisioning.len().min(bind.len()));
+
+        let account = uuid::Uuid::from_bytes([0x42; 16]);
+        for (nonce, ceremony, device, challenge, expires) in [
+            ([0u8; 32], "", [0u8; 32], "", 0i64),
+            ([7u8; 32], "ceremony", [9u8; 32], "challenge", 100),
+            (
+                [0xFF; 32],
+                "x".repeat(64).as_str(),
+                [1u8; 32],
+                "k",
+                i64::MAX,
+            ),
+        ]
+        .iter()
+        .map(|(n, c, d, k, e)| (*n, c.to_string(), *d, k.to_string(), *e))
+        {
+            let for_bind = near_ai_bind_device_bytes(
+                &nonce, &ceremony, &device, &challenge, expires, &account,
+            );
+            let for_provisioning =
+                near_ai_provisioning_device_bytes(&nonce, &ceremony, &device, &challenge, expires);
+            assert_ne!(for_bind, for_provisioning);
+            assert!(for_bind.starts_with(bind));
+            // Not a prefix either way: a signature over one is not a
+            // signature over a truncation or extension of the other.
+            assert!(!for_bind.starts_with(&for_provisioning));
+            assert!(!for_provisioning.starts_with(&for_bind));
+        }
+    }
+
+    /// The exact layout: the provisioning parts in the provisioning order,
+    /// then the account id's sixteen bytes as one more length-prefixed part.
+    #[test]
+    fn near_ai_bind_bytes_frame_the_account_like_every_other_part() {
+        let account = uuid::Uuid::from_bytes([0xCC; 16]);
+        let bytes = near_ai_bind_device_bytes(&[0xAA; 32], "c", &[0xBB; 32], "k", 1, &account);
+        let mut expected = b"trace_commons.near_ai_bind_device.v1\n".to_vec();
+        for part in [
+            &[0xAA; 32][..],
+            b"c",
+            &[0xBB; 32][..],
+            b"k",
+            &1i64.to_be_bytes()[..],
+            &[0xCC; 16][..],
+        ] {
+            expected.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            expected.extend_from_slice(part);
+        }
+        assert_eq!(bytes, expected);
+    }
+
+    /// Every input is bound, the account above all: a bind ceremony signed
+    /// for one account is not a signature for another.
+    #[test]
+    fn near_ai_bind_bytes_bind_every_input_and_the_account() {
+        let nonce = [1u8; 32];
+        let device = [2u8; 32];
+        let a = uuid::Uuid::from_bytes([3; 16]);
+        let base = near_ai_bind_device_bytes(&nonce, "ab", &device, "cd", 5, &a);
+        for other in [
+            near_ai_bind_device_bytes(&[9u8; 32], "ab", &device, "cd", 5, &a),
+            near_ai_bind_device_bytes(&nonce, "zz", &device, "cd", 5, &a),
+            near_ai_bind_device_bytes(&nonce, "ab", &[9u8; 32], "cd", 5, &a),
+            near_ai_bind_device_bytes(&nonce, "ab", &device, "zz", 5, &a),
+            near_ai_bind_device_bytes(&nonce, "ab", &device, "cd", 6, &a),
+            near_ai_bind_device_bytes(
+                &nonce,
+                "ab",
+                &device,
+                "cd",
+                5,
+                &uuid::Uuid::from_bytes([4; 16]),
+            ),
+            near_ai_bind_device_bytes(&nonce, "a", &device, "bcd", 5, &a),
+        ] {
+            assert_ne!(base, other);
+        }
     }
 
     #[test]

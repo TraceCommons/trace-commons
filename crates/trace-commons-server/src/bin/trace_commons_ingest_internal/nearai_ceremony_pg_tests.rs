@@ -99,69 +99,17 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
     SERIAL.get_or_init(Default::default)
 }
 
-/// The runtime pool and the resolver pool, as two roles rather than one.
-///
-/// Aliasing them is not a shortcut, it is #727: the resolver resolves a blind
-/// index while holding no tenant context, which V61 permits only through a
-/// permissive policy scoped `TO trace_login_resolver`. Any other non-superuser
-/// role is left with `trace_corpus_tenant_isolation`, whose predicate compares
-/// `tenant_id` against a `trace_current_tenant_id()` that is NULL here, so it
-/// matches nothing and a returning contributor looks new -- a second tenant
-/// minted quietly for somebody who already had one. This suite enrols a fresh
-/// subject, so it would not fail on the aliased wiring; it would simply stop
-/// modelling the system, which is how #727 survived.
-fn resolver_config(url: &str, resolver_url: Option<&str>) -> DatabaseConfig {
-    DatabaseConfig {
-        url: SecretString::from(url.to_owned()),
-        pool_size: 4,
-        ssl_mode: trace_commons_server::config::SslMode::Prefer,
-        login_resolver_url: resolver_url.map(|u| SecretString::from(u.to_owned())),
-        gate_driver_url: None,
-        pii_backstop_driver_url: None,
-        invite_registry_url: None,
-    }
-}
-
-/// A migrated PostgreSQL on the isolated URL this job supplies.
+/// A migrated PostgreSQL on the isolated URL this job supplies, with the
+/// runtime pool and the resolver pool on two roles rather than one (see
+/// `migrated_pg_fixture::pg_config` for why aliasing them is #727).
 ///
 /// Deliberately the same variable the sibling suite uses: one database per CI
 /// job, and a suite that silently invents its own would not be running against
 /// the schema the job migrated.
 async fn ceremony_pg_admin() -> Arc<PgBackend> {
-    let url = std::env::var("TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL")
-        .expect("explicit isolated URL required");
-    let parsed = reqwest::Url::parse(&url).unwrap();
-    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
-    // Migrate first, with no resolver: V30 is what creates the role the
-    // resolver pool connects as, so it cannot be wired before it exists.
-    let migrator = PgBackend::new(&resolver_config(&url, None)).await.unwrap();
-    migrator.run_migrations().await.unwrap();
-
-    // V30 creates `trace_login_resolver` NOLOGIN, so a pool cannot connect as
-    // it until a test says so. The grant is the narrow one the resolver needs
-    // and nothing more.
-    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+    super::migrated_pg_fixture::migrated_pg("TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL", None)
         .await
-        .unwrap();
-    let handle = tokio::spawn(connection);
-    client
-        .batch_execute(
-            "ALTER ROLE trace_login_resolver LOGIN; \
-             GRANT USAGE ON SCHEMA public TO trace_login_resolver; \
-             GRANT SELECT (tenant_id, anchor_hash) \
-               ON trace_near_account_anchors TO trace_login_resolver;",
-        )
-        .await
-        .unwrap();
-    drop(client);
-    handle.abort();
-
-    let mut resolver = reqwest::Url::parse(&url).unwrap();
-    resolver.set_username("trace_login_resolver").unwrap();
-    let admin = PgBackend::new(&resolver_config(&url, Some(resolver.as_str())))
-        .await
-        .unwrap();
-    Arc::new(admin)
+        .admin
 }
 
 /// The pepper and account-name key wallet provisioning already needs.
@@ -241,18 +189,23 @@ fn publish_provisioning_material() {
 
 /// An `AppState` with the NEAR AI login path ready and introspection pointed at
 /// the stub.
-async fn ceremony_state(db: Arc<PgBackend>, near_ai_base: String) -> Arc<AppState> {
+///
+/// The returned directory backs the state's local storage; hold it for the
+/// test's lifetime so it is removed afterwards rather than leaked.
+async fn ceremony_state(
+    db: Arc<PgBackend>,
+    near_ai_base: String,
+) -> (Arc<AppState>, tempfile::TempDir) {
     publish_provisioning_material();
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state(temp.path().to_path_buf());
-    std::mem::forget(temp);
     let s = Arc::make_mut(&mut state);
     s.near_provisioning_enabled = true;
     s.near_provisioning_admission_ready = true;
     s.near_account_identity = Some(Arc::new(ceremony_identity()));
     s.db_mirror = Some(db.clone() as Arc<dyn Database>);
     s.near_ai_introspection_base_url = Some(near_ai_base);
-    state
+    (state, temp)
 }
 
 async fn post_json(
@@ -315,7 +268,7 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
     let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;
     let before = anchor_rows(&db).await;
-    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
     let (_dir, identity) = device();
     let (verifier, challenge) = challenge_pair();
 
@@ -405,7 +358,7 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
 async fn v2_enrols_without_legacy_witness_and_never_selects_implicitly() {
     let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;
-    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
     // SAFETY: this ignored suite serializes its process-global test controls.
     unsafe { std::env::remove_var("TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON") };
     let catalog = trace_commons_server::inference_connection::OperatorInferenceConnection::new(
@@ -591,7 +544,7 @@ async fn v2_enrols_without_legacy_witness_and_never_selects_implicitly() {
 async fn a_refused_finish_writes_no_anchor_row() {
     let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;
-    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
     let (_dir, identity) = device();
     let (verifier, challenge) = challenge_pair();
 
@@ -654,7 +607,7 @@ async fn a_refused_finish_writes_no_anchor_row() {
 async fn a_device_key_registered_to_another_tenant_is_refused() {
     let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;
-    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
     let (_dir, identity) = device();
     let (verifier, challenge) = challenge_pair();
     let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
@@ -749,7 +702,7 @@ async fn a_device_key_registered_to_another_tenant_is_refused() {
 async fn a_finish_naming_an_account_is_refused_over_the_wire() {
     let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;
-    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (state, _temp) = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
     let (_dir, identity) = device();
     let (verifier, challenge) = challenge_pair();
 

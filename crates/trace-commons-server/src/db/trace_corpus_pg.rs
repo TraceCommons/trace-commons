@@ -1342,7 +1342,32 @@ impl PgBackend {
     }
 }
 
-async fn insert_credit_settlement_batch_on_tx(
+/// `list_trace_credit_holds` inside the caller's tenant-scoped transaction
+/// (the caller has already set `trace_commons.trace_tenant_id`), so a hold
+/// check can sit in the same transaction as the ledger write it guards.
+pub(crate) async fn list_trace_credit_holds_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> {
+    let rows = tx
+        .query(
+            &format!(
+                "SELECT {TRACE_CREDIT_HOLD_COLUMNS}
+                 FROM trace_credit_holds
+                 WHERE tenant_id = $1
+                 ORDER BY created_at ASC, hold_id ASC"
+            ),
+            &[&tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    rows.iter().map(row_to_credit_hold).collect()
+}
+
+/// The settlement-batch upsert of `upsert_trace_credit_settlement_batch`,
+/// inside the caller's tenant-scoped transaction (the caller has already set
+/// `trace_commons.trace_tenant_id` and ensured the tenant row).
+pub(crate) async fn insert_credit_settlement_batch_on_tx(
     tx: &Transaction<'_>,
     batch: &TraceCreditSettlementBatchWrite,
 ) -> Result<(), DatabaseError> {
@@ -1535,13 +1560,9 @@ async fn append_trace_audit_row_in_transaction(
             audit_event.event_hash.is_some(),
         )?,
         Some(resumes_from_event_hash) => validate_trace_audit_chain_resume(
-            &audit_event.tenant_id,
-            audit_event.audit_event_id,
+            audit_event,
             latest_event_hash.as_deref(),
             resumes_from_event_hash,
-            audit_event.decision_inputs_hash.as_deref(),
-            audit_event.previous_event_hash.as_deref(),
-            audit_event.event_hash.is_some(),
         )?,
     }
     let next_audit_sequence: i64 = tx
@@ -4654,12 +4675,21 @@ impl TraceCorpusStore for PgBackend {
         &self,
         audit_event: TraceAuditEventWrite,
         resumes_from_event_hash: &str,
+        append_file_line: &(dyn Fn() -> Result<(), String> + Send + Sync),
     ) -> Result<(), DatabaseError> {
         self.ensure_trace_tenant(&audit_event.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &audit_event.tenant_id).await?;
         append_trace_audit_row_in_transaction(&tx, &audit_event, Some(resumes_from_event_hash))
             .await?;
+        // Still under the advisory lock the insert took, with the DB head
+        // re-checked: the file line goes in only for a resume that will
+        // commit, and a failed append rolls the row back.
+        append_file_line().map_err(|error| {
+            DatabaseError::Query(format!(
+                "trace audit chain resume file append failed: {error}"
+            ))
+        })?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }
@@ -5022,19 +5052,7 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let rows = tx
-            .query(
-                &format!(
-                    "SELECT {TRACE_CREDIT_HOLD_COLUMNS}
-                     FROM trace_credit_holds
-                     WHERE tenant_id = $1
-                     ORDER BY created_at ASC, hold_id ASC"
-                ),
-                &[&tenant_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        let records = rows.iter().map(row_to_credit_hold).collect();
+        let records = list_trace_credit_holds_on_tx(&tx, tenant_id).await;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
     }

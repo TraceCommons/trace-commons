@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "trace_commons_ingest_internal/account_routes.rs"]
+mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
 mod account_trust_growth_routes;
 #[path = "trace_commons_ingest_internal/admission.rs"]
@@ -40,7 +42,7 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Query};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{
     Extension, Json, Router, extract::Path as AxumPath, extract::Request, extract::State,
     middleware::Next,
@@ -59,12 +61,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, privacy_filter_backend_from_env,
-    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
-    retention_policy_for_trace, run_privacy_filter_canary,
+    ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
+    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
+    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
+    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -96,6 +98,7 @@ use trace_commons_server::account_passkey::{
 };
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
+use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
     CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
     TraceCorpusRlsDiagnostics,
@@ -249,6 +252,11 @@ use trace_commons_server::trace_gate_service::{
 use trace_commons_server::trace_score_attestation::{
     AttestationConfig, AttestationSigningState, ScoreAttestationCoverage, ScoreAttestationScope,
     ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
+};
+use trace_commons_server::versioned_pipeline::{
+    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
+    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
+    PipelineService,
 };
 use uuid::Uuid;
 
@@ -649,6 +657,30 @@ const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS";
 const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS";
+const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
+    "TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS";
+/// Fails ingest startup closed when no pipeline runtime was injected (or an
+/// injected one is not production-qualified) rather than booting without one.
+/// See `assemble_ingest_pipeline_runtime`.
+const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED";
+/// Test-and-local-development-only opt-in that lets an injected pipeline
+/// runtime start with a non-production-qualified dependency even though
+/// tenants are routed to it or `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` is
+/// set. Production must never set this. Refused together with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` (see
+/// `assemble_ingest_pipeline_runtime`). Documented in
+/// `docs/operator/pipeline-activation.md`.
+const TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES: &str =
+    "TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES";
+/// Whole-seconds overrides for the per-phase claim lease; see
+/// `parse_pipeline_lease_config_from_env`. Unset keeps
+/// `PipelineLeaseConfig::default()`'s value for that phase.
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW";
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE";
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE";
 const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
     "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
@@ -905,6 +937,27 @@ const TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS: &str =
 /// 210 others were never touched, because the driver takes them oldest-first
 /// and nothing bounded the first one.
 const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
+/// The unbound-account reaper (Z2 S5). Off unless `_ENABLED`; when on it needs
+/// its own least-privilege login, never the runtime URL.
+const TRACE_COMMONS_UNBOUND_REAPER_ENABLED: &str = "TRACE_COMMONS_UNBOUND_REAPER_ENABLED";
+const TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL: &str = "TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL";
+const TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS";
+const TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS";
+/// Names an earlier, never-released draft of the reaper read. Neither is an
+/// alias: the idle window they configured no longer exists, so boot refuses
+/// either one rather than silently ignoring it.
+const TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS: &[&str] = &[
+    "TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS",
+    "TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS",
+];
+const TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS";
+const TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE: &str = "TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE";
+const TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS: u64 = 3600;
+/// Batches one tick may run back to back while each one comes back full.
+const TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK: usize = 10;
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -1220,6 +1273,24 @@ SUBCOMMANDS:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    run_ingest(None).await
+}
+
+/// Starts ingest with an optional production pipeline assembly.
+///
+/// The repository build deliberately passes `None`: proprietary scorer,
+/// index, settlement, and payout implementations do not live in this tree. A
+/// production distribution must pass an assembler and set
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED=true`. Startup then fails closed
+/// if assembly is absent or an injected dependency is not production
+/// qualified -- and fails closed on a non-production-qualified dependency
+/// even without that flag once tenants are routed to the pipeline
+/// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`), unless the test-only
+/// `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` opt-in is set. See
+/// `assemble_ingest_pipeline_runtime`.
+pub async fn run_ingest(
+    pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+) -> anyhow::Result<()> {
     // Choose the rustls crypto provider before anything can open a TLS
     // connection.
     //
@@ -1304,7 +1375,9 @@ async fn main() -> anyhow::Result<()> {
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
-    let state = Arc::new(AppState::from_env().await?);
+    let state = Arc::new(
+        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?,
+    );
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
     validate_trace_near_credit_outbox_scheduler_config(
@@ -1382,6 +1455,7 @@ async fn main() -> anyhow::Result<()> {
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
     spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
+    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1412,18 +1486,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind trace commons ingestion service at {addr}"))?;
     tracing::info!(%addr, "Trace Commons ingestion service listening");
-    let shutdown_grace_seconds = parse_usize_env(
-        TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
-        TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS,
-    )? as u64;
     let shutdown_state = Arc::clone(&state);
-    let result = serve_ingest_with_graceful_shutdown(
-        listener,
-        app(state),
-        shutdown_grace_seconds,
-        wait_for_shutdown_signal(),
-    )
-    .await;
+    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
     // Runs on the way out of BOTH a clean drain and an aborted one: the
     // novelty corpus is the gate's memory of what "duplicate" means, and a
     // restart that drops it silently re-scores every subsequent trace against
@@ -1564,6 +1628,19 @@ struct AppState {
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
+    pipeline_service: Option<Arc<PipelineService>>,
+    /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
+    /// / `pipeline_runtime_required_but_not_injected`) instead of silently
+    /// running ingest without a pipeline runtime. See
+    /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` and
+    /// `validate_pipeline_receipt_rollout`.
+    pipeline_runtime_required: bool,
+    /// Set by the owned pipeline worker loop (`spawn_pipeline_worker`) once
+    /// its first readiness probe succeeds, and cleared on a failing one.
+    /// `GET /v1/pipeline/readiness` reads this same `Arc` -- it is `false`
+    /// unconditionally when no worker is running at all (no runtime
+    /// injected).
+    pipeline_worker_ready: Arc<std::sync::atomic::AtomicBool>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -1708,6 +1785,10 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
+    /// Unbound passkey-account reaper. `None` (the default) means it is off;
+    /// `TRACE_COMMONS_UNBOUND_REAPER_ENABLED` turns it on. Its own pool, built
+    /// at boot from its own login, so the runtime pool never runs the sweep.
+    unbound_account_reaper: Option<UnboundAccountReaperConfig>,
     /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
     /// posture every deployment ships in -- means an arriving certificate is
     /// ignored entirely and every content-bearing trace holds exactly as it
@@ -1776,6 +1857,16 @@ struct AppState {
     /// Single-instance only (see `account_passkey` module docs). Consumed by
     /// the register/login ceremony handlers in later Slice 2 tasks.
     account_ceremony_store: Arc<CeremonyStore>,
+    /// Z2 S2: the cap on unbound passkey-origin accounts, from
+    /// `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`. Unset disables native
+    /// passkey creation.
+    account_unbound_ceiling:
+        Arc<trace_commons_server::account_native_passkey::UnboundAccountCeiling>,
+    /// Z2 S2: successful native passkey creations per client IP in a rolling
+    /// 24 hours, from `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY`
+    /// (default 10). In process, like the other account limiters.
+    account_native_creation_cap:
+        Arc<trace_commons_server::account_native_passkey::PerSourceCreationCap>,
     /// Loopback native-app sign-in: pending authorization requests, keyed by
     /// `request_id`, holding only the PKCE challenge and the validated loopback
     /// redirect. Single-use and TTL-bounded, same in-process store and same
@@ -2025,6 +2116,19 @@ struct PiiBackstopDriverConfig {
     per_submission_timeout: StdDuration,
 }
 
+/// In-process unbound-account reaper config (Z2 S5). Like the PII-backstop
+/// driver it has no bearer-token worker route; unlike it, the cross-tenant
+/// pool is the reaper's own, held here rather than in `PgBackend`, and the
+/// only thing it can run is the V101 definer function.
+#[derive(Clone)]
+struct UnboundAccountReaperConfig {
+    interval: StdDuration,
+    unbound_ttl_days: i64,
+    closed_ttl_days: i64,
+    batch_size: i32,
+    reaper: trace_commons_server::account_reaper::UnboundAccountReaper,
+}
+
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
 /// logged by `spawn_pii_backstop_driver_task`. `done` counts submissions that
 /// were re-redacted and released (to `Accepted`/`Quarantined`); `failed`
@@ -2144,10 +2248,16 @@ enum TraceTenantRolloutFeature {
     ObjectPrimarySubmitReview,
     ObjectPrimaryReplayExport,
     ObjectPrimaryDerivedExports,
+    /// Tenants whose new receipts are routed to the versioned pipeline
+    /// instead of the legacy corpus path. Unlike every other feature here,
+    /// there is no paired "globally enabled" `AppState` bool -- this rollout
+    /// is tenant-list-only, and additionally requires an injected pipeline
+    /// runtime (`validate_pipeline_receipt_rollout`).
+    PipelineReceipts,
 }
 
 impl TraceTenantRolloutFeature {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::DbContributorReads,
         Self::DbReviewerReads,
         Self::DbReviewerRequireObjectRefs,
@@ -2159,6 +2269,7 @@ impl TraceTenantRolloutFeature {
         Self::ObjectPrimarySubmitReview,
         Self::ObjectPrimaryReplayExport,
         Self::ObjectPrimaryDerivedExports,
+        Self::PipelineReceipts,
     ];
 
     fn env_key(self) -> &'static str {
@@ -2186,6 +2297,7 @@ impl TraceTenantRolloutFeature {
             Self::ObjectPrimaryDerivedExports => {
                 TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS
             }
+            Self::PipelineReceipts => TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS,
         }
     }
 
@@ -2202,6 +2314,7 @@ impl TraceTenantRolloutFeature {
             Self::ObjectPrimarySubmitReview => "object_primary_submit_review",
             Self::ObjectPrimaryReplayExport => "object_primary_replay_export",
             Self::ObjectPrimaryDerivedExports => "object_primary_derived_exports",
+            Self::PipelineReceipts => "pipeline_receipts",
         }
     }
 }
@@ -3532,7 +3645,9 @@ impl AppState {
         )
     }
 
-    async fn from_env() -> anyhow::Result<Self> {
+    async fn from_env_with_pipeline_runtime_assembler(
+        pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+    ) -> anyhow::Result<Self> {
         let root = std::env::var("TRACE_COMMONS_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
@@ -3561,7 +3676,10 @@ impl AppState {
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
-        let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        let db_connections = trace_corpus_db_mirror_from_env().await?;
+        let db_mirror = db_connections
+            .as_ref()
+            .map(|connections| connections.database.clone());
         let postgres_runtime_role_sha256 = parse_postgres_runtime_role_sha256_from_env()?;
         let require_postgres_trace_rls_ready =
             env_truthy(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
@@ -3736,6 +3854,23 @@ impl AppState {
             require_object_store_versioning,
             artifact_store.as_ref(),
         )?;
+        let pipeline_runtime_required = env_truthy(TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED);
+        let pipeline_allow_test_dependencies =
+            env_truthy(TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES);
+        let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
+        let pipeline_receipts_tenants_routed =
+            tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0;
+        let pipeline_service = assemble_ingest_pipeline_runtime(
+            pipeline_runtime_assembler,
+            db_connections.as_ref(),
+            artifact_store.as_ref(),
+            pipeline_runtime_required,
+            pipeline_lease_config,
+            pipeline_receipts_tenants_routed,
+            pipeline_allow_test_dependencies,
+        )?;
+        validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
+        let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
             .as_ref()
@@ -3927,6 +4062,29 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
+        let unbound_account_reaper = parse_unbound_account_reaper_config_from_env()?;
+        if let Some(reaper) = &unbound_account_reaper {
+            // The pool connects lazily; take one connection now and check the
+            // login may execute the reaper function, so a login that cannot
+            // connect, or lacks trace_unbound_account_reaper, fails boot, not
+            // the first tick. The error names the variable, never the URL.
+            reaper.reaper.verify_login().await.map_err(|error| {
+                let denied = matches!(
+                    &error,
+                    trace_commons_server::error::DatabaseError::Pool(label)
+                        if label == "unbound_reaper_execute_denied"
+                );
+                if denied {
+                    anyhow::anyhow!(
+                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} connects but cannot execute trace_reap_unbound_accounts (unbound_reaper_execute_denied)"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} did not accept a connection"
+                    )
+                }
+            })?;
+        }
         // Fail closed on configuration. An enabled bypass missing its signing
         // address, its measurement set, or its policy allowlist refuses to
         // boot naming the control, rather than running with a control an
@@ -4147,6 +4305,16 @@ impl AppState {
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
+        // Z2 S2: unset disables native passkey creation; a malformed value
+        // fails startup rather than guessing either way.
+        let account_unbound_ceiling = Arc::new(
+            trace_commons_server::account_native_passkey::UnboundAccountCeiling::from_env()
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
+        let account_native_creation_cap = Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::from_env()
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
         let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
         let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
@@ -4198,6 +4366,9 @@ impl AppState {
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
+            pipeline_service,
+            pipeline_runtime_required,
+            pipeline_worker_ready,
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -4283,6 +4454,7 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
+            unbound_account_reaper,
             witness_bypass,
             witness_capture_pin,
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
@@ -4318,6 +4490,8 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            account_unbound_ceiling,
+            account_native_creation_cap,
             near_provisioning_public_origin: std::env::var(
                 "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
             )
@@ -4502,6 +4676,22 @@ fn enforce_db_mirror_write_result(
         ))),
         Err(_) => Ok(()),
     }
+}
+
+/// Refuses to start ingest with `pipeline_receipts_configured_without_runtime`
+/// when `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` names tenants but no
+/// pipeline runtime was injected -- a configured tenant would otherwise fall
+/// straight through `route_pipeline_receipt` to the legacy path with no
+/// indication the rollout gate did nothing (D3).
+fn validate_pipeline_receipt_rollout(
+    gates: &TraceTenantRolloutGates,
+    runtime_present: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        runtime_present || gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) == 0,
+        "pipeline_receipts_configured_without_runtime"
+    );
+    Ok(())
 }
 
 fn validate_rollout_gate_dependency(
@@ -6803,6 +6993,72 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
     }))
 }
 
+/// The unbound passkey-account reaper. Off by default (`Ok(None)`), so
+/// existing deployments and CI are unaffected until an operator opts in.
+///
+/// Fail-closed at boot: `_ENABLED` without a reaper login URL refuses with a
+/// missing-control label rather than silently leaving the reaper off, and a
+/// login that cannot connect refuses in `AppState::from_env`. The error text
+/// never includes the URL. The unbound TTL defaults to 7 days from binding
+/// creation and the closed TTL to 30 days from `closed_at`; neither can be set
+/// under one day, and the V101 function refuses that too. A variable from the
+/// earlier draft's idle window refuses boot.
+fn parse_unbound_account_reaper_config_from_env()
+-> anyhow::Result<Option<UnboundAccountReaperConfig>> {
+    use trace_commons_server::account_reaper::{
+        DEFAULT_BATCH, DEFAULT_CLOSED_TTL_DAYS, DEFAULT_UNBOUND_TTL_DAYS, MAX_BATCH, MAX_TTL_DAYS,
+        MIN_TTL_DAYS, UnboundAccountReaper,
+    };
+    for removed in TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS {
+        if optional_trimmed_env(removed)?.is_some() {
+            anyhow::bail!(
+                "{removed} is no longer read; use {TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS} and {TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS}"
+            );
+        }
+    }
+    if !env_truthy(TRACE_COMMONS_UNBOUND_REAPER_ENABLED) {
+        return Ok(None);
+    }
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL)? else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_UNBOUND_REAPER_ENABLED}=true but {TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is not set"
+        );
+    };
+    let unbound_ttl_days = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS,
+        DEFAULT_UNBOUND_TTL_DAYS,
+        MIN_TTL_DAYS,
+        MAX_TTL_DAYS,
+    )?;
+    let closed_ttl_days = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS,
+        DEFAULT_CLOSED_TTL_DAYS,
+        MIN_TTL_DAYS,
+        MAX_TTL_DAYS,
+    )?;
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS,
+        TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS,
+        60,
+        86_400,
+    )?;
+    let batch_size = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE,
+        i64::from(DEFAULT_BATCH),
+        1,
+        i64::from(MAX_BATCH),
+    )?;
+    let reaper = UnboundAccountReaper::connect(&url)
+        .map_err(|_| anyhow::anyhow!("{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is invalid"))?;
+    Ok(Some(UnboundAccountReaperConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+        unbound_ttl_days,
+        closed_ttl_days,
+        batch_size: batch_size as i32,
+        reaper,
+    }))
+}
+
 fn parse_trace_credit_cycle_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
@@ -7219,7 +7475,16 @@ fn parse_optional_scheduler_i64_env(
     Ok(value)
 }
 
-async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
+/// The DB-mirror connection pair: the type-erased `Database` mirror ingest's
+/// existing DB-mirror paths use, and the concrete `PgBackend` the pipeline
+/// runtime needs (`assemble_ingest_pipeline_runtime`). Both wrap the same
+/// PostgreSQL pool.
+struct TraceCorpusDbConnections {
+    database: Arc<dyn Database>,
+    postgres: Arc<PgBackend>,
+}
+
+async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<TraceCorpusDbConnections>> {
     if !env_truthy("TRACE_COMMONS_DB_DUAL_WRITE") {
         return Ok(None);
     }
@@ -7231,11 +7496,18 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Data
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(5);
     let config = DatabaseConfig::from_postgres_url(&url, pool_size);
-    let db = trace_commons_server::db::connect_from_config(&config)
+    let postgres = Arc::new(
+        PgBackend::new(&config)
+            .await
+            .context("failed to connect Trace Commons DB dual-write mirror")?,
+    );
+    postgres
+        .run_migrations()
         .await
-        .context("failed to connect Trace Commons DB dual-write mirror")?;
+        .context("failed to migrate Trace Commons DB dual-write mirror")?;
+    let database = postgres.clone() as Arc<dyn Database>;
     tracing::info!("Trace Commons PostgreSQL DB dual-write mirror enabled");
-    Ok(Some(db))
+    Ok(Some(TraceCorpusDbConnections { database, postgres }))
 }
 
 async fn validate_required_postgres_trace_rls_ready(
@@ -7558,111 +7830,159 @@ fn community_routes() -> Router<Arc<AppState>> {
 /// response. `from_fn_with_state` binds the shared `AppState` the middleware needs
 /// to resolve + rotate.
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    let reward_routes = rewards::account_routes(state.clone());
-    Router::new()
-        .route(
+    authenticated_account_surface(state).into_router()
+}
+
+/// Every authenticated account route, with the record of what was registered.
+///
+/// Routes join ONLY through [`account_routes::AccountRoutes`], which records
+/// each `(method, path)`. Each one must also be classified in
+/// [`account_routes::UNBOUND_ACCOUNT_ROUTE_POLICY`] -- the unbound gate in
+/// `account_auth_middleware` refuses any route that is not -- and the test
+/// `every_authenticated_account_route_is_classified_for_unbound_accounts`
+/// fails until it is.
+fn authenticated_account_surface(
+    state: Arc<AppState>,
+) -> account_routes::AuthenticatedAccountRoutes {
+    let (general, rewards) = account_route_groups();
+    general
+        .authenticated(state.clone())
+        .merge(rewards::protected(rewards.authenticated(state)))
+}
+
+/// The account routes before authentication, as two groups because the reward
+/// routes take an extra response layer outside the auth middleware. The
+/// production surface above and the gate tests both build from this, so they
+/// cannot disagree about which routes exist.
+fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::AccountRoutes) {
+    let general = account_routes::AccountRoutes::new()
+        .get(
             "/v1/account/contribution-status",
-            get(admission::account_status_handler),
+            admission::account_status_handler,
         )
-        .route(
-            "/v1/account/invites/redeem",
-            post(account_invite_redeem_handler),
-        )
+        // Z2 S1: the caller's binding state, for the native app's state machine.
+        .get("/v1/account/binding", account_binding_handler)
+        .post("/v1/account/invites/redeem", account_invite_redeem_handler)
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
-        .route("/v1/account/traces", get(account_traces_list_handler))
-        .route(
+        .get("/v1/account/traces", account_traces_list_handler)
+        .post(
             "/v1/account/source-sessions/status",
-            post(account_source_session_status_handler),
+            account_source_session_status_handler,
         )
-        .route(
-            "/v1/account/credit-summary",
-            get(account_credit_summary_handler),
-        )
-        .route(
+        .get("/v1/account/credit-summary", account_credit_summary_handler)
+        .get(
             "/v1/account/traces/{submission_id}",
-            get(account_trace_detail_handler),
+            account_trace_detail_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/content",
-            get(account_trace_content_handler),
+            account_trace_content_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/session-detail",
-            get(account_public_run_session_detail_handler),
+            account_public_run_session_detail_handler,
         )
-        .route(
+        .post(
             "/v1/account/traces/{submission_id}/withdraw",
-            post(account_trace_withdraw_handler),
+            account_trace_withdraw_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/publication",
-            get(account_public_run_handler)
-                .put(account_public_run_publish_handler)
-                .delete(account_public_run_unpublish_handler),
+            account_public_run_handler,
         )
-        .route("/v1/account/logout", post(account_logout_handler))
-        .route(
+        .put(
+            "/v1/account/traces/{submission_id}/publication",
+            account_public_run_publish_handler,
+        )
+        .delete(
+            "/v1/account/traces/{submission_id}/publication",
+            account_public_run_unpublish_handler,
+        )
+        .post("/v1/account/logout", account_logout_handler)
+        .post(
             "/v1/account/sessions/revoke-all",
-            post(account_revoke_all_handler),
+            account_revoke_all_handler,
         )
-        .route(
+        .post(
             "/v1/account/passkeys/register/start",
-            post(account_passkey_register_start_handler),
+            account_passkey_register_start_handler,
         )
-        .route(
+        .post(
             "/v1/account/passkeys/register/finish",
-            post(account_passkey_register_finish_handler),
+            account_passkey_register_finish_handler,
+        )
+        // The native sibling (Z2 S2): the same registration with the ceremony
+        // id in the body instead of a cookie, native session only.
+        .post(
+            "/v1/account/passkeys/native/register/start",
+            account_passkey_native_register_start_handler,
+        )
+        .post(
+            "/v1/account/passkeys/native/register/finish",
+            account_passkey_native_register_finish_handler,
         )
         // Passkey credential management (Slice 2 Task 7). list / rename / remove the
         // caller's OWN credentials. `{credential_id}` is the public base64url id.
-        .route("/v1/account/passkeys", get(account_passkeys_list_handler))
-        .route(
+        .get("/v1/account/passkeys", account_passkeys_list_handler)
+        .patch(
             "/v1/account/passkeys/{credential_id}",
-            patch(account_passkey_rename_handler).delete(account_passkey_remove_handler),
+            account_passkey_rename_handler,
+        )
+        .delete(
+            "/v1/account/passkeys/{credential_id}",
+            account_passkey_remove_handler,
         )
         // Login-with-NEAR enroll ceremony (Slice 3a Task 6). Links a NEAR access
         // key to the caller's account behind the same account-auth middleware.
-        .route(
+        .post(
             "/v1/account/near/enroll/start",
-            post(account_near_enroll_start_handler),
+            account_near_enroll_start_handler,
         )
-        .route(
+        .post(
             "/v1/account/near/enroll/finish",
-            post(account_near_enroll_finish_handler),
+            account_near_enroll_finish_handler,
         )
         // NEAR identity management (Slice 3a Task 9). list / rename / remove the
         // caller's OWN NEAR identities. `{public_key}` is the public NEAR access
         // key. Removal shares the Task 8 strong-authenticator gate; list/rename
         // are not gated.
-        .route(
+        .get(
             "/v1/account/near-identities",
-            get(account_near_identities_list_handler),
+            account_near_identities_list_handler,
         )
-        .route(
+        .patch(
             "/v1/account/near-identities/{public_key}",
-            patch(account_near_identity_rename_handler)
-                .delete(account_near_identity_remove_handler),
+            account_near_identity_rename_handler,
+        )
+        .delete(
+            "/v1/account/near-identities/{public_key}",
+            account_near_identity_remove_handler,
         )
         // Payout designation (Slice 3b Task 6). Designate / clear where credit
         // settles. Money-sensitive, so it shares the strong-authenticator gate.
-        .route(
+        .patch(
             "/v1/account/near-identities/{public_key}/payout",
-            patch(account_near_identity_payout_handler),
+            account_near_identity_payout_handler,
         )
         // Device-principal merge (Slice 3b Task 8). `start` stages a proposal by
         // consuming device B's login-link as proof-of-control (a weak session may
         // stage); `confirm` performs the irreversible fold and is strong-auth-gated.
-        .route("/v1/account/merge/start", post(account_merge_start_handler))
-        .route(
-            "/v1/account/merge/confirm",
-            post(account_merge_confirm_handler),
+        .post("/v1/account/merge/start", account_merge_start_handler)
+        .post("/v1/account/merge/confirm", account_merge_confirm_handler)
+        // Connect near.ai (Z2 S3): bind this unbound passkey account to a NEAR
+        // AI login through the provisioning ceremony. Behind the account
+        // middleware, unlike the unauthenticated provisioning pair: the account
+        // comes from the session, and the ceremony is bound to it.
+        .post(
+            "/v1/account/near-ai/provision/bind/start",
+            near_ai_bind_start_handler,
         )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state,
-            account_auth_middleware,
-        ))
-        .merge(reward_routes)
+        .post(
+            "/v1/account/near-ai/provision/bind/finish",
+            near_ai_bind_finish_handler,
+        );
+    (general, rewards::account_routes())
 }
 
 fn community_cors_layer() -> CorsLayer {
@@ -7723,6 +8043,7 @@ fn app(state: Arc<AppState>) -> Router {
             axum::routing::put(token_bundles::put).get(token_bundles::read),
         )
         .route("/health", get(health_handler))
+        .route("/v1/pipeline/readiness", get(pipeline_readiness_handler))
         .route("/v1/source", get(source_offer_handler))
         // Unauthenticated, like /v1/source above and for the same structural
         // reason: it is registered here, outside every auth layer, on purpose.
@@ -7748,6 +8069,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(recompute_community_snapshot_handler),
         )
         .route("/v1/contributors/me/credit", get(credit_handler))
+        .route(
+            "/v1/contributors/me/settlement-posture",
+            get(settlement_posture_handler),
+        )
         .route(
             trace_commons_protocol::near_ai_measurements::NEAR_AI_MEASUREMENTS_PATH,
             get(near_ai_measurements_handler),
@@ -7787,6 +8112,28 @@ fn app(state: Arc<AppState>) -> Router {
             post(native_authorize_start_handler),
         )
         .route("/v1/account/native/token", post(native_token_handler))
+        // Native passkey identity (Z2 S2). Unauthenticated for the same reason
+        // as the pair above: create/finish and login/finish CREATE the
+        // session, so they cannot require one. The credential is the verified
+        // WebAuthn ceremony itself; every refusal is `native_generic_deny`.
+        // Outside `AccountRoutes` on purpose, so the unbound gate and its
+        // classification table do not apply to them.
+        .route(
+            "/v1/account/native/passkey/create/start",
+            post(native_passkey_create_start_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/create/finish",
+            post(native_passkey_create_finish_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/login/start",
+            post(native_passkey_login_start_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/login/finish",
+            post(native_passkey_login_finish_handler),
+        )
         .route(
             "/v1/account/near/provision/capabilities",
             get(near_provisioning::capabilities),
@@ -7849,6 +8196,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/account/passkey/login/finish",
             post(account_passkey_login_finish_handler),
+        )
+        // The browser passkey step-up page (Z2 S7). Un-versioned and un-authed
+        // beside the login it drives: a plain page whose one script calls the
+        // routes above and the authenticated passkey and payout routes, so a
+        // weak native session's owner can get a strong cookie session.
+        .route(
+            step_up_page::STEP_UP_PATH,
+            get(step_up_page::step_up_page_handler),
         )
         // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
         // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
@@ -8039,6 +8394,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/audit-chain-repair",
             post(audit_chain_repair_handler),
         )
+        .route("/v1/admin/tombstone-repair", post(tombstone_repair_handler))
         .route(
             "/v1/admin/db-reconciliation-drill",
             post(db_reconciliation_drill_handler),
@@ -9125,6 +9481,52 @@ fn parse_signed_token_max_ttl_seconds_from_env() -> anyhow::Result<Option<i64>> 
     }
 }
 
+/// The per-phase claim lease from
+/// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_{REVIEW,SCORE,SETTLE}` (whole
+/// seconds each; unset keeps `PipelineLeaseConfig::default()`'s value for
+/// that phase). Fails closed with the single safe label
+/// `pipeline_lease_config_invalid` for either failure mode -- a value that
+/// does not parse as a non-negative integer, or one that parses but falls
+/// outside `PipelineLeaseConfig::new`'s [1 second, 2 hours] bound -- rather
+/// than two different messages for what is, from an operator's point of
+/// view, the same misconfiguration.
+fn parse_pipeline_lease_config_from_env() -> anyhow::Result<PipelineLeaseConfig> {
+    let defaults = PipelineLeaseConfig::default();
+    let review = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW,
+        defaults.review(),
+    )?;
+    let score = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE,
+        defaults.score(),
+    )?;
+    let settle = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE,
+        defaults.settle(),
+    )?;
+    PipelineLeaseConfig::new(review, score, settle)
+}
+
+fn parse_pipeline_lease_seconds_env(
+    var: &'static str,
+    default: chrono::Duration,
+) -> anyhow::Result<chrono::Duration> {
+    match optional_trimmed_env(var)? {
+        Some(raw) => {
+            let seconds: i64 = raw
+                .parse()
+                .map_err(|_| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))?;
+            // `chrono::Duration::seconds` panics above
+            // `i64::MAX / 1_000`; `try_seconds` reports that the same way
+            // every other malformed value is reported here, rather than
+            // taking the process down on an operator typo.
+            chrono::Duration::try_seconds(seconds)
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))
+        }
+        None => Ok(default),
+    }
+}
+
 fn optional_trimmed_env(name: &'static str) -> anyhow::Result<Option<String>> {
     match std::env::var(name) {
         Ok(value) => {
@@ -9832,6 +10234,7 @@ const CREDIT_CYCLE_SCHEDULER_DRIVER_NAME: &str = "credit_cycle_scheduler";
 const CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME: &str = "credit_settlement_scheduler";
 const PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME: &str = "process_evaluation_scheduler";
 const REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME: &str = "revocation_propagation_scheduler";
+const UNBOUND_ACCOUNT_REAPER_DRIVER_NAME: &str = "unbound_account_reaper";
 
 /// Every driver the liveness registry knows about. The distinctness test
 /// reads this; keep it in sync when adding a driver.
@@ -9848,6 +10251,7 @@ const ALL_DRIVER_NAMES: &[&str] = &[
     CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
     PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
     REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
+    UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
 ];
 
 /// Run `tick` forever on `interval`, recording liveness and emitting the
@@ -10011,6 +10415,67 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
                     "Trace Commons PII backstop driver tick completed"
                 );
                 pii_backstop_tick_outcome(&summary)
+            }
+        },
+    );
+}
+
+/// Spawn the in-process unbound-account reaper (Z2 S5). Copies
+/// `spawn_pii_backstop_driver_task`: `spawn_driver_loop`, a cross-tenant pool
+/// that is not the runtime pool, no bearer-token worker route, hash-free
+/// count-only logging. A tick runs bounded batches back to back while each
+/// comes back full of deletions, up to `TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK`.
+fn spawn_unbound_account_reaper_task(
+    state: &Arc<AppState>,
+    config: Option<UnboundAccountReaperConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        unbound_ttl_days = config.unbound_ttl_days,
+        closed_ttl_days = config.closed_ttl_days,
+        batch_size = config.batch_size,
+        "Trace Commons unbound account reaper enabled"
+    );
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
+        config.interval,
+        move |_state| {
+            let config = tick_config.clone();
+            async move {
+                let mut reaped_unbound = 0u64;
+                let mut reaped_closed = 0u64;
+                let mut skipped = 0u64;
+                for _ in 0..TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK {
+                    let summary = config
+                        .reaper
+                        .reap(
+                            config.unbound_ttl_days,
+                            config.closed_ttl_days,
+                            config.batch_size,
+                        )
+                        .await
+                        .context("unbound account reaper batch failed")?;
+                    reaped_unbound += summary.reaped_unbound;
+                    reaped_closed += summary.reaped_closed;
+                    skipped += summary.skipped;
+                    if summary.reaped() < u64::try_from(config.batch_size).unwrap_or(0) {
+                        break;
+                    }
+                }
+                tracing::info!(
+                    reaped_unbound,
+                    reaped_closed,
+                    skipped,
+                    unbound_ttl_days = config.unbound_ttl_days,
+                    closed_ttl_days = config.closed_ttl_days,
+                    "Trace Commons unbound account reaper tick completed"
+                );
+                Ok(())
             }
         },
     );
@@ -11894,6 +12359,9 @@ struct TraceCommonsObjectStoreConfigStatus {
 struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
+    pipeline_runtime_configured: bool,
+    pipeline_runtime_required: bool,
+    pipeline_runtime_production_qualified: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -12155,6 +12623,12 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
+        pipeline_runtime_configured: state.pipeline_service.is_some(),
+        pipeline_runtime_required: state.pipeline_runtime_required,
+        pipeline_runtime_production_qualified: state
+            .pipeline_service
+            .as_deref()
+            .is_some_and(pipeline_runtime_is_production_qualified),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -13419,6 +13893,164 @@ async fn reject_conflicting_witness_retry(
     Ok(())
 }
 
+/// The pipeline runtime for a tenant routed to `PipelineReceipts`, if any.
+///
+/// `Some` only when the tenant is in the `PipelineReceipts` rollout set AND a
+/// runtime was injected -- the same two conditions `route_pipeline_receipt`
+/// and the completed-admission branch of `submit_trace_handler` both gate
+/// on; shared here so the two cannot drift. A tenant listed without an
+/// injected runtime is refused at startup instead
+/// (`validate_pipeline_receipt_rollout`), so it can never reach either
+/// caller with `state.pipeline_service` still `None`.
+fn pipeline_runtime_for_tenant<'a>(
+    state: &'a AppState,
+    tenant: &TenantCtx,
+) -> Option<&'a Arc<PipelineService>> {
+    if !state.tenant_rollout_gates.enabled_for(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        false,
+        tenant.tenant_id(),
+    ) {
+        return None;
+    }
+    state.pipeline_service.as_ref()
+}
+
+/// The fixed receipt a pipeline-routed submission returns for `Created` and
+/// `Replayed` alike -- shared between `route_pipeline_receipt` (a fresh
+/// submission or its ordinary retry) and the completed-admission branch of
+/// `submit_trace_handler` (a retry that `admission::reserve` already found
+/// terminal), so the two describe the exact same outcome the exact same way.
+fn pipeline_processing_receipt() -> TraceSubmissionReceipt {
+    TraceSubmissionReceipt {
+        status: "processing".to_string(),
+        credit_points_pending: None,
+        credit_points_final: None,
+        explanation: vec!["Accepted for pipeline processing.".to_string()],
+    }
+}
+
+/// The 409 a pipeline-routed submission returns when its idempotency key is
+/// reused with different content -- shared between `route_pipeline_receipt`
+/// and the completed-admission branch of `submit_trace_handler`, which reach
+/// `PipelineReceiptResult::ContentConflict` from `submit` and
+/// `PipelineService::replay_receipt` respectively.
+fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
+    api_error(
+        StatusCode::CONFLICT,
+        "receipt id reused with different content",
+    )
+}
+
+/// Routes a receipt to the versioned pipeline instead of the legacy corpus
+/// path, for a `PipelineReceipts`-rollout tenant with an injected runtime.
+///
+/// Called from `submit_trace_handler` only after the legacy handler's
+/// authentication, submit rate limit, admission reservation,
+/// tenant-access-grant check, envelope validation, and server re-scrub have
+/// all already run (D15) -- this function does none of that itself and
+/// trusts its caller for it. `envelope` is that re-scrubbed envelope.
+/// Returns `Ok(None)` -- meaning "stay on the legacy path" -- unless the
+/// tenant is in the `PipelineReceipts` rollout set AND a runtime was
+/// injected; a tenant listed without an injected runtime is refused at
+/// startup instead (`validate_pipeline_receipt_rollout`), so it can never
+/// reach this function.
+///
+/// A `Replayed` outcome always means a run already exists for this key. A
+/// `ContentConflict` outcome usually does too, but not always: it can also
+/// come from an attempt staged with different content for which no run was
+/// ever created, in which case `replay_receipt` returns `None` below, no
+/// ownership check runs, and the generic content-conflict response is
+/// returned as-is. When a run does exist, this checks that the caller is
+/// the principal who created it, the same way the completed-admission
+/// branch of `submit_trace_handler` checks a replay it finds there. A
+/// pipeline-routed tenant never writes the legacy file record the ordinary
+/// `can_access_submission` check reads, so without this check here that
+/// check would never run against a receipt key at all.
+async fn route_pipeline_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    envelope: &TraceContributionEnvelope,
+    raw_body: &[u8],
+    residual_risk_basis: &[ResidualRiskCondition],
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let Some(pipeline_service) = pipeline_runtime_for_tenant(state, tenant) else {
+        return Ok(None);
+    };
+    let idempotency_key = envelope.submission_id.to_string();
+    let result = pipeline_service
+        .submit(PipelineReceiptRequest {
+            tenant_id: tenant.tenant_id(),
+            actor_principal_ref: tenant.principal_ref(),
+            counts_toward_quota: tenant.role() == TokenRole::Contributor,
+            request_idempotency_key: &idempotency_key,
+            request_bytes: raw_body,
+            server_envelope: envelope,
+            residual_risk_basis,
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: state.submission_quota.max_per_tenant_per_hour,
+                max_per_principal_per_hour: state.submission_quota.max_per_principal_per_hour,
+            },
+        })
+        .await
+        .map_err(internal_error)?;
+    match result {
+        PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
+        replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
+        | PipelineReceiptResult::ContentConflict) => {
+            // A replay means a run already exists for this key, created by
+            // a submission from some principal -- possibly not this one. A
+            // content conflict usually means the same, but not always: it
+            // can also come from an attempt staged with different content
+            // for which no run was ever created, in which case
+            // `replay_receipt` below returns `None` and there is no owner
+            // to check. `read_submission_record` finds no legacy file
+            // record for a pipeline-routed tenant (the pipeline never
+            // writes one), so the legacy `can_access_submission` check --
+            // which already ran earlier, in `submit_trace_handler`, before
+            // this function was ever called -- never ran against this key;
+            // apply the same ownership predicate here, against the
+            // principal the pipeline recorded when it first created the
+            // run.
+            if let Some(replay) = pipeline_service
+                .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
+                .await
+                .map_err(internal_error)?
+            {
+                if !can_access_submission_ref(tenant.auth(), &replay.auth_principal_ref) {
+                    return Err(api_error(
+                        StatusCode::CONFLICT,
+                        "submission id already belongs to another principal",
+                    ));
+                }
+            }
+            match replayed_or_conflicting {
+                PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
+                PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
+                _ => unreachable!("matched above to be Replayed or ContentConflict"),
+            }
+        }
+        // Same message as the legacy `ensure_not_revoked_by_tombstone` check
+        // this bypasses -- the pipeline keeps its own tombstone record, but
+        // the caller-visible refusal is the same one.
+        PipelineReceiptResult::Tombstoned => Err(api_error(
+            StatusCode::CONFLICT,
+            "trace content was previously revoked for this tenant",
+        )),
+        // Same messages as the legacy `enforce_submission_quota` check: the
+        // pipeline enforces its own quota over pipeline receipts only (D10;
+        // see the "Submission quota at switch-over" operator doc section).
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Tenant) => Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "trace contribution tenant submission quota exceeded",
+        )),
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Principal) => Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "trace contribution principal submission quota exceeded",
+        )),
+    }
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13503,6 +14135,74 @@ async fn submit_trace_handler(
             &raw_body,
         )
         .await?;
+        // A pipeline-routed tenant never writes the legacy file record
+        // `read_submission_record` below looks for, so a retried upload that
+        // already completed admission must ask the pipeline for its receipt
+        // first.
+        //
+        // A principal check is still required on this pipeline lookup:
+        // `admission::reserve`'s completed-lookup binds a retry to the
+        // account's admission anchor, not to one principal. An anchor
+        // covers every device the account has provisioned (one principal per
+        // device, `trace_near_provisioned_devices` keyed on
+        // `(tenant_id, principal_ref)` under the same `anchor_hash`), so a
+        // second device on the same account can retry the first device's
+        // submission id and reach this branch as a `completed` retry too.
+        // `replay_receipt` returns the principal the pipeline recorded when
+        // it first created the run (`trace_submissions.auth_principal_ref`),
+        // and the same ownership predicate the legacy fallback below applies
+        // (`can_access_submission`, here via its principal-ref form) is
+        // applied to it before either pipeline outcome is returned.
+        if let Some(pipeline_service) = pipeline_runtime_for_tenant(state.as_ref(), &tenant) {
+            let idempotency_key = envelope.submission_id.to_string();
+            if let Some(PipelineReplayReceipt {
+                result,
+                auth_principal_ref,
+            }) = pipeline_service
+                .replay_receipt(tenant.tenant_id(), &idempotency_key, &raw_body)
+                .await
+                .map_err(internal_error)?
+            {
+                if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
+                    return Err(api_error(
+                        StatusCode::CONFLICT,
+                        "admission_identity_conflict",
+                    ));
+                }
+                match result {
+                    PipelineReceiptResult::Replayed(_) => {
+                        return Ok(Json(pipeline_processing_receipt()));
+                    }
+                    // Defensive, not reachable over HTTP today:
+                    // `admission::reserve`'s own completed-lookup is keyed on
+                    // the request body's hash, so a retry with different
+                    // content for a submission id that is already
+                    // `completed` never reaches this branch as a completed
+                    // retry in the first place -- `reserve` answers it
+                    // first, either refusing a new submission outright (no
+                    // evidence) or with its own identity-conflict decision
+                    // (with evidence). See the third POST in
+                    // `real_http_pipeline_receipt_replays_on_retry`.
+                    PipelineReceiptResult::ContentConflict => {
+                        return Err(pipeline_content_conflict());
+                    }
+                    // `replay_receipt` only ever builds a `Replayed` or a
+                    // `ContentConflict` result (`replay_result`, over a run
+                    // `existing_receipt_run` already found); a read-only
+                    // replay lookup neither creates a run, stages an
+                    // attempt, checks a tombstone, nor counts a quota, so
+                    // none of these three variants can come from it. Kept
+                    // only so this match stays exhaustive against the
+                    // shared `PipelineReceiptResult` enum.
+                    PipelineReceiptResult::Created(_)
+                    | PipelineReceiptResult::Tombstoned
+                    | PipelineReceiptResult::QuotaExceeded(_) => {}
+                }
+            }
+            // No run under this key: a submission that completed admission
+            // on the legacy path before this tenant was routed to the
+            // pipeline. Fall back to the legacy read below, unchanged.
+        }
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)
             .map_err(internal_error)?
@@ -13653,6 +14353,26 @@ async fn submit_trace_handler(
         // the ranker exports read them) and holds `credit_points_pending` at
         // 0.0: the contributor's figure is the gate's, once it has scored.
         apply_credit_estimate_to_envelope(&mut envelope);
+
+        // Tenant rollout gate (D3, D15): every legacy check above --
+        // authentication, the submit rate limit, admission reservation, the
+        // tenant-access-grant check, envelope validation, and the server
+        // re-scrub -- has already run, so a `PipelineReceipts`-listed tenant
+        // with an injected runtime can be hived off to the pipeline here.
+        // Every other tenant falls through unchanged to the legacy path
+        // below.
+        if let Some(receipt) = route_pipeline_receipt(
+            state.as_ref(),
+            &tenant,
+            &envelope,
+            &raw_body,
+            &residual_risk_basis,
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
+        }
+
         let corpus_status = status_for_risk(
             envelope.privacy.residual_pii_risk,
             state.accept_medium_risk_submissions,
@@ -15257,6 +15977,26 @@ async fn credit_handler(
     ))
 }
 
+/// `GET /v1/contributors/me/settlement-posture`
+///
+/// The deployment's settlement posture for a caller holding a device
+/// credential. `GET /v1/account/credit-summary` reports the same object but is
+/// an account route that refuses device bearers, so a contributor daemon
+/// cannot read it. The posture is deployment-wide and label-only (`settlement`
+/// is `http`, `dry_run` or `disabled`; no URL, account or transaction
+/// reference), so any authenticated caller may read it. Both routes derive it
+/// through `credit_numbers::credit_posture`, so they cannot disagree.
+async fn settlement_posture_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<trace_commons_server::credit_numbers::CreditPosture>> {
+    let _tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    Ok(Json(trace_commons_server::credit_numbers::credit_posture(
+        state.near_settlement_mode_label(),
+        false,
+    )))
+}
+
 /// `GET /v1/contributors/me/near-ai-measurements`
 ///
 /// The NEAR AI image measurements this deployment pins, for a caller holding
@@ -15827,7 +16567,7 @@ fn cookie_value_from_headers<'a>(headers: &'a HeaderMap, name: &str) -> Option<&
     })
 }
 
-/// Parse a `tc_account_session` cookie value (`{b64url(tenant_id)}.{secret}`)
+/// Parse an [`ACCOUNT_SESSION_COOKIE`] value (`{b64url(tenant_id)}.{secret}`)
 /// into `(tenant_id, token_hash)`. Returns `None` for any malformed value: no '.'
 /// separator, an empty secret, or a tenant prefix that is not valid base64url /
 /// UTF-8. The stored `token_hash` is `sha256(secret)` ONLY — the tenant is carried
@@ -15853,7 +16593,7 @@ fn account_session_cookie_parts(cookie: &str) -> Option<(String, String)> {
 /// Resolve the dual-auth `AccountCtx` guarding the `/v1/account/*` read surface.
 ///
 /// Exactly one credential is accepted:
-/// - Both a `Authorization: Bearer` AND the `tc_account_session` cookie present →
+/// - Both a `Authorization: Bearer` AND the [`ACCOUNT_SESSION_COOKIE`] present →
 ///   `400` ambiguous credentials. No silent precedence.
 /// - Bearer only → authenticate the device token, resolve its linked account, and
 ///   expand active memberships. `auth_method = DeviceBearer`; actor = device ref.
@@ -15886,7 +16626,7 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_secret_value) =
+    let (ctx, rotated_secret_value, binding) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
@@ -15900,6 +16640,23 @@ async fn account_auth_middleware(
             }
         };
 
+    // The unbound gate (Z2 S1). An account whose binding state is gated
+    // reaches only the routes `UNBOUND_ACCOUNT_ROUTE_POLICY` marks `Allowed`,
+    // looked up by method and matched path template; anything else, including
+    // a route missing from the policy, is refused here, before any handler.
+    // Legacy (no binding row) and bound accounts skip this entirely. The
+    // binding state was read in the same query that validated the session, and
+    // a failed read already refused above.
+    //
+    // A refusal still flows through the rotation attach below: the session may
+    // have rotated in this very request, and withholding the new secret would
+    // sign the client out once the grace window lapses.
+    let gate_refused = binding.is_gated()
+        && account_routes::unbound_access(
+            request.method(),
+            request.extensions().get::<axum::extract::MatchedPath>(),
+        ) != account_routes::UnboundAccess::Allowed;
+
     // A native token rotates exactly like a cookie session, but a native client
     // has no cookie jar. Hand the new token back in a response header — the
     // bearer analogue of `Set-Cookie`, on the same channel, to the same
@@ -15907,9 +16664,14 @@ async fn account_auth_middleware(
     // ever emitted for a native client.
     let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
     if native_rotation {
-        request.extensions_mut().insert(ctx);
-        let mut response = next.run(request).await;
-        if let Some(token) = rotated_secret_value {
+        let mut response = if gate_refused {
+            unbound_gate_refusal(state.as_ref(), &ctx).await
+        } else {
+            request.extensions_mut().insert(ctx);
+            request.extensions_mut().insert(binding);
+            next.run(request).await
+        };
+        if let Some((token, _)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
                     .headers_mut()
@@ -15923,10 +16685,15 @@ async fn account_auth_middleware(
         return response;
     }
 
-    request.extensions_mut().insert(ctx);
-    let mut response = next.run(request).await;
+    let mut response = if gate_refused {
+        unbound_gate_refusal(state.as_ref(), &ctx).await
+    } else {
+        request.extensions_mut().insert(ctx);
+        request.extensions_mut().insert(binding);
+        next.run(request).await
+    };
 
-    if let Some(cookie_value) = rotated_secret_value {
+    if let Some((cookie_value, expires_at)) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
         // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
         // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
@@ -15937,7 +16704,7 @@ async fn account_auth_middleware(
             .http_only(true)
             .same_site(cookie::SameSite::Strict)
             .path("/")
-            .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+            .max_age(rotated_cookie_max_age(expires_at, Utc::now()))
             .build();
         if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
             // APPEND, not insert: a handler may have already set its OWN Set-Cookie
@@ -15949,6 +16716,7 @@ async fn account_auth_middleware(
             response
                 .headers_mut()
                 .append(axum::http::header::SET_COOKIE, value);
+            append_legacy_account_session_clear(response.headers_mut());
             // Cache-Control is single-valued: insert (overwrite) is correct here.
             response.headers_mut().insert(
                 axum::http::header::CACHE_CONTROL,
@@ -15960,15 +16728,87 @@ async fn account_auth_middleware(
     response
 }
 
+/// Max-Age for a rotated session cookie: the usual lifetime, capped at what
+/// is left of the session's absolute `expires_at`, so rotation can never make
+/// the cookie outlive its row. That matters for a step-up session
+/// (`STEP_UP_SESSION_TTL_MINUTES`), whose row expires long before a fresh
+/// seven-day cookie would.
+fn rotated_cookie_max_age(
+    expires_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> cookie::time::Duration {
+    let remaining = (expires_at - now).num_seconds().max(0);
+    cookie::time::Duration::seconds(remaining.min(ACCOUNT_SESSION_TTL_DAYS * 24 * 60 * 60))
+}
+
 #[cfg(test)]
 async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountCtx> {
     // Thin wrapper that DROPS any rotation outcome. Retained so direct unit-test
     // call sites (which assert resolver semantics, not cookie attach) keep working.
     // The PRODUCTION attach point is `account_auth_middleware`, which calls
     // `resolve_account_ctx_with_rotation` and emits the `Set-Cookie` itself.
-    let (ctx, _rotated) = resolve_account_ctx_with_rotation(state, headers).await?;
+    let (ctx, _rotated, _binding) = resolve_account_ctx_with_rotation(state, headers).await?;
     Ok(ctx)
 }
+
+/// The unbound gate's refusal: `403 account_unbound`, one label-only audit row
+/// (`account_unbound_gate_denied`, empty metadata), and a label-only log line.
+/// The refusal does not depend on the audit write: if that fails, the request
+/// is refused all the same.
+async fn unbound_gate_refusal(state: &AppState, ctx: &AccountCtx) -> axum::response::Response {
+    if let Some(db) = state.db_mirror.as_ref() {
+        if db
+            .append_account_audit(
+                &ctx.tenant_id,
+                "account_unbound_gate_denied",
+                &ctx.actor_ref,
+                "denied",
+                serde_json::json!({}),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                label = "account_unbound_gate_audit_failed",
+                "unbound gate refusal could not be audited"
+            );
+        }
+    }
+    tracing::info!(
+        label = account_routes::ACCOUNT_UNBOUND,
+        "unbound gate refusal"
+    );
+    let mut response =
+        api_error(StatusCode::FORBIDDEN, account_routes::ACCOUNT_UNBOUND).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// `GET /v1/account/binding` (Z2 S1): the caller's binding state, as a label.
+///
+/// `unbound` and `bound` for a passkey-origin account, `closed` for one closed
+/// by the existing-account branch of bind, and `legacy` for an account with no
+/// binding row. The state comes from `account_auth_middleware`, which read it
+/// in the session validation query; a request that did not pass through the
+/// middleware has no such extension and is refused by the extractor.
+async fn account_binding_handler(
+    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
+) -> axum::response::Response {
+    let mut response =
+        Json(serde_json::json!({ "binding_state": binding.label() })).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// A session that rotated on this request: the new credential value (cookie
+/// value or native token) and the session's unchanged absolute expiry.
+type RotatedSession = (String, chrono::DateTime<Utc>);
 
 /// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
 /// rotated session secret (cookie path only) so the auth middleware can attach a
@@ -15977,7 +16817,11 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
 async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<RotatedSession>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -16037,7 +16881,11 @@ async fn resolve_account_ctx_with_rotation(
 async fn resolve_account_ctx_native(
     state: &AppState,
     bearer: &str,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<RotatedSession>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -16071,9 +16919,10 @@ async fn resolve_account_ctx_native(
     // middleware hands the new secret back in a response header (the bearer
     // analogue of `Set-Cookie`) so the client can swap before the short
     // prev-token grace lapses.
+    let expires_at = session.expires_at;
     let rotated = session
         .rotated_secret
-        .map(|new_secret| native_token_value(&tenant_id, &new_secret));
+        .map(|new_secret| (native_token_value(&tenant_id, &new_secret), expires_at));
 
     Ok((
         AccountCtx {
@@ -16082,10 +16931,15 @@ async fn resolve_account_ctx_native(
             auth_method: AccountAuthMethod::NativeToken,
             tenant_id,
             actor_ref: account_actor_ref(&account),
-            auth_credential_id: None,
+            // The passkey that minted a native session (Z2 S2), so the passkey
+            // list can mark `this_device`. NULL for loopback and NEAR AI
+            // sessions. A public id; it confers no strength (see below).
+            auth_credential_id: session.auth_credential_id,
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
+            session_token_hash: Some(token_hash),
         },
         rotated,
+        session.binding,
     ))
 }
 
@@ -16097,7 +16951,11 @@ async fn resolve_account_ctx_native(
 async fn resolve_account_ctx_cookie(
     state: &AppState,
     cookie: &str,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<RotatedSession>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -16124,11 +16982,15 @@ async fn resolve_account_ctx_cookie(
     // (`{b64url(tenant)}.{new_secret}`) so the middleware can attach a fresh
     // `Set-Cookie`. The browser still holds the old secret until that header lands;
     // `validate_session` already parked the old hash as the within-grace prev token.
+    let expires_at = session.expires_at;
     let rotated_cookie_value = session.rotated_secret.map(|new_secret| {
-        format!(
-            "{}.{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
-            new_secret,
+        (
+            format!(
+                "{}.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
+                new_secret,
+            ),
+            expires_at,
         )
     });
 
@@ -16145,8 +17007,10 @@ async fn resolve_account_ctx_cookie(
             // Session strength for the authenticator-change gate: `'web'` is weak,
             // `'passkey'`/`'near'` are strong.
             client_kind: session.client_kind,
+            session_token_hash: Some(token_hash),
         },
         rotated_cookie_value,
+        session.binding,
     ))
 }
 
@@ -16423,10 +17287,7 @@ async fn account_credit_summary_handler(
             earned_this_period,
             rate.as_ref(),
         ),
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
         period: AccountCreditPeriod {
             start: period_start,
             end: period_end,
@@ -16971,21 +17832,26 @@ async fn delete_withdrawn_trace_objects(
 /// Must run before the content is deleted: the tombstone's redaction hash
 /// comes from the stored envelope. On a retry the tombstone already exists
 /// and is left as first written.
+///
+/// The file tombstone is also written to the DB's `trace_tombstones`, as an
+/// operator revocation's mirror writes it, so the two tombstone records stay
+/// consistent: the rollback drill compares them by submission id.
 async fn revoke_withdrawn_trace_file_records(
     state: &AppState,
     db: &Arc<dyn Database>,
     tenant_id: &str,
     submission_id: Uuid,
+    created_by_principal_ref: &str,
 ) -> anyhow::Result<()> {
     let record = read_submission_record(&state.root, tenant_id, submission_id)?;
     let derived = read_derived_record(&state.root, tenant_id, submission_id)?;
     if record.is_none() && derived.is_none() {
         return Ok(());
     }
-    if read_revocation(&state.root, tenant_id, submission_id)?.is_none() {
-        write_revocation(
-            &state.root,
-            &TraceCommonsRevocation {
+    let file_tombstone = match read_revocation(&state.root, tenant_id, submission_id)? {
+        Some(existing) => existing,
+        None => {
+            let tombstone = TraceCommonsRevocation {
                 tenant_id: tenant_id.to_string(),
                 tenant_storage_ref: tenant_storage_ref(tenant_id),
                 submission_id,
@@ -16997,9 +17863,25 @@ async fn revoke_withdrawn_trace_file_records(
                 canonical_summary_hash: derived
                     .as_ref()
                     .map(|derived| derived.canonical_summary_hash.clone()),
-            },
-        )?;
-    }
+            };
+            write_revocation(&state.root, &tombstone)?;
+            tombstone
+        }
+    };
+    let trace_id = match record.as_ref() {
+        Some(record) => Some(record.trace_id),
+        None => db
+            .get_trace_submission(tenant_id, submission_id)
+            .await?
+            .map(|db_record| db_record.trace_id),
+    };
+    write_file_tombstone_to_db(
+        db.as_ref(),
+        &file_tombstone,
+        trace_id,
+        created_by_principal_ref,
+    )
+    .await?;
     if let Some(mut record) = record {
         let purged_at = db
             .get_trace_submission(tenant_id, submission_id)
@@ -17019,6 +17901,37 @@ async fn revoke_withdrawn_trace_file_records(
         write_derived_record(&state.root, &derived)?;
     }
     Ok(())
+}
+
+/// Write a file revocation tombstone's DB row in `trace_tombstones`, with the
+/// file tombstone's own reason, hashes and time, under the same deterministic
+/// tombstone id the revocation mirror uses. First writer wins
+/// (`ON CONFLICT DO NOTHING`), so a retry, or a repair run over a withdrawal
+/// that already has its row, changes nothing.
+async fn write_file_tombstone_to_db(
+    db: &dyn Database,
+    file_tombstone: &TraceCommonsRevocation,
+    trace_id: Option<Uuid>,
+    created_by_principal_ref: &str,
+) -> anyhow::Result<()> {
+    db.write_trace_tombstone(StorageTraceTombstoneWrite {
+        tombstone_id: deterministic_trace_uuid_for(
+            "revocation-tombstone",
+            &file_tombstone.tenant_id,
+            file_tombstone.submission_id,
+        ),
+        tenant_id: file_tombstone.tenant_id.clone(),
+        submission_id: file_tombstone.submission_id,
+        trace_id,
+        redaction_hash: file_tombstone.redaction_hash.clone(),
+        canonical_summary_hash: file_tombstone.canonical_summary_hash.clone(),
+        reason: file_tombstone.reason.clone(),
+        effective_at: file_tombstone.revoked_at,
+        retain_until: None,
+        created_by_principal_ref: created_by_principal_ref.to_string(),
+    })
+    .await
+    .context("failed to write the DB row for a file revocation tombstone")
 }
 
 /// Evict a withdrawn trace from every derived surface that would otherwise
@@ -17238,10 +18151,18 @@ async fn account_trace_withdraw_handler(
 
     // The file side records the withdrawal too, before any content is deleted:
     // the file tombstone's redaction hash is read from the stored envelope.
+    // Its DB row is written from the same tombstone.
+    let tombstone_actor = account_audit_tenant(&ctx).principal_ref;
     for affected_id in affected_ids.iter().copied() {
-        revoke_withdrawn_trace_file_records(state.as_ref(), &db, &ctx.tenant_id, affected_id)
-            .await
-            .map_err(|error| withdrawal_failed(&error))?;
+        revoke_withdrawn_trace_file_records(
+            state.as_ref(),
+            &db,
+            &ctx.tenant_id,
+            affected_id,
+            &tombstone_actor,
+        )
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
     }
 
     // Retained mappings make this list stable across retries. Complete the
@@ -17560,11 +18481,31 @@ async fn native_authorize_start_handler(
     response
 }
 
+#[path = "trace_commons_ingest_internal/native_passkey.rs"]
+mod native_passkey;
+#[cfg(test)]
+use native_passkey::NATIVE_PASSKEY_PER_IP_LIMIT;
+use native_passkey::{
+    account_passkey_native_register_finish_handler, account_passkey_native_register_start_handler,
+    native_passkey_create_finish_handler, native_passkey_create_start_handler,
+    native_passkey_login_finish_handler, native_passkey_login_start_handler,
+};
+
+#[path = "trace_commons_ingest_internal/step_up_page.rs"]
+mod step_up_page;
+
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
-    near_ai_provision_finish_handler, near_ai_provision_start_handler,
-    near_provision_finish_handler, near_provision_start_handler,
+    near_ai_bind_finish_handler, near_ai_bind_start_handler, near_ai_provision_finish_handler,
+    near_ai_provision_start_handler, near_provision_finish_handler, near_provision_start_handler,
+};
+
+#[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
+mod pipeline_runtime;
+use pipeline_runtime::{
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime, pipeline_readiness_handler,
+    pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and
@@ -17756,11 +18697,58 @@ where
 /// Issued session lifetime. Matches the spec's ~7d browser session.
 const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
 
+/// Lifetime of a browser passkey session minted for the step-up page (Z2 S7):
+/// a sign-in whose `login/start` asked for `purpose=step_up`. Absolute, like
+/// every session's `expires_at`: activity and rotation-on-use never move it.
+/// A constant, as the other session lifetimes are.
+const STEP_UP_SESSION_TTL_MINUTES: i64 = 15;
+
 /// The session cookie name. Value is `{b64url(tenant_id)}.{secret}`; only the
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
 /// lets the (tenant-less) browser request bootstrap an RLS tenant tx without the
 /// narrow login-resolver pool; see `confirm_login_handler` / `resolve_account_ctx`.
-const ACCOUNT_SESSION_COOKIE: &str = "tc_account_session";
+///
+/// The `__Host-` prefix binds the cookie to the exact host that set it: a
+/// browser accepts it only with `Secure`, `Path=/` and no `Domain`, so the
+/// cookie can be neither set nor shadowed from any other host. Every
+/// `Set-Cookie` for this name must therefore keep those three attributes.
+const ACCOUNT_SESSION_COOKIE: &str = "__Host-tc_account_session";
+
+/// The session cookie's name before it took the `__Host-` prefix. It is never
+/// read: a request that carries only this name is unauthenticated, and the
+/// person signs in again (a one-time sign-out, see
+/// `docs/operator/deployment.md`). Accepting it would keep the old,
+/// host-unbound name alive. The server only ever writes it to expire it; see
+/// [`append_legacy_account_session_clear`].
+const LEGACY_ACCOUNT_SESSION_COOKIE: &str = "tc_account_session";
+
+/// Append a `Set-Cookie` that expires the pre-`__Host-` session cookie, so a
+/// browser still holding it drops it. Same attributes it was set with
+/// (`Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Domain`), with
+/// `Max-Age=0`. Emitted on logout and on every response that sets
+/// [`ACCOUNT_SESSION_COOKIE`]. Append, never insert: it rides alongside the
+/// cookies the response already carries. Idempotent, because a logout that
+/// also rotates reaches this twice (handler, then middleware).
+fn append_legacy_account_session_clear(headers: &mut HeaderMap) {
+    let prefix = format!("{LEGACY_ACCOUNT_SESSION_COOKIE}=");
+    let already = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .any(|v| v.to_str().is_ok_and(|v| v.starts_with(&prefix)));
+    if already {
+        return;
+    }
+    let clear = cookie::Cookie::build((LEGACY_ACCOUNT_SESSION_COOKIE, ""))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .build();
+    if let Ok(value) = HeaderValue::from_str(&clear.to_string()) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
+}
 
 /// Code-free account view path the redeem flow redirects to. The view itself is
 /// a later concern (Tasks 9-10); redirecting here keeps the secret out of any
@@ -18171,12 +19159,28 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 ///
 /// `confirm_is_same_origin` is deliberately kept as well. This does not
 /// replace it; it covers what it cannot.
-const LOGIN_CEREMONY_COOKIE: &str = "tc_login_ceremony";
+const LOGIN_CEREMONY_COOKIE: &str = "__Host-tc_login_ceremony";
 
 /// How long a rendered interstitial stays confirmable. Long enough for a human
 /// to read the page and click, short enough that a leaked nonce is not a
 /// standing credential.
 const LOGIN_CEREMONY_TTL_SECONDS: i64 = 600;
+
+/// Expire the sign-in link ceremony cookie once a confirm has spent it. The
+/// nonce is single-use, and since the `__Host-` prefix put it on `Path=/` it
+/// would otherwise ride along on every request until its lifetime ran out.
+fn append_login_ceremony_clear(headers: &mut HeaderMap) {
+    let clear = cookie::Cookie::build((LOGIN_CEREMONY_COOKIE, ""))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .build();
+    if let Ok(value) = HeaderValue::from_str(&clear.to_string()) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
+}
 
 /// A fresh, unguessable ceremony nonce.
 fn new_login_ceremony_nonce() -> String {
@@ -18331,7 +19335,10 @@ Confirm only if you started this.</p>"
         .secure(true)
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
-        .path("/account/login")
+        // `/`, not `/account/login`: the `__Host-` prefix requires `Path=/`.
+        // The value is a single-use nonce that is useless without the form
+        // it is embedded in, so the wider path exposes nothing.
+        .path("/")
         .max_age(cookie::time::Duration::seconds(LOGIN_CEREMONY_TTL_SECONDS))
         .build()
         .to_string();
@@ -18533,6 +19540,8 @@ async fn confirm_login_inner(
     match HeaderValue::from_str(&cookie.to_string()) {
         Ok(value) => {
             resp_headers.insert(axum::http::header::SET_COOKIE, value);
+            append_legacy_account_session_clear(resp_headers);
+            append_login_ceremony_clear(resp_headers);
         }
         Err(_) => return redeem_generic_deny(),
     }
@@ -18550,7 +19559,7 @@ async fn confirm_login_inner(
 /// `POST /v1/account/logout` — revoke the CURRENT session (Task 11, Part 1).
 ///
 /// Guarded by `resolve_account_ctx` (dual-auth). On the COOKIE path we re-parse
-/// the presented `tc_account_session` cookie to recover the secret, recompute its
+/// the presented session cookie to recover the secret, recompute its
 /// `token_hash`, and revoke exactly that session row (tenant- + token-scoped under
 /// forced RLS, so only the caller's own session is ever touched). On the BEARER
 /// path there is no browser session to revoke (the device token is the
@@ -18560,7 +19569,7 @@ async fn account_logout_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
     headers: HeaderMap,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<axum::response::Response> {
     let db = account_db(state.as_ref())?;
 
     let revoked = match ctx.auth_method {
@@ -18619,7 +19628,13 @@ async fn account_logout_handler(
     .await
     .map_err(internal_error)?;
 
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    // A browser signing out drops any pre-`__Host-` session cookie it still
+    // holds. Native and device callers have no cookie jar, so nothing is sent.
+    if matches!(ctx.auth_method, AccountAuthMethod::SessionCookie) {
+        append_legacy_account_session_clear(response.headers_mut());
+    }
+    Ok(response)
 }
 
 /// `POST /v1/account/sessions/revoke-all` — revoke EVERY session for the caller's
@@ -18657,7 +19672,7 @@ async fn account_revoke_all_handler(
 // Two dual-auth handlers guarded by `resolve_account_ctx`. `register/start`
 // issues a WebAuthn registration challenge, stashes the server-side
 // `PasskeyRegistration` state in the in-process ceremony store, and binds the
-// ceremony to the browser via a short-lived `tc_passkey_ceremony` cookie.
+// ceremony to the browser via a short-lived `__Host-tc_passkey_ceremony` cookie.
 // `register/finish` consumes that cookie (single-use), verifies the attestation,
 // and persists the resulting passkey. Discoverable login (Task 6) and credential
 // management (Task 7+) are intentionally out of scope here.
@@ -18667,7 +19682,7 @@ async fn account_revoke_all_handler(
 /// that started it. Carries only the opaque ceremony id (an unguessable CSPRNG
 /// token), never any key or challenge material; the server-side challenge state
 /// lives in the ceremony store keyed by this id.
-const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "tc_passkey_ceremony";
+const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "__Host-tc_passkey_ceremony";
 
 /// Ceremony cookie lifetime. Matches the ceremony-store TTL window (a few
 /// minutes): long enough for an interactive authenticator tap, short enough to
@@ -18748,7 +19763,7 @@ struct AccountPasskeyRegisterFinishBody {
 /// `exclude_credentials` from the account's existing active credentials so the
 /// same authenticator cannot enroll twice, stashes the server-side
 /// `PasskeyRegistration` state in the ceremony store, and returns the
-/// `CreationChallengeResponse` plus a short-lived `tc_passkey_ceremony` cookie
+/// `CreationChallengeResponse` plus a short-lived `__Host-tc_passkey_ceremony` cookie
 /// binding the ceremony to this browser.
 async fn account_passkey_register_start_handler(
     State(state): State<Arc<AppState>>,
@@ -18845,7 +19860,7 @@ async fn account_passkey_register_start_handler(
 /// `POST /v1/account/passkeys/register/finish` — complete passkey enrollment
 /// (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`; fails closed with 503
 /// if the relying party is unconfigured. Recovers the pending
-/// `PasskeyRegistration` via the single-use `tc_passkey_ceremony` cookie
+/// `PasskeyRegistration` via the single-use `__Host-tc_passkey_ceremony` cookie
 /// (missing / expired / already-consumed / wrong-variant -> 400), verifies the
 /// browser's attestation, and persists the resulting passkey under the canonical
 /// credential-id encoding. A failed/invalid attestation is rejected with a 400
@@ -18957,7 +19972,7 @@ const NEAR_LOGIN_MESSAGE: &str = "Trace Commons sign-in";
 /// Ceremony cookie binding a NEAR enroll ceremony to this browser. Shares the
 /// shape (Secure + HttpOnly + SameSite=Strict + Path=/ + short Max-Age) of the
 /// passkey ceremony cookie but a distinct name so the two ceremonies never alias.
-const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "tc_near_ceremony";
+const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "__Host-tc_near_ceremony";
 
 /// Encode the 32-byte challenge nonce for the wire as lowercase hex (64 chars).
 ///
@@ -18972,7 +19987,7 @@ fn near_nonce_to_wire(nonce: &[u8; 32]) -> String {
 /// `POST /v1/account/near/enroll/start` — begin linking a NEAR access key to the
 /// authenticated account. Fails closed (503) when NEAR sign-in is unconfigured.
 /// Generates a fresh 32-byte CSPRNG nonce, stashes a `NearChallenge` ceremony
-/// keyed by an opaque ceremony id, sets the short-lived `tc_near_ceremony`
+/// keyed by an opaque ceremony id, sets the short-lived `__Host-tc_near_ceremony`
 /// cookie, and returns the `{ message, nonce, recipient }` the wallet's
 /// `signMessage` consumes.
 async fn account_near_enroll_start_handler(
@@ -19065,7 +20080,7 @@ struct AccountNearEnrollFinishBody {
 
 /// `POST /v1/account/near/enroll/finish` — complete the NEAR access-key link.
 /// Fails closed (503) when NEAR sign-in is unconfigured. Recovers and CONSUMES
-/// the `NearChallenge` via the single-use `tc_near_ceremony` cookie (missing /
+/// the `NearChallenge` via the single-use `__Host-tc_near_ceremony` cookie (missing /
 /// expired / wrong-variant -> 400), verifies the NEP-413 wallet signature over
 /// the stashed challenge, then performs the BINDING CHECK: the signing key must
 /// be a FullAccess key of the named NEAR account (a non-FullAccess key or any RPC
@@ -19344,8 +20359,15 @@ async fn account_passkey_remove_handler(
 
     let db = account_db(state.as_ref())?;
 
+    // Z2 S2: every live session this passkey minted is revoked with it, browser
+    // and native, except the session making this request.
     let result = db
-        .revoke_account_credential(&ctx.tenant_id, ctx.account_id.as_uuid(), &credential_id)
+        .revoke_account_credential_sparing_session(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &credential_id,
+            ctx.session_token_hash.as_deref(),
+        )
         .await
         .map_err(internal_error)?;
 
@@ -19752,7 +20774,7 @@ async fn account_merge_confirm_handler(
 //   * `/account/passkey/login/start` issues a discoverable-credential WebAuthn
 //     challenge (no allow-list), stashes the server-side
 //     `DiscoverableAuthentication` state in the in-process ceremony store, and
-//     binds it to the browser via the same short-lived `tc_passkey_ceremony`
+//     binds it to the browser via the same short-lived `__Host-tc_passkey_ceremony`
 //     cookie used by enrollment.
 //   * `/account/passkey/login/finish` verifies the browser's assertion and, on
 //     success, mints the IDENTICAL Slice 1 session cookie. It bootstraps the
@@ -19813,18 +20835,52 @@ where
     }
 }
 
+/// What a browser passkey sign-in is for, fixed at `login/start` and carried
+/// in the ceremony to `finish`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasskeyLoginPurpose {
+    /// An ordinary sign-in: a session of `ACCOUNT_SESSION_TTL_DAYS`.
+    Session,
+    /// The step-up page's sign-in (Z2 S7): a session of
+    /// `STEP_UP_SESSION_TTL_MINUTES`.
+    StepUp,
+}
+
+/// The `purpose` of a `login/start`, from its raw query. No `purpose` is an
+/// ordinary sign-in and other parameters are ignored, as before. A `purpose`
+/// must be exactly `step_up`, once; any other value (or a repeat) is `None`,
+/// which the handler answers with the uniform deny. The value is compared, not
+/// decoded, and never logged.
+fn passkey_login_purpose(query: Option<&str>) -> Option<PasskeyLoginPurpose> {
+    let mut purposes = query.unwrap_or_default().split('&').filter_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "purpose").then_some(value)
+    });
+    match (purposes.next(), purposes.next()) {
+        (None, _) => Some(PasskeyLoginPurpose::Session),
+        (Some("step_up"), None) => Some(PasskeyLoginPurpose::StepUp),
+        _ => None,
+    }
+}
+
 /// `POST /account/passkey/login/start` — begin a discoverable passkey login
 /// (Slice 2 Task 6). UNAUTHENTICATED. Fails closed (uniform deny) when the
 /// relying party is unconfigured. Rate-limited per-IP + global. Issues a
 /// discoverable-credential challenge (no allow-list — the authenticator
 /// "discovers" the credential and user handle), stashes the server-side
 /// `DiscoverableAuthentication` state under a fresh ceremony id, and binds it to
-/// this browser with the short-lived `tc_passkey_ceremony` cookie. Returns the
+/// this browser with the short-lived `__Host-tc_passkey_ceremony` cookie. Returns the
 /// `RequestChallengeResponse`. ANY failure collapses to the uniform deny.
 async fn account_passkey_login_start_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> axum::response::Response {
+    // The one optional input: `purpose=step_up` from the step-up page. Checked
+    // before anything else so a refused purpose costs nothing.
+    let Some(purpose) = passkey_login_purpose(query.as_deref()) else {
+        return passkey_login_generic_deny();
+    };
     // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
     // in the `REDEEM_MIN_LATENCY` timing floor. It performs NO credential or tenant
     // lookup — it only mints a fresh discoverable-auth challenge — so there is no
@@ -19857,7 +20913,10 @@ async fn account_passkey_login_start_handler(
     let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
-        CeremonyState::DiscoverableAuthentication(auth_state),
+        match purpose {
+            PasskeyLoginPurpose::Session => CeremonyState::DiscoverableAuthentication(auth_state),
+            PasskeyLoginPurpose::StepUp => CeremonyState::StepUpDiscoverable(auth_state),
+        },
     );
 
     // Same short-lived ceremony cookie shape as enrollment (Task 5): opaque id
@@ -19885,6 +20944,103 @@ async fn account_passkey_login_start_handler(
         Err(_) => return passkey_login_generic_deny(),
     }
     response
+}
+
+/// A discoverable passkey assertion that verified: the tenant the credential
+/// lives in, the account it belongs to, and its canonical credential id.
+struct VerifiedPasskeyAssertion {
+    tenant: String,
+    account_id: uuid::Uuid,
+    credential_id: String,
+}
+
+/// The ONE passkey login verifier, shared by the browser
+/// (`/account/passkey/login/finish`) and native
+/// (`/v1/account/native/passkey/login/finish`) sign-ins. The two differ only in
+/// how the ceremony state was recovered (a cookie or a body-borne id) and what
+/// they issue; every check on the assertion itself lives here, so the surfaces
+/// cannot drift apart. `None` on any failure; the caller answers with its own
+/// uniform deny.
+///
+/// Steps, in order: identify the asserted handle and credential id (no tenant
+/// context yet); the per-credential ceiling; resolve the tenant through the
+/// NARROW resolver pool with NO tenant write; load the active credential under
+/// that tenant's RLS; require the asserted user handle to equal the
+/// credential's account (before verification runs); verify, which enforces the
+/// signature and the sign-counter clone check; persist the advanced counter.
+async fn verify_discoverable_passkey_assertion(
+    webauthn: &webauthn_rs::Webauthn,
+    db: &dyn Database,
+    assertion: &webauthn_rs::prelude::PublicKeyCredential,
+    auth_state: webauthn_rs::prelude::DiscoverableAuthentication,
+) -> Option<VerifiedPasskeyAssertion> {
+    // Extract the asserted user handle + credential id from the assertion (no
+    // tenant context yet). Encode the credential id with the SAME canonical
+    // base64url encoding enrollment used so the lookup agrees byte-for-byte.
+    let (account_handle_uuid, cred_id_bytes) = webauthn
+        .identify_discoverable_authentication(assertion)
+        .ok()?;
+    let credential_id =
+        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
+
+    // Per-credential hard ceiling (replay/brute bound on one specific credential,
+    // IP-independent, and shared by both surfaces).
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("passkey-login-cred:{credential_id}"),
+        PASSKEY_LOGIN_PER_CRED_LIMIT,
+    ) {
+        return None;
+    }
+
+    // Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
+    // ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
+    // -> deny, and critically NO tenant row is written for a forged id.
+    let tenant = db.resolve_credential_tenant(&credential_id).await.ok()??;
+
+    // Under the resolved tenant's RLS, load the active credential. Deserialize
+    // the stored passkey JSON into a webauthn-rs `Passkey`; a corrupt row also
+    // denies.
+    let credential = db
+        .load_webauthn_credential_for_login(&tenant, &credential_id)
+        .await
+        .ok()??;
+    let credential_account_id = credential.account_id;
+    let mut passkey: webauthn_rs::prelude::Passkey =
+        serde_json::from_value(credential.passkey).ok()?;
+
+    // Cross-account / handle binding (checked BEFORE finish so a mismatch never
+    // reaches verification): the user handle the authenticator asserted MUST
+    // equal the account the stored credential belongs to. Defense-in-depth on
+    // top of the credential_id -> account binding.
+    if account_handle_uuid != credential_account_id {
+        return None;
+    }
+
+    // Verify the assertion. The SIGN-COUNTER regression / clone-detection check
+    // is enforced INSIDE finish_discoverable_authentication (a regressed counter
+    // -> Err), as is the allowed-credential / signature check.
+    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
+    let auth_result = webauthn
+        .finish_discoverable_authentication(assertion, auth_state, &[discoverable_key])
+        .ok()?;
+
+    // Persist the advanced sign counter (clone-detection state) when it moved.
+    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
+    // property (counter / backup flags) actually changed. A persistence failure is
+    // NOT fatal to this login (the assertion already verified), but we fail closed
+    // so a stuck counter can't silently accumulate.
+    if matches!(passkey.update_credential(&auth_result), Some(true)) {
+        let updated = serde_json::to_value(&passkey).ok()?;
+        db.update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
+            .await
+            .ok()?;
+    }
+
+    Some(VerifiedPasskeyAssertion {
+        tenant,
+        account_id: credential_account_id,
+        credential_id,
+    })
 }
 
 /// `POST /account/passkey/login/finish` — complete a discoverable passkey login
@@ -19936,115 +21092,60 @@ async fn account_passkey_login_finish_inner(
 
     // 3. Recover and CONSUME (single-use `take`) the pending discoverable-auth
     //    state via the ceremony cookie. Missing / expired / already-consumed /
-    //    wrong-variant all collapse to the uniform deny.
-    let auth_state = match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
-        Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-            Some(CeremonyState::DiscoverableAuthentication(auth_state)) => auth_state,
-            Some(_) | None => return passkey_login_generic_deny(),
-        },
-        None => return passkey_login_generic_deny(),
-    };
-
-    // 4. Extract the asserted user handle + credential id from the assertion (no
-    //    tenant context yet). Encode the credential id with the SAME canonical
-    //    base64url encoding enrollment used so the lookup agrees byte-for-byte.
-    let (account_handle_uuid, cred_id_bytes) =
-        match webauthn.identify_discoverable_authentication(&assertion) {
-            Ok(parts) => parts,
-            Err(_) => return passkey_login_generic_deny(),
+    //    wrong-variant all collapse to the uniform deny. The purpose was bound
+    //    into the ceremony at `start`; nothing here can change it.
+    let (auth_state, purpose) =
+        match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
+            Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+                Some(CeremonyState::DiscoverableAuthentication(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::Session)
+                }
+                Some(CeremonyState::StepUpDiscoverable(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::StepUp)
+                }
+                Some(_) | None => return passkey_login_generic_deny(),
+            },
+            None => return passkey_login_generic_deny(),
         };
-    let credential_id =
-        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
 
-    // Per-credential hard ceiling (replay/brute bound on one specific credential,
-    // IP-independent). Same uniform deny.
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-cred:{credential_id}"),
-        PASSKEY_LOGIN_PER_CRED_LIMIT,
-    ) {
+    // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
+    //    the advanced sign counter: the verification core shared with native
+    //    passkey sign-in. Any failure -> uniform deny.
+    let Some(VerifiedPasskeyAssertion {
+        tenant,
+        account_id: credential_account_id,
+        credential_id,
+    }) =
+        verify_discoverable_passkey_assertion(&webauthn, db.as_ref(), &assertion, auth_state).await
+    else {
         return passkey_login_generic_deny();
-    }
-
-    // 5. Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
-    //    ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
-    //    -> uniform deny, and critically NO tenant row is written for a forged id.
-    let tenant = match db.resolve_credential_tenant(&credential_id).await {
-        Ok(Some(tenant)) => tenant,
-        Ok(None) | Err(_) => return passkey_login_generic_deny(),
     };
-
-    // 6. Under the resolved tenant's RLS, load the active credential. None ->
-    //    uniform deny. Deserialize the stored passkey JSON into a webauthn-rs
-    //    `Passkey`; a corrupt row also collapses to the uniform deny.
-    let credential = match db
-        .load_webauthn_credential_for_login(&tenant, &credential_id)
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) | Err(_) => return passkey_login_generic_deny(),
-    };
-    // Move the owned `passkey` JSON out of the row (no clone) for deserialization;
-    // `account_id` is retained for the handle-binding check below.
-    let credential_account_id = credential.account_id;
-    let mut passkey: webauthn_rs::prelude::Passkey =
-        match serde_json::from_value(credential.passkey) {
-            Ok(passkey) => passkey,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-
-    // 8. Cross-account / handle binding (checked BEFORE finish so a mismatch never
-    //    reaches verification): the user handle the authenticator asserted MUST
-    //    equal the account the stored credential belongs to. Defense-in-depth on
-    //    top of the credential_id -> account binding.
-    if account_handle_uuid != credential_account_id {
-        return passkey_login_generic_deny();
-    }
-
-    // 7. Verify the assertion. The SIGN-COUNTER regression / clone-detection check
-    //    is enforced INSIDE finish_discoverable_authentication (a regressed counter
-    //    -> Err), as is the allowed-credential / signature check. Any Err ->
-    //    uniform deny.
-    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
-    let auth_result = match webauthn.finish_discoverable_authentication(
-        &assertion,
-        auth_state,
-        &[discoverable_key],
-    ) {
-        Ok(auth_result) => auth_result,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    // Persist the advanced sign counter (clone-detection state) when it moved.
-    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
-    // property (counter / backup flags) actually changed. A persistence failure is
-    // NOT fatal to this login (the assertion already verified), but we fail closed
-    // to the uniform deny so a stuck counter can't silently accumulate.
-    if matches!(passkey.update_credential(&auth_result), Some(true)) {
-        let updated = match serde_json::to_value(&passkey) {
-            Ok(value) => value,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-        if db
-            .update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
-            .await
-            .is_err()
-        {
-            return passkey_login_generic_deny();
-        }
-    }
 
     // 9. Mint the session secret (>=128-bit CSPRNG); store ONLY its hash. Insert
     //    the session (client_kind='passkey', auth_credential_id=credential_id) +
     //    hash-only audit in one RLS-scoped tx under the resolved tenant. NO
     //    ensure_trace_tenant: the credential is verified, so the tenant provably
     //    exists via its FK.
+    //    A step-up sign-in's session lasts `STEP_UP_SESSION_TTL_MINUTES`, in
+    //    the row's absolute `expires_at` and in the cookie's Max-Age alike.
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
-    let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
+    let (lifetime, metadata) = match purpose {
+        PasskeyLoginPurpose::Session => (
+            Duration::days(ACCOUNT_SESSION_TTL_DAYS),
+            // Hash-only / label-only: never the credential id or key material.
+            serde_json::json!({ "client_kind": "passkey" }),
+        ),
+        PasskeyLoginPurpose::StepUp => (
+            Duration::minutes(STEP_UP_SESSION_TTL_MINUTES),
+            serde_json::json!({ "client_kind": "passkey", "purpose": "step_up" }),
+        ),
+    };
+    let expires_at = Utc::now() + lifetime;
     if db
         .issue_passkey_session(
             &tenant,
-            credential.account_id,
+            credential_account_id,
             trace_commons_server::db::NewSession {
                 token_hash: &token_hash,
                 client_kind: "passkey",
@@ -20054,8 +21155,7 @@ async fn account_passkey_login_finish_inner(
             trace_commons_server::db::RedeemAudit {
                 action: "account_passkey_login".to_string(),
                 outcome: "success".to_string(),
-                // Hash-only / label-only: never the credential id or key material.
-                metadata: serde_json::json!({ "client_kind": "passkey" }),
+                metadata,
             },
         )
         .await
@@ -20077,7 +21177,7 @@ async fn account_passkey_login_finish_inner(
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
         .path("/")
-        .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+        .max_age(cookie::time::Duration::seconds(lifetime.num_seconds()))
         .build();
     // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
     let clear_ceremony = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ""))
@@ -20103,6 +21203,7 @@ async fn account_passkey_login_finish_inner(
     if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
         resp_headers.append(axum::http::header::SET_COOKIE, value);
     }
+    append_legacy_account_session_clear(resp_headers);
     resp_headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -20122,7 +21223,7 @@ async fn account_passkey_login_finish_inner(
 //
 //   * `/account/near/login/start` mints a fresh 32-byte challenge nonce, stashes
 //     a `NearChallenge` ceremony in the in-process store, binds it to the browser
-//     via the short-lived `tc_near_ceremony` cookie, and returns
+//     via the short-lived `__Host-tc_near_ceremony` cookie, and returns
 //     `{ message: NEAR_LOGIN_MESSAGE, nonce, recipient }`.
 //   * `/account/near/login/finish` verifies the wallet's NEP-413 assertion
 //     OFFLINE (NO RPC at login), bootstraps the tenant from the asserted public
@@ -20199,7 +21300,7 @@ where
 /// (Slice 3a Task 7). UNAUTHENTICATED. Fails closed (uniform deny) when NEAR
 /// sign-in is unconfigured. Rate-limited per-IP + global. Mints a fresh 32-byte
 /// challenge nonce, stashes a `NearChallenge` ceremony under a fresh ceremony id,
-/// binds it to this browser with the short-lived `tc_near_ceremony` cookie, and
+/// binds it to this browser with the short-lived `__Host-tc_near_ceremony` cookie, and
 /// returns `{ message: NEAR_LOGIN_MESSAGE, nonce: hex, recipient }`. ANY failure
 /// collapses to the uniform deny.
 async fn account_near_login_start_handler(
@@ -20474,6 +21575,7 @@ async fn account_near_login_finish_inner(
     if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
         resp_headers.append(axum::http::header::SET_COOKIE, value);
     }
+    append_legacy_account_session_clear(resp_headers);
     resp_headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -21317,8 +22419,15 @@ const RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND: &str =
     "retention_purged_artifact_invalidation";
 
 /// The file audit event recording an operator audit-chain repair: how many
-/// file lines it restored from the DB. Hash-only.
-const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str = "audit_chain_repair";
+/// file lines it restored from the DB, or the legacy segment it resumed the
+/// DB chain across. Hash-only. The store accepts a resume only from a row of
+/// this kind.
+const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str =
+    trace_commons_server::trace_corpus_storage::TRACE_AUDIT_CHAIN_REPAIR_KIND;
+
+/// The file audit event recording an operator tombstone repair: how many DB
+/// tombstone rows it wrote from file tombstones. Hash-only.
+const TOMBSTONE_REPAIR_AUDIT_KIND: &str = "tombstone_repair";
 
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
@@ -21327,6 +22436,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+            | TOMBSTONE_REPAIR_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -43697,6 +44807,13 @@ struct TraceAuditChainDrillResponse {
     db_mismatch_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     db_last_event_hash: Option<String>,
+    /// Where the DB chain resumes across a legacy segment an operator
+    /// accepted after a binary rollback (`audit-chain-repair`), and how many
+    /// file events those resumes skip. Evidence, not a gap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_legacy_segment_resume_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_legacy_segment_file_event_count: Option<usize>,
     blocking_gaps: Vec<String>,
     failure_hashes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45577,6 +46694,9 @@ struct TraceDbReconciliationDrillResponse {
     /// DB audit rows before the first hashed row, mirrored by a build from
     /// before the DB carried the chain. Not blocking.
     db_audit_legacy_prefix_row_count: usize,
+    /// File events a rolled-back build left with no DB row, inside a legacy
+    /// segment the DB chain resumes across. Not blocking.
+    db_audit_legacy_segment_file_only_event_count: usize,
     file_replay_export_manifest_count: usize,
     db_export_manifest_count: usize,
     db_export_manifest_item_count: usize,
@@ -45656,6 +46776,8 @@ async fn run_db_reconciliation_drill(
         file_audit_event_count: report.file_audit_event_count,
         db_audit_event_count: report.db_audit_event_count,
         db_audit_legacy_prefix_row_count: report.db_audit_legacy_prefix_row_count,
+        db_audit_legacy_segment_file_only_event_count: report
+            .db_audit_legacy_segment_file_only_event_count,
         file_replay_export_manifest_count: report.file_replay_export_manifest_count,
         db_export_manifest_count: report.db_export_manifest_count,
         db_export_manifest_item_count: report.db_export_manifest_item_count,
@@ -45740,6 +46862,20 @@ async fn run_audit_chain_drill(
             "db_audit_chain_mismatch_count",
             usize::from(!db_report.verified) * db_report.mismatch_count.max(1),
         );
+        // Both chains can verify on their own while the tenant is locked
+        // out: every audited append chains from the file's head, and the
+        // store refuses it as stale unless that is also the DB's latest
+        // hashed row. A binary rollback or a failed file append leaves them
+        // apart; `POST /v1/admin/audit-chain-repair` says which and repairs
+        // it. (With no hashed DB row yet, the DB accepts any first one.)
+        push_rollback_gap_count(
+            &mut blocking_gaps,
+            "audit_chain_file_head_not_db_head",
+            usize::from(
+                db_report.last_event_hash.is_some()
+                    && db_report.last_event_hash != report.last_event_hash,
+            ),
+        );
     }
     let failure_hashes = report
         .failures
@@ -45760,6 +46896,9 @@ async fn run_audit_chain_drill(
         db_report.map(|report| report.payload_unverified_event_count);
     let db_mismatch_count = db_report.map(|report| report.mismatch_count);
     let db_last_event_hash = db_report.and_then(|report| report.last_event_hash.clone());
+    let db_legacy_segment_resume_count = db_report.map(|report| report.legacy_segment_resume_count);
+    let db_legacy_segment_file_event_count =
+        db_report.map(|report| report.legacy_segment_file_event_count);
     let evidence_hash = audit_chain_drill_evidence_hash(
         tenant,
         report.verified,
@@ -45774,6 +46913,8 @@ async fn run_audit_chain_drill(
         db_payload_unverified_event_count,
         db_mismatch_count,
         db_last_event_hash.as_deref(),
+        db_legacy_segment_resume_count,
+        db_legacy_segment_file_event_count,
         &blocking_gaps,
         &failure_hashes,
     );
@@ -45797,6 +46938,8 @@ async fn run_audit_chain_drill(
         db_payload_unverified_event_count,
         db_mismatch_count,
         db_last_event_hash,
+        db_legacy_segment_resume_count,
+        db_legacy_segment_file_event_count,
         blocking_gaps,
         failure_hashes,
         recorded_evidence: None,
@@ -46070,15 +47213,25 @@ async fn run_rollback_drill(
     // Legacy submit rows and the file events they stand for are counted
     // apart, not as rollback gaps; see `legacy_submit_audit_rows`.
     let legacy_submit_audit = legacy_submit_audit_rows(&file_audit_events, &db_audit_events);
+    // So are a rolled-back build's file-only events and store rows inside a
+    // legacy segment the DB chain resumes across; see
+    // `db_audit_legacy_segments`.
+    let legacy_segments = db_audit_legacy_segments(&db_audit_events, &file_audit_events);
     let file_audit_event_ids = file_audit_events
         .iter()
         .map(|event| event.event_id)
-        .filter(|event_id| !legacy_submit_audit.file_event_ids.contains(event_id))
+        .filter(|event_id| {
+            !legacy_submit_audit.file_event_ids.contains(event_id)
+                && !legacy_segments.file_only_event_ids.contains(event_id)
+        })
         .collect::<BTreeSet<_>>();
     let db_audit_event_ids = db_audit_events
         .iter()
         .map(|event| event.audit_event_id)
-        .filter(|event_id| !legacy_submit_audit.db_row_ids.contains(event_id))
+        .filter(|event_id| {
+            !legacy_submit_audit.db_row_ids.contains(event_id)
+                && !legacy_segments.store_row_ids.contains(event_id)
+        })
         .collect::<BTreeSet<_>>();
     let file_tombstone_submission_ids = file_tombstones
         .iter()
@@ -46680,6 +47833,9 @@ fn rollout_feature_global_enabled(state: &AppState, feature: TraceTenantRolloutF
         TraceTenantRolloutFeature::ObjectPrimaryDerivedExports => {
             state.object_primary_derived_exports
         }
+        // Tenant-list-only: no paired "globally enabled" `AppState` bool (see
+        // the variant's doc comment).
+        TraceTenantRolloutFeature::PipelineReceipts => false,
     }
 }
 
@@ -46725,11 +47881,15 @@ fn audit_chain_drill_evidence_hash(
     db_payload_unverified_event_count: Option<usize>,
     db_mismatch_count: Option<usize>,
     db_last_event_hash: Option<&str>,
+    db_legacy_segment_resume_count: Option<usize>,
+    db_legacy_segment_file_event_count: Option<usize>,
     blocking_gaps: &[String],
     failure_hashes: &[String],
 ) -> String {
     json_evidence_hash(&serde_json::json!({
         "schema": "trace_commons_audit_chain_drill.v1",
+        "db_legacy_segment_resume_count": db_legacy_segment_resume_count,
+        "db_legacy_segment_file_event_count": db_legacy_segment_file_event_count,
         "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
         "actor_principal_ref": tenant.principal_ref,
         "file_verified": file_verified,
@@ -51739,10 +52899,7 @@ fn register_stats_response(
         withheld,
         scope: REGISTER_STATS_SCOPE,
         as_of: row.as_of,
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
     }
 }
 
@@ -57451,6 +58608,19 @@ fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecor
     auth.role.can_review() || principal_owns_submission(auth, record)
 }
 
+/// The same predicate `can_access_submission` applies, taking the stored
+/// owner's principal ref directly rather than a full
+/// `TraceCommonsSubmissionRecord` -- for a caller whose only record of a
+/// submission's ownership is that one field, such as the pipeline's
+/// `trace_submissions.auth_principal_ref` read for a completed-admission
+/// retry (`submit_trace_handler`). Built from the same
+/// `principal_owns_submission_ref` predicate `can_access_submission` itself
+/// resolves to (through `principal_owns_submission`), so the two can never
+/// drift apart.
+fn can_access_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
+    auth.role.can_review() || principal_owns_submission_ref(auth, auth_principal_ref)
+}
+
 /// Owned quarantined submissions may be superseded by a corrected envelope on
 /// the same `submission_id` (#214). Accepted / rejected / revoked rows stay
 /// classic-idempotent; reviewers use the dedicated rescrub route instead.
@@ -57467,8 +58637,12 @@ fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmiss
 }
 
 fn principal_owns_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
-    record.auth_principal_ref == legacy_principal_ref()
-        || auth.matches_stored_principal(&record.auth_principal_ref)
+    principal_owns_submission_ref(auth, &record.auth_principal_ref)
+}
+
+fn principal_owns_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
+    auth_principal_ref == legacy_principal_ref()
+        || auth.matches_stored_principal(auth_principal_ref)
 }
 
 fn principal_owns_storage_submission(
@@ -58673,7 +59847,7 @@ fn db_audit_legacy_prefix_row_count(events: &[StorageTraceAuditEventRecord]) -> 
 /// hashed row must chain from the hashed row before it.
 struct DbAuditChainFileAnchors<'a> {
     by_id: BTreeMap<Uuid, &'a TraceCommonsAuditEvent>,
-    event_hashes: BTreeSet<&'a str>,
+    by_hash: BTreeMap<&'a str, &'a TraceCommonsAuditEvent>,
 }
 
 impl<'a> DbAuditChainFileAnchors<'a> {
@@ -58683,11 +59857,34 @@ impl<'a> DbAuditChainFileAnchors<'a> {
                 .iter()
                 .map(|event| (event.event_id, event))
                 .collect(),
-            event_hashes: file_events
+            by_hash: file_events
                 .iter()
-                .filter_map(|event| event.event_hash.as_deref())
+                .filter_map(|event| Some((event.event_hash.as_deref()?, event)))
                 .collect(),
         }
+    }
+
+    /// The file events a resume skips: those after the event hashed
+    /// `from_hash`, up to and including the one hashed `to_hash`, walking the
+    /// file chain back from `to_hash`. `None` unless `from_hash` is an
+    /// ancestor of `to_hash` in the file chain.
+    fn file_events_between(
+        &self,
+        from_hash: &str,
+        to_hash: &str,
+    ) -> Option<Vec<&'a TraceCommonsAuditEvent>> {
+        let mut between = Vec::new();
+        let mut cursor = to_hash;
+        while cursor != from_hash {
+            let event = *self.by_hash.get(cursor)?;
+            between.push(event);
+            if between.len() > self.by_hash.len() {
+                return None;
+            }
+            cursor = event.previous_event_hash.as_deref()?;
+        }
+        between.reverse();
+        Some(between)
     }
 
     fn accepts_chain_start(
@@ -58713,7 +59910,7 @@ impl<'a> DbAuditChainFileAnchors<'a> {
         };
         file_event.previous_event_hash.as_deref() == Some(previous_event_hash)
             && file_event.event_hash.as_deref() == Some(event_hash)
-            && self.event_hashes.contains(previous_event_hash)
+            && self.by_hash.contains_key(previous_event_hash)
     }
 
     /// The row an operator audit-chain repair writes to resume the chain
@@ -58724,7 +59921,9 @@ impl<'a> DbAuditChainFileAnchors<'a> {
     /// payload, whose hash the chain check recomputes, carries that
     /// declaration. So the DB chain continues through it only from the exact
     /// hashed row it was written against: a hashed row lost before it still
-    /// breaks the chain.
+    /// breaks the chain. That row must also be an ancestor of the resume in
+    /// the file chain -- the segment is file events after it -- or the DB
+    /// chain would resume across a fork.
     fn accepts_legacy_segment_resume(
         &self,
         expected_previous_hash: &str,
@@ -58732,17 +59931,42 @@ impl<'a> DbAuditChainFileAnchors<'a> {
         previous_event_hash: &str,
         event_hash: &str,
     ) -> bool {
-        row.decision_inputs_hash.as_deref() == Some(expected_previous_hash)
+        self.legacy_segment_resume_skips(
+            expected_previous_hash,
+            row,
+            previous_event_hash,
+            event_hash,
+        )
+        .is_some()
+    }
+
+    /// The file events a resume accepted by
+    /// [`Self::accepts_legacy_segment_resume`] skips; `None` if the row is
+    /// not one.
+    fn legacy_segment_resume_skips(
+        &self,
+        expected_previous_hash: &str,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> Option<Vec<&'a TraceCommonsAuditEvent>> {
+        let is_repair_row = row.decision_inputs_hash.as_deref() == Some(expected_previous_hash)
             && row.canonical_event_json.is_some()
             && row.action == StorageTraceAuditAction::Retain
             && matches!(
                 &row.metadata,
                 StorageTraceAuditSafeMetadata::Maintenance {
                     surface: Some(surface),
+                    dry_run: false,
                     ..
                 } if surface == AUDIT_CHAIN_REPAIR_AUDIT_KIND
             )
-            && self.anchored_in_file(row, previous_event_hash, event_hash)
+            && self.anchored_in_file(row, previous_event_hash, event_hash);
+        if !is_repair_row {
+            return None;
+        }
+        self.file_events_between(expected_previous_hash, previous_event_hash)
+            .filter(|skipped| !skipped.is_empty())
     }
 
     /// Whether a hashed row chains: from the hashed row before it, or across
@@ -58837,6 +60061,76 @@ fn collect_db_audit_hash_chain_failures(
         expected_previous_hash = Some(event_hash.to_string());
     }
     failures
+}
+
+/// The legacy segments the DB audit chain resumes across, as the resume
+/// rows the chain accepts show them. The drills report them, and count the
+/// old build's file-only events and store rows inside them as history, not
+/// drift: an operator accepted that segment, and a verified resume row
+/// records which one.
+#[derive(Debug, Default)]
+struct DbAuditLegacySegments {
+    /// Resume rows the chain accepts.
+    resume_count: usize,
+    /// File events the resumes skip.
+    file_event_count: usize,
+    /// Of those, the ones with no DB row of their id, of a kind the old
+    /// build left file-only ([`LEGACY_FILE_ONLY_AUDIT_KINDS`]).
+    file_only_event_ids: BTreeSet<Uuid>,
+    /// Unhashed DB rows between a resume's declared head and the resume row
+    /// that are of no file event's id: the old build's store rows.
+    store_row_ids: BTreeSet<Uuid>,
+}
+
+fn db_audit_legacy_segments(
+    rows: &[StorageTraceAuditEventRecord],
+    file_events: &[TraceCommonsAuditEvent],
+) -> DbAuditLegacySegments {
+    let anchors = DbAuditChainFileAnchors::new(file_events);
+    let db_ids = rows
+        .iter()
+        .map(|row| row.audit_event_id)
+        .collect::<BTreeSet<_>>();
+    let mut segments = DbAuditLegacySegments::default();
+    let mut previous_hashed: Option<(&str, i64)> = None;
+    for row in rows {
+        let Some(event_hash) = row.event_hash.as_deref() else {
+            continue;
+        };
+        let previous_event_hash = row
+            .previous_event_hash
+            .as_deref()
+            .unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
+        if let Some((expected, head_sequence)) = previous_hashed
+            && previous_event_hash != expected
+            && let Some(skipped) =
+                anchors.legacy_segment_resume_skips(expected, row, previous_event_hash, event_hash)
+        {
+            segments.resume_count += 1;
+            segments.file_event_count += skipped.len();
+            segments.file_only_event_ids.extend(
+                skipped
+                    .iter()
+                    .filter(|event| {
+                        !db_ids.contains(&event.event_id)
+                            && LEGACY_FILE_ONLY_AUDIT_KINDS.contains(&event.kind.as_str())
+                    })
+                    .map(|event| event.event_id),
+            );
+            segments.store_row_ids.extend(
+                rows.iter()
+                    .filter(|other| {
+                        other.audit_sequence > head_sequence
+                            && other.audit_sequence < row.audit_sequence
+                            && other.event_hash.is_none()
+                            && !anchors.by_id.contains_key(&other.audit_event_id)
+                    })
+                    .map(|other| other.audit_event_id),
+            );
+        }
+        previous_hashed = Some((event_hash, row.audit_sequence));
+    }
+    segments
 }
 
 fn storage_audit_event_kind(
@@ -66168,7 +67462,7 @@ fn fail_next_audit_file_append(root: &Path, tenant_id: &str) {
 fn plan_audit_chain_repair(
     file_events: &[TraceCommonsAuditEvent],
     db_rows: &[StorageTraceAuditEventRecord],
-) -> Result<Vec<TraceCommonsAuditEvent>, &'static str> {
+) -> Result<Vec<TraceCommonsAuditEvent>, AuditChainRepairPlanRefusal> {
     let file_head = file_events
         .last()
         .and_then(|event| event.event_hash.clone())
@@ -66183,16 +67477,47 @@ fn plan_audit_chain_repair(
         hashed
             .iter()
             .position(|row| row.event_hash.as_deref() == Some(file_head.as_str()))
-            .ok_or("file_head_not_in_db")?
+            .ok_or(AuditChainRepairPlanRefusal::FileAheadOfDb)?
             + 1
     };
+    plan_db_ahead_tail(file_events, &hashed[start..], file_head)
+        .map_err(AuditChainRepairPlanRefusal::Unrestorable)
+}
+
+/// Why [`plan_audit_chain_repair`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditChainRepairPlanRefusal {
+    /// The file's head is no hashed DB row: the file is ahead of the DB. A
+    /// fork, unless a rolled-back build wrote it; the caller asks
+    /// [`plan_legacy_segment_resume`] which.
+    FileAheadOfDb,
+    /// The DB is ahead of the file, but its tail cannot be verified.
+    Unrestorable(&'static str),
+}
+
+impl AuditChainRepairPlanRefusal {
+    fn label(self) -> &'static str {
+        match self {
+            Self::FileAheadOfDb => "file_head_not_in_db",
+            Self::Unrestorable(label) => label,
+        }
+    }
+}
+
+/// The file lines that the hashed DB rows after the file's head stand for,
+/// each verified against its row.
+fn plan_db_ahead_tail(
+    file_events: &[TraceCommonsAuditEvent],
+    tail: &[&StorageTraceAuditEventRecord],
+    file_head: String,
+) -> Result<Vec<TraceCommonsAuditEvent>, &'static str> {
     let file_event_ids = file_events
         .iter()
         .map(|event| event.event_id)
         .collect::<BTreeSet<_>>();
     let mut expected_previous = file_head;
     let mut plan = Vec::new();
-    for row in &hashed[start..] {
+    for row in tail {
         let event_hash = row.event_hash.as_deref().ok_or("db_row_unhashed")?;
         let payload = row
             .canonical_event_json
@@ -66231,18 +67556,70 @@ fn plan_audit_chain_repair(
     Ok(plan)
 }
 
-/// A legacy segment the DB audit chain can resume across. Hash and counts
-/// only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The file audit kinds that the build a binary rollback returns to (one from
+/// before #1043; `5f239be4` for the pilot) wrote to the file log with no DB
+/// row of the event's id, under required mirror writes. It mirrored every
+/// other kind with the event's id.
+///
+/// - `submitted`, `quarantine_remediated`, `quarantine_operator_rescrub`: its
+///   submission mirror wrote the store's derived-id `submit-audit` row
+///   instead ([`legacy_submit_audit_row_status`]).
+/// - `review_decision`: its review mirror wrote the store's own status row
+///   instead ([`legacy_store_status_row_status`]).
+/// - `idempotent_submit`: a re-POST of a known submission. No DB row at all.
+const LEGACY_FILE_ONLY_AUDIT_KINDS: [&str; 5] = [
+    "submitted",
+    "quarantine_remediated",
+    "quarantine_operator_rescrub",
+    "review_decision",
+    "idempotent_submit",
+];
+
+/// The principals of the old build's PII-backstop passes. Their status
+/// changes were DB-only: the store's status row, and no file event.
+const LEGACY_DB_ONLY_STATUS_PRINCIPALS: [&str; 2] = [
+    PII_BACKSTOP_DRIVER_ACTOR_REF,
+    PII_BACKSTOP_REQUEUE_ACTOR_REF,
+];
+
+/// The derived-id rows the old build wrote for a lifecycle's artifact
+/// invalidation: each id label, with the row's action.
+const LEGACY_LIFECYCLE_INVALIDATION_AUDIT_LABELS: [(&str, StorageTraceAuditAction); 3] = [
+    (
+        "revocation-artifact-invalidation",
+        StorageTraceAuditAction::Revoke,
+    ),
+    (
+        "retention-expiration-artifact-invalidation",
+        StorageTraceAuditAction::Retain,
+    ),
+    (
+        "retention-purge-artifact-invalidation",
+        StorageTraceAuditAction::Purge,
+    ),
+];
+
+/// A legacy segment the DB audit chain can resume across. Hash, counts and
+/// times only.
+#[derive(Debug, Clone)]
 struct LegacySegmentResume {
     /// The DB's latest hashed row's `event_hash`: where the DB chain stopped.
     db_head_event_hash: String,
-    /// File events after the DB head.
+    /// File events after the DB head (an interrupted resume event aside).
     file_events: usize,
     /// DB rows after the DB head, all without chain fields.
     unhashed_db_rows: usize,
     /// File events after the DB head that have no DB row of their id.
     file_only_events: usize,
+    /// The earliest and latest time in the segment: its file events'
+    /// `created_at` and its DB rows' `occurred_at`. The operator checks them
+    /// against the rollback window; a segment reaching outside it is not the
+    /// rollback's doing.
+    earliest_at: Option<DateTime<Utc>>,
+    latest_at: Option<DateTime<Utc>>,
+    /// A resume event that an earlier run appended to the file, whose DB row
+    /// did not commit. The repair completes it instead of writing another.
+    interrupted_resume: Option<Box<TraceCommonsAuditEvent>>,
 }
 
 /// Plans the repair for a file log that ran ahead of the DB through legacy
@@ -66250,23 +67627,42 @@ struct LegacySegmentResume {
 ///
 /// That build chained every event into the file, but under required mirror
 /// writes it wrote the DB row before the event was chained, so the row has
-/// no chain fields; and some of its events (a submission's `submitted`, an
-/// idempotent re-POST) were written to the file only. After the roll-forward
-/// the new build chains from the file head, which is no hashed DB row, and
-/// every append is refused as stale.
+/// no chain fields; and some of its events it wrote to the file only
+/// ([`LEGACY_FILE_ONLY_AUDIT_KINDS`]). After the roll-forward the new build
+/// chains from the file head, which is no hashed DB row, and every append is
+/// refused as stale.
 ///
-/// `file_events` must be in file-line order. `Ok(None)` means nothing is
-/// locked: there is no hashed DB row (the DB accepts any first one), or the
-/// file ends at the DB's latest hashed row. The plan is only ever this shape:
+/// Nothing in-band proves that a rolled-back build wrote the segment, so the
+/// plan accepts only what that build could have written, and every row and
+/// event must account for each other:
 /// - the DB's latest hashed row is a file event, with the same chain fields
 ///   (else `db_head_not_in_file`: a fork or a tampered row);
 /// - the file events after it chain from it, each reproducing its own hash
 ///   (else `file_chain_break_after_db_head`);
-/// - none of them has a hashed DB row, and every DB row of one's id is an
-///   unhashed row agreeing with it (else `legacy_row_mismatch`);
-/// - at least one DB row after the latest hashed row is unhashed -- the mark
-///   of the old build. Without it, a file ahead of the DB is unexplained and
-///   is refused as before (`file_head_not_in_db`).
+/// - a DB row of a segment event's id sits after the DB head (else
+///   `legacy_row_before_db_head`) and is the row the old build mirrored that
+///   event as: unhashed, with the event's principal, and every column the
+///   event determines -- action and metadata through the kind projection,
+///   status, role, reason, export, decision inputs -- agreeing with it (else
+///   `legacy_row_mismatch`);
+/// - a segment event with no DB row is of a kind the old build left
+///   file-only (else `legacy_file_only_event_unexpected`), and has the store
+///   row that build wrote beside it (else `legacy_submit_row_missing` or
+///   `legacy_status_row_missing`);
+/// - every DB row after the DB head is one of those, or another store row the
+///   old build wrote beside a segment event or on its own (else
+///   `legacy_row_unexplained`);
+/// - there is at least one such row -- the old build's mark. Without it, a
+///   file ahead of the DB is unexplained, and it is refused as before
+///   (`file_head_not_in_db`).
+///
+/// A last file event that is this repair's own resume event, declaring the
+/// DB head, with no DB row, is a resume whose DB write did not commit; the
+/// plan carries it as [`LegacySegmentResume::interrupted_resume`].
+///
+/// `file_events` must be in file-line order. `Ok(None)` means nothing is
+/// locked: there is no hashed DB row (the DB accepts any first one), or the
+/// file ends at the DB's latest hashed row.
 fn plan_legacy_segment_resume(
     file_events: &[TraceCommonsAuditEvent],
     db_rows: &[StorageTraceAuditEventRecord],
@@ -66289,7 +67685,7 @@ fn plan_legacy_segment_resume(
     {
         return Err("db_head_not_in_file");
     }
-    let segment = &file_events[head_index + 1..];
+    let mut segment = &file_events[head_index + 1..];
     if segment.is_empty() {
         return Ok(None);
     }
@@ -66311,50 +67707,309 @@ fn plan_legacy_segment_resume(
         .iter()
         .map(|row| (row.audit_event_id, row))
         .collect::<BTreeMap<_, _>>();
-    let mut file_only_events = 0usize;
-    for event in segment {
-        let Some(row) = rows_by_id.get(&event.event_id) else {
-            file_only_events += 1;
-            continue;
-        };
-        if !legacy_audit_row_matches_file_event(row, event) {
-            return Err("legacy_row_mismatch");
-        }
+    let interrupted_resume = segment
+        .last()
+        .filter(|event| {
+            !rows_by_id.contains_key(&event.event_id)
+                && is_legacy_segment_resume_event(event, &db_head_hash)
+        })
+        .cloned()
+        .map(Box::new);
+    if interrupted_resume.is_some() {
+        segment = &segment[..segment.len() - 1];
     }
-    let unhashed_db_rows = db_rows
+    let after_head = db_rows
         .iter()
         .filter(|row| row.audit_sequence > db_head.audit_sequence)
-        .count();
-    if unhashed_db_rows == 0 {
+        .collect::<Vec<_>>();
+    if segment.is_empty() || after_head.is_empty() {
         return Err("file_head_not_in_db");
     }
+
+    let mut explained = BTreeSet::new();
+    let mut file_only_events = 0usize;
+    for event in segment {
+        if let Some(row) = rows_by_id.get(&event.event_id) {
+            if row.audit_sequence <= db_head.audit_sequence {
+                return Err("legacy_row_before_db_head");
+            }
+            if !legacy_audit_row_matches_file_event(row, event) {
+                return Err("legacy_row_mismatch");
+            }
+            explained.insert(row.audit_event_id);
+            continue;
+        }
+        file_only_events += 1;
+        if !LEGACY_FILE_ONLY_AUDIT_KINDS.contains(&event.kind.as_str()) {
+            return Err("legacy_file_only_event_unexpected");
+        }
+        let (Some(principal), Some(_)) = (event.actor_principal_ref.as_deref(), event.actor_role)
+        else {
+            return Err("legacy_event_unattributed");
+        };
+        let status = event.status.map(storage_corpus_status);
+        match event.kind.as_str() {
+            "idempotent_submit" => {}
+            "review_decision" => {
+                let row = after_head
+                    .iter()
+                    .find(|row| {
+                        !explained.contains(&row.audit_event_id)
+                            && legacy_store_status_row_status(row).is_some()
+                            && legacy_store_status_row_status(row) == status
+                            && row.submission_id == Some(event.submission_id)
+                            && row.actor_principal_ref == principal
+                            && row.reason.as_deref() == Some("review_decision")
+                    })
+                    .ok_or("legacy_status_row_missing")?;
+                explained.insert(row.audit_event_id);
+            }
+            _ => {
+                // The submit family: one derived-id row per submission, so a
+                // row pairs with one event at most.
+                let row_id = deterministic_trace_uuid_for(
+                    "submit-audit",
+                    &event.tenant_id,
+                    event.submission_id,
+                );
+                let paired = rows_by_id.get(&row_id).is_some_and(|row| {
+                    row.audit_sequence > db_head.audit_sequence
+                        && legacy_submit_audit_row_status(row).is_some()
+                        && legacy_submit_audit_row_status(row) == status
+                });
+                if !paired || !explained.insert(row_id) {
+                    return Err("legacy_submit_row_missing");
+                }
+            }
+        }
+    }
+    for row in &after_head {
+        if !explained.contains(&row.audit_event_id)
+            && !legacy_store_row_explained_by_segment(row, segment)
+        {
+            return Err("legacy_row_unexplained");
+        }
+    }
+    let times = segment
+        .iter()
+        .map(|event| event.created_at)
+        .chain(after_head.iter().map(|row| row.occurred_at));
     Ok(Some(LegacySegmentResume {
         db_head_event_hash: db_head_hash,
         file_events: segment.len(),
-        unhashed_db_rows,
+        unhashed_db_rows: after_head.len(),
         file_only_events,
+        earliest_at: times.clone().min(),
+        latest_at: times.max(),
+        interrupted_resume,
     }))
 }
 
 /// Whether an unhashed DB row is the mirror a build from before #1043 wrote
-/// for this file event: that build copied these fields from the unchained
-/// event, so any difference is not its doing.
+/// for this file event. That build wrote the row from the unchained event,
+/// with the same action and metadata as the current build, so the row must
+/// be exactly the current build's projection of the event without chain
+/// fields ([`verify_db_audit_projection`]), and carry the event's principal:
+/// that build wrote every event with one. Only `object_ref_id` and
+/// `occurred_at` are not compared -- the file event holds no object ref, and
+/// `occurred_at` is the database's clock, not the event's.
 fn legacy_audit_row_matches_file_event(
     row: &StorageTraceAuditEventRecord,
     event: &TraceCommonsAuditEvent,
 ) -> bool {
+    if row.event_hash.is_some()
+        || row.previous_event_hash.is_some()
+        || row.canonical_event_json.is_some()
+        || row.request_id.is_some()
+        || event.actor_role.is_none()
+        || event.actor_principal_ref.as_deref() != Some(row.actor_principal_ref.as_str())
+    {
+        return false;
+    }
+    let mut unchained = event.clone();
+    unchained.previous_event_hash = None;
+    unchained.event_hash = None;
+    let mut report = TraceDbAuditChainReport::default();
+    verify_db_audit_projection(0, row, &unchained, &mut report);
+    report.failures.is_empty()
+}
+
+/// The `submit-audit` row the old build's submission mirror wrote under an
+/// id derived from the submission, in place of a mirror of the `submitted`
+/// event: its status, if the row is one.
+fn legacy_submit_audit_row_status(
+    row: &StorageTraceAuditEventRecord,
+) -> Option<StorageTraceCorpusStatus> {
+    let submission_id = row.submission_id?;
+    let StorageTraceAuditSafeMetadata::Submission { status, .. } = &row.metadata else {
+        return None;
+    };
+    (row.action == StorageTraceAuditAction::Submit
+        && row.event_hash.is_none()
+        && row.previous_event_hash.is_none()
+        && row.canonical_event_json.is_none()
+        && row.audit_event_id
+            == deterministic_trace_uuid_for("submit-audit", &row.tenant_id, submission_id))
+    .then_some(*status)
+}
+
+/// The status row the old build's store wrote for itself on a status change
+/// (`update_trace_submission_status`, `release_pii_backstop_hold`): its
+/// resulting status, if the row is one.
+fn legacy_store_status_row_status(
+    row: &StorageTraceAuditEventRecord,
+) -> Option<StorageTraceCorpusStatus> {
+    let StorageTraceAuditSafeMetadata::ReviewDecision {
+        decision,
+        resulting_status,
+        reason_code,
+    } = &row.metadata
+    else {
+        return None;
+    };
+    (legacy_store_row_has_no_event_columns(row)
+        && row.actor_role == "system"
+        && *reason_code == row.reason
+        && serde_storage_string(resulting_status).ok().as_deref() == Some(decision.as_str())
+        && row.action == legacy_store_status_action(*resulting_status))
+    .then_some(*resulting_status)
+}
+
+/// The action the store's own status row takes for a status.
+fn legacy_store_status_action(status: StorageTraceCorpusStatus) -> StorageTraceAuditAction {
+    match status {
+        StorageTraceCorpusStatus::Accepted
+        | StorageTraceCorpusStatus::Quarantined
+        | StorageTraceCorpusStatus::AwaitingPiiBackstop
+        | StorageTraceCorpusStatus::Rejected => StorageTraceAuditAction::Review,
+        StorageTraceCorpusStatus::Revoked => StorageTraceAuditAction::Revoke,
+        StorageTraceCorpusStatus::Purged => StorageTraceAuditAction::Purge,
+        StorageTraceCorpusStatus::Expired => StorageTraceAuditAction::Retain,
+        StorageTraceCorpusStatus::Received => StorageTraceAuditAction::Submit,
+    }
+}
+
+/// The derived-id row the old build wrote for a lifecycle's artifact
+/// invalidation: its id label, if the row is one.
+fn legacy_lifecycle_invalidation_row_label(
+    row: &StorageTraceAuditEventRecord,
+) -> Option<&'static str> {
+    let submission_id = row.submission_id?;
+    if !legacy_store_row_has_no_event_columns(row)
+        || !matches!(
+            &row.metadata,
+            StorageTraceAuditSafeMetadata::Maintenance { surface: None, .. }
+        )
+    {
+        return None;
+    }
+    LEGACY_LIFECYCLE_INVALIDATION_AUDIT_LABELS
+        .iter()
+        .find(|(label, action)| {
+            row.action == *action
+                && row.audit_event_id
+                    == deterministic_trace_uuid_for(label, &row.tenant_id, submission_id)
+        })
+        .map(|(label, _)| *label)
+}
+
+/// A store row stands for no file event: no chain fields, no payload, and
+/// none of the columns only an event's mirror fills.
+fn legacy_store_row_has_no_event_columns(row: &StorageTraceAuditEventRecord) -> bool {
     row.event_hash.is_none()
         && row.previous_event_hash.is_none()
         && row.canonical_event_json.is_none()
-        && row.tenant_id == event.tenant_id
-        && row.submission_id == (event.submission_id != Uuid::nil()).then_some(event.submission_id)
-        && row.reason == event.reason
-        && row.export_manifest_id == event.export_id
-        && row.decision_inputs_hash == event.decision_inputs_hash
-        && event
-            .actor_principal_ref
-            .as_deref()
-            .is_none_or(|principal| principal == row.actor_principal_ref)
+        && row.request_id.is_none()
+        && row.object_ref_id.is_none()
+        && row.export_manifest_id.is_none()
+        && row.decision_inputs_hash.is_none()
+        && row.submission_id.is_some()
+}
+
+/// Whether a DB row after the DB head, of no segment event's id, is a store
+/// row the old build wrote on its own or beside a segment event:
+/// - a status row or an artifact-invalidation row of a revocation, beside
+///   that submission's `revoked` event, by the same principal;
+/// - a status row or an artifact-invalidation row of a revocation,
+///   expiration or purge, beside a `maintenance` event by the same
+///   principal (the retention pass);
+/// - a status row of a PII-backstop pass, which had no file event.
+fn legacy_store_row_explained_by_segment(
+    row: &StorageTraceAuditEventRecord,
+    segment: &[TraceCommonsAuditEvent],
+) -> bool {
+    let principal = Some(row.actor_principal_ref.as_str());
+    let revoked_event = || {
+        segment.iter().any(|event| {
+            event.kind == "revoked"
+                && row.submission_id == Some(event.submission_id)
+                && event.actor_principal_ref.as_deref() == principal
+        })
+    };
+    let maintenance_event = || {
+        segment.iter().any(|event| {
+            event.kind == "maintenance" && event.actor_principal_ref.as_deref() == principal
+        })
+    };
+    if let Some(status) = legacy_store_status_row_status(row) {
+        return match status {
+            StorageTraceCorpusStatus::Revoked => revoked_event() || maintenance_event(),
+            StorageTraceCorpusStatus::Expired | StorageTraceCorpusStatus::Purged => {
+                maintenance_event()
+            }
+            _ => LEGACY_DB_ONLY_STATUS_PRINCIPALS.contains(&row.actor_principal_ref.as_str()),
+        };
+    }
+    match legacy_lifecycle_invalidation_row_label(row) {
+        Some("revocation-artifact-invalidation") => revoked_event() || maintenance_event(),
+        Some(_) => maintenance_event(),
+        None => false,
+    }
+}
+
+/// Whether a file event is this repair's own resume event declaring
+/// `db_head_event_hash`, in the canonical shape the repair writes.
+fn is_legacy_segment_resume_event(
+    event: &TraceCommonsAuditEvent,
+    db_head_event_hash: &str,
+) -> bool {
+    event.kind == AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        && event.submission_id == Uuid::nil()
+        && event.status.is_none()
+        && event.actor_role.is_some()
+        && event.actor_principal_ref.is_some()
+        && event.decision_inputs_hash.as_deref() == Some(db_head_event_hash)
+        && legacy_segment_resume_row_mirror(event).is_some()
+}
+
+/// The DB row a resume event is mirrored as, rebuilt from the event: its
+/// reason carries the purpose's hash and the counts, and must be exactly the
+/// reason the repair writes for them.
+fn legacy_segment_resume_row_mirror(event: &TraceCommonsAuditEvent) -> Option<AuditRowMirror> {
+    let reason = event.reason.as_deref();
+    let action_counts = trace_maintenance_audit_action_counts_from_reason(reason);
+    if !action_counts.contains_key("legacy_segment_file_events") {
+        return None;
+    }
+    let purpose_hash = trace_audit_reason_value(reason, "purpose_hash").map(str::to_string);
+    if reason
+        != Some(
+            trace_maintenance_audit_reason(purpose_hash.as_deref(), false, &action_counts).as_str(),
+        )
+    {
+        return None;
+    }
+    Some(AuditRowMirror {
+        action: StorageTraceAuditAction::Retain,
+        metadata: StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
+            purpose_hash,
+            dry_run: false,
+            action_counts,
+        },
+        object_ref_id: None,
+        actor_role_label: None,
+    })
 }
 
 enum AuditChainRepairOutcome {
@@ -66372,11 +68027,20 @@ enum AuditChainRepairOutcome {
 /// Writes the event that resumes the DB audit chain across a legacy segment:
 /// a hash-only `audit_chain_repair` event, chained from the file head like
 /// any other, whose `decision_inputs_hash` names the DB's latest hashed row.
-/// The caller holds the tenant's audit append lock.
+/// The caller holds the tenant's audit append lock, which serializes repairs
+/// in this process only.
 ///
-/// The file line goes first. If the DB insert then fails, the event is one
-/// more file-only event past the DB head and a rerun resumes across it; the
-/// DB insert refuses a DB head that has moved since the plan.
+/// Across processes -- an old and a new build overlapping on one file root --
+/// the DB serializes them: the store takes the tenant's advisory lock,
+/// re-checks that the DB head is still the one planned against, inserts the
+/// row, and only then, before committing, has the file line appended. A
+/// repair that planned against a head another has since moved fails before
+/// it touches the file. The file append re-checks the file head too.
+///
+/// If the commit fails after the file append, the line is file-only; the
+/// next plan finds it as [`LegacySegmentResume::interrupted_resume`], and
+/// this completes it: the row is written for the line already in the file,
+/// and no second resume event is.
 async fn write_legacy_segment_resume_event(
     state: &AppState,
     tenant: &TenantAuth,
@@ -66384,6 +68048,25 @@ async fn write_legacy_segment_resume_event(
     resume: &LegacySegmentResume,
     purpose_hash: &str,
 ) -> anyhow::Result<Uuid> {
+    let path = audit_events_path(&state.root, &tenant.tenant_id);
+    if let Some(event) = resume.interrupted_resume.as_ref() {
+        let row = legacy_segment_resume_row_mirror(event)
+            .context("the interrupted resume event is not in the repair's shape")?;
+        let write = audit_event_storage_write(tenant, event, row)?;
+        let file_still_ends_at_it = || match latest_audit_event_hash(&path, &tenant.tenant_id) {
+            Ok(head) if head == event.event_hash => Ok(()),
+            Ok(_) => Err("the file log moved past the interrupted resume event".to_string()),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        db.append_trace_audit_chain_resume_event(
+            write,
+            &resume.db_head_event_hash,
+            &file_still_ends_at_it,
+        )
+        .await
+        .context("failed to complete the interrupted audit chain resume")?;
+        return Ok(event.event_id);
+    }
     let mut action_counts = BTreeMap::new();
     for (key, value) in [
         ("legacy_segment_file_events", resume.file_events),
@@ -66400,28 +68083,16 @@ async fn write_legacy_segment_resume_event(
         &action_counts,
     );
     event.decision_inputs_hash = Some(resume.db_head_event_hash.clone());
-    event.created_at = Utc::now().max(latest_audit_event_created_at(
-        &audit_events_path(&state.root, &tenant.tenant_id),
-        &tenant.tenant_id,
-    )?);
+    event.created_at = Utc::now().max(latest_audit_event_created_at(&path, &tenant.tenant_id)?);
     let event = chain_audit_event(&state.root, &tenant.tenant_id, event)?;
-    let write = audit_event_storage_write(
-        tenant,
-        &event,
-        AuditRowMirror {
-            action: StorageTraceAuditAction::Retain,
-            metadata: StorageTraceAuditSafeMetadata::Maintenance {
-                surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
-                purpose_hash: Some(purpose_hash.to_string()),
-                dry_run: false,
-                action_counts,
-            },
-            object_ref_id: None,
-            actor_role_label: None,
-        },
-    )?;
-    write_chained_audit_event(&state.root, &tenant.tenant_id, &event)?;
-    db.append_trace_audit_chain_resume_event(write, &resume.db_head_event_hash)
+    let row = legacy_segment_resume_row_mirror(&event)
+        .context("the resume event is not in the repair's shape")?;
+    let write = audit_event_storage_write(tenant, &event, row)?;
+    let append_file_line = || {
+        write_chained_audit_event(&state.root, &tenant.tenant_id, &event)
+            .map_err(|error| format!("{error:#}"))
+    };
+    db.append_trace_audit_chain_resume_event(write, &resume.db_head_event_hash, &append_file_line)
         .await
         .context("failed to write the audit chain resume row")?;
     Ok(event.event_id)
@@ -66470,6 +68141,17 @@ struct TraceAuditChainRepairResponse {
     legacy_segment_file_events: usize,
     legacy_segment_unhashed_db_rows: usize,
     legacy_segment_file_only_events: usize,
+    /// For `file_ahead_through_legacy_rows`: the earliest and latest time in
+    /// the segment, over its file events and its DB rows. Check them against
+    /// the rollback window before accepting the segment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_segment_earliest_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_segment_latest_at: Option<DateTime<Utc>>,
+    /// For `file_ahead_through_legacy_rows`: an earlier run appended its
+    /// resume event to the file but its DB row did not commit. This run
+    /// completes that event rather than writing another.
+    legacy_segment_resume_interrupted: bool,
     /// Whether this run wrote the row that resumes the DB chain.
     chain_resumed: bool,
     /// The repair's own audit event; absent for a dry run.
@@ -66572,7 +68254,7 @@ async fn run_audit_chain_repair(
             }
             // The file is ahead of the DB. That is a fork -- unless a
             // rolled-back build wrote it, with unhashed DB rows.
-            Err("file_head_not_in_db") => {
+            Err(AuditChainRepairPlanRefusal::FileAheadOfDb) => {
                 let file_events_in_order =
                     read_audit_events_in_file_order(&state.root, &tenant.tenant_id)?;
                 match plan_legacy_segment_resume(&file_events_in_order, &db_rows).map_err(refuse)? {
@@ -66605,7 +68287,7 @@ async fn run_audit_chain_repair(
                     }
                 }
             }
-            Err(label) => return Err(refuse(label)),
+            Err(refusal) => return Err(refuse(refusal.label())),
         }
     };
 
@@ -66683,7 +68365,236 @@ async fn run_audit_chain_repair(
         legacy_segment_file_only_events: resume
             .as_ref()
             .map_or(0, |resume| resume.file_only_events),
+        legacy_segment_earliest_at: resume.as_ref().and_then(|resume| resume.earliest_at),
+        legacy_segment_latest_at: resume.as_ref().and_then(|resume| resume.latest_at),
+        legacy_segment_resume_interrupted: resume
+            .as_ref()
+            .is_some_and(|resume| resume.interrupted_resume.is_some()),
         chain_resumed: resume_event_id.is_some(),
+        repair_audit_event_id,
+    })
+}
+
+fn default_tombstone_repair_dry_run() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceTombstoneRepairRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    /// Defaults to true: a repair writes only when asked to.
+    #[serde(default = "default_tombstone_repair_dry_run")]
+    dry_run: bool,
+}
+
+/// Hash-only: counts and the purpose's hash. No submission ids and no
+/// revocation reasons, which an operator revocation may carry as free text.
+#[derive(Debug, Serialize)]
+struct TraceTombstoneRepairResponse {
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose_hash: String,
+    dry_run: bool,
+    /// Both counts as read before the repair wrote anything.
+    file_tombstone_count: usize,
+    db_tombstone_count: usize,
+    /// File tombstones with no `trace_tombstones` row.
+    file_tombstones_missing_in_db: usize,
+    /// Of those, the ones an account withdrawal wrote.
+    withdrawal_tombstones_missing_in_db: usize,
+    /// Of those, the ones whose DB submission is `revoked`: the rows this
+    /// repair writes, or would write on a dry run.
+    repairable: usize,
+    /// Skipped: the DB has no submission row for the tombstone to reference.
+    skipped_db_submission_missing: usize,
+    /// Skipped: the DB submission is not `revoked`, so a tombstone row alone
+    /// would disagree with it. Read these with the db-reconciliation drill's
+    /// `status_mismatches`; this repair does not change a submission's status.
+    skipped_db_submission_not_revoked: usize,
+    db_tombstones_written: usize,
+    /// The repair's own audit event; absent for a dry run.
+    repair_audit_event_id: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct TraceTombstoneRepairRequiresDbMirror;
+
+impl std::fmt::Display for TraceTombstoneRepairRequiresDbMirror {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons tombstone repair requires TRACE_COMMONS_DB_DUAL_WRITE"
+        )
+    }
+}
+
+impl std::error::Error for TraceTombstoneRepairRequiresDbMirror {}
+
+async fn tombstone_repair_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceTombstoneRepairRequest>,
+) -> ApiResult<Json<TraceTombstoneRepairResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_tombstone_repair(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
+/// Writes the missing `trace_tombstones` row for each of the caller's
+/// tenant's file revocation tombstones that has none, from the file
+/// tombstone itself (its reason, hashes and time), so the file and DB
+/// tombstone records are consistent again. An account withdrawal made by a
+/// build that wrote only the file tombstone is the case this exists for.
+///
+/// Writes only where the DB submission exists and is already `revoked`. A
+/// dry run (the default) counts and writes nothing. Idempotent: the rows are
+/// first-writer-wins, and a second run finds nothing missing. A non-dry run
+/// is itself audited, as a hash-only `tombstone_repair` counts event.
+async fn run_tombstone_repair(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceTombstoneRepairRequest,
+) -> anyhow::Result<TraceTombstoneRepairResponse> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or(TraceTombstoneRepairRequiresDbMirror)?;
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_tombstone_repair");
+    let purpose_hash = sha256_prefixed(purpose);
+
+    let file_tombstones = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let db_tombstones = db
+        .list_trace_tombstones(&tenant.tenant_id)
+        .await
+        .context("failed to list DB tombstones for tombstone repair")?;
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|tombstone| tombstone.submission_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut file_tombstones_missing_in_db = 0usize;
+    let mut withdrawal_tombstones_missing_in_db = 0usize;
+    let mut repairable = 0usize;
+    let mut skipped_db_submission_missing = 0usize;
+    let mut skipped_db_submission_not_revoked = 0usize;
+    let mut db_tombstones_written = 0usize;
+    for file_tombstone in &file_tombstones {
+        if db_tombstone_submission_ids.contains(&file_tombstone.submission_id) {
+            continue;
+        }
+        file_tombstones_missing_in_db += 1;
+        if file_tombstone.reason == TRACE_WITHDRAWAL_REASON {
+            withdrawal_tombstones_missing_in_db += 1;
+        }
+        let Some(db_submission) = db
+            .get_trace_submission(&tenant.tenant_id, file_tombstone.submission_id)
+            .await
+            .context("failed to read the DB submission for tombstone repair")?
+        else {
+            skipped_db_submission_missing += 1;
+            continue;
+        };
+        if db_submission.status != StorageTraceCorpusStatus::Revoked {
+            skipped_db_submission_not_revoked += 1;
+            continue;
+        }
+        repairable += 1;
+        if request.dry_run {
+            continue;
+        }
+        write_file_tombstone_to_db(
+            db.as_ref(),
+            file_tombstone,
+            Some(db_submission.trace_id),
+            &tenant.principal_ref,
+        )
+        .await?;
+        db_tombstones_written += 1;
+    }
+
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        dry_run = request.dry_run,
+        file_tombstones_missing_in_db,
+        withdrawal_tombstones_missing_in_db,
+        repairable,
+        skipped_db_submission_missing,
+        skipped_db_submission_not_revoked,
+        db_tombstones_written,
+        "Trace Commons tombstone repair"
+    );
+
+    let repair_audit_event_id = if request.dry_run {
+        None
+    } else {
+        let saturate = |count: usize| count.min(u32::MAX as usize) as u32;
+        let mut action_counts = BTreeMap::new();
+        action_counts.insert(
+            "file_tombstones_missing_in_db".to_string(),
+            saturate(file_tombstones_missing_in_db),
+        );
+        action_counts.insert(
+            "db_tombstones_written".to_string(),
+            saturate(db_tombstones_written),
+        );
+        action_counts.insert(
+            "skipped_db_submission_missing".to_string(),
+            saturate(skipped_db_submission_missing),
+        );
+        action_counts.insert(
+            "skipped_db_submission_not_revoked".to_string(),
+            saturate(skipped_db_submission_not_revoked),
+        );
+        let event = append_audit_event_mirrored(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::lifecycle_counts(
+                tenant,
+                Uuid::nil(),
+                TOMBSTONE_REPAIR_AUDIT_KIND,
+                Some(&purpose_hash),
+                &action_counts,
+            ),
+            AuditRowMirror {
+                action: StorageTraceAuditAction::Retain,
+                metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(TOMBSTONE_REPAIR_AUDIT_KIND.to_string()),
+                    purpose_hash: Some(purpose_hash.clone()),
+                    dry_run: false,
+                    action_counts,
+                },
+                object_ref_id: None,
+                actor_role_label: None,
+            },
+            "tombstone repair audit event",
+        )
+        .await?;
+        Some(event.event_id)
+    };
+
+    Ok(TraceTombstoneRepairResponse {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at: Utc::now(),
+        purpose_hash,
+        dry_run: request.dry_run,
+        file_tombstone_count: file_tombstones.len(),
+        db_tombstone_count: db_tombstones.len(),
+        file_tombstones_missing_in_db,
+        withdrawal_tombstones_missing_in_db,
+        repairable,
+        skipped_db_submission_missing,
+        skipped_db_submission_not_revoked,
+        db_tombstones_written,
         repair_audit_event_id,
     })
 }
@@ -68623,6 +70534,9 @@ fn verify_db_audit_chain_records(
         expected_previous_hash = Some(event_hash.to_string());
         report.last_event_hash = Some(event_hash.to_string());
     }
+    let segments = db_audit_legacy_segments(events, file_events);
+    report.legacy_segment_resume_count = segments.resume_count;
+    report.legacy_segment_file_event_count = segments.file_event_count;
     report.mismatch_count = report.failures.len();
     report.verified = report.mismatch_count == 0;
     Ok(report)
@@ -69584,9 +71498,9 @@ fn audit_backfill_storage_projection(
             .status
             .map(lifecycle_status_audit_action)
             .unwrap_or(StorageTraceAuditAction::Review),
-        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND | AUDIT_CHAIN_REPAIR_AUDIT_KIND => {
-            StorageTraceAuditAction::Retain
-        }
+        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
+        | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        | TOMBSTONE_REPAIR_AUDIT_KIND => StorageTraceAuditAction::Retain,
         RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND => StorageTraceAuditAction::Purge,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
@@ -69711,6 +71625,7 @@ fn audit_backfill_storage_projection(
         | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        | TOMBSTONE_REPAIR_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -70590,6 +72505,22 @@ async fn reconcile_db_mirror(
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
     let file_revocations = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let file_tombstone_submission_ids = file_revocations
+        .iter()
+        .map(|revocation| revocation.submission_id)
+        .collect::<BTreeSet<_>>();
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|tombstone| tombstone.submission_id)
+        .collect::<BTreeSet<_>>();
+    let missing_tombstone_submission_ids_in_db = file_tombstone_submission_ids
+        .difference(&db_tombstone_submission_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_tombstone_submission_ids_in_files = db_tombstone_submission_ids
+        .difference(&file_tombstone_submission_ids)
+        .copied()
+        .collect::<Vec<_>>();
     let file_credit_event_ids = file_credit_events
         .iter()
         .map(|event| event.event_id)
@@ -70951,9 +72882,15 @@ async fn reconcile_db_mirror(
     // table is insert-only). Each is counted as legacy, with its submission's
     // file `submitted` event, and neither is reported as drift.
     let legacy_submit_audit = legacy_submit_audit_rows(&file_audit_events, &db_audit_events);
+    // Likewise the file-only events and store rows of a rolled-back build,
+    // inside a legacy segment the DB chain resumes across.
+    let legacy_segments = db_audit_legacy_segments(&db_audit_events, &file_audit_events);
     let missing_audit_event_ids_in_db = file_audit_event_ids
         .difference(&db_audit_event_ids)
-        .filter(|event_id| !legacy_submit_audit.file_event_ids.contains(event_id))
+        .filter(|event_id| {
+            !legacy_submit_audit.file_event_ids.contains(event_id)
+                && !legacy_segments.file_only_event_ids.contains(event_id)
+        })
         .copied()
         .collect::<Vec<_>>();
     let missing_audit_event_ids_in_files = db_file_projected_audit_event_ids
@@ -71182,21 +73119,37 @@ async fn reconcile_db_mirror(
         db_metadata_view.derived.clone(),
     );
     let db_audit_events_for_reader = read_audit_events_from_db(state, tenant).await;
+    // The samples leave out a legacy segment's file-only events and store
+    // rows, which stand for each other or for nothing, and are topped up past
+    // them, so both hold the same most recent events.
     let file_audit_sample = read_recent_audit_events_from_file(
         &state.root,
         &tenant.tenant_id,
-        TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT,
-    )?;
+        TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT + legacy_segments.file_only_event_ids.len(),
+    )?
+    .into_iter()
+    .filter(|event| {
+        !legacy_segments
+            .file_only_event_ids
+            .contains(&event.event_id)
+    })
+    .take(TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT)
+    .collect::<Vec<_>>();
     let mut file_audit_sample_projection = audit_event_reader_projection(&file_audit_sample);
     let mut audit_reader_sample_failures = Vec::new();
     let audit_reader_sample_parity_ok = match db
         .list_recent_trace_audit_events(
             &tenant.tenant_id,
-            TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT,
+            TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT + legacy_segments.store_row_ids.len(),
         )
         .await
     {
         Ok(db_sample) => {
+            let db_sample = db_sample
+                .into_iter()
+                .filter(|row| !legacy_segments.store_row_ids.contains(&row.audit_event_id))
+                .take(TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT)
+                .collect::<Vec<_>>();
             let db_sample_row_count = db_sample.len();
             let legacy_event_ids = db_sample
                 .iter()
@@ -71309,13 +73262,22 @@ async fn reconcile_db_mirror(
         )
     };
     let audit_reader_parity_ok = {
+        // A legacy segment's file-only events and store rows stand for each
+        // other, or for nothing (an idempotent re-POST): count neither.
         let (reader_ok, reader_detail) = match db_audit_events_for_reader.as_ref() {
             Ok(db_events) => (
-                file_audit_events.len() == db_events.len(),
+                file_audit_events
+                    .len()
+                    .saturating_sub(legacy_segments.file_only_event_ids.len())
+                    == db_events
+                        .len()
+                        .saturating_sub(legacy_segments.store_row_ids.len()),
                 format!(
-                    "file_events={} db_events={}",
+                    "file_events={} db_events={} legacy_segment_file_only_events={} legacy_segment_store_rows={}",
                     file_audit_events.len(),
-                    db_events.len()
+                    db_events.len(),
+                    legacy_segments.file_only_event_ids.len(),
+                    legacy_segments.store_row_ids.len()
                 ),
             ),
             Err(error) => (
@@ -71429,6 +73391,7 @@ async fn reconcile_db_mirror(
         missing_audit_event_ids_in_files,
         legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
         db_audit_legacy_prefix_row_count,
+        db_audit_legacy_segment_file_only_event_count: legacy_segments.file_only_event_ids.len(),
         db_audit_hash_chain_failures,
         db_audit_canonical_projection_failures,
         db_audit_submission_metadata_mismatches,
@@ -71460,6 +73423,8 @@ async fn reconcile_db_mirror(
                 .collect(),
         file_revocation_tombstone_count: file_revocations.len(),
         db_tombstone_count: db_tombstones.len(),
+        missing_tombstone_submission_ids_in_db,
+        missing_tombstone_submission_ids_in_files,
         db_object_ref_count,
         accepted_without_active_envelope_object_ref,
         unreadable_active_envelope_object_refs,
@@ -72112,6 +74077,9 @@ fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     }
     if let Some(error) = error.downcast_ref::<TraceAuditChainRepairRefused>() {
         return api_error(StatusCode::CONFLICT, error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<TraceTombstoneRepairRequiresDbMirror>() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
     internal_error(error)
 }
@@ -74179,6 +76147,11 @@ struct TraceDbAuditChainReport {
     /// `legacy_event_count`: the history of a deployment upgraded from a
     /// build that mirrored no chain fields. Not a failure.
     legacy_prefix_event_count: usize,
+    /// Rows where the chain resumes across a legacy segment an operator
+    /// accepted after a binary rollback, and the file events those resumes
+    /// skip. Not failures; evidence that a resume happened.
+    legacy_segment_resume_count: usize,
+    legacy_segment_file_event_count: usize,
     payload_verified_event_count: usize,
     payload_unverified_event_count: usize,
     mismatch_count: usize,
@@ -74276,6 +76249,9 @@ struct TraceDbReconciliationReport {
     /// before the DB carried the file log's chain fields. Reported, not
     /// blocking.
     db_audit_legacy_prefix_row_count: usize,
+    /// File events a rolled-back build left with no DB row, inside a legacy
+    /// segment the DB chain resumes across. Reported, not blocking.
+    db_audit_legacy_segment_file_only_event_count: usize,
     db_audit_hash_chain_failures: Vec<TraceDbAuditHashChainFailure>,
     db_audit_canonical_projection_failures: Vec<TraceDbAuditProjectionFailure>,
     db_audit_submission_metadata_mismatches: Vec<TraceDbAuditSubmissionMetadataMismatch>,
@@ -74298,6 +76274,10 @@ struct TraceDbReconciliationReport {
     active_export_manifest_ids_with_ineligible_items: Vec<Uuid>,
     file_revocation_tombstone_count: usize,
     db_tombstone_count: usize,
+    /// File revocation tombstones with no `trace_tombstones` row, and the
+    /// reverse, compared by submission id as the rollback drill compares them.
+    missing_tombstone_submission_ids_in_db: Vec<Uuid>,
+    missing_tombstone_submission_ids_in_files: Vec<Uuid>,
     db_object_ref_count: usize,
     accepted_without_active_envelope_object_ref: Vec<Uuid>,
     unreadable_active_envelope_object_refs: Vec<Uuid>,
@@ -74572,6 +76552,16 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "current_retention_job_item_count_mismatches",
             self.current_retention_job_item_count_mismatches.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_tombstone_submission_ids_in_db",
+            self.missing_tombstone_submission_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_tombstone_submission_ids_in_files",
+            self.missing_tombstone_submission_ids_in_files.len(),
         );
         push_gap_count(
             &mut gaps,

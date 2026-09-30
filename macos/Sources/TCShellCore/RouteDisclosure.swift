@@ -159,15 +159,17 @@ public enum RouteDisclosureState: Equatable, Sendable {
 /// read (`tc_route_disclosure_unreadable_copy`). Said rather than left
 /// blank, so a missing panel is not mistaken for nothing to disclose.
 public struct RouteDisclosureUnreadable: Decodable, Equatable, Sendable {
+    /// The section's title, so an unreadable panel is still named.
+    public let title: String
     public let panel: String
     public let session: String
 
-    public static let consumedFields = ["panel", "session"]
+    public static let consumedFields = ["title", "panel", "session"]
 
     public static func decode(fromJSON json: String) -> RouteDisclosureUnreadable? {
         guard let data = json.data(using: .utf8),
             let value = try? JSONDecoder().decode(RouteDisclosureUnreadable.self, from: data),
-            !value.panel.isEmpty, !value.session.isEmpty
+            !value.title.isEmpty, !value.panel.isEmpty, !value.session.isEmpty
         else {
             return nil
         }
