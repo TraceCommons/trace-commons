@@ -72280,7 +72280,8 @@ async fn reconcile_db_mirror(
     // database only, so each file-versus-database comparison below that
     // they would fail leaves them out; `main`'s own rows keep every check,
     // and the database counts still include them. With no pipeline runtime
-    // injected there is nothing to leave out.
+    // injected none is found, so a tenant's earlier pipeline rows are
+    // reported as gaps (fail closed).
     let pipeline_rows = match state.pipeline_product.as_ref() {
         Some(product) => product
             .reconciliation_rows(&tenant.tenant_id)
