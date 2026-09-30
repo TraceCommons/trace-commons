@@ -201,6 +201,16 @@ pub struct PipelineContributorStatus {
     /// same credit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility: Option<PipelineCompatibilityStatus>,
+    /// The submission's `trace_submissions.status`, in `main`'s storage
+    /// vocabulary (`received`, `accepted`, `rejected`, `revoked`, ...), and
+    /// the run's Admission decision (`admit`, `quarantine`, `reject`): what
+    /// `main`'s status route needs to report a pipeline-only submission in
+    /// its own vocabulary (Zaki review 1, minor item M-c). Not part of the
+    /// pipeline's own JSON.
+    #[serde(skip)]
+    pub submission_status: String,
+    #[serde(skip)]
+    pub admission_decision: String,
 }
 
 /// What a compatibility run's contributor status needs beyond the run: the
@@ -1675,6 +1685,7 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
     };
     let settlement_batch_id = trace_credit.and_then(|instrument| instrument.settlement_batch_id);
     let compatibility = compatibility_status_from_row(row)?;
+    let admission_decision: String = row.get("admission_decision");
     Ok(PipelineContributorStatus {
         submission_id: row.get("submission_id"),
         trace_id: row.get("trace_id"),
@@ -1710,6 +1721,8 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
         payout,
         instruments,
         compatibility,
+        submission_status,
+        admission_decision,
     })
 }
 
@@ -2122,6 +2135,8 @@ mod tests {
             payout: None,
             instruments: Vec::new(),
             compatibility: None,
+            submission_status: String::new(),
+            admission_decision: String::new(),
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(

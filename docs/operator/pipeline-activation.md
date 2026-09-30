@@ -585,6 +585,22 @@ the document shows the Score evidence's shadow credit quality with the same
 line. The pipeline block comes with it. A minimal-family run keeps its own
 document under file reads.
 
+A submission only the pipeline knows (its own document) reports `status` in
+`main`'s vocabulary, so the contributor daemon's history counts and its
+held-for-review check recognize it. The pipeline's own state stays in the
+pipeline block (`processing_state`). The mapping:
+
+| Submission status in `trace_submissions` | Run | `status` |
+|---|---|---|
+| `accepted`, `rejected`, `revoked`, `expired`, `purged`, `quarantined` | any | the same value |
+| `received` (Review has not decided) | waiting for a human review, or Admission quarantined it | `quarantined` |
+| `received` | Admission rejected it | `rejected` |
+| `received` | any other state, a failed run included | `accepted` |
+
+Its pending points are 0 when its Trace Credit leg will not be paid:
+forfeited, failed, withheld by one of `main`'s credit checks, or a
+`NoveltyUtility` leg that `main` never settles.
+
 The delta is pinned in the signed bundle package
 (`novelty_utility_microcredits`, in microcredits). The pipeline does not read
 `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` at run time. For the

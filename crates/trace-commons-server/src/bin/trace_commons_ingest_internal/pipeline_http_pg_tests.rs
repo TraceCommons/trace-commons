@@ -3718,7 +3718,10 @@ async fn pipeline_status_route_reports_the_pipeline_block_to_the_owner() {
     assert_eq!(documents.len(), 1, "{documents:?}");
     let document = &documents[0];
     assert_eq!(document["submission_id"], run.submission_id.to_string());
-    assert_eq!(document["status"], "complete");
+    assert_eq!(
+        document["status"], "accepted",
+        "`main`'s vocabulary (Zaki review 1, minor item M-c)"
+    );
     let pipeline = &document["pipeline"];
     assert_eq!(pipeline["run_id"], run.run_id.to_string());
     assert_eq!(pipeline["processing_state"], "complete");

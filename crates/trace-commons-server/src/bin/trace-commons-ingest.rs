@@ -271,8 +271,8 @@ use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_SNAPSHOT_INVALIDATED, PIPELINE_EXPORT_SOURCE_INVALIDATED,
     PipelineContributorStatus, PipelineCreditStatus, PipelineExportConsentScopes,
     PipelineExportSnapshot, PipelineForensicTrace, PipelineOperationalSummary,
-    PipelineProductStore, PipelineReconciliationRows, is_pipeline_export_manifest_purpose_code,
-    pipeline_export_manifest_purpose_code,
+    PipelineProcessingStatus, PipelineProductStore, PipelineReconciliationRows,
+    is_pipeline_export_manifest_purpose_code, pipeline_export_manifest_purpose_code,
 };
 use uuid::Uuid;
 
@@ -16224,14 +16224,20 @@ fn submission_status_from_pipeline(
         .find(|instrument| instrument.instrument_id == "trace_credit")
         .map(|instrument| instrument.atomic_units.get() as f32 / 1_000_000.0)
         .unwrap_or_default();
+    // Zaki review 1, minor item M-b: points that will never be paid are not
+    // pending -- a withheld leg and a leg `main` never settles, as well as a
+    // forfeited or failed one.
     let credit_points_pending = match status.credit {
-        PipelineCreditStatus::Forfeited | PipelineCreditStatus::Failed => 0.0,
+        PipelineCreditStatus::Forfeited
+        | PipelineCreditStatus::Failed
+        | PipelineCreditStatus::Withheld
+        | PipelineCreditStatus::NotSettlementEligible => 0.0,
         _ => trace_credit_points,
     };
     TraceSubmissionStatusUpdate {
         submission_id: status.submission_id,
         trace_id: status.trace_id,
-        status: snake_case_label(status.processing),
+        status: main_status_for_pipeline(status).to_string(),
         credit_points_pending,
         credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
             .then_some(trace_credit_points),
@@ -16241,6 +16247,36 @@ fn submission_status_from_pipeline(
         delayed_credit_explanations: Vec::new(),
         consent_scopes: Vec::new(),
         pipeline: Some(pipeline_status_for_protocol(status)),
+    }
+}
+
+/// A pipeline-only submission's `status`, in `main`'s vocabulary (Zaki
+/// review 1, minor item M-c), so the contributor daemon's history counts and
+/// its held-for-review check (`quarantined`) recognize it; the pipeline's own
+/// state stays in the pipeline block (`processing_state`).
+///
+/// A decided submission reports `main`'s stored status as is (`accepted`,
+/// `rejected`, `revoked`, `expired`, `purged`, `quarantined`). One not yet
+/// decided (`received`: Review has not approved or rejected it) reports what
+/// `main`'s receipt reports for the same privacy decision: `quarantined`
+/// when it waits for a human review or its Admission quarantined it,
+/// `rejected` when Admission rejected it, and `accepted` otherwise. A run
+/// that failed keeps the value of the state it failed in.
+fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str {
+    match status.submission_status.as_str() {
+        "accepted" => "accepted",
+        "quarantined" => "quarantined",
+        "rejected" => "rejected",
+        "revoked" => "revoked",
+        "expired" => "expired",
+        "purged" => "purged",
+        _ if status.processing == PipelineProcessingStatus::AwaitingReview
+            || status.admission_decision == "quarantine" =>
+        {
+            "quarantined"
+        }
+        _ if status.admission_decision == "reject" => "rejected",
+        _ => "accepted",
     }
 }
 

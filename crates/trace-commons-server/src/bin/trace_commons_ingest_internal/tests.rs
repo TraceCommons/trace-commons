@@ -102396,6 +102396,8 @@ fn pipeline_contributor_status_fixture() -> PipelineContributorStatus {
             },
         ],
         compatibility: None,
+        submission_status: "accepted".to_string(),
+        admission_decision: "admit".to_string(),
     }
 }
 
@@ -102463,7 +102465,10 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
     let projected = submission_status_from_pipeline(&status);
     assert_eq!(projected.submission_id, status.submission_id);
     assert_eq!(projected.trace_id, status.trace_id);
-    assert_eq!(projected.status, "complete");
+    assert_eq!(
+        projected.status, "accepted",
+        "`main`'s vocabulary; the pipeline state is in the pipeline block"
+    );
     assert_eq!(projected.credit_points_pending, 2.5);
     assert_eq!(projected.credit_points_final, Some(2.5));
     assert_eq!(
@@ -102531,6 +102536,140 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
         projected.credit_points_total, None,
         "a pending award is never reported as a total"
     );
+}
+
+/// Zaki review 1, minor item M-b: a Trace Credit leg that will never be paid
+/// reports no pending points, as a forfeited or failed one does: a
+/// `NoveltyUtility` leg `main` never settles (`NotSettlementEligible`) and
+/// one `main`'s credit checks withheld (`Withheld`).
+#[test]
+fn a_withheld_or_never_settled_leg_reports_no_pending_points() {
+    for (credit, internal_settlement_state) in [
+        (PipelineCreditStatus::Withheld, "withheld"),
+        (
+            PipelineCreditStatus::NotSettlementEligible,
+            "not_settlement_eligible",
+        ),
+    ] {
+        let mut status = pipeline_contributor_status_fixture();
+        status.credit = credit;
+        let trace_credit = status
+            .instruments
+            .iter_mut()
+            .find(|instrument| instrument.instrument_id == "trace_credit")
+            .unwrap();
+        trace_credit.internal_settlement_state = internal_settlement_state.to_string();
+        trace_credit.settlement_batch_id = None;
+        let projected = submission_status_from_pipeline(&status);
+        assert_eq!(
+            projected.credit_points_pending, 0.0,
+            "a {internal_settlement_state} leg has no pending points"
+        );
+        assert_eq!(projected.credit_points_final, None);
+        assert_eq!(
+            projected.pipeline.unwrap().instruments[1].atomic_units,
+            "2500000",
+            "the pipeline block still carries the award"
+        );
+    }
+}
+
+/// Zaki review 1, minor item M-c: a pipeline-only submission's `status` is
+/// in `main`'s vocabulary, so the contributor daemon's history counts and
+/// its held-for-review check (`quarantined`) recognize it; the pipeline's own
+/// state stays in the pipeline block. A decided submission reports `main`'s
+/// stored status as is. One not yet decided (`received`) reports what
+/// `main`'s receipt would have: `quarantined` while it waits for a human
+/// review or its Admission quarantined it and Review has not passed it,
+/// `rejected` for an Admission reject, and `accepted` otherwise.
+#[test]
+fn a_pipeline_only_submission_reports_mains_status_vocabulary() {
+    use trace_commons_gate_api::pipeline::Phase;
+    use trace_commons_server::versioned_pipeline_product::PipelineProcessingStatus as P;
+    for (processing, submission_status, admission, phase, expected) in [
+        (P::Complete, "accepted", "admit", None, "accepted"),
+        (P::Rejected, "rejected", "quarantine", None, "rejected"),
+        (
+            P::Withdrawn,
+            "revoked",
+            "admit",
+            Some(Phase::Settle),
+            "revoked",
+        ),
+        (P::Withdrawn, "purged", "admit", None, "purged"),
+        (
+            P::Pending,
+            "accepted",
+            "quarantine",
+            Some(Phase::Score),
+            "accepted",
+        ),
+        (
+            P::AwaitingReview,
+            "received",
+            "quarantine",
+            Some(Phase::Review),
+            "quarantined",
+        ),
+        (
+            P::Pending,
+            "received",
+            "quarantine",
+            Some(Phase::Review),
+            "quarantined",
+        ),
+        (
+            P::Retry,
+            "received",
+            "admit",
+            Some(Phase::Review),
+            "accepted",
+        ),
+        (
+            P::Blocked,
+            "received",
+            "admit",
+            Some(Phase::Review),
+            "accepted",
+        ),
+        (
+            P::Pending,
+            "received",
+            "reject",
+            Some(Phase::Review),
+            "rejected",
+        ),
+        (
+            P::Failed,
+            "received",
+            "quarantine",
+            Some(Phase::Review),
+            "quarantined",
+        ),
+        (
+            P::Failed,
+            "accepted",
+            "admit",
+            Some(Phase::Settle),
+            "accepted",
+        ),
+    ] {
+        let mut status = pipeline_contributor_status_fixture();
+        status.processing = processing;
+        status.submission_status = submission_status.to_string();
+        status.admission_decision = admission.to_string();
+        status.current_phase = phase;
+        let projected = submission_status_from_pipeline(&status);
+        assert_eq!(
+            projected.status, expected,
+            "{processing:?} / {submission_status} / {admission}"
+        );
+        assert_eq!(
+            projected.pipeline.unwrap().processing_state,
+            snake_case_label(processing),
+            "the pipeline state stays in the pipeline block"
+        );
+    }
 }
 
 /// Ruling F-M8: points that will never arrive are not pending. A run whose
