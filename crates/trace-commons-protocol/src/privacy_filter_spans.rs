@@ -13,6 +13,19 @@ use crate::trace_contribution::{
     safe_privacy_filter_label,
 };
 
+/// Whether a non-2xx from a classifier says "not now" rather than "not this".
+///
+/// A 5xx is the classifier's problem, and so are 429 (rate limited) and 408
+/// (request timeout): all three are about its load, not the text we sent, so
+/// they are retried and, if they outlive the retries, typed transient so the
+/// trace is not charged for them. Every other 4xx is about our request, and
+/// retrying it would only hide the bug.
+pub(crate) fn is_transient_classifier_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+}
+
 #[derive(Deserialize, Clone)]
 pub(crate) struct ClassifySpan {
     pub(crate) category: String,

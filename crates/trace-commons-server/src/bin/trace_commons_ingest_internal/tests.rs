@@ -101377,6 +101377,10 @@ async fn near_provisioning_default_disabled_returns_uniform_denial() {
 #[path = "admission_pg_tests.rs"]
 mod admission_pg_tests;
 
+/// The migrated PostgreSQL the two ignored ceremony suites below share.
+#[path = "migrated_pg_fixture.rs"]
+mod migrated_pg_fixture;
+
 /// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
 ///
 /// **The module name is load-bearing.** The `postgres-suites` job selects this

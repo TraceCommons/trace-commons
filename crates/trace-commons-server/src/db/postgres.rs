@@ -7439,47 +7439,6 @@ mod tests {
         );
     }
 
-    /// Two changes that each add a `V75` pass every check on their own branch
-    /// and collide on merge. On a fresh database the second insert fails its
-    /// primary key; on a database that already applied the first, the runner
-    /// used to skip the second silently. Refuse the table outright instead.
-    #[test]
-    fn migration_versions_are_unique_and_strictly_increasing() {
-        for pair in super::MIGRATIONS.windows(2) {
-            let ((earlier, earlier_name, _), (later, later_name, _)) = (&pair[0], &pair[1]);
-            assert!(
-                later > earlier,
-                "MIGRATIONS must be strictly increasing by version: V{earlier}                  ({earlier_name}) is followed by V{later} ({later_name})"
-            );
-        }
-    }
-
-    /// The directory can hold two files with one version and different stems
-    /// (two branches, both merged); the table test above only sees the one the
-    /// table lists. Catch the duplicate at the file level too.
-    #[test]
-    fn no_two_migration_files_share_a_version() {
-        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
-        let mut seen: std::collections::BTreeMap<i32, String> = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(MIGRATIONS_DIR).expect("read migrations/") {
-            let name = entry
-                .expect("dir entry")
-                .file_name()
-                .into_string()
-                .expect("utf-8 name");
-            let Some(rest) = name.strip_prefix('V') else {
-                continue;
-            };
-            let Some((version, _)) = rest.split_once("__") else {
-                continue;
-            };
-            let version: i32 = version.parse().expect("numeric migration version");
-            if let Some(previous) = seen.insert(version, name.clone()) {
-                panic!("V{version} is claimed by both {previous} and {name}");
-            }
-        }
-    }
-
     #[test]
     fn an_unrecorded_version_is_applied() {
         assert!(!super::recorded_migration_state(None, 75, "account_trust").expect("not an error"));
@@ -7507,6 +7466,12 @@ mod tests {
         );
     }
 
+    /// Also the check for two migrations claiming one version, whether from
+    /// two branches that each added a `V75` or from a hand-edited table:
+    /// `migrations_on_disk` lists every file, duplicates included, so a second
+    /// `V75__*.sql` makes the table and the directory disagree, and a second
+    /// `V75` row in `MIGRATIONS` fails the strictly-increasing loop. A separate
+    /// test for either would repeat this one.
     #[test]
     fn every_migration_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
