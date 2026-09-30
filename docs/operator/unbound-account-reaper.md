@@ -20,9 +20,10 @@ again for 30 days of idleness, which let one sign-in hold an unbound account,
 and a slot under the unbound ceiling, for a month.
 
 S3 sets `closed_at` in the same transaction that moves the binding to
-`closed`, so `closed_at` is the close time. Closed accounts are not counted
-against the unbound ceiling, so without the second window they would pile up
-without limit.
+`closed`, so `closed_at` is the close time. Since V102, closed accounts count
+against the unbound ceiling until this reaper deletes them, so the closed
+window is also what frees their slots; before V102 they were not counted, and
+without the second window they would have piled up without limit.
 
 **A live session does not put the reap off** (decided 2026-09-30). An earlier
 draft kept either kind while it held an unrevoked, unexpired session. Native
