@@ -7998,12 +7998,16 @@ impl PipelineService {
                     }
                 };
                 // A held Trace Credit account is checked before any external
-                // effect, so a held account never reaches its adapter.
+                // effect, so a held account never reaches its adapter. Only a
+                // leg that settles into a batch is held: a `NoveltyUtility`
+                // leg never settles, and `main` writes that credit regardless
+                // of holds (owner ruling, Zaki review 1, round 2, finding 13).
                 let credit_account_ref = if instrument_id == InstrumentId::trace_credit() {
                     let account_ref = self.credit_account_ref(&run).await?;
-                    if self
-                        .credit_account_is_held(&run.tenant_id, &account_ref)
-                        .await?
+                    if bundle.trace_credit_event == PipelineTraceCreditEvent::PipelineScore
+                        && self
+                            .credit_account_is_held(&run.tenant_id, &account_ref)
+                            .await?
                     {
                         self.store
                             .update_settlement(
@@ -8591,10 +8595,16 @@ impl PipelineService {
             &[&account_lock],
         )
         .await?;
-        if list_trace_credit_holds_on_tx(&tx, &run.tenant_id)
-            .await?
-            .iter()
-            .any(|hold| hold.credit_account_ref == account_ref && hold.released_at.is_none())
+        // Holds gate settlement: `main` leaves a held account out of its
+        // settlement batches and payouts, and writes `NoveltyUtility` credit
+        // regardless of holds (its hold filter covers only settlement-eligible
+        // events). So a hold stops only a leg that settles into a batch
+        // (owner ruling on Zaki review 1, round 2, finding 13).
+        if trace_credit_event == PipelineTraceCreditEvent::PipelineScore
+            && list_trace_credit_holds_on_tx(&tx, &run.tenant_id)
+                .await?
+                .iter()
+                .any(|hold| hold.credit_account_ref == account_ref && hold.released_at.is_none())
         {
             // Dropping the transaction rolls it back: nothing was written.
             return Ok(InternalCreditResult::Held);

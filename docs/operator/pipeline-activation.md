@@ -485,7 +485,7 @@ to NEAR.
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`, `..._REQUIRE_NEAR_CONTRACT` | applied at startup | An enabled payout must name `main`'s contract (`pipeline_runtime_near_contract_mismatch`, `payout_near_contract_missing`). |
   | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | applied at every payout | Ingest hands the mode to the runtime and refuses one that holds another (`pipeline_runtime_near_payout_controls_mismatch`). `disabled` (the default): no outbox row is written and nothing is submitted or confirmed; each leg stays `pending`, as `main`'s rows do. `dry_run`: the full outbox state machine runs in process, with synthetic transaction hashes from each call's idempotency key, no network and no funds, and the injected adapter is not called. `http`: the injected adapter pays. |
   | `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH` | refuses an enabled payout on an adapter without a credential | As `main` refuses to start its NEAR adapters without their bearer tokens, whatever the mode: `near_payout_adapter_auth_missing`. The runtime must hold the same flag (`pipeline_runtime_near_payout_controls_mismatch`). |
-  | Credit holds (`credit_holds`) | applied at Settle | A held principal's leg is `held` and is not settled, as `main` leaves held accounts out. |
+  | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's settlement-eligible (`accepted`) leg is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; that event never settles or pays. |
   | Ranking calibration gates (`TRACE_COMMONS_RANKING_*`) | not applicable | They apply only to `RankingUtility` events; a pipeline leg writes an `accepted` event. |
 
 - A contributor is paid as `main` pays them. A principal linked to an
@@ -501,7 +501,8 @@ to NEAR.
   is paid within one interval after the contributor enrols or designates a
   NEAR account. A principal with no account is paid
   with no NEAR account, as on `main`. Holds (`credit_holds`) still apply per
-  principal, as on `main`.
+  principal to settled legs, as on `main`; they never stop a `NoveltyUtility`
+  leg (see "Compatibility credit").
 - A withdrawal does not stop a payout. A leg is `complete` only when Settle
   completed it while the submission was operable, and a withdrawal forfeits
   only the legs Settle has not completed. A completed leg keeps its credit,
@@ -598,6 +599,9 @@ writes that event: settlement state `final`, actor role `vector_worker`, and
 the reason `novelty_utility:compatibility_quality_novelty_v1`. That event type
 does not settle on `main`, so the pipeline never batches or pays it, and the
 contributor status reports the leg as `not_settlement_eligible`.
+
+A credit hold on the contributor does not stop this event, as it does not on
+`main`: holds gate settlement batches and payouts only.
 
 Before Settle writes the ledger event, it applies `main`'s `NoveltyUtility`
 credit checks, in `main`'s order. A check that refuses the credit withholds
