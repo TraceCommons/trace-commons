@@ -42,8 +42,8 @@ CREATE TABLE pipeline_bundle_qualifications (
 
 -- Immutable, the same shape as `pipeline_review_assessments` (V101): neither
 -- an UPDATE nor a direct DELETE is ever allowed, but a DELETE arriving
--- through a cascade (the package this qualification belongs to was deleted,
--- taking its tenant with it) is let through. See
+-- through a cascade (the tenant that owns this qualification's package was
+-- deleted, taking the package and then this row with it) is let through. See
 -- `reject_pipeline_review_assessment_mutation`'s comment (V101) for why
 -- `pg_trigger_depth() > 1` is the direct/cascade boundary.
 CREATE FUNCTION reject_pipeline_bundle_qualification_mutation()

@@ -806,12 +806,19 @@ impl PipelineQualificationStore {
         }
     }
 
-    /// Verifies `signed`'s trust and production shape, checks `metadata`
-    /// against `dependencies`, and records the qualification. Fails closed
-    /// on: an untrusted or tampered package (`trust.verify`), a
-    /// non-production or development package (`validate_production_package`),
-    /// malformed metadata (`bundle_qualification_metadata_invalid`), a
-    /// metadata dependency digest that does not match `dependencies`
+    /// Verifies `signed`'s trust and production shape, checks `metadata` and
+    /// `dependencies` against `signed.package` and each other, and records
+    /// the qualification. Fails closed on: an untrusted or tampered package
+    /// (`trust.verify`), a non-production or development package
+    /// (`validate_production_package`), malformed metadata
+    /// (`bundle_qualification_metadata_invalid`), a `dependencies` profile
+    /// built for a different bundle -- a different `bundle_id` or a
+    /// `dependency_digest` that does not match `signed.package`'s own
+    /// (`bundle_qualification_profile_mismatch`; `dependencies` is
+    /// bundle-scoped, so nothing else here ties it to `signed.package`), a
+    /// `configuration_digest` that does not match `signed.package`'s own
+    /// (`bundle_qualification_configuration_mismatch`), a metadata dependency
+    /// digest that does not match `dependencies`
     /// (`runtime_dependency_identity_mismatch`), any blocked dependency or
     /// infrastructure control (`dependencies.blockers()`'s first label), or a
     /// second call for the same bundle with different metadata
@@ -828,6 +835,19 @@ impl PipelineQualificationStore {
         trust.verify(signed).map_err(DatabaseError::Constraint)?;
         validate_production_package(&signed.package).map_err(DatabaseError::Constraint)?;
         metadata.validate().map_err(DatabaseError::Constraint)?;
+        let digests = package_digests(&signed.package).map_err(DatabaseError::Constraint)?;
+        if dependencies.bundle.bundle_id != signed.package.bundle_id
+            || dependencies.bundle.dependency_digest != digests.dependency_digest
+        {
+            return Err(DatabaseError::Constraint(
+                "bundle_qualification_profile_mismatch".to_string(),
+            ));
+        }
+        if metadata.configuration_digest != digests.configuration_digest {
+            return Err(DatabaseError::Constraint(
+                "bundle_qualification_configuration_mismatch".to_string(),
+            ));
+        }
         if metadata.runtime_dependency_digest
             != dependencies
                 .runtime_identity_digest()

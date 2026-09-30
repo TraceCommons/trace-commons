@@ -74,10 +74,11 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineProductStore, pipeline_control_health,
 };
 use trace_commons_server::versioned_pipeline_qualification::{
-    BundlePackageTrustStore, BundleQualificationMetadata, PACKAGE_SIGNATURE_INVALID_LABEL,
+    BundlePackageTrustStore, BundleQualificationMetadata, PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL,
+    PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL, PACKAGE_SIGNATURE_INVALID_LABEL,
     PACKAGE_SIGNER_UNTRUSTED_LABEL, PipelineCheckEmitter, PipelineQualificationStore,
     ProductionAdapterKind, ProductionDependencyProfile, ProductionInfrastructureProfile,
-    sign_bundle_package, trusted_key_for_pkcs8,
+    package_digests, sign_bundle_package, trusted_key_for_pkcs8,
 };
 
 use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
@@ -23702,11 +23703,15 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 
 // Task 6: `pipeline_bundle_qualifications` (V103) and `PipelineQualificationStore`.
 //
-// Every double below reports a production-looking identity and content
-// descriptor (no `test`/`reference`/`synthetic`/`mock_` marker in its bytes)
-// and `production_qualified() == true`, so a package built from it both
-// passes `validate_production_package` and reports every dependency
-// qualified through `PipelineService::bundle_qualification`. Real production
+// Every double below reports `production_qualified() == true` and a content
+// descriptor free of the five development markers
+// `validate_production_package` checks for (`local_reference`, `reference_`,
+// `pipeline-test`, `mock_`, `synthetic`), so a package built from one of
+// these passes that check and reports every dependency qualified through
+// `PipelineService::bundle_qualification`. Their `dependency_identity()`
+// labels do say `*_test_only` -- that is fine, since an identity is a
+// hash-only label the pipeline reports, never bytes written into a package
+// artifact, so `validate_production_package` never sees it. Real production
 // dependencies are injected by a proprietary assembler and never live in
 // this tree; these exist only so the tests below can exercise a package and
 // a `PipelineBundleQualification` that both qualify.
@@ -24015,10 +24020,12 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
     let dir = tempfile::tempdir().unwrap();
     let (service, package) = qualified_production_service(backend.clone(), &dir).await;
 
-    let bundle = service
-        .bundle_qualification(&package)
-        .expect("the fully qualified service resolves the package cleanly");
-    let profile = ProductionDependencyProfile::new(bundle, all_production_infrastructure());
+    let profile = ProductionDependencyProfile::for_bundle(
+        &service,
+        &package,
+        all_production_infrastructure(),
+    )
+    .expect("the fully qualified service resolves the package cleanly");
     assert!(
         profile.blockers().is_empty(),
         "an all-production infrastructure profile over a fully qualified bundle has no \
@@ -24040,7 +24047,9 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
     let metadata = BundleQualificationMetadata {
         corpus_digest: sha256_prefixed(b"corpus"),
         input_digest: sha256_prefixed(b"input"),
-        configuration_digest: sha256_prefixed(b"configuration"),
+        configuration_digest: package_digests(&package)
+            .expect("package digests compute")
+            .configuration_digest,
         code_revision_hash: sha256_prefixed(b"code-revision"),
         runtime_dependency_digest: profile
             .runtime_identity_digest()
@@ -24161,9 +24170,12 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
 }
 
 /// Task 6: `qualify_bundle` fails closed on an untrusted signer, a tampered
-/// package, malformed metadata, a metadata dependency digest that does not
-/// match the profile, and a profile carrying a blocker -- and none of these
-/// failed calls leaves a row behind.
+/// package, a development or non-compatibility package, malformed metadata,
+/// a dependency profile built for a different package (bundle id or
+/// dependency digest), a metadata configuration digest that does not match
+/// the package, a metadata dependency digest that does not match the
+/// profile, and a profile carrying a blocker -- and none of these failed
+/// calls leaves a row behind.
 #[tokio::test]
 async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
     let Some(backend) = runtime_backend(4).await else {
@@ -24171,10 +24183,12 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
     };
     let dir = tempfile::tempdir().unwrap();
     let (service, package) = qualified_production_service(backend.clone(), &dir).await;
-    let bundle = service
-        .bundle_qualification(&package)
-        .expect("the fully qualified service resolves the package cleanly");
-    let profile = ProductionDependencyProfile::new(bundle.clone(), all_production_infrastructure());
+    let profile = ProductionDependencyProfile::for_bundle(
+        &service,
+        &package,
+        all_production_infrastructure(),
+    )
+    .expect("the fully qualified service resolves the package cleanly");
     assert!(profile.blockers().is_empty());
 
     let random = ring::rand::SystemRandom::new();
@@ -24190,7 +24204,9 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
     let metadata = BundleQualificationMetadata {
         corpus_digest: sha256_prefixed(b"corpus"),
         input_digest: sha256_prefixed(b"input"),
-        configuration_digest: sha256_prefixed(b"configuration"),
+        configuration_digest: package_digests(&package)
+            .expect("package digests compute")
+            .configuration_digest,
         code_revision_hash: sha256_prefixed(b"code-revision"),
         runtime_dependency_digest: profile
             .runtime_identity_digest()
@@ -24230,6 +24246,54 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
         "unexpected tampered-package error: {tampered_error:?}"
     );
 
+    // T6-3(b): a package that is structurally fine and correctly signed, but
+    // carries a development dependency marker (the local-reference
+    // compatibility config), is refused by `validate_production_package`
+    // before any digest or profile check runs. Deleting that call would
+    // leave every other case in this test green, since none of them signs a
+    // package shaped like this one.
+    let development_package = MinimalPolicyBundle::compatibility_package(
+        &CompatibilityBundleConfig::local_reference(),
+        &QualifiedProductionScorer(ReferencePerplexityScorer::new()),
+        &QualifiedProductionEmbedder(ReferenceEmbedder::new()),
+    )
+    .expect("local-reference compatibility package builds");
+    let signed_development = sign_bundle_package(
+        development_package,
+        "qualification-release-key",
+        pkcs8.as_ref(),
+    )
+    .expect("development package signs");
+    let development_error = store
+        .qualify_bundle(&tenant, &signed_development, &trust, &metadata, &profile)
+        .await
+        .expect_err("a development-dependency package is refused");
+    assert!(
+        matches!(development_error, DatabaseError::Constraint(ref label) if label == PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL),
+        "unexpected development-package error: {development_error:?}"
+    );
+
+    // T6-3(b), the other half: a package entirely outside the compatibility
+    // family fails the same check one step earlier, on the implementation
+    // id itself.
+    let minimal_package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(false),
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+    .expect("minimal package builds");
+    let signed_minimal =
+        sign_bundle_package(minimal_package, "qualification-release-key", pkcs8.as_ref())
+            .expect("minimal package signs");
+    let minimal_error = store
+        .qualify_bundle(&tenant, &signed_minimal, &trust, &metadata, &profile)
+        .await
+        .expect_err("a non-compatibility package is refused");
+    assert!(
+        matches!(minimal_error, DatabaseError::Constraint(ref label) if label == PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL),
+        "unexpected minimal-package error: {minimal_error:?}"
+    );
+
     // Invalid metadata: a non-sha256 digest.
     let mut invalid_metadata = metadata.clone();
     invalid_metadata.corpus_digest = "not-a-hash".to_string();
@@ -24240,6 +24304,54 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
     assert!(
         matches!(invalid_metadata_error, DatabaseError::Constraint(ref label) if label == "bundle_qualification_metadata_invalid"),
         "unexpected invalid-metadata error: {invalid_metadata_error:?}"
+    );
+
+    // I1: a dependency profile built for a different package. `dependencies`
+    // is bundle-scoped (`PipelineBundleQualification::bundle_id` and
+    // `dependency_digest` come from whatever package `bundle_qualification`
+    // was given), so nothing else in `qualify_bundle` ties `profile` to the
+    // package actually being signed and recorded -- without this check, a
+    // profile qualified for `package` could record an unrelated, possibly
+    // unqualified, `other_package` under its own bundle id.
+    let mut other_config = production_compatible_config();
+    other_config.projection_id = "qualified_production_projection_two.v1".to_string();
+    let other_package = MinimalPolicyBundle::compatibility_package(
+        &other_config,
+        &QualifiedProductionScorer(ReferencePerplexityScorer::new()),
+        &QualifiedProductionEmbedder(ReferenceEmbedder::new()),
+    )
+    .expect("second production-compatible package builds");
+    assert_ne!(other_package.bundle_id, package.bundle_id);
+    let signed_other =
+        sign_bundle_package(other_package, "qualification-release-key", pkcs8.as_ref())
+            .expect("second package signs");
+    let profile_mismatch_error = store
+        .qualify_bundle(&tenant, &signed_other, &trust, &metadata, &profile)
+        .await
+        .expect_err("a profile built for a different package is refused");
+    assert!(
+        matches!(profile_mismatch_error, DatabaseError::Constraint(ref label) if label == "bundle_qualification_profile_mismatch"),
+        "unexpected profile-mismatch error: {profile_mismatch_error:?}"
+    );
+
+    // T6-3(a): a metadata configuration digest that does not match the
+    // package actually being recorded.
+    let mut configuration_mismatched_metadata = metadata.clone();
+    configuration_mismatched_metadata.configuration_digest =
+        sha256_prefixed(b"a-different-configuration");
+    let configuration_mismatch_error = store
+        .qualify_bundle(
+            &tenant,
+            &signed,
+            &trust,
+            &configuration_mismatched_metadata,
+            &profile,
+        )
+        .await
+        .expect_err("a configuration digest that does not match the package is refused");
+    assert!(
+        matches!(configuration_mismatch_error, DatabaseError::Constraint(ref label) if label == "bundle_qualification_configuration_mismatch"),
+        "unexpected configuration-mismatch error: {configuration_mismatch_error:?}"
     );
 
     // A metadata dependency digest that differs from the profile's own.
@@ -24258,8 +24370,12 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
     // A profile with a blocker: the local-test infrastructure profile is not
     // all production (`runtime_identity_digest` is unaffected by
     // infrastructure, so `metadata` still matches it).
-    let blocked_profile =
-        ProductionDependencyProfile::new(bundle, ProductionInfrastructureProfile::local_test());
+    let blocked_profile = ProductionDependencyProfile::for_bundle(
+        &service,
+        &package,
+        ProductionInfrastructureProfile::local_test(),
+    )
+    .expect("the fully qualified service resolves the package cleanly");
     let blockers = blocked_profile.blockers();
     let first_blocker = blockers
         .first()
