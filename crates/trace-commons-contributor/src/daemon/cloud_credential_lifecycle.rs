@@ -188,7 +188,11 @@ pub(crate) fn classify_load_failure(
 }
 
 /// What a contributor-initiated move of a legacy-keychain entry found.
+///
+/// Constructed only on macOS, the one platform with a legacy store; the
+/// allow is conditional so a real dead-code regression there still fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum LegacyMigration {
     /// The active entry is in the data-protection store now: copied just
     /// now, or already there from an earlier move.

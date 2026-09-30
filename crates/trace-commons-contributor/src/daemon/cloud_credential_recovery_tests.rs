@@ -552,6 +552,7 @@ fn status_label(shared: &DaemonShared) -> String {
         .to_owned()
 }
 
+#[cfg(target_os = "macos")]
 fn migrate_request() -> Request {
     Request {
         id: 1,
