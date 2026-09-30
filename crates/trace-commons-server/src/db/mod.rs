@@ -1582,8 +1582,10 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Count passkey-origin accounts that are still `unbound`, in EVERY tenant
-    /// (Z2 S2, the unbound-account ceiling). A cross-tenant read, so the
+    /// Count passkey-origin accounts that hold a slot under the unbound-account
+    /// ceiling, in EVERY tenant (Z2 S2): `unbound` ones, and since V102
+    /// `closed` ones the reaper has not yet removed, so create-then-close
+    /// cycles cannot escape the ceiling. A cross-tenant read, so the
     /// PostgreSQL backend answers through the V98 SECURITY DEFINER function,
     /// never through a runtime-pool query. The default refuses: a backend that
     /// cannot count cannot enforce the ceiling, so creation stays closed.

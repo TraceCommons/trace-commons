@@ -1,6 +1,10 @@
+import { RouteDisclosureUnreadableLine } from "../../../components/route-disclosure";
+import { Spinner } from "../../../components/ui/spinner";
+import { routeDisclosureView } from "../../../lib/tauri/route-disclosure";
 import {
   useCertificateDetail,
   useRouteDisclosure,
+  useRouteDisclosureUnreadableCopy,
 } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { WaitingPreview } from "../types";
@@ -21,16 +25,18 @@ export function SessionSendDisclosure({
   const certificate = useCertificateDetail(
     preview.entry.holds_certificate === true ? preview.entry.entry_id : null,
   );
+  const unreadable = useRouteDisclosureUnreadableCopy();
   if (!disclosure.data) {
+    // As macOS: a spinner while still being read, and the core's line --
+    // or, if even that failed to load, the glyph alone -- once unreadable.
+    if (routeDisclosureView(disclosure, core) === "loading") {
+      return <Spinner className="size-3" />;
+    }
     return (
-      <p
-        className={`m-0 text-[11px] ${disclosure.isError ? "text-destructive" : "text-muted-foreground"}`}
-        role={disclosure.isError ? "alert" : "status"}
-      >
-        {disclosure.isError
-          ? "Where this session goes could not be read."
-          : "Reading where this session goes…"}
-      </p>
+      <RouteDisclosureUnreadableLine
+        line={unreadable.data?.session}
+        className="text-[11px]"
+      />
     );
   }
   const { facts, copy } = disclosure.data;

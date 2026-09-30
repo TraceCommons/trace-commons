@@ -2399,6 +2399,12 @@ pub struct TraceGateCreditDecisionRow {
 /// degrade.
 pub const TRACE_WITHDRAWAL_BACKEND_MISSING: &str = "TraceWithdrawalBackendMissing";
 
+/// The kind of the operator audit-chain repair's own audit event, and the
+/// `Maintenance` surface of its DB row. The only row
+/// [`TraceCorpusStore::append_trace_audit_chain_resume_event`] accepts
+/// carries it.
+pub const TRACE_AUDIT_CHAIN_REPAIR_KIND: &str = "audit_chain_repair";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceSourceSessionStatus {
     Active,
@@ -3227,11 +3233,19 @@ pub trait TraceCorpusStore: Send + Sync {
     /// the file log's head, not the DB's latest hashed row. The row must name
     /// that latest row's hash as its `decision_inputs_hash`, and it is
     /// refused unless `resumes_from_event_hash` is still the latest hashed
-    /// row. Only the operator audit-chain repair calls this.
+    /// row. Only the operator audit-chain repair calls this, and the row must
+    /// be its `audit_chain_repair` row ([`TRACE_AUDIT_CHAIN_REPAIR_KIND`]).
+    ///
+    /// `append_file_line` runs after the row is inserted and before the
+    /// transaction commits, under the tenant's audit advisory lock: the
+    /// caller appends the row's file log line there, so a repair whose DB
+    /// head has moved fails before it touches the file, and overlapping
+    /// repairs cannot both write one. If it fails, nothing commits.
     async fn append_trace_audit_chain_resume_event(
         &self,
         _audit_event: TraceAuditEventWrite,
         _resumes_from_event_hash: &str,
+        _append_file_line: &(dyn Fn() -> Result<(), String> + Send + Sync),
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Query(
             "trace audit chain resume is not supported by this backend".to_string(),

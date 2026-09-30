@@ -1569,21 +1569,57 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "unbound_account_reaper",
         include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
     ),
-    // V102 and V103 add human review claims and assessments, index
+    // #1135 review: closed-but-not-yet-reaped passkey accounts count against
+    // the unbound ceiling. Supersedes V101's note that closed rows fall
+    // outside V98's count. Depends only on V97 and V98.
+    (
+        102,
+        "passkey_ceiling_counts_closed",
+        include_str!("../../../../migrations/V102__passkey_ceiling_counts_closed.sql"),
+    ),
+    // V103 and V104 add human review claims and assessments, index
     // invalidations with retry columns, pipeline_runs.index_invalidation_state,
     // and immutable customer export snapshots. Every table forces RLS; there
     // is no cross-tenant claim function.
     (
-        102,
+        103,
         "versioned_pipeline_review_invalidation",
-        include_str!("../../../../migrations/V102__versioned_pipeline_review_invalidation.sql"),
+        include_str!("../../../../migrations/V103__versioned_pipeline_review_invalidation.sql"),
     ),
     (
-        103,
+        104,
         "versioned_pipeline_exports",
-        include_str!("../../../../migrations/V103__versioned_pipeline_exports.sql"),
+        include_str!("../../../../migrations/V104__versioned_pipeline_exports.sql"),
     ),
 ];
+
+/// One account's active strong authenticators (unrevoked passkeys plus
+/// unrevoked NEAR identities), inside a transaction already scoped to its
+/// tenant. The single definition of the count: `count_active_strong_
+/// authenticators` and bind's existing-account branch both read it here.
+pub(super) async fn active_strong_authenticator_count(
+    tx: &deadpool_postgres::Transaction<'_>,
+    account_id: &Uuid,
+) -> Result<i64, DatabaseError> {
+    let row = tx
+        .query_one(
+            "SELECT (
+                SELECT count(*) FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+              ) + (
+                SELECT count(*) FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+              ) AS strong_count",
+            &[account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    Ok(row.get("strong_count"))
+}
 
 #[async_trait]
 impl Database for PgBackend {
@@ -4696,25 +4732,9 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let row = tx
-            .query_one(
-                "SELECT (
-                    SELECT count(*) FROM trace_webauthn_credentials
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND revoked_at IS NULL
-                  ) + (
-                    SELECT count(*) FROM trace_near_identities
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND revoked_at IS NULL
-                  ) AS strong_count",
-                &[&account_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let strong = active_strong_authenticator_count(&tx, &account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(row.get("strong_count"))
+        Ok(strong)
     }
 
     async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
@@ -6890,8 +6910,8 @@ mod tests {
         (93, 4),
         (94, 4),
         (95, 4),
-        (102, 4),
         (103, 4),
+        (104, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7631,8 +7651,8 @@ mod tests {
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
-            include_str!("../../../../migrations/V102__versioned_pipeline_review_invalidation.sql"),
-            include_str!("../../../../migrations/V103__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V103__versioned_pipeline_review_invalidation.sql"),
+            include_str!("../../../../migrations/V104__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7664,8 +7684,8 @@ mod tests {
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
-            include_str!("../../../../migrations/V102__versioned_pipeline_review_invalidation.sql"),
-            include_str!("../../../../migrations/V103__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V103__versioned_pipeline_review_invalidation.sql"),
+            include_str!("../../../../migrations/V104__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7749,8 +7769,8 @@ mod tests {
         let content =
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql");
         let review_invalidation =
-            include_str!("../../../../migrations/V102__versioned_pipeline_review_invalidation.sql");
-        let exports = include_str!("../../../../migrations/V103__versioned_pipeline_exports.sql");
+            include_str!("../../../../migrations/V103__versioned_pipeline_review_invalidation.sql");
+        let exports = include_str!("../../../../migrations/V104__versioned_pipeline_exports.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -7833,7 +7853,7 @@ mod tests {
         ] {
             assert!(
                 review_invalidation.contains(required),
-                "V102 is missing `{required}`"
+                "V103 is missing `{required}`"
             );
         }
         for forbidden in [
@@ -7847,7 +7867,7 @@ mod tests {
         ] {
             assert!(
                 !review_invalidation.contains(forbidden),
-                "V102 must not contain `{forbidden}`"
+                "V103 must not contain `{forbidden}`"
             );
         }
         for required in [
@@ -7861,12 +7881,12 @@ mod tests {
             "ALTER TABLE pipeline_export_snapshots FORCE ROW LEVEL SECURITY;",
             "ALTER TABLE pipeline_export_snapshot_items FORCE ROW LEVEL SECURITY;",
         ] {
-            assert!(exports.contains(required), "V103 is missing `{required}`");
+            assert!(exports.contains(required), "V104 is missing `{required}`");
         }
         for forbidden in ["SECURITY DEFINER", "SET search_path", "attempt_count"] {
             assert!(
                 !exports.contains(forbidden),
-                "V103 must not contain `{forbidden}`"
+                "V104 must not contain `{forbidden}`"
             );
         }
     }

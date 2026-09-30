@@ -251,8 +251,13 @@ export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value;
 
 - **Unset disables creation.** Every `create` request gets the uniform deny.
   A value that is not a non-negative integer fails startup.
-- The cap is on accounts in state `unbound`, counted across every tenant. It is
-  checked at `create/start` and again inside the `create/finish` transaction.
+- The cap is on passkey accounts in state `unbound` or `closed`, counted
+  across every tenant. It is checked at `create/start` and again inside the
+  `create/finish` transaction. A `closed` account (a bind refused because the
+  NEAR AI account already had one, see S3 below) keeps its slot until the
+  reaper deletes it, 30 days after the close, so creating and closing accounts
+  in a loop cannot get past the cap (V102; before V102 only `unbound` counted).
+  `bound` accounts never count.
 - When the count reaches the cap, ingest logs the label
   `unbound_account_ceiling_reached` once (target `trace_commons::passkey`), and
   again only after the count has dropped below and reached it a second time.
@@ -304,6 +309,13 @@ When the NEAR AI account already belongs to another commons account, the bind
 is refused: the passkey account is closed (its sessions and passkey revoked)
 and the response carries the existing account's session. Nothing moves between
 the two accounts; folding the passkey into the existing account is not built.
+
+When the daemon's device key is already registered to another account (the
+machine ran NEAR AI or wallet provisioning for a different account first),
+bind finish answers `409 {"error":"device_key_registered_elsewhere"}` rather
+than the uniform deny, and writes an `account_binding_failed` audit row with
+that stage. Nothing else is written: the passkey account stays `unbound`, and
+no fresh device key is minted. The label names no tenant or account.
 
 ### Browser passkey step-up page (Z2 S7)
 
@@ -743,10 +755,10 @@ table. Check before deploying:
 SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
 ```
 
-### V102 and V103: review, invalidation, and export tables
+### V103 and V104: review, invalidation, and export tables
 
-V102 adds the human review claims and assessments, the index invalidation
-queue, a column on `pipeline_runs`, and an index for the payout pass. V103
+V103 adds the human review claims and assessments, the index invalidation
+queue, a column on `pipeline_runs`, and an index for the payout pass. V104
 adds the export snapshots and their items. Like V92 to V95, each grants
 `trace_ingest_runtime` what the pipeline code reads and writes there, and
 nothing broader, and each refuses to apply if the group does not exist:
@@ -756,7 +768,7 @@ nothing broader, and each refuses to apply if the group does not exist:
 | `pipeline_review_claims` | `SELECT, INSERT, DELETE`; `UPDATE` on `reviewer_principal_ref`, `lease_token`, `lease_expires_at`, `claimed_at` | a reviewer's claim inserts the row, or takes over an expired claim or renews its own; the assessment deletes the spent claim |
 | `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
 | `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
-| `pipeline_runs` | `UPDATE (index_invalidation_state)`, the column V102 adds | queueing an invalidation marks the run `pending`; the worker marks it `complete` or `failed` |
+| `pipeline_runs` | `UPDATE (index_invalidation_state)`, the column V103 adds | queueing an invalidation marks the run `pending`; the worker marks it `complete` or `failed` |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
 | `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
 

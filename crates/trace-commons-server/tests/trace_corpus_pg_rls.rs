@@ -1589,10 +1589,10 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         "../../../migrations/V97__account_bindings.sql"
     ));
     sql.push_str(include_str!(
-        "../../../migrations/V102__versioned_pipeline_review_invalidation.sql"
+        "../../../migrations/V103__versioned_pipeline_review_invalidation.sql"
     ));
     sql.push_str(include_str!(
-        "../../../migrations/V103__versioned_pipeline_exports.sql"
+        "../../../migrations/V104__versioned_pipeline_exports.sql"
     ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
@@ -1721,10 +1721,10 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         "../../../migrations/V95__versioned_pipeline_receipt_content.sql"
     ));
     sql.push_str(include_str!(
-        "../../../migrations/V102__versioned_pipeline_review_invalidation.sql"
+        "../../../migrations/V103__versioned_pipeline_review_invalidation.sql"
     ));
     sql.push_str(include_str!(
-        "../../../migrations/V103__versioned_pipeline_exports.sql"
+        "../../../migrations/V104__versioned_pipeline_exports.sql"
     ));
     for table in expected_trace_rls_tables()
         .into_iter()
