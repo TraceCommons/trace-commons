@@ -1321,6 +1321,7 @@ fn visit_session(
         path: obs.path.clone(),
         size_bytes: obs.size_bytes,
         discovered_at: ctx.now,
+        review_started_at: None,
         state: if armed {
             // Opted in, so it needs no decision; the uploader picks it
             // up on its next pass.

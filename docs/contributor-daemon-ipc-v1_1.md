@@ -695,14 +695,20 @@ It stays until a shell calls `acknowledge_arming_rewordings` with its `id`
 sets the project's mode, which answers it. A void takes it with it. The
 rewording itself is audited as `arming-reworded` with the project label.
 
-Today no rewording is recorded: every shell's arming offer says "will be
+For claim narrowings, every shell's arming offer currently says "will be
 scrubbed" whatever R1's disclosure is, so the words in force have not
-changed. It fires when the arming offer becomes disclosure-dependent
+changed. That notice fires when the arming offer becomes disclosure-dependent
 (`arming_wording::project_arming_claim`), or when a folder's disclosure drops
 to patterns-only. The words are
 `consent_copy::arming_reworded_notice_for_wire` (`tc_arming_reworded_notice`);
 its `ask_first_action` button is `set_project_mode` with the element's
 `project_id` and `notify_only`.
+
+The Automatic-default upgrade also uses this persisted notice channel.
+An element with `scrub_check_defaulted: true` announces the new review holds;
+its `was` and `now` claims are unchanged. The shared formatter selects the
+upgrade wording, including the existing Ask me first action. An upgrade and
+a claim-narrowing notice can coexist and are acknowledged by their own ids.
 
 #### `automatic_contribution_held`
 
@@ -2367,8 +2373,10 @@ or a count of them.
 { "reasons": { "dismissed-by-contributor": 2, "expired-without-decision": 1 } }
 ```
 
-A count, by `reason_label`, across every entry currently on the queue in any
-state. This method is **not** named `eligibility_reasons`, and does not
+A count, by `reason_label`, across resolved entries currently on the queue.
+Pending, approved, and uploading entries are excluded: sessions held for
+review are still waiting, not terminal outcomes. This method is **not**
+named `eligibility_reasons`, and does not
 explain sessions that were never offered at all. Every `reason_label` this
 method can report belongs to an entry that already exists in the queue (in
 practice: dismissed, refused, expired, and superseded entries). It cannot
@@ -3665,13 +3673,24 @@ The Settings row "Scrub check" (K4 of #1118). `set_settings` takes a string,
 `"automatic"` or `"manual"`; anything else, including another case, a boolean
 or `null`, is `bad_params` / `settings-invalid-value` and changes nothing.
 `get_settings` always reports the key as one of the two strings, never
-`null`: `"automatic"` until the contributor chooses otherwise. It is persisted with the other settings and read at
+`null`: `"automatic"` until the contributor chooses otherwise. It is persisted
+with the other settings and read at
 each watcher pass and each upload, so a change reaches a running daemon
 without a restart.
 
 It decides what happens to a session in a folder set to share automatically
 (`auto_upload`), and only there. A person's own `approve` is never held by it:
 they are the second look.
+
+An existing settings file with an absent/null choice records
+`scrub_check_defaulted_on_upgrade: true`, retained through unrelated saves.
+An older armed policy with no settings file also records that provenance;
+a new-format policy distinguishes fresh installs from those upgrades.
+At startup, already-armed folders receive a one-time persisted notice in
+`arming_rewordings` with `scrub_check_defaulted: true`. All shells render it
+through the shared notice formatter and acknowledge its exact id. Fresh
+installs and explicit Manual choices receive no upgrade notice. A saved
+policy migration marker prevents replay after acknowledgement or later arming.
 
 | Value | Armed folders |
 |---|---|
@@ -3691,6 +3710,12 @@ local-redaction path nothing has left the machine
 when a session is held. With a witness configured, the witness has already
 seen the session (as with `witness-risk-review-required`): the hold stops the
 upload to the commons, not the send to the enclave.
+
+A session newly held for a person receives a full review window from its
+first hold (`review_started_at`); its original discovery time is preserved.
+Repeated holds and restarts do not extend that window. On witness routes,
+the first hold has already incurred witness/claim work; approving it may
+repeat that work before upload.
 
 **What a hold leaves on the entry.** The entry goes back to `Pending` with
 `reason_label` `second-look-review-required`, and the envelope the hold was

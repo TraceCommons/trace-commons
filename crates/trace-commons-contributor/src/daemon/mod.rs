@@ -1099,11 +1099,12 @@ async fn drain_approved(
                     second_look = ?reasons,
                     "held a session approved on the contributor's behalf for a person"
                 );
-                q.hold_with_scrub_pin(
+                q.hold_with_scrub_pin_at(
                     entry.entry_id,
                     &reason_label,
                     pin.as_ref()
                         .map(|(digest, counts)| (digest.as_str(), *counts)),
+                    now,
                 );
             }
             uploader::UploadDecision::Failed { reason_label } => {

@@ -736,7 +736,7 @@ impl DaemonShared {
         // finished or undone before the policy is read and before any pass,
         // so nothing ever sees a half-switched identity.
         super::legacy_migration::recover(&store)?;
-        let policy = ProjectPolicy::load(&store)?;
+        let mut policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|error| {
             let mut settings = DaemonSettings::load(&store)?;
@@ -753,6 +753,24 @@ impl DaemonShared {
             settings.cloud_storage_unavailable = true;
             Ok::<_, anyhow::Error>(settings)
         })?;
+        if settings.scrub_check_defaulted_on_upgrade
+            && store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)?
+                .is_none()
+        {
+            // Save provenance before marking the policy migration done; a
+            // restart must not mistake a legacy settings-less install for fresh.
+            settings.save(&store)?;
+        }
+        if policy.record_scrub_check_upgrade(
+            settings.scrub_check_defaulted_on_upgrade
+                && settings.scrub_check == super::settings::ScrubCheck::Automatic,
+            Utc::now(),
+        ) {
+            // Fail startup if the notice cannot be persisted: changed
+            // unattended behavior must not silently precede its notice.
+            policy.save(&store)?;
+        }
         // Built here from the declaration this settings file carries at
         // startup. A later edit does not wait for a restart:
         // `set_settings` rebuilds the instance in place.
@@ -1708,6 +1726,7 @@ impl DaemonShared {
                     ),
                     "was": notice.was,
                     "now": notice.now,
+                    "scrub_check_defaulted": notice.scrub_check_defaulted,
                 })
             })
             .collect();
@@ -2574,12 +2593,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "cancel" => handle_cancel(shared, req),
         "list_audit" => handle_list_audit(shared, req),
-        // A count of `reason_label` across every entry currently on the
-        // queue, whatever its state -- no state filter is applied, it is
-        // simply whichever entries currently carry a label (in practice
-        // that's dismissed, refused, expired, and superseded entries, since
-        // nothing else sets one). These labels are already computed by the
-        // queue and uploader; this is the first surface that rolls them up.
+        // Resolved outcomes only. Pending review holds and approved/uploading
+        // entries are still waiting, and must not appear in the shells'
+        // "Sessions no longer waiting" group.
         //
         // Deliberately NOT named `eligibility_reasons`: every source of a
         // `reason_label` applies to an entry that already exists in the
@@ -2595,6 +2611,12 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             let mut counts: std::collections::BTreeMap<&str, u64> =
                 std::collections::BTreeMap::new();
             for e in queue.all() {
+                if matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                ) {
+                    continue;
+                }
                 if let Some(label) = e.reason_label.as_deref() {
                     *counts.entry(label).or_insert(0) += 1;
                 }
@@ -8625,6 +8647,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn automatic_default_upgrade_notice_survives_save_restart_and_acknowledgement() {
+        let s = enrolled_shared();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/upgrade", ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&s.store).unwrap();
+        }
+        let mut old = serde_json::to_value(DaemonSettings::default()).unwrap();
+        old.as_object_mut().unwrap().remove("scrub_check");
+        s.store
+            .write_daemon_file(
+                crate::config::DAEMON_SETTINGS_FILE,
+                old.to_string().as_bytes(),
+            )
+            .unwrap();
+        // A preference write before the daemon starts must not erase provenance.
+        DaemonSettings::load(&s.store)
+            .unwrap()
+            .save(&s.store)
+            .unwrap();
+        let upgraded = DaemonShared::load(s.store.clone()).unwrap();
+        let notices = upgraded.status_value()["arming_rewordings"].clone();
+        assert_eq!(notices.as_array().unwrap().len(), 1);
+        assert_eq!(notices[0]["scrub_check_defaulted"], true);
+        assert!(!notices.to_string().contains("/tmp/upgrade"));
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(restarted.status_value()["arming_rewordings"], notices);
+        let response = handle_request(
+            &restarted,
+            &req(
+                "acknowledge_arming_rewordings",
+                serde_json::json!({"ids": [notices[0]["id"]]}),
+            ),
+        );
+        assert!(response.error.is_none());
+        let acknowledged = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            acknowledged.status_value()["arming_rewordings"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn startup_announces_an_old_armed_install_without_a_settings_file() {
+        let s = shared();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_none()
+        );
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/legacy", ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&s.store).unwrap();
+        }
+        let upgraded = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            upgraded.status_value()["arming_rewordings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            DaemonSettings::load(&s.store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            restarted.status_value()["arming_rewordings"],
+            upgraded.status_value()["arming_rewordings"]
+        );
+    }
+
     /// Arm `key` over the socket, then play the arming-copy change: the
     /// words in force for it now claim patterns only.
     fn armed_then_reworded(key: &str) -> DaemonShared {
@@ -9974,13 +10079,18 @@ mod tests {
         // against today's cap reports pressure, or blocked entries, that no
         // upload is actually facing yet. Once it is due it counts again.
         let s = shared();
-        let now = Utc::now();
+        // Stay within one UTC day: near midnight, +31 minutes correctly
+        // resets the real daily cap and used to make this test fail.
+        let now = "2026-09-30T12:00:00Z"
+            .parse::<chrono::DateTime<Utc>>()
+            .unwrap();
         {
             let mut state = s.state.lock().unwrap();
             state.day_bucket = Some(now.format("%Y-%m-%d").to_string());
             state.uploads_today = 50;
         }
         let mut waiting = approved_entry(1_024);
+        waiting.discovered_at = now;
         waiting.reason_label = Some(crate::submit::REASON_TRANSIENT_REDACTION.into());
         waiting.retry_after = Some(now + chrono::Duration::minutes(30));
         {
@@ -12749,6 +12859,27 @@ mod tests {
         let r = handle_request(&s, &req("queue_outcome_counts", serde_json::json!({})));
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(r.result.unwrap()["reasons"]["expired-without-decision"], 1);
+    }
+
+    #[test]
+    fn queue_outcome_counts_excludes_sessions_still_waiting_for_review() {
+        for label in [
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            super::super::second_look::REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let s = shared();
+            let id = seed_entry_in_state(&s, QueueState::Pending);
+            s.queue
+                .lock()
+                .unwrap()
+                .set_state(id, QueueState::Pending, Some(label.into()));
+            let r = handle_request(&s, &req("queue_outcome_counts", serde_json::json!({})));
+            assert_eq!(
+                r.result.unwrap()["reasons"],
+                serde_json::json!({}),
+                "{label}"
+            );
+        }
     }
 
     #[test]

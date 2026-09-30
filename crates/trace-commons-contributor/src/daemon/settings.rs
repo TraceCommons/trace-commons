@@ -491,6 +491,12 @@ pub struct DaemonSettings {
     #[serde(default, deserialize_with = "scrub_check_or_default")]
     pub scrub_check: ScrubCheck,
 
+    /// The stored choice was absent/null when Automatic became the default.
+    /// Kept across unrelated preference writes so startup can announce the
+    /// changed behavior of folders that were already armed.
+    #[serde(default)]
+    pub scrub_check_defaulted_on_upgrade: bool,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -927,6 +933,7 @@ impl Default for DaemonSettings {
             private_inference: false,
             private_inference_offer_seen: false,
             scrub_check: ScrubCheck::Automatic,
+            scrub_check_defaulted_on_upgrade: false,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -955,7 +962,18 @@ impl DaemonSettings {
     /// never been configured on this machine.
     pub fn load(store: &ConfigStore) -> Result<Self> {
         let Some(body) = store.read_daemon_file(DAEMON_SETTINGS_FILE)? else {
-            return Ok(Self::default());
+            // Older installs can arm folders without ever writing settings.
+            // Preserve that evidence even if a preferences writer runs before
+            // daemon startup. New-format policies already know this default.
+            let policy = super::policy::ProjectPolicy::load(store)?;
+            return Ok(Self {
+                scrub_check_defaulted_on_upgrade: !policy.scrub_check_upgrade_recorded
+                    && policy.projects.iter().any(|(key, entry)| {
+                        key != super::policy::UNKNOWN_PROJECT_KEY
+                            && entry.mode == super::policy::ProjectMode::AutoUpload
+                    }),
+                ..Self::default()
+            });
         };
         // The serde context stays for local stderr and journals, where the
         // parser's own "missing field `schema_version` at line 1 column 65"
@@ -966,6 +984,10 @@ impl DaemonSettings {
         let mut settings: Self = serde_json::from_slice(&body)
             .context("parsing daemon settings")
             .context(crate::daemon::StartFailure::SettingsUnreadable)?;
+        let stored: serde_json::Value = serde_json::from_slice(&body)?;
+        settings.scrub_check_defaulted_on_upgrade |= stored
+            .get("scrub_check")
+            .is_none_or(serde_json::Value::is_null);
         settings.absorb_legacy_roots();
         settings.validate_digest_schedule();
         Ok(settings)
@@ -1903,7 +1925,79 @@ mod tests {
                 "automatic",
                 "unset ({unset:?}) resolves to Automatic"
             );
+            assert_eq!(
+                serde_json::to_value(&loaded).unwrap()["scrub_check_defaulted_on_upgrade"],
+                true
+            );
+            loaded.save(&store).unwrap();
+            let reloaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(
+                serde_json::to_value(&reloaded).unwrap()["scrub_check_defaulted_on_upgrade"],
+                true
+            );
         }
+    }
+
+    #[test]
+    fn invalid_stored_scrub_checks_fail_closed() {
+        for invalid in ["off", "Automatic"] {
+            let (_d, store) = temp_store();
+            let mut value = serde_json::to_value(DaemonSettings::default()).unwrap();
+            value["scrub_check"] = serde_json::json!(invalid);
+            store
+                .write_daemon_file(DAEMON_SETTINGS_FILE, value.to_string().as_bytes())
+                .unwrap();
+            assert!(DaemonSettings::load(&store).is_err());
+        }
+    }
+
+    #[test]
+    fn an_old_armed_policy_without_settings_preserves_upgrade_provenance() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        let (_d, store) = temp_store();
+        assert!(
+            !DaemonSettings::load(&store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/tmp/legacy-armed",
+                ProjectMode::AutoUpload,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        policy.scrub_check_upgrade_recorded = false;
+        policy.save(&store).unwrap();
+        let settings = DaemonSettings::load(&store).unwrap();
+        assert!(settings.scrub_check_defaulted_on_upgrade);
+        settings.save(&store).unwrap();
+        assert!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+    }
+
+    #[test]
+    fn a_new_armed_policy_without_settings_is_not_an_upgrade() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        let (_d, store) = temp_store();
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/tmp/new-armed",
+                ProjectMode::AutoUpload,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        policy.save(&store).unwrap();
+        assert!(
+            !DaemonSettings::load(&store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
     }
 
     /// An explicit Manual choice is kept across a load and the daemon's own
@@ -1921,6 +2015,7 @@ mod tests {
             serde_json::to_value(&loaded).unwrap()["scrub_check"],
             "manual"
         );
+        assert!(!loaded.scrub_check_defaulted_on_upgrade);
         loaded.save(&store).unwrap();
         let reloaded = DaemonSettings::load(&store).unwrap();
         assert_eq!(
