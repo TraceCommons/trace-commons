@@ -30980,6 +30980,8 @@ async fn account_withdrawal_revokes_the_file_side_records() {
         "reviewer_metadata_reader_parity",
         "analytics_reader_parity",
         "db_reader_parity_failures",
+        "missing_tombstone_submission_ids_in_db",
+        "missing_tombstone_submission_ids_in_files",
     ] {
         assert!(
             !gaps.iter().any(|gap| gap.starts_with(label)),
@@ -30987,6 +30989,452 @@ async fn account_withdrawal_revokes_the_file_side_records() {
         );
     }
 
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// POST an admin drill or repair route as `admin-token-a` and return its body.
+async fn post_admin_json(
+    state: &Arc<AppState>,
+    uri: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(AUTHORIZATION, "Bearer admin-token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("admin route responds");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body reads");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{uri}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    serde_json::from_slice(&bytes).expect("admin route response parses")
+}
+
+fn blocking_gap_labels(value: &serde_json::Value) -> Vec<String> {
+    value["blocking_gaps"]
+        .as_array()
+        .expect("blocking gaps array")
+        .iter()
+        .map(|gap| gap.as_str().expect("gap label").to_string())
+        .collect()
+}
+
+/// Submit one metadata-only trace for `tenant-a` against PostgreSQL and
+/// withdraw it through the account route. Returns the state and the
+/// withdrawn submission id.
+async fn withdraw_one_trace_through_account_route(
+    backend: &Arc<PgBackend>,
+    root: &Path,
+) -> (Arc<AppState>, Uuid) {
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        root.to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        true,
+        true,
+        true,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission mirrors to DB");
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+    let Json(withdrawn) =
+        account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(submission_id))
+            .await
+            .expect("own trace withdraws");
+    assert_eq!(withdrawn.prior_status, "accepted");
+    (state, submission_id)
+}
+
+/// An account withdrawal writes the DB tombstone row as well as the file
+/// tombstone, so the two tombstone records stay consistent and the rollback
+/// drill stays `ready`. Before this the account route wrote the file
+/// tombstone only, and the rollback drill reported
+/// `missing_file_tombstones_in_db=1` for every withdrawal.
+#[tokio::test]
+async fn account_withdrawal_keeps_file_and_db_tombstones_consistent() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (state, submission_id) =
+        withdraw_one_trace_through_account_route(&backend, temp.path()).await;
+
+    let file_tombstone = read_revocation(temp.path(), "tenant-a", submission_id)
+        .expect("file tombstone reads")
+        .expect("withdrawal writes a file tombstone");
+    let db_tombstones = backend
+        .list_trace_tombstones("tenant-a")
+        .await
+        .expect("DB tombstones list");
+    assert_eq!(
+        db_tombstones
+            .iter()
+            .map(|tombstone| tombstone.submission_id)
+            .collect::<Vec<_>>(),
+        vec![submission_id],
+        "withdrawal writes exactly one DB tombstone row"
+    );
+    let db_tombstone = &db_tombstones[0];
+    assert_eq!(db_tombstone.reason, TRACE_WITHDRAWAL_REASON);
+    assert_eq!(db_tombstone.redaction_hash, file_tombstone.redaction_hash);
+    assert_eq!(
+        db_tombstone.canonical_summary_hash,
+        file_tombstone.canonical_summary_hash
+    );
+
+    let rollback = post_admin_json(
+        &state,
+        "/v1/admin/rollback-drill",
+        serde_json::json!({ "purpose": "withdrawal rollback" }),
+    )
+    .await;
+    assert_eq!(
+        rollback["file_tombstone_count"], rollback["db_tombstone_count"],
+        "{rollback}"
+    );
+    assert_eq!(rollback["file_tombstone_count"], 1, "{rollback}");
+    assert!(
+        blocking_gap_labels(&rollback).is_empty(),
+        "withdrawal left rollback gaps: {rollback}"
+    );
+    assert_eq!(rollback["ready"], true, "{rollback}");
+
+    let reconciliation = post_admin_json(
+        &state,
+        "/v1/admin/db-reconciliation-drill",
+        serde_json::json!({ "purpose": "withdrawal reconciliation" }),
+    )
+    .await;
+    let gaps = blocking_gap_labels(&reconciliation);
+    assert!(
+        !gaps.iter().any(|gap| gap.contains("tombstone")),
+        "withdrawal left a tombstone reconciliation gap: {gaps:?}"
+    );
+
+    // Withdrawing again writes no second row.
+    let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+    let _ = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(submission_id))
+        .await
+        .expect("withdrawing twice is idempotent");
+    assert_eq!(
+        backend
+            .list_trace_tombstones("tenant-a")
+            .await
+            .expect("DB tombstones list")
+            .len(),
+        1
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Delete one tenant's DB tombstone rows through the raw test pool, to stand
+/// in for a withdrawal made by a build that wrote only the file tombstone.
+async fn delete_pg_trace_tombstones(backend: &PgBackend, tenant_id: &str) -> u64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get connection");
+    let tx = client.transaction().await.expect("start transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let deleted = tx
+        .execute(
+            "DELETE FROM trace_tombstones WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("delete tombstones");
+    tx.commit().await.expect("commit");
+    deleted
+}
+
+/// The db-reconciliation drill compares the file and DB tombstones by
+/// submission id and reports a file tombstone with no DB row as a blocking
+/// gap, as the rollback drill does. It previously reported both counts and
+/// stayed `ready` when they differed.
+#[tokio::test]
+async fn db_reconciliation_drill_reports_a_file_tombstone_missing_from_the_db() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (state, _submission_id) =
+        withdraw_one_trace_through_account_route(&backend, temp.path()).await;
+    // Stand in for a withdrawal made before the DB row was written.
+    delete_pg_trace_tombstones(backend.as_ref(), "tenant-a").await;
+
+    let reconciliation = post_admin_json(
+        &state,
+        "/v1/admin/db-reconciliation-drill",
+        serde_json::json!({ "purpose": "tombstone reconciliation" }),
+    )
+    .await;
+    assert_eq!(reconciliation["file_revocation_tombstone_count"], 1);
+    assert_eq!(reconciliation["db_tombstone_count"], 0);
+    assert_eq!(reconciliation["ready"], false, "{reconciliation}");
+    assert!(
+        blocking_gap_labels(&reconciliation)
+            .iter()
+            .any(|gap| gap == "missing_tombstone_submission_ids_in_db=1"),
+        "{reconciliation}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// A tombstone present on one side only is a blocking reconciliation gap, in
+/// either direction, as it is for the rollback drill.
+#[test]
+fn db_reconciliation_blocks_on_tombstones_present_on_one_side_only() {
+    let report = TraceDbReconciliationReport {
+        contributor_credit_reader_parity_ok: true,
+        reviewer_metadata_reader_parity_ok: true,
+        analytics_reader_parity_ok: true,
+        audit_reader_parity_ok: true,
+        audit_reader_sample_parity_ok: true,
+        replay_export_manifest_reader_parity_ok: true,
+        ..TraceDbReconciliationReport::default()
+    };
+    assert!(report.compute_blocking_gap_summaries().is_empty());
+
+    let file_only = TraceDbReconciliationReport {
+        missing_tombstone_submission_ids_in_db: vec![Uuid::new_v4()],
+        ..report
+    };
+    assert_eq!(
+        file_only.compute_blocking_gap_summaries(),
+        vec!["missing_tombstone_submission_ids_in_db=1".to_string()]
+    );
+    let db_only = TraceDbReconciliationReport {
+        missing_tombstone_submission_ids_in_db: Vec::new(),
+        missing_tombstone_submission_ids_in_files: vec![Uuid::new_v4(), Uuid::new_v4()],
+        ..file_only
+    };
+    assert_eq!(
+        db_only.compute_blocking_gap_summaries(),
+        vec!["missing_tombstone_submission_ids_in_files=2".to_string()]
+    );
+}
+
+/// The tombstone repair writes the DB row a file tombstone is missing, from
+/// the file tombstone itself: a dry run first, writing nothing, then the
+/// apply, then a second apply that finds nothing. Afterwards both drills
+/// agree on the tombstones. The fixture stands in for an account withdrawal
+/// made by a build that wrote only the file tombstone.
+#[tokio::test]
+async fn tombstone_repair_backfills_db_rows_from_file_tombstones() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (state, submission_id) =
+        withdraw_one_trace_through_account_route(&backend, temp.path()).await;
+    assert_eq!(
+        delete_pg_trace_tombstones(backend.as_ref(), "tenant-a").await,
+        1
+    );
+    let rollback = post_admin_json(
+        &state,
+        "/v1/admin/rollback-drill",
+        serde_json::json!({ "purpose": "before repair" }),
+    )
+    .await;
+    assert_eq!(
+        blocking_gap_labels(&rollback),
+        vec!["missing_file_tombstones_in_db=1".to_string()],
+        "{rollback}"
+    );
+
+    // Dry run by default: counts, writes nothing.
+    let dry_run = post_admin_json(
+        &state,
+        "/v1/admin/tombstone-repair",
+        serde_json::json!({ "purpose": "withdrawal tombstone repair" }),
+    )
+    .await;
+    assert_eq!(dry_run["dry_run"], true, "{dry_run}");
+    assert_eq!(dry_run["file_tombstone_count"], 1, "{dry_run}");
+    assert_eq!(dry_run["db_tombstone_count"], 0, "{dry_run}");
+    assert_eq!(dry_run["file_tombstones_missing_in_db"], 1, "{dry_run}");
+    assert_eq!(
+        dry_run["withdrawal_tombstones_missing_in_db"], 1,
+        "{dry_run}"
+    );
+    assert_eq!(dry_run["repairable"], 1, "{dry_run}");
+    assert_eq!(dry_run["db_tombstones_written"], 0, "{dry_run}");
+    assert!(dry_run["repair_audit_event_id"].is_null(), "{dry_run}");
+    // Hash-only: no submission id in the response.
+    assert!(
+        !dry_run.to_string().contains(&submission_id.to_string()),
+        "{dry_run}"
+    );
+    assert!(
+        backend
+            .list_trace_tombstones("tenant-a")
+            .await
+            .expect("DB tombstones list")
+            .is_empty()
+    );
+
+    let applied = post_admin_json(
+        &state,
+        "/v1/admin/tombstone-repair",
+        serde_json::json!({ "purpose": "withdrawal tombstone repair", "dry_run": false }),
+    )
+    .await;
+    assert_eq!(applied["dry_run"], false, "{applied}");
+    assert_eq!(applied["db_tombstones_written"], 1, "{applied}");
+    assert!(applied["repair_audit_event_id"].is_string(), "{applied}");
+
+    let file_tombstone = read_revocation(temp.path(), "tenant-a", submission_id)
+        .expect("file tombstone reads")
+        .expect("file tombstone exists");
+    let db_tombstones = backend
+        .list_trace_tombstones("tenant-a")
+        .await
+        .expect("DB tombstones list");
+    assert_eq!(db_tombstones.len(), 1);
+    assert_eq!(db_tombstones[0].submission_id, submission_id);
+    assert_eq!(db_tombstones[0].reason, TRACE_WITHDRAWAL_REASON);
+    assert_eq!(
+        db_tombstones[0].redaction_hash,
+        file_tombstone.redaction_hash
+    );
+    assert_eq!(
+        db_tombstones[0].canonical_summary_hash,
+        file_tombstone.canonical_summary_hash
+    );
+    assert_eq!(
+        db_tombstones[0].effective_at.timestamp_micros(),
+        file_tombstone.revoked_at.timestamp_micros()
+    );
+
+    // Idempotent: nothing left to write.
+    let again = post_admin_json(
+        &state,
+        "/v1/admin/tombstone-repair",
+        serde_json::json!({ "dry_run": false }),
+    )
+    .await;
+    assert_eq!(again["file_tombstones_missing_in_db"], 0, "{again}");
+    assert_eq!(again["db_tombstones_written"], 0, "{again}");
+
+    // Both drills agree, and the repair's own audit events kept audit parity.
+    let rollback = post_admin_json(
+        &state,
+        "/v1/admin/rollback-drill",
+        serde_json::json!({ "purpose": "after repair" }),
+    )
+    .await;
+    assert_eq!(rollback["ready"], true, "{rollback}");
+    assert_eq!(rollback["file_tombstone_count"], 1, "{rollback}");
+    assert_eq!(rollback["db_tombstone_count"], 1, "{rollback}");
+    let reconciliation = post_admin_json(
+        &state,
+        "/v1/admin/db-reconciliation-drill",
+        serde_json::json!({ "purpose": "after repair" }),
+    )
+    .await;
+    let gaps = blocking_gap_labels(&reconciliation);
+    assert!(
+        !gaps
+            .iter()
+            .any(|gap| gap.contains("tombstone") || gap.starts_with("missing_audit_event_ids")),
+        "{gaps:?}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The tombstone repair is admin-only and dry-run by default; a request
+/// with an unknown field is refused rather than read as a dry run.
+#[tokio::test]
+async fn tombstone_repair_requires_admin_and_known_fields() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        true,
+        true,
+        true,
+    );
+    for (token, body, expected) in [
+        (
+            "token-a",
+            serde_json::json!({ "dry_run": true }),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "admin-token-a",
+            serde_json::json!({ "dryrun": false }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/tombstone-repair")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("tombstone repair responds");
+        assert_eq!(response.status(), expected, "{token} {body}");
+    }
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
