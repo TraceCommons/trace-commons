@@ -2484,6 +2484,358 @@ impl IdentifiedEmbedder for CountingEmbedder {
     }
 }
 
+/// A perplexity scorer whose identity, descriptor, and production-qualified
+/// answer are all chosen by the test, and which counts `score` calls -- the
+/// scorer counterpart of `CountingEmbedder`, for the bundle-qualification
+/// tests below, which need to observe exactly which of several held scorers
+/// the constructor resolves and the runtime actually calls.
+struct CountingScorer {
+    identity: &'static str,
+    descriptor: Vec<u8>,
+    qualified: bool,
+    calls: AtomicUsize,
+}
+
+impl trace_commons_gate_api::PerplexityScorer for CountingScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ReferencePerplexityScorer::new().score(plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for CountingScorer {
+    fn dependency_identity(&self) -> &str {
+        self.identity
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        self.descriptor.clone()
+    }
+
+    fn production_qualified(&self) -> bool {
+        self.qualified
+    }
+}
+
+/// Task 5 (FR5 P4): qualification is scoped to what the constructor actually
+/// resolves for the package being qualified, not to every scorer the service
+/// happens to hold. Two counting scorer doubles -- Q (qualified) and U
+/// (unqualified), with different content descriptors -- are both held; the
+/// package names only Q. `bundle_qualification` must report Q's own identity
+/// and qualification and must never mention U, and driving one receipt
+/// through Score must call only Q's `score`, never U's.
+///
+/// Uses the compatibility family, not the minimal one: `FixedScorePolicy`
+/// (the minimal family's Score policy) never calls its scorer at all -- the
+/// scorer is only checked for identity at bind time -- while
+/// `CompatibilityScorePolicy` calls `scorer.score_chunk` once per chunk,
+/// which falls through to `score` by default (`PerplexityScorer::score_chunk`'s
+/// default body), so this is the one bundle family that can actually
+/// distinguish "held" from "used."
+#[tokio::test]
+async fn qualification_inspects_the_objects_the_constructor_receives() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let q = Arc::new(CountingScorer {
+        identity: "counting_scorer_q_test_only",
+        descriptor: b"counting-scorer-q-test-descriptor-v1".to_vec(),
+        qualified: true,
+        calls: AtomicUsize::new(0),
+    });
+    let u = Arc::new(CountingScorer {
+        identity: "counting_scorer_u_test_only",
+        descriptor: b"counting-scorer-u-test-descriptor-v1".to_vec(),
+        qualified: false,
+        calls: AtomicUsize::new(0),
+    });
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let config = CompatibilityBundleConfig::local_reference();
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, q.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package naming Q");
+    let index = IsolatedPipelineIndex::new();
+    let trace_credit_adapter: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit_adapter])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store(&dir),
+        package.clone(),
+        index.clone(),
+        index,
+        registry,
+        caps,
+    )
+    .with_scorer(q.clone())
+    .with_scorer(u.clone())
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .build()
+    .expect("build a pipeline service holding both Q and U");
+
+    let qualification = service
+        .bundle_qualification(&package)
+        .expect("the package resolves cleanly against the held dependencies");
+    assert_eq!(qualification.scorer.identity, "counting_scorer_q_test_only");
+    assert!(qualification.scorer.production_qualified);
+    assert_ne!(qualification.scorer.identity, "counting_scorer_u_test_only");
+
+    let tenant = format!("qualification-inspects-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review completes");
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score completes");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(
+        q.calls.load(Ordering::SeqCst) > 0,
+        "Q is called at least once for the one run through Score"
+    );
+    assert_eq!(u.calls.load(Ordering::SeqCst), 0, "U is never called");
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_bundle_qualification",
+        Some(&package),
+        serde_json::json!({
+            "scorer_identity_is_q": true,
+            "scorer_identity_u_absent": true,
+            "score_calls_u": 0,
+        }),
+    );
+}
+
+/// Task 5: `bundle_qualification` fails closed on a package it cannot
+/// resolve against the held dependencies -- the same two failure labels
+/// `construct` uses -- and reports, rather than refuses, a bundle-pinned
+/// instrument the registry holds no adapter for as a missing, unqualified
+/// dependency.
+#[tokio::test]
+async fn qualification_fails_closed_for_a_substituted_or_missing_dependency() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(Vec::new()).expect("build settlement adapter registry");
+    let default_package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(false),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build a resolvable default package");
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store(&dir),
+        default_package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer.clone())
+    .with_embedder(embedder.clone())
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .build()
+    .expect("build pipeline service");
+
+    // A package naming a scorer under a content hash the service does not
+    // hold: the identity label is shared, but the descriptor bytes (and so
+    // the content hash the package names) are not.
+    let original_scorer = CountingScorer {
+        identity: "same_label_different_bytes_test_only",
+        descriptor: b"same-label-different-bytes-original-v1".to_vec(),
+        qualified: true,
+        calls: AtomicUsize::new(0),
+    };
+    let substituted_package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(false),
+        &original_scorer,
+        embedder.as_ref(),
+    )
+    .expect("build the package naming the original scorer");
+    assert_eq!(
+        service.bundle_qualification(&substituted_package),
+        Err("bundle_dependency_missing")
+    );
+
+    // A package whose artifact bytes no longer hash to their own key.
+    let mut corrupted_package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(false),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build a package to corrupt");
+    let (_, bytes) = corrupted_package
+        .artifacts
+        .iter_mut()
+        .next()
+        .expect("the package carries at least one artifact");
+    bytes.push(0xFF);
+    assert_eq!(
+        service.bundle_qualification(&corrupted_package),
+        Err("bundle_package_invalid")
+    );
+
+    // A package that pins an instrument the registry holds no adapter for.
+    let unpinned_instrument_config = PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: "no_adapter_registered_test_instrument".to_string(),
+            atomic_units: AtomicUnits::from_raw(0),
+            descriptor: storage_rebate_descriptor(),
+        }],
+        include_index: false,
+        variant: None,
+    };
+    let missing_adapter_package = MinimalPolicyBundle::minimal_package(
+        &unpinned_instrument_config,
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build a package pinning an unregistered instrument");
+    let qualification = service
+        .bundle_qualification(&missing_adapter_package)
+        .expect("a missing adapter is reported, not refused");
+    let check = qualification
+        .settlement_adapters
+        .get("no_adapter_registered_test_instrument")
+        .expect("the pinned instrument is reported");
+    assert_eq!(check.identity, "settlement_adapter_missing");
+    assert!(!check.production_qualified);
+    assert!(
+        qualification
+            .blockers()
+            .contains(&"runtime_settlement_not_production")
+    );
+}
+
+/// Task 5: the NEAR payout adapter is a bundle-scoped dependency exactly
+/// like a settlement adapter -- it counts toward qualification only when
+/// payout is enabled *and* the package being qualified actually pins the
+/// Trace Credit instrument. `dependency_qualification` (the whole-service
+/// check `novelty_utility_withheld_reason` still reads) makes no such
+/// distinction; `bundle_qualification` does.
+#[tokio::test]
+async fn qualification_reports_payout_only_when_it_applies() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let index = IsolatedPipelineIndex::new();
+    let default_package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(false),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build a resolvable default package");
+    let trace_credit_config = PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+            atomic_units: AtomicUnits::from_raw(0),
+            descriptor: trace_credit_descriptor(),
+        }],
+        include_index: false,
+        variant: None,
+    };
+    let trace_credit_package = MinimalPolicyBundle::minimal_package(
+        &trace_credit_config,
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build a package pinning trace_credit");
+
+    let payout_config = |enabled: bool| PipelinePayoutConfig {
+        enabled,
+        require_confirmation_evidence: true,
+        near_contract_id: Some("trace-credits.testnet".to_string()),
+        confirmation_interval: std::time::Duration::from_secs(60),
+        controls: HTTP_NEAR_PAYOUT_CONTROLS,
+    };
+    let build = |enabled: bool, near_adapter: Arc<dyn NearPayoutAdapter>| {
+        let trace_credit_adapter: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "near",
+        );
+        let registry = SettlementAdapterRegistry::new(vec![trace_credit_adapter])
+            .expect("build settlement adapter registry");
+        PipelineServiceBuilder::new(
+            backend.clone(),
+            artifact_store(&dir),
+            default_package.clone(),
+            index.clone(),
+            index.clone(),
+            registry,
+            PipelineCaps {
+                per_instrument_atomic_units: BTreeMap::new(),
+            },
+        )
+        .with_scorer(scorer.clone())
+        .with_embedder(embedder.clone())
+        .with_authority(allow_all_authority())
+        .with_privacy(default_privacy_boundary())
+        .with_payout(near_adapter, payout_config(enabled))
+        .build()
+        .expect("build pipeline service")
+    };
+
+    let disabled_service = build(false, Arc::new(RecordingNearAdapter::new()));
+    let disabled_qualification = disabled_service
+        .bundle_qualification(&trace_credit_package)
+        .expect("qualify a package pinning trace_credit");
+    assert_eq!(disabled_qualification.payout, None);
+
+    let unqualified_near = Arc::new(RecordingNearAdapter::new());
+    let enabled_service = build(true, unqualified_near.clone());
+    let pinned_qualification = enabled_service
+        .bundle_qualification(&trace_credit_package)
+        .expect("qualify a package pinning trace_credit");
+    assert_eq!(
+        pinned_qualification.payout,
+        Some(unqualified_near.production_qualified())
+    );
+
+    let unpinned_qualification = enabled_service
+        .bundle_qualification(&default_package)
+        .expect("qualify a package that does not pin trace_credit");
+    assert_eq!(unpinned_qualification.payout, None);
+}
+
 /// P5: an embedder that fails its first 7 `embed` calls and then delegates
 /// to the reference embedder, for `transient_policy_errors_do_not_exhaust_the_trace`.
 /// `FixedScorePolicy` chunks the reviewed artifact and aborts a Score

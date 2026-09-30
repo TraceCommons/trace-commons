@@ -68,6 +68,7 @@ use crate::versioned_pipeline_credit::{
     pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_novelty_utility_reason,
     pipeline_settlement_batch_id, source_list_hash,
 };
+use crate::versioned_pipeline_qualification::package_digests;
 
 /// The tenant's derived storage reference, the same value ingest's
 /// `tenant_storage_ref` produces: the first 16 bytes of SHA-256, as hex.
@@ -5464,15 +5465,24 @@ pub struct SubmissionGuard {
     pub operable: bool,
 }
 
-/// Whether each held dependency is production-qualified. `scorer` and
-/// `embedder` are true only when every scorer/embedder the service holds is
-/// (decision P4); a bundle can name any one of them by content hash, so a
-/// single unqualified reference dependency disqualifies the whole set.
-/// `authority` and `privacy` follow the same shape (Ruling T2-2): true only
-/// when the held object is `production_qualified()`, false when the service
-/// holds none at all (`submit` already fails closed on that case before any
-/// dependency check runs). `payout` is the same for the NEAR payout adapter:
-/// true only when the service holds one and it is `production_qualified()`.
+/// Whether each held dependency is production-qualified, across *every*
+/// dependency the service holds -- regardless of whether any bundle actually
+/// uses it. `scorer` and `embedder` are true only when every scorer/embedder
+/// the service holds is (decision P4 as first shipped); a bundle can name
+/// any one of them by content hash, so a single unqualified reference
+/// dependency disqualifies the whole set. `authority` and `privacy` follow
+/// the same shape (Ruling T2-2): true only when the held object is
+/// `production_qualified()`, false when the service holds none at all
+/// (`submit` already fails closed on that case before any dependency check
+/// runs). `payout` is the same for the NEAR payout adapter: true only when
+/// the service holds one and it is `production_qualified()`.
+///
+/// Startup no longer reads this field-by-field check, except `bundle`: see
+/// [`PipelineService::bundle_qualification`], which scopes qualification to
+/// the one bundle a runtime actually starts (decision P4-D7). The
+/// `NoveltyUtility` production-gate check in `novelty_utility_withheld_reason`
+/// still reads this method directly -- that check is about every dependency
+/// the service could ever route a compatibility receipt to, not one bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineDependencyQualification {
     pub scorer: bool,
@@ -5488,6 +5498,81 @@ pub struct PipelineDependencyQualification {
     /// (`CompatibilityBundleConfig::is_qualifiable`; Zaki review 1, round 2,
     /// finding 11). Any other bundle carries no such configuration.
     pub bundle: bool,
+}
+
+/// One dependency's identity and production-qualification state, as
+/// [`PipelineService::bundle_qualification`] reports it for a single bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PipelineDependencyCheck {
+    pub identity: String,
+    pub production_qualified: bool,
+}
+
+/// Whether every dependency one bundle package actually uses is
+/// production-qualified (decision P4-D7). Unlike
+/// [`PipelineDependencyQualification`], which reports every dependency the
+/// service holds, this reports only: the scorer and embedder the package
+/// names among the held dependencies (resolved the same way
+/// [`PipelineService::construct`] resolves them); the held index reader and
+/// writer (every bundle uses the one pair the service holds -- a bundle does
+/// not name these independently); one settlement-adapter check per
+/// instrument the package pins (an instrument with no registered adapter
+/// reports identity `settlement_adapter_missing`, unqualified); `authority`
+/// and `privacy` (unconditional -- every bundle needs both); and `payout`,
+/// which is `None` unless payout is enabled *and* the package pins the Trace
+/// Credit instrument, in which case it is `Some` of the held NEAR adapter's
+/// own qualification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PipelineBundleQualification {
+    pub bundle_id: String,
+    pub scorer: PipelineDependencyCheck,
+    pub embedder: PipelineDependencyCheck,
+    pub index_reader: PipelineDependencyCheck,
+    pub index_writer: PipelineDependencyCheck,
+    pub settlement_adapters: BTreeMap<String, PipelineDependencyCheck>,
+    pub authority: bool,
+    pub privacy: bool,
+    pub payout: Option<bool>,
+    pub dependency_digest: String,
+}
+
+impl PipelineBundleQualification {
+    /// The safe labels naming every blocked dependency this qualification
+    /// found; empty exactly when [`Self::is_production_qualified`] is true.
+    pub fn blockers(&self) -> Vec<&'static str> {
+        let mut blockers = Vec::new();
+        for (check, label) in [
+            (&self.scorer, "runtime_scorer_not_production"),
+            (&self.embedder, "runtime_embedder_not_production"),
+            (&self.index_reader, "runtime_index_reader_not_production"),
+            (&self.index_writer, "runtime_index_writer_not_production"),
+        ] {
+            if !check.production_qualified {
+                blockers.push(label);
+            }
+        }
+        if self
+            .settlement_adapters
+            .values()
+            .any(|check| !check.production_qualified)
+        {
+            blockers.push("runtime_settlement_not_production");
+        }
+        if !self.authority {
+            blockers.push("runtime_authority_not_production");
+        }
+        if !self.privacy {
+            blockers.push("runtime_privacy_not_production");
+        }
+        if self.payout == Some(false) {
+            blockers.push("runtime_payout_not_production");
+        }
+        blockers
+    }
+
+    pub fn is_production_qualified(&self) -> bool {
+        self.blockers().is_empty()
+    }
 }
 
 /// The per-tenant and per-principal hourly receipt limits. A limit of `0` is
@@ -5922,6 +6007,15 @@ pub struct PipelineService {
 impl PipelineService {
     pub fn bundle_id(&self) -> &str {
         &self.default_package.bundle_id
+    }
+
+    /// The package this service registers as every rollout tenant's active
+    /// bundle (`register_default_bundle`) and the one
+    /// `pipeline_runtime_is_production_qualified` checks at startup: startup
+    /// qualification is scoped to the bundle a runtime actually starts
+    /// (decision P4-D7), not every dependency the service happens to hold.
+    pub fn default_package(&self) -> &BundlePackage {
+        &self.default_package
     }
 
     /// The `trace_object_refs.object_store` label this service records.
@@ -6376,18 +6470,26 @@ impl PipelineService {
         Ok(())
     }
 
-    /// Resolve the dependencies the package names and construct its bundle.
-    /// A hash the service does not hold fails closed.
-    fn construct(&self, package: BundlePackage) -> Result<MinimalPolicyBundle, &'static str> {
-        self.construct_with_index_reader(package, self.index_reader.clone())
-    }
-
-    /// `construct`, with `index_reader` as the index the Score policy reads.
-    fn construct_with_index_reader(
+    /// Resolves the scorer and embedder `package` names among the held
+    /// dependencies, by content hash -- the same hash `with_scorer`/
+    /// `with_embedder` index by. A hash the service does not hold, whether
+    /// because it holds none at all or because a same-labeled dependency's
+    /// content changed, fails closed with `bundle_dependency_missing`.
+    /// Shared by `construct_with_index_reader` (which builds the runnable
+    /// bundle from the result, for `construct` and for a compatibility
+    /// Score's serialized read) and `bundle_qualification` (which only
+    /// needs the resolved objects' identity and qualification, never a
+    /// runnable bundle).
+    fn resolve_score_dependencies(
         &self,
-        package: BundlePackage,
-        index_reader: Arc<dyn IdentifiedIndexReader>,
-    ) -> Result<MinimalPolicyBundle, &'static str> {
+        package: &BundlePackage,
+    ) -> Result<
+        (
+            Arc<dyn IdentifiedPerplexityScorer>,
+            Arc<dyn IdentifiedEmbedder>,
+        ),
+        &'static str,
+    > {
         let named = &package.manifest.score.data_artifact_hashes;
         let scorer = named
             .iter()
@@ -6400,12 +6502,105 @@ impl PipelineService {
         let (Some(scorer), Some(embedder)) = (scorer, embedder) else {
             return Err(PIPELINE_DEPENDENCY_MISSING_LABEL);
         };
+        Ok((scorer, embedder))
+    }
+
+    /// Resolve the dependencies the package names and construct its bundle.
+    /// A hash the service does not hold fails closed.
+    fn construct(&self, package: BundlePackage) -> Result<MinimalPolicyBundle, &'static str> {
+        self.construct_with_index_reader(package, self.index_reader.clone())
+    }
+
+    /// `construct`, with `index_reader` as the index the Score policy reads.
+    fn construct_with_index_reader(
+        &self,
+        package: BundlePackage,
+        index_reader: Arc<dyn IdentifiedIndexReader>,
+    ) -> Result<MinimalPolicyBundle, &'static str> {
+        let (scorer, embedder) = self.resolve_score_dependencies(&package)?;
         MinimalPolicyBundle::from_package_with_runtime(package, scorer, embedder, index_reader)
             .map_err(|error| match error.to_string().as_str() {
                 PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
                 "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
                 _ => PIPELINE_BUNDLE_INVALID_LABEL,
             })
+    }
+
+    /// Whether every dependency the package `package` actually uses is
+    /// production-qualified (decision P4-D7): the scorer and embedder it
+    /// names, the held index reader and writer, one settlement-adapter check
+    /// per instrument it pins, `authority` and `privacy`, and `payout` when
+    /// it applies to this bundle. `pipeline_runtime_is_production_qualified`
+    /// calls this with `default_package()` at startup, so an unqualified
+    /// dependency the default bundle never touches no longer blocks boot.
+    ///
+    /// `Err("bundle_package_invalid")` when `package` itself does not
+    /// validate (`package_digests`); `Err("bundle_dependency_missing")` when
+    /// it names a scorer or embedder hash the service does not hold -- the
+    /// same two failure labels `construct` can return for the same reasons.
+    pub fn bundle_qualification(
+        &self,
+        package: &BundlePackage,
+    ) -> Result<PipelineBundleQualification, &'static str> {
+        let digests = package_digests(package).map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL)?;
+        let (scorer, embedder) = self.resolve_score_dependencies(package)?;
+        let settlement_adapters = package
+            .manifest
+            .instruments
+            .keys()
+            .map(|instrument_id| {
+                let check = match self.settlement_adapters.get(instrument_id) {
+                    Some(adapter) => PipelineDependencyCheck {
+                        identity: adapter.adapter_identity().to_string(),
+                        production_qualified: adapter.production_qualified(),
+                    },
+                    None => PipelineDependencyCheck {
+                        identity: PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL.to_string(),
+                        production_qualified: false,
+                    },
+                };
+                (instrument_id.as_str().to_string(), check)
+            })
+            .collect();
+        let pins_trace_credit = package
+            .manifest
+            .instruments
+            .contains_key(&InstrumentId::trace_credit());
+        let payout = (self.payout_enabled() && pins_trace_credit).then(|| {
+            self.payout
+                .as_ref()
+                .is_some_and(|(adapter, _)| adapter.production_qualified())
+        });
+        Ok(PipelineBundleQualification {
+            bundle_id: package.bundle_id.clone(),
+            scorer: PipelineDependencyCheck {
+                identity: scorer.dependency_identity().to_string(),
+                production_qualified: scorer.production_qualified(),
+            },
+            embedder: PipelineDependencyCheck {
+                identity: embedder.dependency_identity().to_string(),
+                production_qualified: embedder.production_qualified(),
+            },
+            index_reader: PipelineDependencyCheck {
+                identity: self.index_reader.dependency_identity().to_string(),
+                production_qualified: self.index_reader.production_qualified(),
+            },
+            index_writer: PipelineDependencyCheck {
+                identity: self.index_writer.dependency_identity().to_string(),
+                production_qualified: self.index_writer.production_qualified(),
+            },
+            settlement_adapters,
+            authority: self
+                .authority
+                .as_ref()
+                .is_some_and(|authority| authority.production_qualified()),
+            privacy: self
+                .privacy
+                .as_ref()
+                .is_some_and(|privacy| privacy.production_qualified()),
+            payout,
+            dependency_digest: digests.dependency_digest,
+        })
     }
 
     /// Loads and constructs the bundle a run is bound to, checking the

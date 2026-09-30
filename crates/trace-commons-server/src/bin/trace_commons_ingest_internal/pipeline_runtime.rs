@@ -237,35 +237,28 @@ pub(crate) fn validate_pipeline_privacy_filter_requirement(
     Ok(())
 }
 
-/// Whether every dependency an injected pipeline runtime holds is
-/// production-qualified.
+/// Whether every dependency the default bundle actually uses is
+/// production-qualified (decision P4-D7).
 ///
-/// Checks `scorer`, `embedder`, `index_reader`, `index_writer`, every
-/// registered settlement adapter (decision P4's
-/// `PipelineDependencyQualification`), and now `authority` and `privacy`
-/// (Ruling T2-2): an unqualified authority provider or privacy boundary
-/// fails closed the same way an unqualified scorer or index does, whenever
-/// tenants are routed. The NEAR payout adapter counts only when payout is
-/// enabled (`PipelineService::payout_enabled`): a service that pays nothing
-/// out holds no payout dependency to qualify. A compatibility bundle's
-/// configuration must be qualifiable (`bundle`, Zaki review 1, round 2,
+/// Scoped to `PipelineService::bundle_qualification` for
+/// `service.default_package()`, not every dependency the service holds: a
+/// held-but-unnamed scorer, embedder, or settlement adapter the default
+/// bundle never touches no longer blocks startup. What the default bundle
+/// does use -- its named scorer and embedder, the held index reader and
+/// writer, one settlement adapter per instrument it pins, authority, privacy
+/// (Ruling T2-2), and payout when it applies -- still fails closed the same
+/// way, whenever tenants are routed; an invalid or unresolvable default
+/// package (`bundle_package_invalid`, `bundle_dependency_missing`) fails
+/// closed the same as an unqualified one. A compatibility bundle's
+/// configuration must also be qualifiable
+/// (`PipelineDependencyQualification::bundle`, Zaki review 1, round 2,
 /// finding 11), so the all-zero local reference never binds for real
 /// tenants.
 pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService) -> bool {
-    let qualification = service.dependency_qualification();
-    qualification.scorer
-        && qualification.embedder
-        && qualification.index_reader
-        && qualification.index_writer
-        && !qualification.settlement_adapters.is_empty()
-        && qualification
-            .settlement_adapters
-            .values()
-            .all(|ready| *ready)
-        && qualification.authority
-        && qualification.privacy
-        && qualification.bundle
-        && (!service.payout_enabled() || qualification.payout)
+    service
+        .bundle_qualification(service.default_package())
+        .is_ok_and(|qualification| qualification.is_production_qualified())
+        && service.dependency_qualification().bundle
 }
 
 /// Label-only readiness body. `reason` is present only when `status` is

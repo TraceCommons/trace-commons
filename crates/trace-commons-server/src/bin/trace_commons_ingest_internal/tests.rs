@@ -10590,6 +10590,31 @@ impl trace_commons_gate_api::IdentifiedPerplexityScorer for QualifiedTestScorer 
     }
 }
 
+/// Wraps `ReferencePerplexityScorer` without overriding `production_qualified`
+/// (the trait default, `false`) -- the unqualified counterpart of
+/// `QualifiedTestScorer`, with its own identity and content descriptor so it
+/// can be held under a different content hash than any other test scorer.
+/// Decision P4-D7: the bundle-qualification tests below use this to prove
+/// both halves of the per-bundle scoping rule -- held-but-unnamed, it must
+/// not block startup; named, it must.
+struct UnqualifiedTestScorer(trace_commons_gate_api::ReferencePerplexityScorer);
+
+impl trace_commons_gate_api::PerplexityScorer for UnqualifiedTestScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.0.score(plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for UnqualifiedTestScorer {
+    fn dependency_identity(&self) -> &str {
+        "unqualified_test_perplexity_scorer"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-unqualified-test-perplexity-scorer.v1".to_vec()
+    }
+}
+
 /// Wraps `ReferenceEmbedder` the same way `QualifiedTestScorer` wraps the
 /// reference scorer.
 struct QualifiedTestEmbedder(trace_commons_gate_api::ReferenceEmbedder);
@@ -10802,8 +10827,33 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
     }
 }
 
-/// A pipeline service whose scorer, embedder, index, and settlement adapter
-/// are all the `Qualified*` test doubles above, so
+/// The Trace Credit instrument award every `qualified_pipeline_service`
+/// fixture pins, so its default package always has exactly one
+/// settlement-adapter dependency to qualify, and payout has an instrument to
+/// apply to when a test enables it. `minimal_package` itself reads only
+/// `instrument_id` and `descriptor` from this, but `.build()` also resolves
+/// the default package all the way through `from_package_with_runtime`,
+/// which rebuilds an `InstrumentAward` from the stored config and refuses a
+/// zero amount (`ContractError::ZeroInstrumentAward`) -- so `atomic_units`
+/// must be nonzero even though no fixture here ever drives a run to Score.
+fn qualified_test_trace_credit_award()
+-> trace_commons_server::versioned_pipeline_bundle::PipelineInstrumentAwardConfig {
+    trace_commons_server::versioned_pipeline_bundle::PipelineInstrumentAwardConfig {
+        instrument_id: trace_commons_gate_api::pipeline::InstrumentId::trace_credit()
+            .as_str()
+            .to_string(),
+        atomic_units: trace_commons_gate_api::pipeline::AtomicUnits::from_raw(1),
+        descriptor: trace_commons_gate_api::pipeline::InstrumentDescriptor {
+            kind: trace_commons_gate_api::pipeline::InstrumentKind::Nep141,
+            network: "testnet".to_string(),
+            contract: "trace-credit.testnet".to_string(),
+            decimals: trace_commons_gate_api::pipeline::TRACE_CREDIT_DECIMALS,
+        },
+    }
+}
+
+/// A pipeline service whose scorer, embedder, index, and Trace Credit
+/// settlement adapter are all the `Qualified*` test doubles above, so
 /// `pipeline_runtime_is_production_qualified` reports `true` for it. Same
 /// shape as `minimal_pipeline_service`, which stays unqualified (its
 /// settlement adapter registry is empty). `include_authority`/
@@ -10811,7 +10861,12 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
 /// service that is missing just one of those two controls, to isolate
 /// T2-2's own contribution to the overall qualification check from the
 /// pre-existing scorer/embedder/index/settlement checks. `payout`, when
-/// given, is the NEAR payout adapter and its configuration.
+/// given, is the NEAR payout adapter and its configuration. `extra_scorer`
+/// and `extra_settlement_adapter`, when given, are held (and, for the
+/// adapter, registered) by the service but never named by its default
+/// package -- decision P4-D7's own tests use these to prove a dependency the
+/// default bundle does not use cannot block startup.
+#[allow(clippy::too_many_arguments)]
 fn qualified_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -10822,6 +10877,8 @@ fn qualified_pipeline_service(
         Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
         trace_commons_server::versioned_pipeline::PipelinePayoutConfig,
     )>,
+    extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
+    extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -10839,7 +10896,7 @@ fn qualified_pipeline_service(
     ));
     let package = MinimalPolicyBundle::minimal_package(
         &PipelineBundleConfig {
-            instrument_awards: vec![],
+            instrument_awards: vec![qualified_test_trace_credit_award()],
             include_index: false,
             variant: None,
         },
@@ -10850,7 +10907,83 @@ fn qualified_pipeline_service(
         trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
     ));
     let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
-        instrument_id: InstrumentId::new("qualified_test_instrument")?,
+        instrument_id: InstrumentId::trace_credit(),
+    });
+    let mut adapters = vec![adapter];
+    if let Some(extra_settlement_adapter) = extra_settlement_adapter {
+        adapters.push(extra_settlement_adapter);
+    }
+    let registry = SettlementAdapterRegistry::new(adapters)?;
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(extra_scorer) = extra_scorer {
+        builder = builder.with_scorer(extra_scorer);
+    }
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    if include_authority {
+        builder = builder.with_authority(Arc::new(QualifiedTestAuthority));
+    }
+    if include_privacy {
+        builder = builder.with_privacy(Arc::new(QualifiedTestPrivacy));
+    }
+    if let Some((adapter, config)) = payout {
+        builder = builder.with_payout(adapter, config);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// Like `qualified_pipeline_service` (fully qualified authority, privacy,
+/// index, embedder, and the pinned Trace Credit settlement adapter), except
+/// its default package names `UnqualifiedTestScorer` instead of
+/// `QualifiedTestScorer`. The other half of decision P4-D7: a dependency the
+/// default bundle actually names still blocks startup, unlike a same-shaped
+/// unnamed extra scorer the service merely holds.
+fn pipeline_service_with_unqualified_named_scorer(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+
+    let scorer = Arc::new(UnqualifiedTestScorer(
+        trace_commons_gate_api::ReferencePerplexityScorer::new(),
+    ));
+    let embedder = Arc::new(QualifiedTestEmbedder(
+        trace_commons_gate_api::ReferenceEmbedder::new(),
+    ));
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![qualified_test_trace_credit_award()],
+            include_index: false,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )?;
+    let index = Arc::new(QualifiedTestIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
+        instrument_id: InstrumentId::trace_credit(),
     });
     let registry = SettlementAdapterRegistry::new(vec![adapter])?;
     let mut builder = PipelineServiceBuilder::new(
@@ -10865,18 +10998,11 @@ fn qualified_pipeline_service(
         },
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_authority(Arc::new(QualifiedTestAuthority))
+    .with_privacy(Arc::new(QualifiedTestPrivacy));
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
-    }
-    if include_authority {
-        builder = builder.with_authority(Arc::new(QualifiedTestAuthority));
-    }
-    if include_privacy {
-        builder = builder.with_privacy(Arc::new(QualifiedTestPrivacy));
-    }
-    if let Some((adapter, config)) = payout {
-        builder = builder.with_payout(adapter, config);
     }
     Ok(Arc::new(builder.build()?))
 }
@@ -11124,6 +11250,8 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         true,
         true,
         None,
+        None,
+        None,
     )
     .unwrap();
     assert!(pipeline_runtime_is_production_qualified(
@@ -11141,6 +11269,8 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         true,
         false,
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -11200,6 +11330,8 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
             true,
             true,
             None,
+            None,
+            None,
         )
     }
 }
@@ -11223,6 +11355,8 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutAuthority {
             false,
             true,
             None,
+            None,
+            None,
         )
     }
 }
@@ -11244,8 +11378,173 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutPrivacy {
             true,
             false,
             None,
+            None,
+            None,
         )
     }
+}
+
+/// Decision P4-D7: like `QualifiedAssembler`, but the service also holds one
+/// more scorer the default package never names, under its own content hash:
+/// `UnqualifiedTestScorer`. A bundle names at most one scorer by content
+/// hash among however many the service holds, so an unqualified one the
+/// default bundle never touches must not block startup.
+struct QualifiedAssemblerWithAnUnnamedUnqualifiedScorer;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithAnUnnamedUnqualifiedScorer {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            true,
+            true,
+            None,
+            Some(Arc::new(UnqualifiedTestScorer(
+                trace_commons_gate_api::ReferencePerplexityScorer::new(),
+            ))),
+            None,
+        )
+    }
+}
+
+/// Decision P4-D7: like `QualifiedAssembler`, but the service also holds an
+/// extra, unqualified settlement adapter for an instrument the default
+/// package does not pin (only Trace Credit is pinned). A settlement adapter
+/// a bundle's package never names among its instruments must not block
+/// startup, however unqualified it is.
+struct QualifiedAssemblerWithAnUnpinnedUnqualifiedSettlementAdapter;
+
+impl IngestPipelineRuntimeAssembler
+    for QualifiedAssemblerWithAnUnpinnedUnqualifiedSettlementAdapter
+{
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            true,
+            true,
+            None,
+            None,
+            Some(
+                trace_commons_server::versioned_pipeline_credit::RecordingSettlementAdapter::new(
+                    trace_commons_gate_api::pipeline::InstrumentId::new("unpinned_test_instrument")
+                        .expect("static instrument id"),
+                    "recording_unpinned_test_instrument",
+                    "none",
+                ),
+            ),
+        )
+    }
+}
+
+/// A qualified default bundle whose *named* scorer is unqualified
+/// (`UnqualifiedTestScorer`) rather than an unnamed extra one. The other
+/// half of decision P4-D7: a dependency the default bundle actually uses
+/// still blocks startup.
+struct AssemblerWithAnUnqualifiedNamedScorer;
+
+impl IngestPipelineRuntimeAssembler for AssemblerWithAnUnqualifiedNamedScorer {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        pipeline_service_with_unqualified_named_scorer(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// Decision P4-D7: an unqualified scorer the default bundle does not name
+/// must not block startup -- only the dependency the default bundle
+/// actually names is checked.
+#[tokio::test]
+async fn an_unqualified_scorer_the_default_bundle_does_not_name_does_not_block_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssemblerWithAnUnnamedUnqualifiedScorer),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
+    )
+    .expect("an unqualified scorer the default bundle does not name does not block startup")
+    .expect("an assembler was given, so a service is returned");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// Decision P4-D7: an unqualified settlement adapter for an instrument the
+/// default bundle does not pin must not block startup either.
+#[tokio::test]
+async fn an_unqualified_adapter_for_an_instrument_the_bundle_does_not_pin_does_not_block_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssemblerWithAnUnpinnedUnqualifiedSettlementAdapter),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
+    )
+    .expect("an unpinned unqualified settlement adapter does not block startup")
+    .expect("an assembler was given, so a service is returned");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// The other half of decision P4-D7: a scorer the default bundle *does*
+/// name still blocks startup when it is not production-qualified, exactly
+/// like the old, unscoped check did.
+#[tokio::test]
+async fn an_unqualified_scorer_the_default_bundle_names_blocks_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&AssemblerWithAnUnqualifiedNamedScorer),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
+    )
+    .err()
+    .expect("a named unqualified scorer with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
 }
 
 /// A `TraceCorpusDbConnections` and `ConfiguredTraceArtifactStore` pair over
@@ -11598,6 +11897,8 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
                 )),
                 config,
             )),
+            None,
+            None,
         )
     }
 }
@@ -11875,6 +12176,8 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
                 adapter,
                 payout_test_config(enabled, Some(TEST_PAYOUT_NEAR_CONTRACT)),
             )),
+            None,
+            None,
         )
         .expect("build the pipeline service")
     };
