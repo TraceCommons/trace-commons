@@ -1981,6 +1981,12 @@ pub fn entry_value(
         // to expose, because nothing in the format supplies one.
         "subagent_count": e.subagent_count,
         "subagents_dropped": e.subagents_dropped,
+        // When the session ran and how many prompts it had. Metadata only;
+        // null for an entry queued before this was recorded.
+        "started_at": e.shape.as_ref().and_then(|s| s.started_at),
+        "ended_at": e.shape.as_ref().and_then(|s| s.ended_at),
+        "duration_secs": e.shape.as_ref().and_then(super::queue::SessionShape::duration_secs),
+        "user_turns": e.shape.as_ref().map(|s| s.user_turns),
     });
     // ABSENT, NOT `unknown`, WHENEVER THE SIGNUP FLAG IS OFF.
     //
@@ -2732,6 +2738,56 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
 // which every shell does to it, because the raw label is a slug no
 // contributor should read. Clients MUST NOT recognise this row by
 // label.
+/// Sessions the watcher has observed per project key, with the latest one's
+/// modification time, from the cwd cache.
+///
+/// The project key is read from each entry, where the watcher recorded it at
+/// insert, so this canonicalizes nothing under the state lock. An entry
+/// written before that field existed is resolved once, outside the lock, and
+/// the key written back.
+///
+/// What it counts: sessions observed on this machine and still present at
+/// the last full pass (the watcher prunes entries whose file is gone), and
+/// the latest session's file modification time -- when it was last written,
+/// not when it started.
+fn sessions_seen_per_project(
+    shared: &DaemonShared,
+) -> std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> {
+    let unresolved: Vec<(String, Option<String>)> = {
+        let state = shared.state.lock().expect("state lock");
+        state
+            .cwd_cache
+            .iter()
+            .filter(|(_, e)| e.project_key.is_none())
+            .map(|(path, e)| (path.clone(), e.cwd.clone()))
+            .collect()
+    };
+    if !unresolved.is_empty() {
+        let resolved: Vec<(String, String)> = unresolved
+            .into_iter()
+            .map(|(path, cwd)| (path, super::policy::project_for(cwd.as_deref()).0))
+            .collect();
+        let mut state = shared.state.lock().expect("state lock");
+        for (path, key) in resolved {
+            if let Some(entry) = state.cwd_cache.get_mut(&path) {
+                entry.project_key.get_or_insert(key);
+            }
+        }
+    }
+    let state = shared.state.lock().expect("state lock");
+    let mut seen: std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> =
+        std::collections::BTreeMap::new();
+    for cached in state.cwd_cache.values() {
+        let Some(key) = cached.project_key.clone() else {
+            continue;
+        };
+        let slot = seen.entry(key).or_insert((0, cached.modified_at));
+        slot.0 += 1;
+        slot.1 = slot.1.max(cached.modified_at);
+    }
+    seen
+}
+
 fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     // What a group-level send would actually do, answerable before the
     // press.
@@ -2750,8 +2806,14 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     let group_filters = super::contribution_eligibility::evidence_flag(
         shared.store.load_config().ok().flatten().as_ref(),
     );
+    // How many sessions the watcher has seen in each project, and when the
+    // latest was last written: from the cwd cache every observed session
+    // passes through, so it counts sessions whatever their queue state.
+    // Taken before the policy lock, so it adds no lock ordering.
+    let seen = sessions_seen_per_project(shared);
     let policy = shared.policy.lock().expect("policy lock");
     let queue = shared.queue.lock().expect("queue lock");
+    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
     let counts = |key: &str| {
         let pending: Vec<&super::queue::QueueEntry> = queue
             .pending()
@@ -2772,13 +2834,20 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     // exactly as it does for `eligibility`; a null would be one more thing
     // three shells each decide how to read.
     let with_counts = |mut row: serde_json::Value, counts: (usize, Option<usize>)| {
+        let key = row["project_id"]
+            .as_str()
+            .and_then(|id| project_key_for_id(id, &known));
+        let (session_count, last_session_at) = key
+            .and_then(|k| seen.get(&k).copied())
+            .map_or((0, None), |(n, at)| (n, Some(at)));
+        row["session_count"] = serde_json::Value::from(session_count);
+        row["last_session_at"] = serde_json::json!(last_session_at);
         row["pending_count"] = serde_json::Value::from(counts.0);
         if let Some(contributable) = counts.1 {
             row["contributable_count"] = serde_json::Value::from(contributable);
         }
         row
     };
-    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
     let discovered: std::collections::BTreeMap<String, Option<String>> = queue
         .all()
         .iter()
@@ -4741,6 +4810,7 @@ pub(crate) fn preview_card_value(
     serde_json::json!({
         "would_send_bytes": summary.would_send_bytes,
         "raw_session_bytes": summary.raw_session_bytes,
+        "title": summary.title,
         "event_count": summary.event_count,
         "opening_prompt": summary.opening_prompt,
         "redactions": summary.redactions,

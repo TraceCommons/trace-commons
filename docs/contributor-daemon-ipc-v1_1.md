@@ -855,6 +855,34 @@ other would be a claim this daemon cannot verify.
 above for why this one field is allowed to be, and what that permission does
 not extend to.
 
+`title` is a short name for the session, for a row or a sheet header: the
+first non-empty line of the redacted `opening_prompt`, cut at a word boundary
+to 60 characters with an ellipsis when cut, and `null` when there is no task
+description. It is the same redacted content as `opening_prompt`, under the
+same boundary, so it is served only where `opening_prompt` is -- in a preview
+summary, never in `list_pending`. A list that wants titles schedules previews
+(`preview_request`, `preview_visible`) and fills each row in as its
+`preview_ready` arrives.
+
+### A session's shape on every queue entry
+
+Every entry `list_pending` and `snapshot` return also carries when its session
+ran and how many prompts it had. These are metadata, not content: timestamps
+and a count, never a word of what was said, so they are on every row.
+
+| Field | Meaning |
+|---|---|
+| `started_at` | the earlier of the source's own session start and the earliest event timestamp; `null` when neither is known |
+| `ended_at` | the latest event timestamp, or `null` |
+| `duration_secs` | `ended_at - started_at` in whole seconds, or `null` when either end is unknown or they are out of order |
+| `user_turns` | how many prompts the person typed: user messages in the parent transcript that name a task (the same test the preview's `opening_prompt` uses), so injected wrappers -- system reminders, command metadata, AGENTS.md and environment preambles -- and a delegated subagent's own prompts are not counted |
+
+`user_turns` is deliberately not `preview_turns`' `turn_count`, which indexes
+every event of the redacted envelope. `ended_at` spans the delegated work
+too, since it is part of the session. An entry queued before these fields
+existed has them all `null`; it is not backfilled, and gains a shape when its
+session is next loaded (it grows, or is re-offered).
+
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are
 hashes, never content. Issuing `preview` **pins the entry** to that envelope
@@ -1312,12 +1340,24 @@ render, not from anything the daemon left out.
       "added_at": null,
       "configured": false,
       "is_unresolved_bucket": false,
+      "session_count": 22,
+      "last_session_at": "2026-09-12T11:18:00Z",
       "pending_count": 7,
       "contributable_count": 3
     }
   ]
 }
 ```
+
+`session_count` is how many sessions the watcher has observed in this
+project that were still on this machine at the last full pass, whatever their
+queue state: a session whose file is deleted stops being counted once a full
+pass in which every source listed cleanly has seen it gone. `last_session_at`
+is the latest of those sessions' file modification times -- when it was last
+written, not when it started -- or `null` when none has been observed. Both
+come from the daemon's per-session record of each session's project, recorded
+when the watcher resolves it, so answering reads and canonicalizes nothing. A tool's own totals are in `tc_discover_sources` (`session_count`,
+`most_recent`).
 
 `pending_count` is how many `Pending` entries this project holds.
 `contributable_count` is how many of those a group-level `approve` would act
