@@ -127,6 +127,7 @@ impl PublicRunRouteFixture {
             actor_ref: account_actor_ref(&account_id),
             auth_credential_id: None,
             client_kind: "native".to_string(),
+            session_token_hash: None,
         };
 
         Some(Self {

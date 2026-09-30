@@ -177,7 +177,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject pipeline pipeline_http; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -186,6 +186,7 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace pipeline_test_upgrade
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
       # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
@@ -340,6 +341,27 @@ jobs:
           grep -q 'test result: ok. 5 passed; 0 failed' legacy-invite-counts.log
         env:
           TRACE_COMMONS_LEGACY_INVITE_COUNTS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/postgres
+      - name: versioned pipeline storage upgrade
+        run: cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored
+        env:
+          TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/pipeline_test_upgrade
+      - name: versioned pipeline runtime
+        run: cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline
+      - name: Refuse a pipeline run that never used its NOBYPASSRLS role
+        run: |
+          set -euo pipefail
+          found=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                    -c "SELECT COUNT(*) FROM pg_roles WHERE rolname='trace_pipeline_runtime_test';")
+          if [ "${found:-0}" != "1" ]; then
+            echo "::error::versioned_pipeline_runtime_pg never provisioned its runtime role"
+            exit 1
+          fi
+      - name: versioned pipeline real HTTP
+        run: cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
@@ -976,6 +998,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Verify native wallet browser state transitions
         run: node scripts/ci/test-near-wallet-browser.cjs
+      - name: Verify the browser step-up page script
+        run: node scripts/ci/test-step-up-page.cjs
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v5
         with:
@@ -1157,6 +1181,22 @@ jobs:
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.
       - uses: ./.github/actions/trim-cargo-cache
+
+  # scripts/check-aasa.sh, the smoke test for the apple-app-site-association
+  # file (Z2 S4 of #1118), against local stand-ins for the origin and Apple's
+  # CDN. The file itself is built and served by
+  # TraceCommons/trace-commons-community. Not a required check.
+  check-aasa-script:
+    name: check-aasa.sh tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      # Pinned to the version the Tauri jobs use. curl and jq are on the image.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: node --test scripts/ci/test-check-aasa.mjs
 
   privacy-filter-shim-tests:
     name: privacy-filter shim tests
