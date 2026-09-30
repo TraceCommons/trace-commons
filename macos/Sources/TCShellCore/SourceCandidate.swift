@@ -40,6 +40,13 @@ public struct SourceCandidate: Equatable, Sendable {
     /// Whether `CLAUDE_CONFIG_DIR` / `CODEX_HOME` moved this store, so the
     /// screen can explain a path the contributor was not expecting.
     public let relocatedByEnv: Bool
+    /// The vendor this tool's own calls answer at by default, e.g.
+    /// `"Anthropic"` for Claude Code, or `nil` for a tool with no single
+    /// default (Cline, OpenCode).
+    ///
+    /// A fixed label the Rust side ships with, never something checked
+    /// against the copy of the tool actually installed on this machine.
+    public let answersAt: String?
 
     public init(
         source: SourceKind,
@@ -47,7 +54,8 @@ public struct SourceCandidate: Equatable, Sendable {
         exists: Bool,
         sessionCount: UInt64,
         mostRecent: Date?,
-        relocatedByEnv: Bool
+        relocatedByEnv: Bool,
+        answersAt: String? = nil
     ) {
         self.source = source
         self.path = path
@@ -55,6 +63,7 @@ public struct SourceCandidate: Equatable, Sendable {
         self.sessionCount = sessionCount
         self.mostRecent = mostRecent
         self.relocatedByEnv = relocatedByEnv
+        self.answersAt = answersAt
     }
 
     /// The one line under the path that says what agreeing would mean.
@@ -115,6 +124,11 @@ public struct SourceCandidate: Equatable, Sendable {
         let sessionCount: UInt64
         let mostRecent: String?
         let relocatedByEnv: Bool
+        /// Absent from a payload an older daemon build emitted before this
+        /// field existed -- decoded as `nil` rather than failing the whole
+        /// row, the same way an unrecognized `source` is dropped rather than
+        /// thrown.
+        let answersAt: String?
 
         enum CodingKeys: String, CodingKey {
             case source
@@ -123,6 +137,7 @@ public struct SourceCandidate: Equatable, Sendable {
             case sessionCount = "session_count"
             case mostRecent = "most_recent"
             case relocatedByEnv = "relocated_by_env"
+            case answersAt = "answers_at"
         }
 
         var candidate: SourceCandidate? {
@@ -133,7 +148,8 @@ public struct SourceCandidate: Equatable, Sendable {
                 exists: exists,
                 sessionCount: sessionCount,
                 mostRecent: mostRecent.flatMap(Wire.parseTimestamp),
-                relocatedByEnv: relocatedByEnv
+                relocatedByEnv: relocatedByEnv,
+                answersAt: answersAt
             )
         }
 

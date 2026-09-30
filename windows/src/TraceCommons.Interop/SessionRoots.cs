@@ -119,6 +119,18 @@ public sealed class SourceCandidate
     /// </summary>
     [JsonPropertyName("relocated_by_env")]
     public bool RelocatedByEnv { get; set; }
+
+    /// <summary>
+    /// The vendor this tool's own calls answer at by default (e.g.
+    /// <c>"Anthropic"</c>), or null for a tool with no single default. A
+    /// fixed label the daemon ships with, never a claim checked against the
+    /// copy of the tool actually installed on this machine. Absent from a
+    /// payload an older daemon build emitted before this field existed;
+    /// <see cref="System.Text.Json"/> leaves it null rather than failing
+    /// the whole row.
+    /// </summary>
+    [JsonPropertyName("answers_at")]
+    public string? AnswersAt { get; set; }
 }
 
 /// <summary>
