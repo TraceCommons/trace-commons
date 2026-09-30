@@ -20,31 +20,31 @@ import {
   unansweredTools,
 } from "./ftux-model.ts";
 
-test("connect and forget is three screens, customize and tailor is four", () => {
+test("quick setup is three screens, custom setup is four", () => {
   assert.deepEqual(
-    stepsFor("connect").map((step) => step.label),
+    stepsFor("quick").map((step) => step.label),
     ["Join", "Folders", "Uses"],
   );
   assert.deepEqual(
-    stepsFor("customize").map((step) => step.label),
+    stepsFor("custom").map((step) => step.label),
     ["Join", "Tools", "Rules", "Uses"],
   );
-  assert.equal(nextScreen("connect", "join"), "folders");
-  assert.equal(nextScreen("customize", "tools"), "rules");
-  assert.equal(nextScreen("customize", "uses"), null);
+  assert.equal(nextScreen("quick", "join"), "folders");
+  assert.equal(nextScreen("custom", "tools"), "rules");
+  assert.equal(nextScreen("custom", "uses"), null);
 });
 
 test("switching tiers lands on the equivalent screen", () => {
-  assert.deepEqual(switchPath("customize", "folders"), {
-    path: "customize",
+  assert.deepEqual(switchPath("custom", "folders"), {
+    path: "custom",
     screen: "tools",
   });
-  assert.deepEqual(switchPath("connect", "rules"), {
-    path: "connect",
+  assert.deepEqual(switchPath("quick", "rules"), {
+    path: "quick",
     screen: "folders",
   });
-  assert.deepEqual(switchPath("customize", "join"), {
-    path: "customize",
+  assert.deepEqual(switchPath("custom", "join"), {
+    path: "custom",
     screen: "join",
   });
 });

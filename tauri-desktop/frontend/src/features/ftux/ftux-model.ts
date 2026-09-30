@@ -1,21 +1,21 @@
-// Pure state for the first-run flows in the WYSIWYG design: "Connect and
-// forget" (Join -> Folders -> Uses), "Customize and tailor" (Join -> Tools ->
-// Rules -> Uses), and the passkey popups that open from the Join screen.
+// Pure state for the first-run flows in the WYSIWYG design: Quick setup
+// (Join -> Folders -> Uses), Custom setup (Join -> Tools -> Rules -> Uses), and the passkey
+// popups that open from the Join screen.
 // Kept free of React and of imports so `node --test` can load it directly.
 
-export type FtuxPath = "connect" | "customize";
+export type FtuxPath = "quick" | "custom";
 
 export type FtuxScreen = "join" | "folders" | "tools" | "rules" | "uses";
 
 export type FtuxStep = { screen: FtuxScreen; label: string };
 
-const CONNECT_STEPS: FtuxStep[] = [
+const QUICK_STEPS: FtuxStep[] = [
   { screen: "join", label: "Join" },
   { screen: "folders", label: "Folders" },
   { screen: "uses", label: "Uses" },
 ];
 
-const CUSTOMIZE_STEPS: FtuxStep[] = [
+const CUSTOM_STEPS: FtuxStep[] = [
   { screen: "join", label: "Join" },
   { screen: "tools", label: "Tools" },
   { screen: "rules", label: "Rules" },
@@ -23,7 +23,7 @@ const CUSTOMIZE_STEPS: FtuxStep[] = [
 ];
 
 export function stepsFor(path: FtuxPath): FtuxStep[] {
-  return path === "connect" ? CONNECT_STEPS : CUSTOMIZE_STEPS;
+  return path === "quick" ? QUICK_STEPS : CUSTOM_STEPS;
 }
 
 export function stepIndex(path: FtuxPath, screen: FtuxScreen): number {
@@ -47,10 +47,10 @@ export function switchPath(
   to: FtuxPath,
   screen: FtuxScreen,
 ): { path: FtuxPath; screen: FtuxScreen } {
-  if (to === "customize" && screen === "folders") {
+  if (to === "custom" && screen === "folders") {
     return { path: to, screen: "tools" };
   }
-  if (to === "connect" && (screen === "tools" || screen === "rules")) {
+  if (to === "quick" && (screen === "tools" || screen === "rules")) {
     return { path: to, screen: "folders" };
   }
   return { path: to, screen };

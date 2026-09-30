@@ -69,10 +69,8 @@ function ContinueButton({
   );
 }
 
-// Connect and forget: W-2.
-export function FoldersScreen(
-  props: ToolListProps & { onCustomize: () => void },
-) {
+// Quick setup: W-2.
+export function FoldersScreen(props: ToolListProps & { onCustom: () => void }) {
   return (
     <>
       <ScreenTitle light="Which folders may this " bold="app watch?" />
@@ -85,8 +83,8 @@ export function FoldersScreen(
         <ToolList {...props} />
       </div>
       <div className="ftux-footer ftux-footer-split">
-        <button type="button" className="ftux-link" onClick={props.onCustomize}>
-          Customize instead
+        <button type="button" className="ftux-link" onClick={props.onCustom}>
+          Custom setup instead
         </button>
         <ContinueButton
           enabled={props.canContinue}
@@ -97,7 +95,7 @@ export function FoldersScreen(
   );
 }
 
-// Customize and tailor: W-4.
+// Custom setup: W-4.
 export function ToolsScreen(props: ToolListProps & { onAddTool: () => void }) {
   const [dragging, setDragging] = useState(false);
   return (

@@ -130,7 +130,7 @@ function PastSessionFolder({
   );
 }
 
-// Customize and tailor: W-5.
+// Custom setup: W-5.
 export function RulesScreen({
   candidates,
   selections,

@@ -15,21 +15,22 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const ConnectAndForgetJoin: Story = {};
-export const ConnectAndForgetFolders: Story = {
+export const QuickJoin: Story = {};
+export const JoinWithPasskeyCard: Story = { args: { showPasskey: true } };
+export const QuickFolders: Story = {
   args: { initialScreen: "folders" },
 };
-export const ConnectAndForgetUses: Story = {
+export const QuickUses: Story = {
   args: { initialScreen: "uses" },
 };
-export const CustomizeTools: Story = {
-  args: { initialPath: "customize", initialScreen: "tools" },
+export const CustomTools: Story = {
+  args: { initialPath: "custom", initialScreen: "tools" },
 };
-export const CustomizeRules: Story = {
-  args: { initialPath: "customize", initialScreen: "rules" },
+export const CustomRules: Story = {
+  args: { initialPath: "custom", initialScreen: "rules" },
 };
-export const CustomizeUses: Story = {
-  args: { initialPath: "customize", initialScreen: "uses" },
+export const CustomUses: Story = {
+  args: { initialPath: "custom", initialScreen: "uses" },
 };
 export const ReturningUser: Story = {
   args: { returningPasskey: MOCK_STORED_PASSKEY },

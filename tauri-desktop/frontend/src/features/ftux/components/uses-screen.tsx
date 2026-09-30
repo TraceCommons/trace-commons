@@ -1,3 +1,5 @@
+import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
+import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { groupState, OPTIONAL_USES, optionalUsesLabel } from "../ftux-model";
 import type { SharingMode } from "../types";
 import {
@@ -15,15 +17,19 @@ const SHARING_OPTIONS: SelectOption<SharingMode>[] = [
   { value: "ask", label: "Ask me each time", tone: "yellow" },
 ];
 
-// W-3 (Connect and forget) and W-6 (Customize and tailor, which adds the
-// Private AI switch).
+// W-3 (Quick setup) and W-6 (Custom setup, which adds the Private AI
+// switch). Uses are the data-use scope (R7), so they are answered before the
+// sharing decision on the same screen: a grant covers the scopes chosen when
+// it is given, and widening them later voids it.
 export function UsesScreen({
+  baseUse,
   optionalUses,
   listHandle,
   sharing,
   privateAi,
   submitting,
   error,
+  onToggleBaseUse,
   onToggleUses,
   onToggleUse,
   onToggleHandle,
@@ -31,13 +37,16 @@ export function UsesScreen({
   onTogglePrivateAi,
   onStart,
 }: {
+  // The floor scope: required, but ticked by hand like the rest (R7).
+  baseUse: boolean;
   optionalUses: boolean[];
   listHandle: boolean;
   sharing: SharingMode;
-  // Null hides the Private AI card (Connect and forget).
+  // Null hides the Private AI card (Quick setup).
   privateAi: boolean | null;
   submitting: boolean;
   error: string | null;
+  onToggleBaseUse: () => void;
   onToggleUses: () => void;
   onToggleUse: (index: number) => void;
   onToggleHandle: () => void;
@@ -46,6 +55,12 @@ export function UsesScreen({
   onStart: () => void;
 }) {
   const usesState = groupState(optionalUses);
+  // The sharing words are the core's: which scrub runs, and what leaves the
+  // machine, depend on the configuration, so this screen never states them.
+  const core = useCoreStatus();
+  const grantCopy = useAutomaticGrantCopy(core.scope, core.isSuccess);
+  const copy = grantCopy.data;
+  const canStart = baseUse && copy !== undefined && !submitting;
   return (
     <>
       <ScreenTitle light="How your data is " bold="used & permissioned." />
@@ -56,13 +71,13 @@ export function UsesScreen({
           </span>
           <div className="ftux-check-row">
             <GlassCheckbox
-              checked
-              disabled
-              label="Finding bugs and measuring agents, always on"
+              checked={baseUse}
+              label="Finding bugs and measuring agents, required"
+              onToggle={onToggleBaseUse}
             />
             <span style={{ flex: 1 }}>
               <strong>Finding bugs and measuring agents</strong>
-              <span className="ftux-always-on">always on</span>
+              <span className="ftux-always-on">required</span>
               <br />
               <span className="ftux-muted">
                 Researchers read traces to see where coding agents fail and to
@@ -127,12 +142,18 @@ export function UsesScreen({
             <span style={{ display: "flex", flexDirection: "column" }}>
               <span className="ftux-card-title">Sharing</span>
               <span className="ftux-card-text">
-                Scrubbed on this device, shared once quality checked.
-                Undetermined sessions wait for your approval.
+                {copy
+                  ? sharing === "auto"
+                    ? `${copy.path_automatic} ${copy.scrub.scope} ${copy.scrub.limit}`
+                    : copy.path_ask_first
+                  : grantCopy.isError
+                    ? "Sharing copy unavailable. Starting is disabled."
+                    : "Loading sharing copy…"}
               </span>
             </span>
             <PillSelect
               label="Sharing"
+              disabled={!copy}
               value={sharing}
               options={SHARING_OPTIONS}
               onChange={onSharing}
@@ -150,11 +171,17 @@ export function UsesScreen({
           </p>
         ) : null}
       </div>
-      <div className="ftux-footer">
+      <div className={`ftux-footer${baseUse ? "" : " ftux-footer-split"}`}>
+        {baseUse ? null : (
+          <span className="ftux-card-text ftux-muted" id="ftux-scope-note">
+            Tick the first use to contribute. Without it nothing is shared.
+          </span>
+        )}
         <button
           type="button"
           className="ftux-btn ftux-btn-primary"
-          disabled={submitting}
+          disabled={!canStart}
+          aria-describedby={baseUse ? undefined : "ftux-scope-note"}
           onClick={onStart}
         >
           {submitting ? <Spinner /> : null}

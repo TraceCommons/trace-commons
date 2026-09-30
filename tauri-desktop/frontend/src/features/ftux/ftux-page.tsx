@@ -58,7 +58,7 @@ function initialSelections(repos: RepoCandidate[]): RepoSelection[] {
   }));
 }
 
-// Rules are only set on Customize and tailor, and only for repos whose tool
+// Rules are only set on Custom setup, and only for repos whose tool
 // is watched; nothing the person has not seen goes into setup.
 function offeredRepos(
   candidates: RepoCandidate[] | null,
@@ -86,10 +86,11 @@ function offeredRepos(
 const SIGNED_OUT: JoinState = { invite: null, passkey: null, nearAi: false };
 
 export function FtuxPage({
-  initialPath = "connect",
+  initialPath = "quick",
   initialScreen = "join",
   initialInvite = null,
   returningPasskey = null,
+  showPasskey = false,
   onComplete,
 }: {
   initialPath?: FtuxPath;
@@ -97,6 +98,8 @@ export function FtuxPage({
   initialInvite?: string | null;
   // Set when a passkey is already stored on this Mac (P-7).
   returningPasskey?: PasskeyResult | null;
+  // The passkey card on Join; hidden in the first release (see JoinScreen).
+  showPasskey?: boolean;
   onComplete: (settings: FtuxSettings) => void;
 }) {
   const [path, setPath] = useState<FtuxPath>(initialPath);
@@ -120,6 +123,7 @@ export function FtuxPage({
   const [candidates, setCandidates] = useState<RepoCandidate[] | null>(null);
   const [repos, setRepos] = useState<RepoSelection[]>([]);
 
+  const [baseUse, setBaseUse] = useState(false);
   const [optionalUses, setOptionalUses] = useState<boolean[]>(
     OPTIONAL_USES.map(() => false),
   );
@@ -225,11 +229,12 @@ export function FtuxPage({
       join,
       watch,
       customFolders,
-      repos: path === "customize" ? offer.repos : [],
+      baseUse,
+      repos: path === "custom" ? offer.repos : [],
       optionalUses,
       listHandle,
       sharing,
-      privateAi: path === "customize" && privateAi,
+      privateAi: path === "custom" && privateAi,
     };
     setSubmitting(true);
     setSubmitError(null);
@@ -261,9 +266,7 @@ export function FtuxPage({
         PREVIEW · MOCK DATA
       </span>
       <GlassWindow
-        eyebrow={
-          path === "connect" ? "Getting started" : "Getting started · customize"
-        }
+        eyebrow={path === "quick" ? "Quick setup" : "Custom setup"}
         steps={steps}
         current={stepIndex(path, screen)}
       >
@@ -285,13 +288,11 @@ export function FtuxPage({
             }}
             onSignInNearAi={() => void handleNearAi()}
             onNext={advance}
+            showPasskey={showPasskey}
           />
         ) : null}
         {screen === "folders" ? (
-          <FoldersScreen
-            {...toolProps}
-            onCustomize={() => changePath("customize")}
-          />
+          <FoldersScreen {...toolProps} onCustom={() => changePath("custom")} />
         ) : null}
         {screen === "tools" ? (
           <ToolsScreen {...toolProps} onAddTool={() => void handleAddTool()} />
@@ -321,12 +322,14 @@ export function FtuxPage({
         ) : null}
         {screen === "uses" ? (
           <UsesScreen
+            baseUse={baseUse}
             optionalUses={optionalUses}
             listHandle={listHandle}
             sharing={sharing}
-            privateAi={path === "customize" ? privateAi : null}
+            privateAi={path === "custom" ? privateAi : null}
             submitting={submitting}
             error={submitError}
+            onToggleBaseUse={() => setBaseUse(!baseUse)}
             onToggleUses={() => setOptionalUses(toggleGroup(optionalUses))}
             onToggleUse={(index) =>
               setOptionalUses(toggleAt(optionalUses, index))

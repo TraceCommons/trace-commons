@@ -92,14 +92,18 @@ export function signInWithNearAi(): Promise<void> {
   return later(undefined, 600);
 }
 
-// Fail closed: setup may not arm automatic contribution until the FTUX
-// spec's first open question is settled. The real implementation keeps this
-// check in front of the calls that save the choices.
+// Fail closed. Setup offers automatic sharing only through the scrub and
+// witness disclosures and then `requestGrant` (flow1.ts), per the consent
+// spec's rev 8. That wiring lands in the PR stacked on this one; until then
+// an automatic choice is refused rather than saved.
 export async function finishSetup(settings: FtuxSettings): Promise<void> {
+  if (!settings.baseUse) {
+    throw new Error("Tick the first use to contribute.");
+  }
   const armed = automaticChoices(settings);
   if (armed.length > 0) {
     throw new Error(
-      `Setup can't turn on automatic sharing yet (${armed.join(", ")}). Choose "Ask me" instead; you can change it later.`,
+      `Automatic sharing goes through its disclosures and grant, which are not connected in this preview yet (${armed.join(", ")}). Choose "Ask me" for now.`,
     );
   }
   await later(undefined, 600);

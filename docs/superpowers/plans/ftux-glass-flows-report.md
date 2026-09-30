@@ -1,21 +1,22 @@
 # First-run glass flows (FTUX) — implementation report
 
-Date: 2026-09-25 (updated 2026-09-28 after review)
+Date: 2026-09-25 (updated 2026-09-28 and 2026-09-29 after review)
 Branch: `ftux`
 Spec: `docs/superpowers/specs/2026-09-25-ftux-glass-flows-design.md`
 Scope: `tauri-desktop/frontend` only. No daemon, server, Rust or CI change.
 
 ## Summary
 
-The Connect and forget, Customize and tailor, and Create a passkey flows from
-the WYSIWYG design are built as a new feature module,
+The Quick setup and Custom setup flows (the design's "Quick setup" and
+"Custom setup", renamed; see the spec) and the Create a passkey flow
+from the WYSIWYG design are built as a new feature module,
 `src/features/ftux/`, reachable at `#/ftux`. Every backend call is mocked in
 one file. The existing onboarding and its gate are unchanged.
 
 ## How to see it
 
 The flow opens at its own address, `#/ftux`, in the Tauri app (`tauri dev`) or `pnpm dev`. The route is registered only in development builds or with `VITE_FTUX_PREVIEW=1`, so a release build does not contain it.
-Two options: `#/ftux?path=customize` starts on Customize and tailor, and
+Two options: `#/ftux?path=custom` starts on Custom setup, and
 `#/ftux?returning=1` opens the returning-user "Welcome back" card. The
 existing onboarding is untouched and still decides who sees setup. Finishing
 the new flow saves nothing and just returns to the app, so it can't mark anyone
@@ -55,10 +56,10 @@ All paths are under `tauri-desktop/frontend/`.
 
 ## What works
 
-- **Connect and forget:** Join, Folders, Uses. Continue stays off until every
-  tool found on the Mac has an answer, and "Customize instead" switches to the
+- **Quick setup:** Join, Folders, Uses. Continue stays off until every
+  tool found on the Mac has an answer, and "Custom setup instead" switches to the
   other flow.
-- **Customize and tailor:** Join, Tools, Rules, Uses.
+- **Custom setup:** Join, Tools, Rules, Uses.
   - Tools adds the "add your tool" box, by click or drag.
   - Rules sets a rule per repo and lets you pick past sessions by folder, with
     the "7 of 43 selected" count. Setting a folder to Never clears its
@@ -117,7 +118,7 @@ addressed:
 | 1 | "Private Inference" on the Uses screen fails `tauri_never_says_private_inference_to_a_contributor` | Sentence removed; the test passes |
 | 2 | Private AI text written in the file and contradicting `OFFER_NO_REPOINT`; `OFFER_EXPOSURE` missing | `PrivateAiCard` renders `destination`, `offer_what`, `offer_exposure`, `offer_no_repoint` from the shared copy; switch disabled until it loads |
 | 3 | Defaults arm automatic contribution | Sharing starts at Ask me, optional uses off, no repo on Share automatically, no session ticked; `finishSetup` refuses `automaticChoices` |
-| 4 | Connect and forget sends unseen repos; repos not filtered by tool answers | Connect and forget sends no repos; `reposForWatchedTools` filters Rules; empty state when nothing is watched |
+| 4 | Quick setup sends unseen repos; repos not filtered by tool answers | Quick setup sends no repos; `reposForWatchedTools` filters Rules; empty state when nothing is watched |
 | 5 | `aria-modal` without a real modal | Background `inert`, Tab trapped, focus restored to the opener |
 | 6 | Imitation macOS sheets unmarked and shipped in release | Each sheet carries a Simulated mark; preview tag drawn above popups; route dev-only or `VITE_FTUX_PREVIEW=1` |
 | 7 | Verify cancel leaves other sign-ins shown | Sign-out clears invite, near.ai and passkey |
@@ -128,6 +129,20 @@ addressed:
 See the spec for the deliberate differences from the design and the open
 questions, the first of which (the *Share automatically* default against #507
 and #991) must be settled before `finishSetup` is wired.
+
+## Consent-spec decisions (2026-09-29)
+
+The reviewer's second comment on #1030 set how the flows line up with #991
+rev 8. Applied here:
+
+| # | Decision | Change |
+|---|---|---|
+| 1 | "Connect and forget" names the consent path | Tiers renamed Quick setup / Custom setup (`FtuxPath` is now `"quick" \| "custom"`, `?path=custom`) |
+| 2 | Sharing is a moment of consent | Picker kept; *Share automatically* still refused, with a message saying the disclosures and grant are not connected yet. Wiring deferred to the stacked PR |
+| 3 | The core chooses the sharing copy | Sharing card renders `useAutomaticGrantCopy`; Start disabled until it loads |
+| 4 | Uses are the scope and come first; the floor use is required, unticked | `baseUse` starts unticked; Start disabled until ticked; `finishSetup` refuses without it |
+| 5 | Private AI is a consent event | Deferred to the stacked PR |
+| 6 | near.ai is the account; Skip leads to watching only; passkey card may be hidden | *Skip: watch only* with a note; passkey card hidden behind `showPasskey` (story `JoinWithPasskeyCard` shows it) |
 
 ## Verification
 
@@ -153,7 +168,7 @@ src/features/ftux` reports no errors and 4 CSS specificity warnings. Biome is
 not run in CI, and `main` already has Biome errors elsewhere.
 
 Each screen and popup was walked in the browser at `#/ftux`,
-`#/ftux?path=customize` and `#/ftux?returning=1` and compared with the design:
+`#/ftux?path=custom` and `#/ftux?returning=1` and compared with the design:
 the full Create new passkey path (P-1 to P-5) back to Join, invite lookup,
 Continue gating on Folders and Tools, adding a tool, the Never rule changing the
 count from "7 of 43" to "4 of 21", the Private AI switch, and *Start sharing*

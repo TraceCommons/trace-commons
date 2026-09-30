@@ -51,6 +51,7 @@ export type FtuxSettings = {
   watch: Record<string, WatchAnswer>;
   customFolders: Record<string, string>;
   repos: RepoSelection[];
+  baseUse: boolean;
   optionalUses: boolean[];
   listHandle: boolean;
   sharing: SharingMode;

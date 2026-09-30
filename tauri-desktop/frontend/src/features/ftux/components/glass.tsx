@@ -296,12 +296,14 @@ export function PillSelect<T extends string>({
   value,
   options,
   placeholder,
+  disabled,
   onChange,
 }: {
   label: string;
   value: T | null;
   options: SelectOption<T>[];
   placeholder?: string;
+  disabled?: boolean;
   onChange: (value: T) => void;
 }) {
   const selected = options.find((option) => option.value === value);
@@ -312,6 +314,7 @@ export function PillSelect<T extends string>({
       ) : null}
       <select
         aria-label={label}
+        disabled={disabled}
         value={selected ? selected.value : ""}
         onChange={(event) => onChange(event.target.value as T)}
       >
