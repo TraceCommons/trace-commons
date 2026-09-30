@@ -8051,6 +8051,50 @@ impl PipelineService {
                 } else {
                     None
                 };
+                // Zaki review 1, round 2, finding 19: `main` applies its
+                // `NoveltyUtility` credit checks before it credits anything, so
+                // they run here, before the adapter call: a leg they withhold
+                // never reaches its adapter. It completes with no ledger row,
+                // under `main`'s label, at the result reference the persisted
+                // selection recorded. The ledger transaction checks again
+                // (`settle_internal_credit`), since the tenant policy can change
+                // between the two.
+                if instrument_id == InstrumentId::trace_credit()
+                    && bundle.trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility
+                {
+                    let amount =
+                        InstrumentAward::new(InstrumentId::trace_credit(), settlement.atomic_units)
+                            .and_then(|award| award.trace_credit_microcredits())
+                            .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                    let withheld = {
+                        let mut client = self.backend.trace_pool().get().await?;
+                        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id)
+                            .await?;
+                        let withheld = self
+                            .novelty_utility_withheld_reason(&tx, &run, amount.get())
+                            .await?;
+                        tx.commit().await?;
+                        withheld
+                    };
+                    if let Some(label) = withheld {
+                        self.store
+                            .update_settlement(
+                                &run,
+                                instrument_id.as_str(),
+                                SettlementUpdate {
+                                    operation_state: "complete",
+                                    result_ref_hash: Some(request.expected_result_ref_hash()),
+                                    external_receipt_hash: None,
+                                    credit_event_id: None,
+                                    settlement_batch_id: None,
+                                    payout_state: None,
+                                    error_label: Some(label),
+                                },
+                            )
+                            .await?;
+                        continue;
+                    }
+                }
                 // Zaki review 1, minor item M-e: `guard` was read once,
                 // before this loop, and only the Trace Credit leg reads it
                 // again under the submission's row lock (its ledger

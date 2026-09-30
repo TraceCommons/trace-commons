@@ -96,6 +96,26 @@ CREATE INDEX idx_pipeline_index_invalidations_work
     ON pipeline_index_invalidations (tenant_id, next_attempt_at, run_id)
     WHERE state = 'pending';
 
+-- A Trace Credit leg `main`'s NoveltyUtility credit checks withhold is
+-- decided before its adapter is called, so it completes without ever being
+-- dispatched: complete, no credit event, under the withholding label. V94's
+-- dispatch shape allowed a complete leg only once dispatched; it now allows
+-- exactly that one undispatched shape too.
+ALTER TABLE pipeline_run_settlements
+    DROP CONSTRAINT pipeline_run_settlements_dispatch_shape;
+ALTER TABLE pipeline_run_settlements
+    ADD CONSTRAINT pipeline_run_settlements_dispatch_shape CHECK (
+        operation_state NOT IN ('leased', 'complete')
+        OR dispatched_at IS NOT NULL
+        OR (
+            operation_state = 'complete'
+            AND instrument_id = 'trace_credit'
+            AND credit_event_id IS NULL
+            AND external_receipt_hash IS NULL
+            AND last_error_label IS NOT NULL
+        )
+    );
+
 -- Whether the payout may pay a leg: Score seeded it `pending` for a batch
 -- Settle writes under the account's settlement key and hold. A leg the
 -- V94-era code seeded `pending` has no such batch line and stays false, so

@@ -760,7 +760,11 @@ SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindi
 V105 adds the human review claims and assessments, the index invalidation
 queue, a column on `pipeline_runs`, a column on `pipeline_run_settlements`
 (`payout_eligible`, set when Score inserts a leg, which the runtime's
-table-wide `INSERT` from V94 covers), and an index for the payout pass. V106
+table-wide `INSERT` from V94 covers), and an index for the payout pass. It
+also widens V94's `pipeline_run_settlements_dispatch_shape` check to allow a
+Trace Credit leg that `main`'s `NoveltyUtility` credit checks withheld before
+its adapter was called: complete, never dispatched, no credit event, with its
+withholding label. V106
 adds the export snapshots and their items. Like V92 to V95, each grants
 `trace_ingest_runtime` what the pipeline code reads and writes there, and
 nothing broader, and each refuses to apply if the group does not exist. V105

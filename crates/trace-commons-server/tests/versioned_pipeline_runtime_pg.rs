@@ -14780,7 +14780,12 @@ async fn settled_compatibility_award(
     let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:compat-checks";
     let run = submit_envelope_and_complete(service, &tenant, principal, env).await;
-    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(
+        run.state,
+        PipelineRunState::Complete,
+        "{:?}",
+        run.last_error_label
+    );
     let leg = trace_credit_settlement(service, &tenant, run.run_id).await;
     let rows = count_credit_ledger_rows_for_run(backend, &tenant, run.run_id).await;
     let status = PipelineProductStore::new(backend.clone())
@@ -22493,5 +22498,78 @@ async fn only_trace_credit_is_seeded_a_pending_payout() {
                 "pending".to_string()
             ),
         ]
+    );
+}
+
+/// Finding 19: `main`'s `NoveltyUtility` credit checks run before the Trace
+/// Credit leg's adapter call, so a leg they withhold never reaches its
+/// adapter: it completes withheld (no ledger row, `main`'s label) and the
+/// adapter records no request. A credited leg still settles through it.
+#[tokio::test]
+async fn a_withheld_novelty_utility_leg_never_reaches_its_adapter() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry =
+        SettlementAdapterRegistry::new(vec![trace_credit.clone() as Arc<dyn SettlementAdapter>])
+            .expect("build settlement adapter registry");
+    let service = Arc::new(
+        PipelineServiceBuilder::new(
+            backend.clone(),
+            artifact_store(&dir),
+            package,
+            index.clone(),
+            index,
+            registry,
+            PipelineCaps {
+                per_instrument_atomic_units: BTreeMap::from([(
+                    InstrumentId::trace_credit().as_str().to_string(),
+                    AtomicUnits::from_raw(u128::MAX),
+                )]),
+            },
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_authority(allow_all_authority())
+        .with_privacy(default_privacy_boundary())
+        .build()
+        .expect("build the compatibility service"),
+    );
+
+    let withheld =
+        settled_compatibility_award(&service, &backend, &envelope(uuid::Uuid::new_v4()).await)
+            .await;
+    assert_withheld(&withheld, PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL);
+    assert!(
+        trace_credit.requests().is_empty(),
+        "a withheld leg never reaches its adapter"
+    );
+
+    assert_credited(
+        &settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await,
+    );
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "a credited leg settles through its adapter"
     );
 }
