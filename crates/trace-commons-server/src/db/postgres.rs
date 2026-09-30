@@ -261,6 +261,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
     "pipeline_bundle_qualifications",
+    "pipeline_attempt_artifacts",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1664,6 +1665,17 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         103,
         "versioned_pipeline_qualification",
         include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
+    ),
+    // V104 (PR 4) adds the table that tracks each pipeline phase attempt's
+    // objects, staged before they are published and committed with the
+    // phase commit, so the worker can sweep the objects of an attempt that
+    // crashed, lost its lease, or had its commit refused, and the Score
+    // objects of a withdrawn submission. No cross-tenant claim function,
+    // same as V101/V102/V103.
+    (
+        104,
+        "versioned_pipeline_attempt_artifacts",
+        include_str!("../../../../migrations/V104__versioned_pipeline_attempt_artifacts.sql"),
     ),
 ];
 
@@ -7020,6 +7032,7 @@ mod tests {
         (95, 4),
         (105, 4),
         (106, 4),
+        (104, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7762,6 +7775,7 @@ mod tests {
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V104__versioned_pipeline_attempt_artifacts.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7796,6 +7810,7 @@ mod tests {
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V104__versioned_pipeline_attempt_artifacts.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7883,6 +7898,8 @@ mod tests {
         let exports = include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql");
         let qualification =
             include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql");
+        let attempt_artifacts =
+            include_str!("../../../../migrations/V104__versioned_pipeline_attempt_artifacts.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -8020,6 +8037,31 @@ mod tests {
             assert!(
                 !qualification.contains(forbidden),
                 "V103 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_attempt_artifacts",
+            "artifact IN ('approved', 'index-command', 'score-neighbors')",
+            "ciphertext_sha256 TEXT NOT NULL CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            "state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed', 'deleted'))",
+            "PRIMARY KEY (tenant_id, run_id, lease_token, artifact)",
+            "UNIQUE (tenant_id, object_key)",
+            "ON DELETE CASCADE",
+            "CREATE INDEX pipeline_attempt_artifacts_due",
+            "ALTER TABLE pipeline_attempt_artifacts FORCE ROW LEVEL SECURITY;",
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_attempt_artifacts",
+            "GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
+            "GRANT UPDATE (state, committed_at, deleted_at) ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                attempt_artifacts.contains(required),
+                "V104 is missing `{required}`"
+            );
+        }
+        for forbidden in ["SECURITY DEFINER", "SET search_path", "ON DELETE RESTRICT"] {
+            assert!(
+                !attempt_artifacts.contains(forbidden),
+                "V104 must not contain `{forbidden}`"
             );
         }
     }

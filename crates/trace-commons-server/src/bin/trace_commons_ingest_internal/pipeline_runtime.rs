@@ -339,6 +339,11 @@ const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 /// The rest wait for the next pass.
 const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
 
+/// How many pipeline phase attempt artifacts the worker sweeps for one
+/// tenant per pass (`PipelineService::sweep_attempt_artifacts`), right after
+/// the receipt sweep. The rest wait for the next pass.
+const PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT: usize = 32;
+
 /// How many of one tenant's due index invalidations the worker processes
 /// each time it runs the tenant's invalidation step
 /// (`PipelineService::process_index_invalidations`), right after draining
@@ -537,10 +542,16 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// and the payouts after them). Last, on every pass, it sweeps up to
 /// `PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT` of the tenant's receipt
 /// attempts that never committed: each staged object whose
-/// row's `cleanup_after` has passed is deleted with its row. An
-/// invalidation, payout, or sweep failure is logged the same way, and the
-/// drain goes on to the next step. All of it runs in the pass's supervised
-/// task for the tenant (`run_pipeline_worker_pass`).
+/// row's `cleanup_after` has passed is deleted with its row. Then, also on
+/// every pass, it sweeps up to
+/// `PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT` of the tenant's
+/// pipeline phase attempt objects
+/// (`PipelineService::sweep_attempt_artifacts`): the same shape, for the
+/// Review and Score objects a phase attempt writes under its own lease
+/// token, plus the Score objects of a run whose submission was withdrawn
+/// after it finished. An invalidation, payout, or sweep failure is logged
+/// the same way, and the drain goes on to the next step. All of it runs in
+/// the pass's supervised task for the tenant (`run_pipeline_worker_pass`).
 pub(crate) async fn drain_pipeline_tenant(
     service: Arc<PipelineService>,
     tenant_id: String,
@@ -635,6 +646,20 @@ pub(crate) async fn drain_pipeline_tenant(
             tenant_storage_ref = %tenant_storage_ref(&tenant_id),
             error_hash = %safe_display_error_hash(&error),
             "pipeline worker receipt sweep failed"
+        );
+    }
+    if let Err(error) = service
+        .sweep_attempt_artifacts(
+            &tenant_id,
+            PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT,
+        )
+        .await
+    {
+        tracing::warn!(
+            error_class = "pipeline_worker_attempt_sweep_failed",
+            tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+            error_hash = %safe_display_error_hash(&error),
+            "pipeline worker attempt sweep failed"
         );
     }
 }

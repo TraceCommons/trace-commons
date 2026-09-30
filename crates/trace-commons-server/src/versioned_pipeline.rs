@@ -1679,6 +1679,18 @@ impl PgPipelineStore {
             )
             .await?;
         let updated = pipeline_run_from_row(&row)?;
+        // PR 4: the attempt's staged object -- the approved content, when
+        // this commit approved one -- moves to `committed` in this same
+        // transaction. A refused commit above already returned without
+        // reaching here, so this never runs for one; nothing to move when a
+        // rejection staged no object (the `UPDATE` then matches zero rows).
+        tx.execute(
+            "UPDATE pipeline_attempt_artifacts
+                SET state = 'committed', committed_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND state = 'staged'",
+            &[&run.tenant_id, &run.run_id, &lease_token],
+        )
+        .await?;
         tx.commit().await?;
         Ok(updated)
     }
@@ -2304,6 +2316,17 @@ impl PgPipelineStore {
             )
             .await?;
         let updated = pipeline_run_from_row(&row)?;
+        // PR 4: the attempt's staged objects -- `index-command` and/or
+        // `score-neighbors`, whichever this commit wrote -- move to
+        // `committed` in this same transaction. A refused commit above
+        // already returned without reaching here.
+        tx.execute(
+            "UPDATE pipeline_attempt_artifacts
+                SET state = 'committed', committed_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND state = 'staged'",
+            &[&run.tenant_id, &run.run_id, &lease_token],
+        )
+        .await?;
         tx.commit().await?;
         Ok(updated)
     }
@@ -4089,6 +4112,58 @@ impl PgPipelineStore {
                 &attempt.request_content_hash,
                 &attempt.receipt.object_key,
                 &attempt.receipt.ciphertext_sha256,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Records a pipeline phase attempt's object before it is written (PR 4,
+    /// the same shape as `stage_receipt_artifact`): its own tenant
+    /// transaction, committing before the caller publishes the object the
+    /// row names. Whatever happens after the write -- the rest of the phase
+    /// failing, a refused commit, a lost lease, a process crash -- the
+    /// `staged` row still names the object, and
+    /// `PipelineService::sweep_attempt_artifacts` deletes both once
+    /// `cleanup_after` passes. `commit_review` and `commit_score` move the
+    /// row to `committed` in the same transaction as the phase commit; a
+    /// refused commit rolls that back with everything else, leaving the row
+    /// `staged` for the sweep.
+    ///
+    /// `ON CONFLICT DO NOTHING` on the row's own primary key makes a repeat
+    /// call for the same attempt a no-op -- safe because
+    /// `pipeline_attempt_object_id` is a deterministic function of `(run_id,
+    /// lease_token, artifact)`, so a retry for the same triple always
+    /// prepares the same object key. A caller that ever computed a different
+    /// object key for the same triple would collide instead on `UNIQUE
+    /// (tenant_id, object_key)`, which this `INSERT` does not suppress, and
+    /// surfaces as an ordinary constraint error.
+    pub async fn stage_attempt_artifact(
+        &self,
+        run: &PipelineRunRecord,
+        artifact: PipelineAttemptArtifact,
+        object_key: &str,
+        ciphertext_sha256: &str,
+        cleanup_after: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        tx.execute(
+            "INSERT INTO pipeline_attempt_artifacts (
+                tenant_id, run_id, lease_token, artifact, object_key,
+                ciphertext_sha256, cleanup_after
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (tenant_id, run_id, lease_token, artifact) DO NOTHING",
+            &[
+                &run.tenant_id,
+                &run.run_id,
+                &lease_token,
+                &artifact.as_str(),
+                &object_key,
+                &ciphertext_sha256,
+                &cleanup_after,
             ],
         )
         .await?;
@@ -7425,6 +7500,166 @@ impl PipelineService {
         Ok(removed)
     }
 
+    /// How long a phase attempt's staged object outlives its own lease
+    /// before the sweep may remove it: `PIPELINE_LEASE_RENEWAL_CAP_FACTOR`
+    /// times `phase`'s configured lease -- the same bound
+    /// `PipelineLeaseRenewal::start` caps a live renewal at, so an attempt
+    /// still legitimately renewing its lease never has its own object swept
+    /// out from under it -- plus one hour of margin for the commit itself to
+    /// land once the phase work is done.
+    fn attempt_artifact_cleanup_after(&self, phase: Phase) -> DateTime<Utc> {
+        truncate_to_microseconds(
+            Utc::now()
+                + self.lease_config.for_phase(phase) * PIPELINE_LEASE_RENEWAL_CAP_FACTOR
+                + Duration::hours(1),
+        )
+    }
+
+    /// Deletes the objects of pipeline phase attempts this run's commits
+    /// never claimed (PR 4): a `staged` row whose `cleanup_after` has
+    /// passed -- an attempt that crashed, lost its lease, or had its commit
+    /// refused -- and the Score objects (`index-command`, `score-neighbors`)
+    /// of a run that finished (`complete` or `failed`) with its index
+    /// invalidation settled (`none` or `complete`, never `pending`: the
+    /// invalidation still needs the stored `index-command` to know what to
+    /// remove) whose submission was withdrawn, by either signal
+    /// (`trace_withdrawals` or `trace_submissions.withdrawn_at`) -- the
+    /// review-time tombstone-only test helper sets only the latter, the real
+    /// withdrawal path sets both.
+    ///
+    /// One tenant transaction, `FOR UPDATE SKIP LOCKED`, up to `limit` rows
+    /// across both selections combined. For each row, the object is deleted
+    /// only when the store still reports it present -- a store whose delete
+    /// errors on an absent object never fails the sweep for a row another
+    /// pass, or the write site's own best-effort delete, already cleared.
+    /// A delete failure (or a presence check that itself errors) logs
+    /// `pipeline_attempt_sweep_delete_failed` and keeps the row for the next
+    /// pass; otherwise a `staged` row is deleted outright, and a withdrawn
+    /// run's `committed` row moves to `deleted` -- the run's own
+    /// `pipeline_runs` row, and its other objects, are never touched here.
+    /// Returns how many rows it removed.
+    pub async fn sweep_attempt_artifacts(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<usize> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+
+        let staged_rows = tx
+            .query(
+                "SELECT run_id, lease_token, artifact, object_key, ciphertext_sha256
+                   FROM pipeline_attempt_artifacts
+                  WHERE tenant_id = $1 AND state = 'staged' AND cleanup_after <= NOW()
+                  ORDER BY cleanup_after, run_id, lease_token, artifact
+                  LIMIT $2
+                  FOR UPDATE SKIP LOCKED",
+                &[&tenant_id, &limit],
+            )
+            .await?;
+        let mut rows: Vec<(bool, Row)> = staged_rows.into_iter().map(|row| (true, row)).collect();
+
+        let remaining = limit.saturating_sub(rows.len() as i64);
+        if remaining > 0 {
+            let withdrawn_rows = tx
+                .query(
+                    "SELECT paa.run_id, paa.lease_token, paa.artifact, paa.object_key,
+                            paa.ciphertext_sha256
+                       FROM pipeline_attempt_artifacts paa
+                       JOIN pipeline_runs pr
+                         ON pr.tenant_id = paa.tenant_id AND pr.run_id = paa.run_id
+                      WHERE paa.tenant_id = $1
+                        AND paa.state = 'committed'
+                        AND paa.artifact IN ('index-command', 'score-neighbors')
+                        AND pr.state IN ('complete', 'failed')
+                        AND pr.index_invalidation_state IN ('none', 'complete')
+                        AND (
+                          EXISTS (
+                            SELECT 1 FROM trace_withdrawals w
+                             WHERE w.tenant_id = pr.tenant_id AND w.submission_id = pr.submission_id
+                          )
+                          OR EXISTS (
+                            SELECT 1 FROM trace_submissions s
+                             WHERE s.tenant_id = pr.tenant_id AND s.submission_id = pr.submission_id
+                               AND s.withdrawn_at IS NOT NULL
+                          )
+                        )
+                      ORDER BY paa.staged_at
+                      LIMIT $2
+                      FOR UPDATE OF paa SKIP LOCKED",
+                    &[&tenant_id, &remaining],
+                )
+                .await?;
+            rows.extend(withdrawn_rows.into_iter().map(|row| (false, row)));
+        }
+
+        let mut removed = 0usize;
+        for (staged, row) in &rows {
+            let run_id: Uuid = row.get("run_id");
+            let lease_token: Uuid = row.get("lease_token");
+            let artifact: String = row.get("artifact");
+            let object_key: String = row.get("object_key");
+            let ciphertext_sha256: String = row.get("ciphertext_sha256");
+            let artifact_kind = PipelineAttemptArtifact::from_db_str(&artifact)
+                .expect("pipeline_attempt_artifacts.artifact is CHECK-constrained")
+                .store_kind();
+
+            let present = self.artifact_store.artifact_present_by_object_key(
+                tenant_storage_ref.as_str(),
+                artifact_kind.clone(),
+                &object_key,
+                &ciphertext_sha256,
+            );
+            let delete_failed = match present {
+                Ok(Some(true)) => {
+                    let receipt = EncryptedTraceArtifactReceipt {
+                        tenant_storage_ref: tenant_storage_ref.as_str().to_string(),
+                        artifact_kind,
+                        object_key: object_key.clone(),
+                        ciphertext_sha256: ciphertext_sha256.clone(),
+                        encrypted_at: Utc::now(),
+                    };
+                    self.artifact_store
+                        .delete_artifact(tenant_storage_ref.as_str(), &receipt)
+                        .is_err()
+                }
+                Ok(_) => false,
+                Err(_) => true,
+            };
+            if delete_failed {
+                tracing::warn!(
+                    label = "pipeline_attempt_sweep_delete_failed",
+                    "a pipeline attempt object could not be deleted; its row is kept \
+                     for the next pass"
+                );
+                continue;
+            }
+            if *staged {
+                tx.execute(
+                    "DELETE FROM pipeline_attempt_artifacts
+                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND artifact = $4
+                        AND state = 'staged'",
+                    &[&tenant_id, &run_id, &lease_token, &artifact],
+                )
+                .await?;
+            } else {
+                tx.execute(
+                    "UPDATE pipeline_attempt_artifacts
+                        SET state = 'deleted', deleted_at = NOW()
+                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND artifact = $4
+                        AND state = 'committed'",
+                    &[&tenant_id, &run_id, &lease_token, &artifact],
+                )
+                .await?;
+            }
+            removed += 1;
+        }
+        tx.commit().await?;
+        Ok(removed)
+    }
+
     /// Loads a run's committed outcome for `phase` and decodes its decision.
     async fn committed_decision<T: serde::de::DeserializeOwned>(
         &self,
@@ -8119,12 +8354,22 @@ impl PipelineService {
                             required_lease_token(run)?,
                         );
                         let wrapper = encode_pipeline_artifact_bytes(content.bytes())?;
-                        let receipt = self.artifact_store.put_serialized_json(
+                        let prepared = self.artifact_store.prepare_serialized_json(
                             pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
                             TraceArtifactKind::ContributionEnvelope,
                             &object_id,
                             &wrapper,
                         )?;
+                        self.store
+                            .stage_attempt_artifact(
+                                run,
+                                PipelineAttemptArtifact::Approved,
+                                &prepared.receipt().object_key,
+                                &prepared.receipt().ciphertext_sha256,
+                                self.attempt_artifact_cleanup_after(Phase::Review),
+                            )
+                            .await?;
+                        let receipt = self.artifact_store.publish_serialized_json(&prepared)?;
                         self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
                         written_receipt = Some(receipt.clone());
                         Some(ApprovedRevision {
@@ -8317,6 +8562,7 @@ impl PipelineService {
         // artifact is stored, rather than at the database CHECK.
         ensure_trace_credit_awards_fit_the_ledger(result.decision.awards())?;
         let lease_token = required_lease_token(run)?;
+        let cleanup_after = self.attempt_artifact_cleanup_after(Phase::Score);
         let command_bytes = match &command {
             None => None,
             Some(command) => {
@@ -8328,8 +8574,11 @@ impl PipelineService {
             }
         };
         // Each stored object is `(artifact, stored ref, hash, object ref,
-        // receipt)`. A write that fails deletes the objects stored before it
-        // (best effort), as a refused commit does below.
+        // receipt)`. Each is staged (PR 4) before it is published. A write
+        // that fails deletes the objects stored before it (best effort), as
+        // a refused commit does below; an attempt that crashes before its
+        // commit leaves every object it stored named by a `staged` row that
+        // `sweep_attempt_artifacts` removes once `cleanup_after` passes.
         let mut written: Vec<(
             &str,
             String,
@@ -8340,22 +8589,42 @@ impl PipelineService {
         for (artifact, bytes, hash) in [
             command_bytes
                 .as_ref()
-                .map(|(bytes, hash)| ("index-command", bytes, hash.clone())),
-            neighbor
-                .as_ref()
-                .map(|bytes| ("score-neighbors", bytes, sha256_prefixed(bytes))),
+                .map(|(bytes, hash)| (PipelineAttemptArtifact::IndexCommand, bytes, hash.clone())),
+            neighbor.as_ref().map(|bytes| {
+                (
+                    PipelineAttemptArtifact::ScoreNeighbors,
+                    bytes,
+                    sha256_prefixed(bytes),
+                )
+            }),
         ]
         .into_iter()
         .flatten()
         {
-            let put = encode_pipeline_artifact_bytes(bytes).and_then(|wrapper| {
-                self.artifact_store.put_serialized_json(
+            // Stage the object's row (PR 4), then publish it. A failure here
+            // deletes the objects this attempt already published, best
+            // effort, as a refused commit does below; their `staged` rows
+            // stay for `sweep_attempt_artifacts`.
+            let put: anyhow::Result<EncryptedTraceArtifactReceipt> = async {
+                let wrapper = encode_pipeline_artifact_bytes(bytes)?;
+                let prepared = self.artifact_store.prepare_serialized_json(
                     tenant.as_str(),
                     TraceArtifactKind::VectorPayload,
-                    &pipeline_attempt_object_id(artifact, run.run_id, lease_token),
+                    &pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token),
                     &wrapper,
-                )
-            });
+                )?;
+                self.store
+                    .stage_attempt_artifact(
+                        run,
+                        artifact,
+                        &prepared.receipt().object_key,
+                        &prepared.receipt().ciphertext_sha256,
+                        cleanup_after,
+                    )
+                    .await?;
+                self.artifact_store.publish_serialized_json(&prepared)
+            }
+            .await;
             let receipt = match put {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -8369,13 +8638,13 @@ impl PipelineService {
             };
             let object_ref = score_object_ref(
                 run,
-                artifact,
+                artifact.as_str(),
                 &receipt,
                 bytes.len(),
                 &self.object_store_name,
             );
             written.push((
-                artifact,
+                artifact.as_str(),
                 format!("{}#{}", receipt.object_key, receipt.ciphertext_sha256),
                 hash,
                 object_ref,
@@ -8430,7 +8699,11 @@ impl PipelineService {
                 // whatever refused the commit -- an inoperable submission, a
                 // stale lease, `settlement_adapter_missing`, or anything else
                 // (Zaki review 1, round 2, finding 4). Best effort: a failed
-                // delete never masks the refusal.
+                // delete never masks the refusal. Their `staged` rows (PR 4)
+                // stay, because the commit that would have committed them
+                // rolled back; once `cleanup_after` passes,
+                // `sweep_attempt_artifacts` finds each object absent and drops
+                // its row, or deletes an object whose delete failed here.
                 if phase_commit_refused(&error) {
                     self.delete_attempt_objects(
                         &run.tenant_id,
@@ -10802,6 +11075,48 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
         .map_err(|_| anyhow::anyhow!("pipeline_artifact_wrapper_invalid"))
 }
 
+/// One of the (at most three) objects a pipeline phase attempt writes under
+/// its own lease-token key (`pipeline_attempt_object_id`): Review's
+/// `approved` content, and Score's `index-command` and `score-neighbors`
+/// (PR 4). `as_str` is the exact string the `artifact` column of
+/// `pipeline_attempt_artifacts` stores and `pipeline_attempt_object_id`
+/// embeds in the object id; `from_db_str` is its inverse for a reader that
+/// only has the column's value, and `store_kind` is the `TraceArtifactKind`
+/// its write site stores it under (`ContributionEnvelope` for `approved`,
+/// `VectorPayload` for the two Score artifacts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineAttemptArtifact {
+    Approved,
+    IndexCommand,
+    ScoreNeighbors,
+}
+
+impl PipelineAttemptArtifact {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::IndexCommand => "index-command",
+            Self::ScoreNeighbors => "score-neighbors",
+        }
+    }
+
+    fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "approved" => Some(Self::Approved),
+            "index-command" => Some(Self::IndexCommand),
+            "score-neighbors" => Some(Self::ScoreNeighbors),
+            _ => None,
+        }
+    }
+
+    fn store_kind(&self) -> TraceArtifactKind {
+        match self {
+            Self::Approved => TraceArtifactKind::ContributionEnvelope,
+            Self::IndexCommand | Self::ScoreNeighbors => TraceArtifactKind::VectorPayload,
+        }
+    }
+}
+
 /// The object id a claim stores one of its run's phase artifacts under
 /// (`artifact` is `approved`, `index-command`, or `score-neighbors`).
 ///
@@ -10813,9 +11128,11 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
 /// matching the stored object. The database refs a commit records stay
 /// deterministic (the approved object ref id is derived from the run id
 /// alone); only the object key moves per claim. A phase attempt that
-/// crashes before its commit leaves its objects unreferenced (not tracked
-/// in PR 2). The receipt's source object is tracked: see
-/// `pipeline_receipt_object_id`.
+/// crashes before its commit, loses its lease, or has its commit refused
+/// leaves its objects named by a `pipeline_attempt_artifacts` `staged` row
+/// (PR 4); `PipelineService::sweep_attempt_artifacts` deletes both once the
+/// row's `cleanup_after` passes. The receipt's source object is tracked
+/// separately: see `pipeline_receipt_object_id`.
 pub fn pipeline_attempt_object_id(artifact: &str, run_id: Uuid, lease_token: Uuid) -> String {
     format!("pipeline-{artifact}-{run_id}-{lease_token}")
 }

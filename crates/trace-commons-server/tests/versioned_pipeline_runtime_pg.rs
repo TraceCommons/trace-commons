@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AtomicUnits, BundlePackage, IndexMembershipDecision, InstrumentAward,
-    InstrumentDescriptor, InstrumentId, InstrumentKind, InstrumentSettlement,
+    InstrumentAwards, InstrumentDescriptor, InstrumentId, InstrumentKind, InstrumentSettlement,
     InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult, ReasonCode, ReviewDecision,
     ReviewEvaluation, ReviewEvidence, ReviewOutput, ReviewRecommendation, ScoreEvidence,
     SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS, TenantStorageRef,
@@ -56,8 +56,8 @@ use trace_commons_server::versioned_pipeline_authority::{
 };
 use trace_commons_server::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle, PipelineBundleConfig,
-    PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
-    pipeline_result_ref,
+    PipelineInstrumentAwardConfig, PipelineTraceCreditEvent, dependency_content_hash,
+    pipeline_operation_ref, pipeline_result_ref,
 };
 use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
@@ -7688,23 +7688,28 @@ async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
 /// The service-level race window: withdraws the submission
 /// *after* the approved object is written and *before* `commit_review`
 /// runs (or, with another `trigger_object_id_prefix`, after that phase
-/// artifact is written and before its phase commits). `put_serialized_json` is a synchronous call the Review arm makes
-/// mid-transaction-free (there is no open database transaction while it
-/// runs), so a wrapper that intercepts exactly that write and drives the
-/// real withdrawal to completion before returning makes the race
-/// deterministic: `commit_review` must always find the
-/// submission already withdrawn by the time it takes the submission row's
-/// lock.
+/// artifact is written and before its phase commits). PR 4 split that write
+/// into `prepare_serialized_json` (in memory, nothing stored) and
+/// `publish_serialized_json` (the actual write, still
+/// mid-transaction-free -- `stage_attempt_artifact`'s own transaction, in
+/// between, has already committed and returned its connection by the time
+/// this runs); `publish_serialized_json` is now the call this wrapper
+/// intercepts. `trigger_withdrawal_once` drives the real withdrawal to
+/// completion before that call returns, which makes the race deterministic:
+/// the phase commit must always find the submission already withdrawn by
+/// the time it takes the submission row's lock. `put_serialized_json` is
+/// intercepted too (unused by the phase write sites now, but still part of
+/// the trait), so a caller that goes through the one-call path is covered
+/// the same way.
 ///
 /// The withdrawal itself runs on its own thread with its own Tokio runtime
 /// and its own single-connection `PgBackend` (never the shared pool the
-/// rest of the test drives): the wrapper's `put_serialized_json` is called
-/// from inside the test's own `#[tokio::test]` runtime, and nesting a
-/// `block_on` inside a running runtime panics, so the withdrawal needs a
-/// runtime of its own. Using a dedicated connection (rather than checking
-/// the shared pool out from a foreign runtime) avoids leaving a connection
-/// whose background I/O task belongs to a runtime that is about to be torn
-/// down.
+/// rest of the test drives): the intercepted call is made from inside the
+/// test's own `#[tokio::test]` runtime, and nesting a `block_on` inside a
+/// running runtime panics, so the withdrawal needs a runtime of its own.
+/// Using a dedicated connection (rather than checking the shared pool out
+/// from a foreign runtime) avoids leaving a connection whose background I/O
+/// task belongs to a runtime that is about to be torn down.
 struct WithdrawOnApprovedWriteStore {
     inner: Arc<dyn TraceArtifactStore>,
     runtime_url: String,
@@ -7714,6 +7719,50 @@ struct WithdrawOnApprovedWriteStore {
     /// The object id prefix of the write that triggers the withdrawal:
     /// `pipeline-approved-` for Review's approved object.
     trigger_object_id_prefix: &'static str,
+    /// Set by `prepare_serialized_json` when the object it just prepared
+    /// matches `trigger_object_id_prefix`, so the later
+    /// `publish_serialized_json` for that same prepared artifact knows to
+    /// trigger. `publish_serialized_json` only sees a
+    /// `PreparedSerializedJsonArtifact`, whose fields are private to the
+    /// store module (by design: a caller outside it cannot forge a receipt
+    /// for an artifact it never encrypted) -- unlike `object_id`, which
+    /// `prepare_serialized_json` still receives directly.
+    preparing_trigger: AtomicBool,
+}
+
+impl WithdrawOnApprovedWriteStore {
+    /// Runs the real withdrawal to completion, once, on its own thread and
+    /// runtime (see the struct doc comment for why). Called from whichever
+    /// call is this store's actual write of the triggering object.
+    fn trigger_withdrawal_once(&self) {
+        if self.triggered.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let runtime_url = self.runtime_url.clone();
+        let tenant_id = self.tenant_id.clone();
+        let submission_id = self.submission_id;
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("build withdrawal runtime");
+            runtime.block_on(async move {
+                let withdrawal_backend =
+                    PgBackend::new(&DatabaseConfig::from_postgres_url(&runtime_url, 1))
+                        .await
+                        .expect("connect a dedicated withdrawal connection");
+                withdrawal_backend
+                    .record_trace_withdrawal(
+                        &tenant_id,
+                        submission_id,
+                        chrono::Utc::now(),
+                        "received",
+                        "not_distributed",
+                    )
+                    .await
+                    .expect("record the race-window withdrawal");
+            });
+        })
+        .join()
+        .expect("withdrawal thread completes");
+    }
 }
 
 impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
@@ -7730,33 +7779,8 @@ impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
             object_id,
             serialized_json,
         )?;
-        if object_id.starts_with(self.trigger_object_id_prefix)
-            && !self.triggered.swap(true, Ordering::SeqCst)
-        {
-            let runtime_url = self.runtime_url.clone();
-            let tenant_id = self.tenant_id.clone();
-            let submission_id = self.submission_id;
-            std::thread::spawn(move || {
-                let runtime = tokio::runtime::Runtime::new().expect("build withdrawal runtime");
-                runtime.block_on(async move {
-                    let withdrawal_backend =
-                        PgBackend::new(&DatabaseConfig::from_postgres_url(&runtime_url, 1))
-                            .await
-                            .expect("connect a dedicated withdrawal connection");
-                    withdrawal_backend
-                        .record_trace_withdrawal(
-                            &tenant_id,
-                            submission_id,
-                            chrono::Utc::now(),
-                            "received",
-                            "not_distributed",
-                        )
-                        .await
-                        .expect("record the race-window withdrawal");
-                });
-            })
-            .join()
-            .expect("withdrawal thread completes");
+        if object_id.starts_with(self.trigger_object_id_prefix) {
+            self.trigger_withdrawal_once();
         }
         Ok(receipt)
     }
@@ -7768,6 +7792,9 @@ impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        if object_id.starts_with(self.trigger_object_id_prefix) {
+            self.preparing_trigger.store(true, Ordering::SeqCst);
+        }
         self.inner.prepare_serialized_json(
             tenant_storage_ref,
             artifact_kind,
@@ -7780,7 +7807,15 @@ impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
         &self,
         prepared: &PreparedSerializedJsonArtifact,
     ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.publish_serialized_json(prepared)
+        // PR 4: each phase write site now calls `prepare_serialized_json`
+        // then `stage_attempt_artifact` then `publish_serialized_json`, so
+        // this -- not `put_serialized_json`, which those write sites no
+        // longer call -- is the actual write the struct doc comment means.
+        let receipt = self.inner.publish_serialized_json(prepared)?;
+        if self.preparing_trigger.swap(false, Ordering::SeqCst) {
+            self.trigger_withdrawal_once();
+        }
+        Ok(receipt)
     }
 
     fn read_artifact(
@@ -7852,6 +7887,7 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
         submission_id,
         triggered: AtomicBool::new(false),
         trigger_object_id_prefix: "pipeline-approved-",
+        preparing_trigger: AtomicBool::new(false),
     });
     let (service, _, _) = test_service(
         backend.clone(),
@@ -7937,6 +7973,7 @@ async fn a_refused_score_commit_deletes_the_objects_its_attempt_wrote() {
         submission_id,
         triggered: AtomicBool::new(false),
         trigger_object_id_prefix: "pipeline-score-neighbors-",
+        preparing_trigger: AtomicBool::new(false),
     });
     let service = compatibility_test_service(
         backend.clone(),
@@ -8674,6 +8711,898 @@ async fn score_commit_refuses_a_submission_withdrawn_after_the_read() {
         .unwrap()
         .expect("the Score attempt runs");
     assert_score_refused_as_inoperable(&service, &tenant, &refused).await;
+}
+
+/// Builds the P1 byte-wrapper `encode_pipeline_artifact_bytes` produces
+/// inside the crate. Duplicated here because that helper is private: the
+/// Task 7 tests below drive the write sites' own `prepare_serialized_json` /
+/// `stage_attempt_artifact` / `publish_serialized_json` sequence directly,
+/// the same shape `withdrawal_during_review_refuses_commit_and_stays_revoked`
+/// already builds its wrapper for.
+fn wrap_pipeline_artifact_bytes(content: &[u8]) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "schema": "trace_commons.pipeline_artifact_bytes.v1",
+        "bytes_base64": base64::engine::general_purpose::STANDARD.encode(content),
+    }))
+    .unwrap()
+}
+
+/// Prepares, stages, and publishes one pipeline attempt artifact for
+/// `run`'s current lease -- the same three calls each of the three
+/// production write sites makes (`prepare_serialized_json`,
+/// `stage_attempt_artifact`, `publish_serialized_json`) -- and returns the
+/// published receipt. Shared by the Task 7 sweep tests below, which drive
+/// `pipeline_attempt_artifacts` at the store level rather than through a
+/// full `PipelineService` policy run.
+async fn stage_and_publish_attempt_artifact(
+    store: &PgPipelineStore,
+    artifacts: &Arc<dyn TraceArtifactStore>,
+    run: &PipelineRunRecord,
+    artifact: PipelineAttemptArtifact,
+    content: &[u8],
+    cleanup_after: chrono::DateTime<chrono::Utc>,
+) -> EncryptedTraceArtifactReceipt {
+    let tenant_ref = pipeline_tenant_storage_ref(&run.tenant_id);
+    let lease_token = run.lease_token.expect("a claim carries a lease");
+    let wrapper = wrap_pipeline_artifact_bytes(content);
+    let object_id = pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token);
+    let kind = if matches!(artifact, PipelineAttemptArtifact::Approved) {
+        TraceArtifactKind::ContributionEnvelope
+    } else {
+        TraceArtifactKind::VectorPayload
+    };
+    let prepared = artifacts
+        .prepare_serialized_json(tenant_ref.as_str(), kind, &object_id, &wrapper)
+        .expect("prepare the attempt artifact");
+    store
+        .stage_attempt_artifact(
+            run,
+            artifact,
+            &prepared.receipt().object_key,
+            &prepared.receipt().ciphertext_sha256,
+            cleanup_after,
+        )
+        .await
+        .expect("stage the attempt artifact");
+    artifacts
+        .publish_serialized_json(&prepared)
+        .expect("publish the attempt artifact")
+}
+
+/// The object ref `commit_score` records for one Score object `artifact`
+/// of `run` (PR 3's `score_object_ref`, private to the crate): a
+/// `worker_intermediate` ref whose id derives from the run id and whose
+/// `created_by_job_id` is the run.
+fn score_object_ref_write(
+    run: &PipelineRunRecord,
+    artifact: PipelineAttemptArtifact,
+    receipt: &EncryptedTraceArtifactReceipt,
+    size_bytes: usize,
+) -> TraceObjectRefWrite {
+    TraceObjectRefWrite {
+        object_ref_id: uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            format!(
+                "tracecommons:pipeline-{}-object:{}",
+                artifact.as_str(),
+                run.run_id
+            )
+            .as_bytes(),
+        ),
+        tenant_id: run.tenant_id.clone(),
+        submission_id: run.submission_id,
+        artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+        object_store: PIPELINE_DEFAULT_OBJECT_STORE_NAME.to_string(),
+        object_key: receipt.object_key.clone(),
+        content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+        encryption_key_ref: format!(
+            "tenant:{}",
+            pipeline_tenant_storage_ref(&run.tenant_id).as_str()
+        ),
+        size_bytes: size_bytes as i64,
+        compression: None,
+        created_by_job_id: Some(run.run_id),
+    }
+}
+
+/// The count and states of `pipeline_attempt_artifacts` rows for one run, as
+/// `(artifact, state)` pairs ordered by artifact and then state -- two rows
+/// can share an `artifact` (a stale attempt and the claim that superseded
+/// it, both `approved`, under different lease tokens), so `state` is a
+/// deterministic tiebreaker rather than leaving their order to the planner.
+async fn attempt_artifact_rows(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Vec<(String, String)> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT artifact, state FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2
+              ORDER BY artifact, state",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    rows.into_iter()
+        .map(|row| (row.get("artifact"), row.get("state")))
+        .collect()
+}
+
+/// Step 2's first test: a Score commit refused because the submission was
+/// withdrawn between the attempt's object writes and its commit leaves both
+/// staged rows behind -- the seam
+/// `score_commit_refuses_a_submission_withdrawn_after_the_read` uses, at the
+/// store level. `sweep_attempt_artifacts` must not touch either row before
+/// `cleanup_after`, and must remove both objects and both rows once it has
+/// passed.
+#[tokio::test]
+async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = service.store();
+    let tenant = format!("score-refused-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+
+    let claimed_review = store
+        .claim_run(&tenant, seeded.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("claim for review");
+    let approved_bytes = b"approved content for score-refused-sweep".to_vec();
+    let approved_receipt = stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed_review,
+        PipelineAttemptArtifact::Approved,
+        &approved_bytes,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await;
+    let approved = ApprovedRevision {
+        revision_id: uuid::Uuid::new_v4(),
+        object_ref: TraceObjectRefWrite {
+            object_ref_id: uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!(
+                    "tracecommons:pipeline-approved-object:{}",
+                    claimed_review.run_id
+                )
+                .as_bytes(),
+            ),
+            tenant_id: tenant.clone(),
+            submission_id: claimed_review.submission_id,
+            artifact_kind: TraceObjectArtifactKind::ReviewSnapshot,
+            object_store: PIPELINE_DEFAULT_OBJECT_STORE_NAME.to_string(),
+            object_key: approved_receipt.object_key.clone(),
+            content_sha256: format!("sha256:{}", approved_receipt.ciphertext_sha256),
+            encryption_key_ref: format!("tenant:{}", tenant_ref.as_str()),
+            size_bytes: approved_bytes.len() as i64,
+            compression: None,
+            created_by_job_id: None,
+        },
+        content_hash: dependency_content_hash(&approved_bytes),
+        source_content_hash: dependency_content_hash(b"source-bytes-for-score-refused-sweep"),
+        worker_identity: "minimal_review_passthrough".to_string(),
+    };
+    let review_outcome = StoredPhaseResult {
+        phase: Phase::Review,
+        decision: serde_json::json!({"approved": true}),
+        evidence: serde_json::json!({}),
+        evaluation: serde_json::json!({}),
+    };
+    let reviewed = store
+        .commit_review(&claimed_review, review_outcome, Some(approved))
+        .await
+        .expect("commit review");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+
+    let claimed_score = store
+        .claim_run(&tenant, reviewed.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("claim for score");
+    let command_bytes = b"{\"score\":\"index-command\"}".to_vec();
+    let command_receipt = stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed_score,
+        PipelineAttemptArtifact::IndexCommand,
+        &command_bytes,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await;
+    let neighbor_bytes = b"{\"score\":\"neighbors\"}".to_vec();
+    let neighbor_receipt = stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed_score,
+        PipelineAttemptArtifact::ScoreNeighbors,
+        &neighbor_bytes,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await;
+
+    let score_lease = claimed_score.lease_token.unwrap();
+    let staged_before = attempt_artifact_rows(&backend, &tenant, claimed_score.run_id).await;
+    assert_eq!(
+        staged_before,
+        vec![
+            ("approved".to_string(), "committed".to_string()),
+            ("index-command".to_string(), "staged".to_string()),
+            ("score-neighbors".to_string(), "staged".to_string()),
+        ],
+        "both Score objects are staged under the Score lease, beside the committed approved row"
+    );
+
+    // Withdraw between the writes above and the refused commit below.
+    withdraw_submission(&backend, &tenant, claimed_score.submission_id).await;
+
+    let outcome_score = StoredPhaseResult {
+        phase: Phase::Score,
+        decision: serde_json::json!({"awards": []}),
+        evidence: serde_json::json!({}),
+        evaluation: serde_json::json!({}),
+    };
+    let command_ref = format!(
+        "{}#{}",
+        command_receipt.object_key, command_receipt.ciphertext_sha256
+    );
+    let neighbor_ref = format!(
+        "{}#{}",
+        neighbor_receipt.object_key, neighbor_receipt.ciphertext_sha256
+    );
+    let result = store
+        .commit_score(
+            &claimed_score,
+            outcome_score,
+            &InstrumentAwards::default(),
+            Some((
+                command_ref.as_str(),
+                dependency_content_hash(&command_bytes).as_str(),
+                &score_object_ref_write(
+                    &claimed_score,
+                    PipelineAttemptArtifact::IndexCommand,
+                    &command_receipt,
+                    command_bytes.len(),
+                ),
+            )),
+            Some((
+                neighbor_ref.as_str(),
+                dependency_content_hash(&neighbor_bytes).as_str(),
+                &score_object_ref_write(
+                    &claimed_score,
+                    PipelineAttemptArtifact::ScoreNeighbors,
+                    &neighbor_receipt,
+                    neighbor_bytes.len(),
+                ),
+            )),
+            &BTreeMap::new(),
+            false,
+            PipelineTraceCreditEvent::PipelineScore,
+        )
+        .await;
+    let error = result.expect_err("commit_score must refuse a withdrawn submission");
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error}"
+    );
+
+    // Before cleanup_after: the sweep removes nothing.
+    let removed_before = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(removed_before, 0, "neither row is due yet");
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, claimed_score.run_id).await,
+        staged_before,
+        "the sweep left both rows untouched"
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &command_receipt.object_key,
+                &command_receipt.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(true)
+    );
+
+    // Move cleanup_after into the past: a direct SQL update, the same time
+    // shortcut `force_due` uses for `pipeline_runs.next_attempt_at`.
+    // `cleanup_after` is not a column the runtime role may UPDATE (V104's
+    // grant is `state, committed_at, deleted_at` only), so this backdate --
+    // a test-only time shortcut, not something production code ever does --
+    // runs as the database owner, the same way `owner_client` backdates
+    // other columns the runtime role cannot touch elsewhere in this file.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_attempt_artifacts SET cleanup_after = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3",
+        &[&tenant, &claimed_score.run_id, &score_lease],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let removed_after = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(removed_after, 2, "both due staged rows are removed");
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, claimed_score.run_id).await,
+        vec![("approved".to_string(), "committed".to_string())],
+        "both staged rows are gone; the committed approved row is untouched"
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &command_receipt.object_key,
+                &command_receipt.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(false),
+        "the index-command object is deleted"
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &neighbor_receipt.object_key,
+                &neighbor_receipt.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(false),
+        "the score-neighbors object is deleted"
+    );
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_orphan_sweep",
+        Some(service.default_package()),
+        serde_json::json!({
+            "removed_before_due": removed_before,
+            "removed_after_due": removed_after,
+        }),
+    );
+}
+
+/// Step 2's second test: a stale worker's Review attempt writes its approved
+/// object and stages its row, but loses the lease before it can commit; a
+/// second claim commits Review for real. The stale attempt's own commit is
+/// then refused (a stale-lease error, the same fence
+/// `stale_lease_cannot_commit_after_reclaim` exercises). The sweep must
+/// leave the committed object and row alone and remove only the stale ones.
+#[tokio::test]
+async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = service.store();
+    let tenant = format!("stale-attempt-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+
+    // Worker A claims the run and stages its approved object, but never
+    // commits before its lease is expired out from under it (a direct
+    // UPDATE, a time shortcut, not a processor call).
+    let claimed_a = store
+        .claim_run(&tenant, seeded.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("worker A claims the run");
+    let lease_a = claimed_a.lease_token.unwrap();
+    let content_a = b"stale worker A's approved content".to_vec();
+    let receipt_a = stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed_a,
+        PipelineAttemptArtifact::Approved,
+        &content_a,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await;
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+        &[&tenant, &seeded.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    // Worker B reclaims the run under a new lease and commits Review for
+    // real, with its own approved object under its own token.
+    let claimed_b = store
+        .claim_run(&tenant, seeded.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("worker B reclaims the run");
+    assert_ne!(claimed_b.lease_token, claimed_a.lease_token);
+    let content_b = b"worker B's committed approved content".to_vec();
+    let receipt_b = stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed_b,
+        PipelineAttemptArtifact::Approved,
+        &content_b,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await;
+    let approved_b = ApprovedRevision {
+        revision_id: uuid::Uuid::new_v4(),
+        object_ref: TraceObjectRefWrite {
+            object_ref_id: uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("tracecommons:pipeline-approved-object:{}", claimed_b.run_id).as_bytes(),
+            ),
+            tenant_id: tenant.clone(),
+            submission_id: claimed_b.submission_id,
+            artifact_kind: TraceObjectArtifactKind::ReviewSnapshot,
+            object_store: PIPELINE_DEFAULT_OBJECT_STORE_NAME.to_string(),
+            object_key: receipt_b.object_key.clone(),
+            content_sha256: format!("sha256:{}", receipt_b.ciphertext_sha256),
+            encryption_key_ref: format!("tenant:{}", tenant_ref.as_str()),
+            size_bytes: content_b.len() as i64,
+            compression: None,
+            created_by_job_id: None,
+        },
+        content_hash: dependency_content_hash(&content_b),
+        source_content_hash: dependency_content_hash(b"source-bytes-for-stale-attempt-sweep"),
+        worker_identity: "minimal_review_passthrough".to_string(),
+    };
+    let outcome_b = StoredPhaseResult {
+        phase: Phase::Review,
+        decision: serde_json::json!({"approved": true}),
+        evidence: serde_json::json!({}),
+        evaluation: serde_json::json!({}),
+    };
+    let reviewed = store
+        .commit_review(&claimed_b, outcome_b, Some(approved_b))
+        .await
+        .expect("worker B commits Review");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+
+    // Worker A wakes up and tries to commit its own stale claim: refused,
+    // since the run is no longer leased under A's token.
+    let approved_a = ApprovedRevision {
+        revision_id: uuid::Uuid::new_v4(),
+        object_ref: TraceObjectRefWrite {
+            object_ref_id: uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("tracecommons:pipeline-approved-object:{}", claimed_a.run_id).as_bytes(),
+            ),
+            tenant_id: tenant.clone(),
+            submission_id: claimed_a.submission_id,
+            artifact_kind: TraceObjectArtifactKind::ReviewSnapshot,
+            object_store: PIPELINE_DEFAULT_OBJECT_STORE_NAME.to_string(),
+            object_key: receipt_a.object_key.clone(),
+            content_sha256: format!("sha256:{}", receipt_a.ciphertext_sha256),
+            encryption_key_ref: format!("tenant:{}", tenant_ref.as_str()),
+            size_bytes: content_a.len() as i64,
+            compression: None,
+            created_by_job_id: None,
+        },
+        content_hash: dependency_content_hash(&content_a),
+        source_content_hash: dependency_content_hash(b"source-bytes-for-stale-attempt-sweep-a"),
+        worker_identity: "minimal_review_passthrough".to_string(),
+    };
+    let outcome_a = StoredPhaseResult {
+        phase: Phase::Review,
+        decision: serde_json::json!({"approved": true}),
+        evidence: serde_json::json!({}),
+        evaluation: serde_json::json!({}),
+    };
+    let stale = store
+        .commit_review(&claimed_a, outcome_a, Some(approved_a))
+        .await
+        .expect_err("worker A's commit must be refused as stale");
+    assert!(
+        stale.to_string().contains("pipeline lease is stale"),
+        "unexpected error: {stale}"
+    );
+
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, seeded.run_id).await,
+        vec![
+            ("approved".to_string(), "committed".to_string()),
+            ("approved".to_string(), "staged".to_string()),
+        ],
+        "worker B's row committed; worker A's stayed staged"
+    );
+
+    // Move the stale attempt's row into the past; worker B's stays alone.
+    // `cleanup_after` is not runtime-role-writable (V104 grants only
+    // `state, committed_at, deleted_at`), so this test-only backdate runs as
+    // the database owner.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_attempt_artifacts SET cleanup_after = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3",
+        &[&tenant, &seeded.run_id, &lease_a],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let removed = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(removed, 1, "only the stale attempt's row is due");
+
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, seeded.run_id).await,
+        vec![("approved".to_string(), "committed".to_string())],
+        "the committed row survives; the stale row is gone"
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::ContributionEnvelope,
+                &receipt_a.object_key,
+                &receipt_a.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(false),
+        "the stale attempt's object is deleted"
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::ContributionEnvelope,
+                &receipt_b.object_key,
+                &receipt_b.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(true),
+        "the committed object is untouched"
+    );
+}
+
+/// Step 2's third test: a complete, indexed run whose submission is
+/// withdrawn afterward. The Score objects stay while the queued index
+/// invalidation is pending -- Score's stored `index-command` is what the
+/// invalidation reads to know which entries to remove -- and are swept only
+/// once the invalidation completes. The approved object, per the brief, is
+/// checked for readability rather than deleted here: if the existing
+/// withdrawal path (`PgPipelineStore::withdraw_submission`) ever starts
+/// leaving it readable, that is a PR 3 finding, not something this task
+/// fixes.
+#[tokio::test]
+async fn withdrawal_deletes_committed_score_objects_after_the_run_ends() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdrawn-score-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "complete");
+    assert!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
+        "the index write left entries"
+    );
+
+    // `FixedScorePolicy` (the minimal reference bundle) never proposes a
+    // `score-neighbors` artifact -- its `ScoreOutput::new` call always passes
+    // `None` for it -- so only `approved` and `index-command` commit here.
+    let committed_before = attempt_artifact_rows(&backend, &tenant, settled.run_id).await;
+    assert_eq!(
+        committed_before,
+        vec![
+            ("approved".to_string(), "committed".to_string()),
+            ("index-command".to_string(), "committed".to_string()),
+        ],
+        "the approved and index-command attempt objects are committed"
+    );
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let score_objects: Vec<(String, String, String)> = tx
+        .query(
+            "SELECT artifact, object_key, ciphertext_sha256 FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2
+                AND artifact IN ('index-command', 'score-neighbors')
+              ORDER BY artifact",
+            &[&tenant, &settled.run_id],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("artifact"),
+                row.get("object_key"),
+                row.get("ciphertext_sha256"),
+            )
+        })
+        .collect();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        score_objects.len(),
+        1,
+        "only index-command is committed here"
+    );
+
+    let outcome = withdraw(&service, &tenant, settled.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    let (_, pending_run_state) = index_invalidation_rows(&backend, &tenant, settled.run_id).await;
+    assert_eq!(pending_run_state, "pending");
+
+    // While the invalidation is pending, the sweep keeps the Score objects.
+    let removed_while_pending = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(
+        removed_while_pending, 0,
+        "the sweep waits for the invalidation to settle"
+    );
+    for (artifact, object_key, ciphertext_sha256) in &score_objects {
+        assert_eq!(
+            artifacts
+                .artifact_present_by_object_key(
+                    tenant_ref.as_str(),
+                    TraceArtifactKind::VectorPayload,
+                    object_key,
+                    ciphertext_sha256,
+                )
+                .unwrap(),
+            Some(true),
+            "{artifact} is kept while the invalidation is pending"
+        );
+    }
+
+    // Once the invalidation completes, the sweep deletes the committed
+    // Score object(s) and marks their row(s) deleted.
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    let (_, completed_run_state) = index_invalidation_rows(&backend, &tenant, settled.run_id).await;
+    assert_eq!(completed_run_state, "complete");
+
+    let removed_after_complete = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(
+        removed_after_complete,
+        score_objects.len(),
+        "every committed Score object is swept once the invalidation completes"
+    );
+    for (artifact, object_key, ciphertext_sha256) in &score_objects {
+        assert_eq!(
+            artifacts
+                .artifact_present_by_object_key(
+                    tenant_ref.as_str(),
+                    TraceArtifactKind::VectorPayload,
+                    object_key,
+                    ciphertext_sha256,
+                )
+                .unwrap(),
+            Some(false),
+            "{artifact} is deleted once the invalidation has completed"
+        );
+    }
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, settled.run_id).await,
+        vec![
+            ("approved".to_string(), "committed".to_string()),
+            ("index-command".to_string(), "deleted".to_string()),
+        ]
+    );
+
+    // The approved object, per the brief: checked for readability, not
+    // deleted here. The existing withdrawal path never touches it, and
+    // every read of it (`load_approved_bytes`) shares the same operability
+    // guard `load_object_bytes` applies to every pipeline object read, so it
+    // is expected to refuse once the submission is withdrawn.
+    let approved_read = service.load_approved_bytes(&settled).await;
+    assert!(
+        approved_read.is_err(),
+        "approved bytes must not be readable through the service once withdrawn -- if this \
+         starts succeeding, PR 3's withdrawal path has changed and that is a PR 3 finding"
+    );
+}
+
+/// Step 2's fourth test: a staged object already deleted by hand. The sweep
+/// must still remove the row, without treating the missing object as a
+/// failure.
+#[tokio::test]
+async fn the_sweep_treats_an_absent_object_as_removed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = service.store();
+    let tenant = format!("absent-object-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, seeded.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("claim for review");
+    let content = b"an object the test deletes by hand".to_vec();
+    let receipt = stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::Approved,
+        &content,
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await;
+
+    assert!(
+        artifacts
+            .delete_artifact(tenant_ref.as_str(), &receipt)
+            .expect("the direct delete itself succeeds")
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::ContributionEnvelope,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(false)
+    );
+
+    let removed = service
+        .sweep_attempt_artifacts(&tenant, 10)
+        .await
+        .expect("the sweep does not fail on an absent object");
+    assert_eq!(removed, 1);
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, claimed.run_id).await,
+        Vec::<(String, String)>::new(),
+        "the row is removed even though its object was already gone"
+    );
+}
+
+/// Step 2's fifth test: the sweep and the table it reads are tenant-scoped.
+/// Sweeping tenant B never touches tenant A's due row, and a direct read
+/// under tenant B's own context sees none of tenant A's rows -- RLS, not
+/// just the sweep's own `WHERE tenant_id = $1`.
+#[tokio::test]
+async fn attempt_artifact_rows_are_tenant_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = service.store();
+    let tenant_a = format!("attempt-scope-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("attempt-scope-b-{}", uuid::Uuid::new_v4());
+
+    let seeded_a = seed_run(&backend, &tenant_a, uuid::Uuid::new_v4()).await;
+    let claimed_a = store
+        .claim_run(&tenant_a, seeded_a.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("claim tenant A's run");
+    stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed_a,
+        PipelineAttemptArtifact::Approved,
+        b"tenant a's approved content",
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await;
+
+    let seeded_b = seed_run(&backend, &tenant_b, uuid::Uuid::new_v4()).await;
+    let claimed_b = store
+        .claim_run(&tenant_b, seeded_b.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("claim tenant B's run");
+    stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed_b,
+        PipelineAttemptArtifact::Approved,
+        b"tenant b's approved content",
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await;
+
+    let removed_b = service
+        .sweep_attempt_artifacts(&tenant_b, 10)
+        .await
+        .unwrap();
+    assert_eq!(removed_b, 1, "only tenant B's own due row is swept");
+
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant_a, seeded_a.run_id).await,
+        vec![("approved".to_string(), "staged".to_string())],
+        "tenant A's row is untouched by tenant B's sweep"
+    );
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant_b, seeded_b.run_id).await,
+        Vec::<(String, String)>::new(),
+        "tenant B's own row is gone"
+    );
+
+    // RLS, not just the sweep's own filter: a direct read under tenant B's
+    // context sees none of tenant A's rows.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant_b).await;
+    let cross_tenant_visible: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_attempt_artifacts WHERE run_id = $1",
+            &[&seeded_a.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(
+        cross_tenant_visible, 0,
+        "tenant B's context reads none of tenant A's rows"
+    );
 }
 
 /// Brief section 2 (M9): Settle's index dispatch holds the submission lock
