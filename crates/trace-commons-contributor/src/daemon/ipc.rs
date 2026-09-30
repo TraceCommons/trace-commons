@@ -4586,8 +4586,14 @@ async fn handle_witness_preview_request_inner(
         id,
         &review.summary.envelope_digest,
         review.artifact.attested_inference().cloned(),
-    ) || queue.save(&shared.store).is_err()
-    {
+    ) || {
+        queue.record_scrub(
+            id,
+            &review.summary.envelope_digest,
+            review.summary.scrub_counts,
+        );
+        queue.save(&shared.store).is_err()
+    } {
         *queue = previous_queue;
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
     }
@@ -4604,12 +4610,12 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     if entry.holds_witness_certificate() {
         return match open_preview(shared, id).await {
             Ok((summary, _)) => {
-                let scrub = super::second_look::Scrub::from_redactions(&summary.redactions);
+                let scrub = super::second_look::Scrub::Scrubbed(summary.scrub_counts);
                 let dropped = summary.subagents_dropped;
                 let mut value =
                     serde_json::to_value(summary).expect("preview summary serialization");
                 super::second_look::insert_fields(&mut value, scrub, dropped);
-                // Re-read: the build above recorded its mark count on the
+                // Re-read: the build above recorded its counts on the pinned
                 // entry, and the entry this response describes should say so.
                 let entry = entry_by_id(shared, req, id).unwrap_or(entry);
                 value["entry"] = entry_value(&entry, shared.admission_evidence());
@@ -4656,8 +4662,6 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             // added only here: this response describes an entry the caller
             // just named, while a cached summary outlives that state.
             let mut value = preview_card_value(&summary);
-            record_scrub(shared, id, &summary.redactions);
-            let entry = entry_by_id(shared, req, id).unwrap_or(entry);
             value["entry"] = entry_value(&entry, shared.admission_evidence());
             Response::ok(req.id, value)
         }
@@ -4688,11 +4692,13 @@ pub(crate) fn preview_card_value(
     summary: &super::preview::PreviewCardSummary,
 ) -> serde_json::Value {
     let mut value = preview_card_fields(summary);
-    // The same three scrub fields `entry_value` carries, from this build:
-    // a card is a preview, so it is always `scrubbed`.
+    // The same scrub fields `entry_value` carries, describing THIS build: a
+    // card is a scrub, so it is always `scrubbed`. A card pins nothing, so
+    // nothing here is recorded on the queue entry -- see
+    // `QueueEntry::scrub`.
     super::second_look::insert_fields(
         &mut value,
-        super::second_look::Scrub::from_redactions(&summary.redactions),
+        super::second_look::Scrub::Scrubbed(summary.scrub_counts),
         summary.subagents_dropped,
     );
     value
@@ -4884,7 +4890,15 @@ async fn build_and_pin_preview(
             attested_bodies,
         )
         .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"))?;
-        record_scrub(shared, entry_id, &built.0.redactions);
+        // The stored artifact this summary was rebuilt from is the one the
+        // entry is pinned to (checked above), so its counts describe the
+        // bytes an approval would send.
+        record_scrub(
+            shared,
+            entry_id,
+            &built.0.envelope_digest,
+            built.0.scrub_counts,
+        );
         return Ok(built);
     }
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
@@ -4913,29 +4927,27 @@ async fn build_and_pin_preview(
     if summary.enrolled {
         pin_previewed_envelope(shared, entry_id, &summary, &envelope);
     }
-    record_scrub(shared, entry_id, &summary.redactions);
     Ok((summary, body, envelope))
 }
 
-/// Record the mark count a preview of `entry_id` just made on its queue
-/// entry, so `list_pending` can say "Scrubbed · 7 marks" -- or "nothing
-/// matched" -- without re-running the pipeline. See
-/// `QueueEntry::scrub_marks` and `second_look`.
+/// Record what the scrubber found in the envelope `entry_id` is pinned to,
+/// so `list_pending` can say "Scrubbed · 7 marks" -- or "worth a second
+/// look" -- without re-running the pipeline. See `QueueEntry::scrub` and
+/// `second_look`.
 ///
-/// Every preview path calls this: the card (`preview`), the scheduled card
-/// (`preview_scheduler::DaemonPreviewRunner`) and the pinning build above.
-/// A count only; no label, value or offset is stored. Best effort, like
-/// `pin_previewed_envelope`: a queue that cannot be saved keeps the count in
-/// memory, and a lost count reads as not yet scrubbed, which is the safe
-/// direction.
+/// Only for the pinned bytes: `Queue::record_scrub` refuses a digest the
+/// entry is not pinned to, so a card, an unenrolled build, or a pin that
+/// failed to write records nothing. Counts only. Best effort, like
+/// `pin_previewed_envelope`: a queue that cannot be saved keeps the record in
+/// memory, and a lost record reads as not yet scrubbed, the safe direction.
 pub(crate) fn record_scrub(
     shared: &DaemonShared,
     entry_id: Uuid,
-    redactions: &std::collections::BTreeMap<String, u32>,
+    envelope_digest: &str,
+    counts: super::second_look::ScrubCounts,
 ) {
-    let marks = crate::redaction_labels::removed_total(redactions);
     let mut queue = shared.queue.lock().expect("queue lock");
-    if queue.record_scrub(entry_id, marks) {
+    if queue.record_scrub(entry_id, envelope_digest, counts) {
         let _ = queue.save(&shared.store);
     }
 }
@@ -5268,7 +5280,7 @@ async fn handle_preview_turns(shared: &DaemonShared, req: &Request) -> Response 
             "envelope_digest": envelope_digest,
             "turn_count": turns.len(),
             "turns": turns,
-            "leaves_this_mac": leaves_this_mac_value(&envelope, turns.len()),
+            "leaves_this_mac": leaves_this_mac_value(shared, id, &envelope, turns.len()),
         }),
     )
 }
@@ -5302,7 +5314,7 @@ pub async fn open_preview_turns(
         "envelope_digest": envelope_digest,
         "turn_count": turns.len(),
         "turns": turns,
-        "leaves_this_mac": leaves_this_mac_value(&envelope, turns.len()),
+        "leaves_this_mac": leaves_this_mac_value(shared, entry_id, &envelope, turns.len()),
     }))
     .map_err(|_| "turns-serialize-failed")
 }
@@ -5318,19 +5330,52 @@ pub async fn open_preview_turns(
 /// envelope cannot be measured, and `line` is then absent: a line quoting a
 /// size nobody measured would be a claim the daemon cannot back.
 fn leaves_this_mac_value(
+    shared: &DaemonShared,
+    entry_id: Uuid,
     envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
     turn_count: usize,
 ) -> serde_json::Value {
     let fields = crate::consent_copy::leaves_this_mac_fields(envelope);
     let size = crate::envelope::envelope_size(envelope).ok();
+    // The folder's own names, from the entry: the basename of the project
+    // root, of the unfolded path, and of the directory the session ran in.
+    // Only absolute paths are scrubbed, so a relative path in the
+    // conversation can still name the folder, and the line must say so
+    // rather than promise it never leaves.
+    let folders: Vec<String> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue
+            .get(entry_id)
+            .map(|e| {
+                [
+                    Some(e.project_key.as_str()),
+                    e.project_path.as_deref(),
+                    e.session_cwd.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.rsplit(['/', '\\']).find(|seg| !seg.is_empty()))
+                .map(str::to_string)
+                .collect()
+            })
+            .unwrap_or_default()
+    };
+    let folder_refs: Vec<&str> = folders.iter().map(String::as_str).collect();
+    let (in_metadata, in_conversation) =
+        crate::consent_copy::folder_named_in(envelope, &folder_refs);
     let mut value = serde_json::json!({
         "fields": fields,
         "would_send_bytes": size,
         "turn_count": turn_count,
+        "folder_named_in_conversation": in_conversation,
+        "folder_named_in_metadata": in_metadata,
     });
     if let Some(bytes) = size {
         value["line"] = serde_json::Value::from(crate::consent_copy::leaves_this_mac_line(
-            bytes, turn_count, &fields,
+            bytes,
+            turn_count,
+            &fields,
+            (in_metadata, in_conversation),
         ));
     }
     value
@@ -5519,6 +5564,9 @@ fn pin_previewed_envelope(
         return;
     }
     if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None) {
+        // The counts go down with the pin they describe; see
+        // `QueueEntry::scrub`.
+        queue.record_scrub(entry_id, &summary.envelope_digest, summary.scrub_counts);
         // A failed queue write leaves the pin in memory and the bytes on
         // disk -- consistent with each other, and the next queue save
         // persists it. Nothing is removed here: the bytes are what the

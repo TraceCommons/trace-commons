@@ -93,11 +93,13 @@ pub enum UploadDecision {
     /// Approved on the contributor's behalf and held for a person by the
     /// Scrub check (K4 of #1118): under Manual, before anything was built;
     /// under Automatic, because the envelope just built is worth a second
-    /// look. Nothing was sent to the commons. `marks` is that envelope's mark
-    /// count, `None` when nothing was built (Manual).
+    /// look. Nothing was sent to the commons. `reasons` are that envelope's
+    /// `second_look` labels, empty when nothing was built (Manual); labels
+    /// only, for the log. No count is recorded on the entry, because the
+    /// envelope the hold was decided on is not pinned.
     HeldForSecondLook {
         reason_label: String,
-        marks: Option<u32>,
+        reasons: Vec<&'static str>,
     },
     /// Network, auth, or transient classifier failure.
     Failed { reason_label: String },
@@ -310,10 +312,10 @@ fn decision_for(
         }
         SubmitOutcome::HeldForSecondLook {
             reason_label,
-            marks,
+            reasons,
         } => UploadDecision::HeldForSecondLook {
             reason_label,
-            marks: Some(marks),
+            reasons,
         },
     }
 }
@@ -478,7 +480,7 @@ impl Uploader<'_, '_> {
         {
             return Ok(UploadDecision::HeldForSecondLook {
                 reason_label: super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string(),
-                marks: None,
+                reasons: Vec::new(),
             });
         }
         if !enrollment_is_live(self.store) {
@@ -1462,15 +1464,25 @@ mod tests {
         assert_eq!(state.uploads_today, 1);
     }
 
-    fn assert_held(decision: &UploadDecision, reason: &str, marks: Option<u32>) {
+    fn assert_held(decision: &UploadDecision, reason: &str, reasons: &[&'static str]) {
         assert_eq!(
             decision,
             &UploadDecision::HeldForSecondLook {
                 reason_label: reason.to_string(),
-                marks,
+                reasons: reasons.to_vec(),
             }
         );
     }
+
+    use crate::daemon::second_look::{
+        REASON_LOOKS_UNSURE, REASON_NOTHING_MATCHED, REASON_SECOND_LOOK_REVIEW_REQUIRED,
+        REASON_TRIMMED_TO_FIT,
+    };
+
+    /// An address the scrubber takes out, and an obfuscated one it leaves
+    /// and the unsure-span detector flags.
+    const ONE_EMAIL_ONE_UNSURE: &str =
+        "please write to alice.smith@example.org or ops [at] acme [dot] io";
 
     /// Manual: an armed session with plenty of marks still waits, before
     /// anything is built.
@@ -1481,7 +1493,7 @@ mod tests {
         assert_held(
             &decision,
             crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL,
-            None,
+            &[],
         );
         assert_eq!(state.uploads_today, 0, "nothing was sent");
     }
@@ -1503,21 +1515,34 @@ mod tests {
         assert_eq!(state.uploads_today, 1);
     }
 
-    /// Automatic: nothing matched, so it waits, and the hold carries the
-    /// count it was decided on.
+    /// Automatic: nothing matched, so it waits.
     #[tokio::test]
     async fn automatic_holds_an_armed_session_where_nothing_matched() {
         let session = session_saying(NOTHING_TO_MARK);
         let (decision, state) = upload_under(&session, armed, automatic()).await;
         assert_held(
             &decision,
-            crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
-            Some(0),
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
         );
         assert_eq!(state.uploads_today, 0, "nothing was sent");
     }
 
-    /// Automatic: trimmed to fit waits even with marks.
+    /// Automatic: something was removed, but the redacted body still holds a
+    /// span that looks like personal data, so it waits.
+    #[tokio::test]
+    async fn automatic_holds_an_armed_session_that_looks_unsure() {
+        let session = session_saying(ONE_EMAIL_ONE_UNSURE);
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_LOOKS_UNSURE],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Automatic: trimmed to fit waits even with a clean scrub.
     #[tokio::test]
     async fn automatic_holds_an_armed_session_trimmed_to_fit() {
         let session = session_saying(ONE_EMAIL);
@@ -1530,18 +1555,11 @@ mod tests {
             automatic(),
         )
         .await;
-        let UploadDecision::HeldForSecondLook {
-            reason_label,
-            marks,
-        } = &decision
-        else {
-            panic!("expected a hold, got {decision:?}");
-        };
-        assert_eq!(
-            reason_label,
-            crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_TRIMMED_TO_FIT],
         );
-        assert!(marks.is_some_and(|m| m > 0), "it was scrubbed: {marks:?}");
         assert_eq!(state.uploads_today, 0, "nothing was sent");
     }
 
@@ -1558,17 +1576,27 @@ mod tests {
     }
 
     /// Not yet scrubbed is never fine. The watcher approved this without a
-    /// preview; the entry's own record even claims marks (a stale count from
-    /// an earlier build). The hold is decided on the envelope actually
-    /// built, which has none.
+    /// preview. The entry may carry nothing, or a record that claims a
+    /// clean scrub of some other build (not the bytes being sent). Either
+    /// way the hold is decided on the envelope actually built, which has
+    /// nothing in it.
     #[tokio::test]
     async fn automatic_never_sends_an_unscrubbed_session_as_fine() {
-        for recorded in [None, Some(5)] {
+        let clean_elsewhere = crate::daemon::second_look::ScrubRecord {
+            envelope_digest: "sha256:another-build".into(),
+            counts: crate::daemon::second_look::ScrubCounts {
+                marks: 5,
+                content_marks: 5,
+                unsure_spans: 0,
+                unsure_unreadable: false,
+            },
+        };
+        for recorded in [None, Some(clean_elsewhere)] {
             let session = session_saying(NOTHING_TO_MARK);
             let (decision, state) = upload_under(
                 &session,
                 |s, cfg| QueueEntry {
-                    scrub_marks: recorded,
+                    scrub: recorded.clone(),
                     ..armed(s, cfg)
                 },
                 automatic(),
@@ -1576,8 +1604,8 @@ mod tests {
             .await;
             assert_held(
                 &decision,
-                crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
-                Some(0),
+                REASON_SECOND_LOOK_REVIEW_REQUIRED,
+                &[REASON_NOTHING_MATCHED],
             );
             assert_eq!(
                 state.uploads_today, 0,
@@ -1595,24 +1623,20 @@ mod tests {
         let cfg = fixture_cfg(&store);
         let entry = armed(&session, &cfg);
         let (decision, _) = upload_under(&session, armed, automatic()).await;
-        let UploadDecision::HeldForSecondLook {
-            reason_label,
-            marks,
-        } = decision
-        else {
+        let UploadDecision::HeldForSecondLook { reason_label, .. } = decision else {
             panic!("expected a hold, got {decision:?}");
         };
 
         // What `drain_approved` does with it.
         let mut q = crate::daemon::queue::Queue::default();
         q.upsert(entry.clone(), 10).unwrap();
-        assert!(q.hold_for_second_look(entry.entry_id, &reason_label, marks));
+        assert!(q.revoke_approval(entry.entry_id, &reason_label));
         let held = q.get(entry.entry_id).unwrap().clone();
         assert!(held.held_for_review());
-        assert_eq!(held.scrub_marks, Some(0), "the scrub is kept");
         assert_eq!(
-            held.second_look_reasons(),
-            vec![crate::daemon::second_look::REASON_NOTHING_MATCHED]
+            held.scrub(),
+            crate::daemon::second_look::Scrub::NotYetScrubbed,
+            "no count is kept without a pin"
         );
         assert!(
             !q.approve_unattended(entry.entry_id, &cfg.consent_scopes, None),

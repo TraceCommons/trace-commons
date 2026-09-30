@@ -1,0 +1,37 @@
+-- Binding a passkey account to near.ai (Z2, slice S3;
+-- docs/superpowers/specs/2026-09-28-native-passkey-identity-design.md,
+-- "Flow 3 -- Connect near.ai").
+--
+-- NUMBERING: S1 is V97, S2 is V98 and S5 (the unbound reaper) claims V99, so
+-- this is V100. If S5 lands with another number, or another slice takes 100
+-- first, renumber this file and its entry in PgBackend's migration list; it
+-- depends only on V97 (trace_account_bindings) and V90
+-- (trace_ingest_runtime).
+--
+-- S3 adds the only writer that changes a binding row after it is created:
+-- POST /v1/account/near-ai/provision/bind/finish. It writes two things to
+-- trace_account_bindings, both through the ingest runtime under forced RLS in
+-- the account's own tenant:
+--
+--   * bind in place: `unbound` -> `bound` with bound_at = now(), in the same
+--     transaction that claims the anchor and links the device and principal;
+--   * the existing-account branch: `unbound` -> `closed` (bound_at stays
+--     NULL), in a transaction that also revokes the account's sessions and
+--     credentials and sets trace_accounts.closed_at.
+--
+-- So the one new grant is UPDATE on exactly those two columns. Not origin,
+-- not tenant_id, not account_id, not created_at: a runtime compromised after
+-- this migration can move a row between states, which the CHECK constraints
+-- bound, but cannot re-key it, re-origin it or backdate it. No DELETE: a row
+-- is only ever removed by the cascade from its account.
+--
+-- Everything else bind writes is a table the NEAR AI login provisioning
+-- already writes through the same runtime (anchors, provisioned devices,
+-- device keys, principals, sessions, account audit), and closing an account
+-- uses revoked_at on sessions and credentials (the revoke paths) and
+-- trace_accounts.closed_at (V90). No grant here repeats or widens those.
+--
+-- Idempotent, and applied by a non-superuser CREATEROLE migrator: it creates
+-- no role, and GRANT on a table needs only its ownership.
+
+GRANT UPDATE (state, bound_at) ON trace_account_bindings TO trace_ingest_runtime;

@@ -450,7 +450,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | — | `pending[]` of queue entries | each entry carries `scrub`, `marks` (only once scrubbed) and `second_look[]`; see "The scrub state and `second_look`" below |
+| `list_pending` | — | `pending[]` of queue entries | each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -893,43 +893,65 @@ redaction except what an external filter would additionally have removed.
 ### The scrub state and `second_look`
 
 The Flow 2 design shows each pending session with its scrub state
-("Scrubbed · 7 marks") and marks some "worth a second look". That heading
-groups two states -- **nothing matched** and **trimmed to fit the byte
-budget** -- and both wait for a person. The daemon decides both, once, in
-`daemon::second_look::second_look_reasons`, and publishes the answer in three
-additive fields on every queue entry (`list_pending`, `snapshot`, the
+("Scrubbed · 7 marks") and marks some "worth a second look": sessions the
+scrubber was unsure about, which wait for a person. The daemon decides that
+once, in `daemon::second_look::second_look_reasons`, and publishes the answer
+in additive fields on every queue entry (`list_pending`, `snapshot`, the
 `entry` inside a `preview` response) and on every preview summary
 (`preview`, `preview_request`'s `ready` summary, the `preview_ready` event):
 
 | Field | Presence | Meaning |
 |---|---|---|
-| `scrub` | always | `scrubbed` once a preview of this entry has run, `not-yet-scrubbed` before. A summary is always `scrubbed`. |
-| `marks` | **only when `scrub` is `scrubbed`** | how many values the scrubber took out: the sum of `redactions` over labels that removed something. A `residual_secret_at:*` survivor is not a mark. |
-| `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched` (`marks` is `0`), `trimmed-to-fit` (`subagents_dropped > 0`) |
+| `scrub` | always | `scrubbed` or `not-yet-scrubbed` (see below). A summary is always `scrubbed`: it describes its own build. |
+| `marks` | **only when `scrubbed`** | how many values the scrubber took out: the sum of `redactions` over labels that removed something. A `residual_secret_at:*` survivor is not a mark. |
+| `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
+| `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
+| `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
 
-**Not yet scrubbed is not zero marks.** Before any preview has run nobody
-has counted, so `marks` is **absent** -- never `0`, never `null` -- and
-`second_look` never contains `nothing-matched`. A shell must not render an
-unscrubbed session as "0 marks" or as clean; test for the key. It can still
-say `trimmed-to-fit`, because the trim is decided when the transcript is
-loaded and recorded at discovery.
+The reasons:
+
+- **`nothing-matched`**: `content_marks` is `0`. The scrubber took out no
+  personal detail -- only file paths, or nothing at all. Path removals are
+  deliberately left out of this test: nearly every real session carries
+  absolute paths, so counting them would make the reason almost never fire,
+  and a session whose only marks were paths has had nothing personal found
+  in it.
+- **`looks-unsure`**: the unsure-span detector found at least one span (an
+  email, phone number or key shape the scrubber did not mark), or could not
+  index the body at all, which counts as unsure.
+- **`trimmed-to-fit`**: `subagents_dropped > 0`; part of the conversation is
+  not in what would be sent.
+
+**Not yet scrubbed is not zero marks.** On a queue entry, `scrub` is
+`scrubbed` only while the entry is pinned to an envelope **and** the counts
+were taken from that exact envelope: they are stored beside its digest, and
+only the pinning build (`preview_body`, `preview_turns`,
+`preview_unsure_spans`, `approve`, a witnessed review) writes them. A card
+(`preview`, `preview_request`) pins nothing and so records nothing, and an
+unenrolled build is never pinned. When the pin is released, replaced or
+revoked -- a re-enrolment, a privacy-filter change, an approval revoked and
+re-offered, a stale pin released after three days -- the entry reads as
+`not-yet-scrubbed` again, with nothing to clear by hand. Before then `marks`,
+`content_marks` and `unsure_spans` are **absent** -- never `0`, never `null`
+-- and `second_look` never contains `nothing-matched` or `looks-unsure`. A
+shell must not render an unscrubbed session as "0 marks" or as clean; test
+for the key. `trimmed-to-fit` can appear before any preview, because the
+trim is decided at discovery.
 
 **An empty `second_look` is an all-clear only when `scrub` is `scrubbed`.**
-For a `not-yet-scrubbed` entry it means no reason is known yet.
+For a `not-yet-scrubbed` entry it means no reason is known yet. A caller that
+would move a session on its own (the Scrub check's Automatic mode) must pin
+and count it first.
 
-The queue entry's count is recorded by every preview path -- `preview`, the
-scheduled card, and the pinning build behind `preview_body` /
-`preview_turns` / `approve` -- for a `Pending` entry, and the latest preview
-wins. The Automatic Scrub check's hold records it too, from the envelope the
-hold was decided on (see `scrub_check` under `set_settings`). It is persisted with the queue, so it survives a restart. Recording it
-publishes no event: a shell that just received a preview already holds the
-same three fields on the summary, and the next `list_pending` or `snapshot`
-carries them on the entry. Under an LLM-backed privacy filter, which does
-not reproduce its own output, the count describes the most recent build.
+Recording the counts publishes no event: the next `list_pending` or
+`snapshot` carries them.
 
-Neither state is a colour: a shell renders the reason, and the design's
-sentence for `nothing-matched` is "0 marks. No detector matched; that is
-why this one waits."
+The Automatic Scrub check's hold (see `scrub_check` under `set_settings`)
+counts the envelope it is about to send in exactly this way, but records
+nothing: that envelope is not pinned, so an entry it holds reads
+`not-yet-scrubbed` until a person's review pins and counts it.
+
+Neither state is a colour: a shell renders the reason.
 
 ### Explicit witnessed review
 
@@ -1013,8 +1035,9 @@ with an object whose `state` is one of:
 | `too_large` | `raw_session_bytes`, `limit_bytes` | refused by admission control; nothing was parsed |
 | `failed` | `code`, `label` | the pipeline refused; same fixed labels `preview` uses |
 
-`summary` also carries `scrub`, `marks` and `second_look` (see "The scrub
-state and `second_look`" above). Beyond those, it carries exactly the fields
+`summary` also carries `scrub`, `marks`, `content_marks`, `unsure_spans`
+and `second_look`, describing that build (see "The scrub state and
+`second_look`" above). Beyond those, it carries exactly the fields
 `preview` returns -- `would_send_bytes`,
 `raw_session_bytes`, `event_count`, `opening_prompt`, `redactions`,
 `pii_labels_present`, `consent_scopes`, `residual_risk`, `envelope_digest`,
@@ -1324,29 +1347,54 @@ shell writes its own claim about what the envelope carries:
 
 ```json
 "leaves_this_mac": {
-  "fields": ["tool", "tool-version", "model", "timing", "outcome", "uses",
-             "contributor-id", "folder-fingerprint"],
+  "fields": ["conversation", "tool", "tool-version", "timing", "outcome",
+             "uses", "redaction-summary", "session-id", "trace-ids",
+             "contributor-id", "tenant", "revocation-handle",
+             "folder-fingerprint", "replay", "scores", "format-version"],
   "would_send_bytes": 19456,
   "turn_count": 12,
-  "line": "19 KB · 12 turns · tool, tool version, model, timing, outcome, the uses you allowed, a pseudonymous contributor id, a one-way fingerprint of the folder. Never the path or the folder name."
+  "folder_named_in_conversation": false,
+  "folder_named_in_metadata": false,
+  "line": "19 KB · 12 turns · tool, tool version, timing, outcome, …. The metadata never carries the path or the folder name."
 }
 ```
 
-`fields` is read off the envelope that would be sent
-(`consent_copy::leaves_this_mac_fields`), in that fixed order, from a closed
-set: `tool`, `tool-version`, `model`, `timing`, `outcome`, `correction`,
-`uses`, `contributor-id`, `folder-fingerprint`. A label appears only when the
-envelope carries it -- `model` only when the transcript named one,
-`correction` only when the contributor wrote one. Labels, never values: not
-the tool name, not the model, not the fingerprint. `would_send_bytes` is the
-envelope's size, `preview`'s figure; `turn_count` equals the method's own.
-`line` is the finished sentence (**DRAFT, NEEDS APPROVAL**), absent only if
-the envelope could not be measured.
+`fields` is derived by **walking every key of the serialized envelope** that
+would be sent (`consent_copy::leaves_this_mac_fields`) and naming it, so it
+is complete by construction. The set is closed and listed in this order:
+`conversation`, `tool`, `tool-version`, `model`, `timing`,
+`usage-and-cost` (per-event token counts and cost), `routing` (routing
+rows), `outcome`, `correction`, `uses`, `redaction-summary`
+(`privacy.redaction_counts` and the rest of the privacy block),
+`session-id` (`conversation_id`, the tool's own session id, and
+`source_session`), `trace-ids`, `contributor-id`, `tenant`
+(`contributor.tenant_scope_ref`), `credit-account`, `revocation-handle`,
+`folder-fingerprint` (`cwd_hash`), `replay`, `scores`, `format-version`, and
+`other`. A label appears only when the envelope carries a non-null key for
+it. A key this build has no name for is reported as `other` -- over-described,
+never dropped -- and a test fails the build on any such key. Labels, never
+values.
+
+`would_send_bytes` is the envelope's size, `preview`'s figure; `turn_count`
+equals the method's own. `line` is the finished sentence (**DRAFT, NEEDS
+APPROVAL**), absent only if the envelope could not be measured.
+
+**What the line promises about the folder is only what is true.** Only
+absolute paths are scrubbed out of the conversation, so a relative path
+(`../myproj/src/main.rs`) or a sentence can still name the folder. The daemon
+looks for the folder's own names (the basenames of the project root, the
+unfolded path and the session's working directory) as standalone,
+case-insensitive words, separately in the conversation (`events`) and in
+everything else, and reports both as booleans:
+
+- the line always says "The metadata never carries the path or the folder
+  name." -- unless `folder_named_in_metadata` is true, when it says "The
+  folder's name appears in what would be sent." instead;
+- when `folder_named_in_conversation` is true it adds "The conversation
+  itself names the folder."
 
 The list does **not** say "project label", which the design's mock does: the
 envelope has carried no project name, in the clear or hashed, since #207.
-What it carries in the folder's place is `cwd_hash`, a one-way fingerprint of
-the working directory, and the list says so.
 
 ### `preview_unsure_spans`
 
@@ -1410,6 +1458,11 @@ whole one.
 
 `preview_unsure_spans` is answered on the async dispatcher only; the
 synchronous entry point refuses it with `preview-unsure-spans-requires-async`.
+
+The C ABI's `tc_preview_unsure_spans_json(handle, entry_id, body_digest,
+err)` returns the same object, from the same function, under the same
+anchoring and refusals, and like `tc_preview_turns_json` refuses an attached
+handle with `preview-requires-embedded`.
 
 ### `list_projects`
 
@@ -1598,8 +1651,8 @@ reason no unattended approval can satisfy:
   the witness again.
 - `second-look-review-required`: a session approved on the contributor's
   behalf that the Automatic Scrub check held because the envelope built for
-  it is worth a second look -- nothing matched, or it was trimmed to fit. Its
-  mark count is kept on the entry. See `scrub_check` under `set_settings`.
+  it is worth a second look -- nothing matched, it looks unsure, or it was
+  trimmed to fit. See `scrub_check` under `set_settings`.
 
 A group control is by definition not a review of one
 session, so held entries are left out for every contributor, invited or not,
@@ -3108,7 +3161,7 @@ they are the second look.
 | Value | Armed folders |
 |---|---|
 | `null` (never chosen, **the default**) | exactly as before this setting existed: every settled session sends on its own, with no second-look hold. |
-| `automatic` | send on their own, **except** a session that is worth a second look (`second_look` is `nothing-matched` or `trimmed-to-fit`, see "The scrub state and `second_look`"). That one is held for a person under `second-look-review-required` and never moves on its own. |
+| `automatic` | send on their own, **except** a session that is worth a second look (`second_look` would be `nothing-matched`, `looks-unsure` or `trimmed-to-fit` for the envelope about to be sent, see "The scrub state and `second_look`"). That one is held for a person under `second-look-review-required` and never moves on its own. |
 | `manual` | nothing is sent without a person. The watcher approves nothing on anyone's behalf, and an approval made before the switch is held under `scrub-check-manual` when the uploader reaches it. |
 
 **Where the Automatic hold happens.** The watcher approves an armed session
@@ -3116,18 +3169,24 @@ without building anything, so at that point nobody has counted its marks: it
 is `not-yet-scrubbed`, and treating that as fine would be wrong. So the hold
 is decided by the uploader, on the envelope it has just built for the send,
 after every refusal and before anything reaches the commons -- the same point
-as the witness's residual-risk hold. The count is therefore exact, and never
-"not yet scrubbed". On the local-redaction path nothing has left the machine
+as the witness's residual-risk hold. It is counted exactly as a pinning
+preview counts (`ScrubCounts::of` over the redaction map and
+`preview::body_of`), so the count is exact and never "not yet scrubbed"; a
+body the unsure-span detector cannot read counts as `looks-unsure`. On the
+local-redaction path nothing has left the machine
 when a session is held. With a witness configured, the witness has already
 seen the session (as with `witness-risk-review-required`): the hold stops the
 upload to the commons, not the send to the enclave.
 
 **What a hold leaves on the entry.** The entry goes back to `Pending` with
-`reason_label` `second-look-review-required`, and the mark count of the
-envelope the hold was decided on is recorded as the entry's `marks`, so
-`list_pending` and `snapshot` show `scrub: "scrubbed"`, the count, and the
-`second_look` reasons without a preview recomputing them. The envelope itself
-is not kept; opening the session builds its preview as for any pending entry.
+`reason_label` `second-look-review-required`. No count is recorded: a count is
+only ever stored beside the digest of the bytes it describes, and the envelope
+the hold was decided on is not pinned. So the held entry reads
+`scrub: "not-yet-scrubbed"`, with `second_look` holding at most
+`trimmed-to-fit`, until the person's review pins and counts it; the reason the
+session waits is its `reason_label`. The daemon logs the second-look labels
+the hold was decided on (labels only). Opening the session builds its preview
+as for any pending entry.
 `second-look-review-required` is one of the reasons a session is held for a
 person (see the group `approve` section): the watcher does not approve it
 again, and a group `approve` leaves it out and counts it in `excluded_held`.

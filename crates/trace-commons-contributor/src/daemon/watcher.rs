@@ -1210,7 +1210,7 @@ fn visit_session(
         attested_inference: None,
         // Not yet scrubbed: nothing has previewed this offer. Never zero,
         // which would read as "nothing matched". See `second_look::Scrub`.
-        scrub_marks: None,
+        scrub: None,
     };
     let entry_id = entry.entry_id;
 
@@ -2142,10 +2142,9 @@ mod tests {
         let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
 
         // What `drain_approved` does with the uploader's HeldForSecondLook.
-        assert!(f.shared.queue.lock().unwrap().hold_for_second_look(
+        assert!(f.shared.queue.lock().unwrap().revoke_approval(
             id,
             super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
-            Some(0)
         ));
 
         f.settle(Utc::now() + chrono::Duration::hours(31)).await;
@@ -2153,7 +2152,6 @@ mod tests {
         let e = f.shared.queue.lock().unwrap().all()[0].clone();
         assert_eq!(e.state, QueueState::Pending, "held, not re-approved");
         assert!(e.held_for_review());
-        assert_eq!(e.scrub_marks, Some(0));
     }
 
     /// Reviewed on #1010: a hold outlived its cause. Turning token

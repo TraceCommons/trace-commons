@@ -104,6 +104,7 @@ async fn owner_session_detail_returns_only_real_status_when_content_is_unavailab
             actor_ref: account_actor_ref(&account_id),
             auth_credential_id: None,
             client_kind: "native".to_string(),
+            session_token_hash: None,
         };
 
         let response = account_public_run_session_detail_handler(
@@ -149,6 +150,7 @@ async fn owner_session_detail_returns_only_real_status_when_content_is_unavailab
         actor_ref: account_actor_ref(&account_id),
         auth_credential_id: None,
         client_kind: "native".to_string(),
+        session_token_hash: None,
     };
     let outsider = account_public_run_session_detail_handler(
         State(state.clone()),
@@ -308,6 +310,7 @@ async fn account_public_run_publish_route_checks_owner_source_and_exact_approval
         actor_ref: account_actor_ref(&account_id),
         auth_credential_id: None,
         client_kind: "native".to_string(),
+        session_token_hash: None,
     };
     let response = Router::new()
         .route(
@@ -464,6 +467,7 @@ async fn account_public_run_publish_route_rejects_unauthorized_and_stale_writes(
         actor_ref: account_actor_ref(&account_id),
         auth_credential_id: None,
         client_kind: "native".to_string(),
+        session_token_hash: None,
     };
 
     let mut cross_origin_headers = HeaderMap::new();
@@ -501,6 +505,7 @@ async fn account_public_run_publish_route_rejects_unauthorized_and_stale_writes(
         actor_ref: account_actor_ref(&other_account_id),
         auth_credential_id: None,
         client_kind: "native".to_string(),
+        session_token_hash: None,
     };
     let unowned = account_public_run_publish_handler(
         State(state.clone()),

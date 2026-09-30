@@ -196,11 +196,12 @@ pub enum SubmitOutcome {
     /// The Automatic Scrub check held this session for a person (K4 of
     /// #1118): the envelope was built and scrubbed, and the scrub is worth a
     /// second look. Nothing was uploaded. Only returned when the caller asked
-    /// for it with [`SubmitContext::hold_unless_scrub_is_clear`]. `marks` is
-    /// the built envelope's mark count, so the caller can keep it.
+    /// for it with [`SubmitContext::hold_unless_scrub_is_clear`]. `reasons`
+    /// are the `second_look` labels of the built envelope, for the caller's
+    /// log; no count is kept, because the envelope is not pinned.
     HeldForSecondLook {
         reason_label: String,
-        marks: u32,
+        reasons: Vec<&'static str>,
     },
 }
 
@@ -229,24 +230,36 @@ fn held_for_review(
 
 /// The Automatic Scrub check's hold, decided (K4 of #1118): `Some` when the
 /// caller asked for it (`hold` carries the entry's `subagents_dropped`) and
-/// the envelope about to be sent is worth a second look. Read off that
-/// envelope's own redaction counts, so the scrub is always a real count,
-/// never "not yet scrubbed".
+/// the envelope about to be sent is worth a second look.
+///
+/// Counted exactly as a preview counts (`second_look::ScrubCounts::of`, over
+/// the redaction map and `preview::body_of`), but on the envelope that would
+/// be sent, so the scrub is always a real count, never "not yet scrubbed".
+/// A body that cannot be serialized for the unsure-span detector is held as
+/// `looks-unsure`: an unreadable body counts as unsure.
 fn held_for_second_look(
     hold: Option<u32>,
     envelope: &TraceContributionEnvelope,
 ) -> Option<SubmitOutcome> {
+    use crate::daemon::second_look::{self, Scrub, ScrubCounts};
     let subagents_dropped = hold?;
-    let scrub =
-        crate::daemon::second_look::Scrub::from_redactions(&envelope.privacy.redaction_counts);
-    let reason_label = crate::daemon::second_look::unattended_hold(
+    let redactions = &envelope.privacy.redaction_counts;
+    let counts = match crate::daemon::preview::body_of(envelope) {
+        Ok(body) => ScrubCounts::of(redactions, &body),
+        Err(_) => ScrubCounts {
+            unsure_unreadable: true,
+            ..ScrubCounts::of(redactions, "")
+        },
+    };
+    let scrub = Scrub::Scrubbed(counts);
+    let reason_label = second_look::unattended_hold(
         crate::daemon::settings::ScrubCheck::Automatic,
         scrub,
         subagents_dropped,
     )?;
     Some(SubmitOutcome::HeldForSecondLook {
         reason_label: reason_label.to_string(),
-        marks: scrub.marks().unwrap_or(0),
+        reasons: second_look::second_look_reasons(scrub, subagents_dropped),
     })
 }
 

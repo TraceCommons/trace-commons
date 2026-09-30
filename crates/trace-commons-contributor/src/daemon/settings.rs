@@ -417,7 +417,7 @@ pub struct DaemonSettings {
     ///
     /// - [`ScrubCheck::Automatic`] -- armed folders send unattended, **except**
     ///   a session `second_look::second_look_reasons` flags (nothing matched,
-    ///   or trimmed to fit). That one is held for a person under
+    ///   looks unsure, or trimmed to fit). That one is held for a person under
     ///   `second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED` and never moves on
     ///   its own. The uploader decides the hold from the envelope it has just
     ///   built, after redaction and before anything is sent, so a session
