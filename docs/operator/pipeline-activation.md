@@ -899,6 +899,10 @@ therefore receive a legacy 429 for a pipeline receipt.
 
 ## Rehearse the switch
 
+This section describes activation tooling that is not in this repository
+yet -- the `versioned_pipeline_pg` test target it names below does not
+exist.
+
 Set `TRACE_COMMONS_PG_TEST_DATABASE_URL` to a PostgreSQL test database.
 Then run this command:
 
@@ -918,6 +922,10 @@ integration tests remain separate schema and recovery checks.
 
 ## Local operator routes
 
+This section describes activation tooling that is not in this repository
+yet -- the `trace-commons-pipeline-local` binary it names below does not
+exist.
+
 `trace-commons-pipeline-local` adds these routes:
 
 - `POST /v1/pipeline/switched-submissions`
@@ -930,8 +938,13 @@ The switched route is the dual-path receipt used during migration.
 
 ## Current completion
 
-None of the redesign is in this repository yet. The versioned pipeline
-contracts are defined; the runtime, qualification, and activation work
-follows in later changes. `SCR-005` stays deferred until the external
-valuation protocol exists. New valuation rules use a later bundle through
-the same qualification and activation process.
+The versioned pipeline contracts, runtime, compatibility capabilities, and
+qualification tooling are in this repository: `pipeline.py test`, `run`,
+`package`, `restore-drill`, and `qualify` (see
+[pipeline-qualification.md](pipeline-qualification.md)) exercise them
+against a real PostgreSQL server today. Activation -- the
+switched-submission route, tenant routing, containment, and
+legacy-writer retirement described above -- arrives with a later change.
+`SCR-005` stays deferred until the external valuation protocol exists. New
+valuation rules use a later bundle through the same qualification and
+activation process.

@@ -85,8 +85,8 @@ PipelineQualificationOK: report=.local/pipeline-qualification-report.json checks
 PipelineQualificationScope: production_promotion_ready=false blockers=local_reference_scorer,local_reference_embedder,synthetic_index,synthetic_settlement,static_bearer_authentication,filesystem_restore_local_only,hf_network_canary_not_run -- local evidence only, not a production promotion
 ```
 
-A full local run, cold build included, takes about 1.5 minutes once
-dependencies are already compiled (measured: 1:27).
+With the workspace already built, a full local run takes about 1.5 minutes
+(measured: 1:27). A cold build adds the compile time on top of that.
 
 ### `pipeline.py restore-drill [--postgres-admin-url URL]`
 

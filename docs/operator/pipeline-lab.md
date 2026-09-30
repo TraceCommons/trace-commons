@@ -95,7 +95,7 @@ all, so digests are stable across runs of the same bundle and corpus).
 
 Top-level fields: `schema`, `check_id` (`pipeline_http_corpus_<label>`),
 `scope: "local_test"`, `production_ready: false`,
-`external_payout_enabled: false`, `safe_blockers` (at least
+`external_payout_enabled: false`, `safe_blockers` (exactly
 `local_test_only`, `local_reference_scorer`, `local_reference_embedder`,
 `synthetic_index`, `synthetic_settlement`, `static_bearer_authentication`),
 `bundle_id`, `package_hash`, `configuration_digest`, `dependency_digest`,
@@ -153,14 +153,18 @@ do not match `--corpus-digest`), `corpus_not_json` /
 file), `corpus_package_and_bundle_conflict` /
 `corpus_package_and_key_required` / `corpus_bundle_or_package_required` (an
 invalid `--bundle`/`--package`/`--trusted-key` combination),
-`hf_source_digest_mismatch` / `hf_order_digest_mismatch` /
-`hf_manifest_contains_raw_trace_text` (the HF export disagrees with the
-pin), `database_check_executed_nothing:<step>` (the scenario database shows
-fewer than 5 committed transactions), `corpus_report_missing` /
-`corpus_report_malformed` / `corpus_report_has_failures` /
-`corpus_evidence_mismatch` (the harness's own report or evidence did not
-check out), and `step_failed:<step>` for any test or export step that
-exited nonzero -- its log is at the path the failure line names. See
+`hf_manifest_contains_raw_trace_text` (the export produced a manifest that
+admits raw trace text), `database_check_executed_nothing:<step>` (the
+scenario database shows fewer than 5 committed transactions),
+`corpus_report_missing` / `corpus_report_malformed` /
+`corpus_report_has_failures` / `corpus_evidence_mismatch` (the harness's own
+report or evidence did not check out), and `step_failed:<step>` for any test
+or export step that exited nonzero -- its log is at the path the failure
+line names. A pin whose source or sample order no longer matches the
+recorded digest fails this way too: the export binary itself refuses with
+"source digest changed" or "sample order digest changed", which surfaces as
+`step_failed:hf_corpus_export`; the step's protected log holds the export's
+own message. See
 [pipeline-qualification.md](pipeline-qualification.md#the-environment-container-digest---postgres-admin-url-one-server-at-a-time)
 for the environment-level labels (`pipeline_tooling_container_*`,
 `pipeline_tooling_admin_url_invalid`, `pipeline_tooling_server_busy`).

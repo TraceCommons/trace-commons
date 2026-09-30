@@ -142,7 +142,7 @@ ingest, in this order:
 2. Restore the encrypted object store.
 3. Rebuild the pipeline's index: `POST /v1/workers/pipeline/index-rebuild`,
    behind the same vector worker bearer-token gate as `main`'s vector index
-   worker route (see [`env-reference.md`](env-reference.md) for the
+   worker route (see [`operator-binaries.md`](operator-binaries.md) for the
    credential). It replays every complete, included run's authoritative
    commands through the service's own index writer and returns a hash-only
    report. It creates no outcomes and no credit, so it is safe to run again
