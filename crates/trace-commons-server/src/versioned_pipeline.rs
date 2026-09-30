@@ -4487,6 +4487,20 @@ async fn reset_failed_index_invalidations_on_tx(
     Ok(u64::try_from(reset.len()).unwrap_or(u64::MAX))
 }
 
+/// Whether a failed phase commit certainly committed nothing: the store
+/// refused it (a `Constraint` label -- a stale lease,
+/// `settlement_adapter_missing`, `submission_inoperable` -- or another
+/// refusal before the commit), no connection was had, or the database
+/// answered with an error, which aborts the transaction. A connection lost
+/// with no answer may have lost it after the `COMMIT` landed, so the
+/// objects the attempt wrote are kept then: a committed row may name them.
+fn phase_commit_refused(error: &DatabaseError) -> bool {
+    match error {
+        DatabaseError::Postgres(error) => error.as_db_error().is_some(),
+        _ => true,
+    }
+}
+
 fn stale_lease_error() -> DatabaseError {
     DatabaseError::Constraint("pipeline lease is stale".to_string())
 }
@@ -7133,39 +7147,36 @@ impl PipelineService {
                     .await;
                 let updated = match commit_result {
                     Ok(updated) => updated,
-                    // The submission became inoperable (a
-                    // withdrawal, expiry, or purge) in the window between
-                    // this attempt's artifact write and the commit above.
-                    // The store's `Display` prefixes every `Constraint`
-                    // error ("Constraint violation: ..."), which would not
-                    // match the safe-label allowlist verbatim (the same
-                    // reason `commit_score_phase` re-raises
-                    // `settlement_adapter_missing` bare); re-raise this one
-                    // the same way. Delete the approved object this attempt
-                    // wrote -- best effort, and never let a failed delete
-                    // mask the real refusal.
-                    Err(DatabaseError::Constraint(ref label))
-                        if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
-                    {
-                        if let Some(receipt) = written_receipt.as_ref() {
-                            if self
-                                .artifact_store
-                                .delete_artifact(
-                                    pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
-                                    receipt,
-                                )
-                                .is_err()
-                            {
-                                tracing::warn!(
-                                    label = "review_approved_object_delete_failed",
-                                    "best-effort delete of an approved object failed after \
-                                     commit_review refused an inoperable submission"
-                                );
-                            }
+                    Err(error) => {
+                        // Nothing committed, so no object ref names the
+                        // approved object this attempt wrote under its own
+                        // lease key: delete it, whatever refused the commit
+                        // -- an inoperable submission, a stale lease, or
+                        // anything else (Zaki review 1, round 2, finding 4).
+                        // Best effort: a failed delete never masks the
+                        // refusal.
+                        if phase_commit_refused(&error) {
+                            self.delete_attempt_objects(
+                                &run.tenant_id,
+                                written_receipt.iter(),
+                                "review_approved_object_delete_failed",
+                            );
                         }
-                        return Err(anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL));
+                        // The store's `Display` prefixes every `Constraint`
+                        // error ("Constraint violation: ..."), which would not
+                        // match the safe-label allowlist verbatim (the same
+                        // reason `commit_score_phase` re-raises
+                        // `settlement_adapter_missing` bare); re-raise the
+                        // inoperable refusal the same way.
+                        return Err(match error {
+                            DatabaseError::Constraint(label)
+                                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                            {
+                                anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+                            }
+                            error => error.into(),
+                        });
                     }
-                    Err(error) => return Err(error.into()),
                 };
                 self.inject_crash(PipelineCrashPoint::AfterReviewCommit)?;
                 Ok(updated)
@@ -7227,10 +7238,15 @@ impl PipelineService {
             }
         };
         // Each stored object is `(artifact, stored ref, hash, object ref,
-        // receipt)`. A write that fails leaves the objects stored before it;
-        // those are not tracked, like the objects of an attempt that crashes
-        // before its commit.
-        let mut written = Vec::new();
+        // receipt)`. A write that fails deletes the objects stored before it
+        // (best effort), as a refused commit does below.
+        let mut written: Vec<(
+            &str,
+            String,
+            String,
+            TraceObjectRefWrite,
+            EncryptedTraceArtifactReceipt,
+        )> = Vec::new();
         for (artifact, bytes, hash) in [
             command_bytes
                 .as_ref()
@@ -7242,13 +7258,25 @@ impl PipelineService {
         .into_iter()
         .flatten()
         {
-            let wrapper = encode_pipeline_artifact_bytes(bytes)?;
-            let receipt = self.artifact_store.put_serialized_json(
-                tenant.as_str(),
-                TraceArtifactKind::VectorPayload,
-                &pipeline_attempt_object_id(artifact, run.run_id, lease_token),
-                &wrapper,
-            )?;
+            let put = encode_pipeline_artifact_bytes(bytes).and_then(|wrapper| {
+                self.artifact_store.put_serialized_json(
+                    tenant.as_str(),
+                    TraceArtifactKind::VectorPayload,
+                    &pipeline_attempt_object_id(artifact, run.run_id, lease_token),
+                    &wrapper,
+                )
+            });
+            let receipt = match put {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    self.delete_attempt_objects(
+                        &run.tenant_id,
+                        written.iter().map(|(.., receipt)| receipt),
+                        "score_object_delete_failed",
+                    );
+                    return Err(error);
+                }
+            };
             let object_ref = score_object_ref(
                 run,
                 artifact,
@@ -7287,43 +7315,61 @@ impl PipelineService {
             .await;
         let updated = match commit_result {
             Ok(updated) => updated,
-            // The store's Display prefixes every Constraint error
-            // ("Constraint violation: ..."), which would not match decision
-            // P2's fixed allowlist verbatim; re-raise the labels the
-            // allowlist expects as bare anyhow errors.
-            Err(DatabaseError::Constraint(ref label))
-                if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL =>
-            {
-                return Err(anyhow::anyhow!(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL));
-            }
-            // The submission became inoperable (a withdrawal, expiry, or
-            // purge) between this attempt's read and its commit, so nothing
-            // committed and no object ref names these objects. Delete every
-            // object this attempt wrote, as Review deletes its approved
-            // object: best effort, and a failed delete never masks the
-            // refusal.
-            Err(DatabaseError::Constraint(ref label))
-                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
-            {
-                for (.., receipt) in &written {
-                    if self
-                        .artifact_store
-                        .delete_artifact(tenant.as_str(), receipt)
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            label = "score_object_delete_failed",
-                            "best-effort delete of a Score object failed after commit_score \
-                             refused an inoperable submission"
-                        );
-                    }
+            Err(error) => {
+                // Nothing committed, so no object ref names the objects this
+                // attempt wrote under its own lease key: delete every one,
+                // whatever refused the commit -- an inoperable submission, a
+                // stale lease, `settlement_adapter_missing`, or anything else
+                // (Zaki review 1, round 2, finding 4). Best effort: a failed
+                // delete never masks the refusal.
+                if phase_commit_refused(&error) {
+                    self.delete_attempt_objects(
+                        &run.tenant_id,
+                        written.iter().map(|(.., receipt)| receipt),
+                        "score_object_delete_failed",
+                    );
                 }
-                return Err(anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL));
+                // The store's Display prefixes every Constraint error
+                // ("Constraint violation: ..."), which would not match
+                // decision P2's fixed allowlist verbatim; re-raise the labels
+                // the allowlist expects as bare anyhow errors.
+                return Err(match error {
+                    DatabaseError::Constraint(label)
+                        if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL
+                            || label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                    {
+                        anyhow::anyhow!(label)
+                    }
+                    error => error.into(),
+                });
             }
-            Err(error) => return Err(error.into()),
         };
         self.inject_crash(PipelineCrashPoint::AfterScoreCommit)?;
         Ok(updated)
+    }
+
+    /// Deletes objects a phase attempt wrote that no committed row names,
+    /// best effort: a failed delete is logged under `label` alone and never
+    /// masks the error that led here.
+    fn delete_attempt_objects<'a>(
+        &self,
+        tenant_id: &str,
+        receipts: impl Iterator<Item = &'a EncryptedTraceArtifactReceipt>,
+        label: &'static str,
+    ) {
+        let tenant = pipeline_tenant_storage_ref(tenant_id);
+        for receipt in receipts {
+            if self
+                .artifact_store
+                .delete_artifact(tenant.as_str(), receipt)
+                .is_err()
+            {
+                tracing::warn!(
+                    label,
+                    "best-effort delete of a phase attempt's object failed"
+                );
+            }
+        }
     }
 
     /// Settle's first half (brief 3B/3C, port 4547 to 4723 under the #971

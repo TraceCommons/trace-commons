@@ -21494,3 +21494,280 @@ async fn an_enabled_payout_needs_an_authenticated_adapter_when_main_requires_one
             .expect("no credential is needed without the flag");
     }
 }
+
+/// An artifact store that runs `hook` once, right after the first write whose
+/// object id starts with `trigger_object_id_prefix`, and before the write
+/// returns: between a phase's object write and its commit.
+struct RunOnWriteStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    trigger_object_id_prefix: &'static str,
+    triggered: AtomicBool,
+    hook: Box<dyn Fn() + Send + Sync>,
+}
+
+impl TraceArtifactStore for RunOnWriteStore {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let receipt = self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )?;
+        if object_id.starts_with(self.trigger_object_id_prefix)
+            && !self.triggered.swap(true, Ordering::SeqCst)
+        {
+            (self.hook)();
+        }
+        Ok(receipt)
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// A hook that expires `run_id`'s current lease, as the database owner, on a
+/// thread and runtime of its own (the write that runs it is called from
+/// inside the test's runtime): the phase's commit then finds its lease stale.
+fn expire_the_lease_hook(tenant_id: String, run_id: uuid::Uuid) -> Box<dyn Fn() + Send + Sync> {
+    Box::new(move || {
+        let tenant_id = tenant_id.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("build the expiry runtime");
+            runtime.block_on(async move {
+                owner_client()
+                    .await
+                    .execute(
+                        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+                          WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+                        &[&tenant_id, &run_id],
+                    )
+                    .await
+                    .expect("expire the run's lease");
+            });
+        })
+        .join()
+        .expect("the expiry thread completes");
+    })
+}
+
+/// Finding 4: a phase commit refused for any reason -- here a stale lease,
+/// not an inoperable submission -- deletes every object the attempt wrote,
+/// so no copy is left under a per-lease key no object ref names. Review's
+/// approved object goes; the attempt is recorded as an uncharged lease
+/// expiry, and the retry writes and commits its own.
+#[tokio::test]
+async fn a_review_commit_refused_for_a_stale_lease_leaves_no_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("review-stale-objects-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run_id_cell = Arc::new(std::sync::OnceLock::<uuid::Uuid>::new());
+    let hook_tenant = tenant.clone();
+    let hook_run = run_id_cell.clone();
+    let store = Arc::new(RunOnWriteStore {
+        inner: artifact_store(&dir),
+        trigger_object_id_prefix: "pipeline-approved-",
+        triggered: AtomicBool::new(false),
+        hook: Box::new(move || {
+            expire_the_lease_hook(hook_tenant.clone(), *hook_run.get().expect("the run id"))()
+        }),
+    });
+    let (service, _, _) = test_service(
+        backend.clone(),
+        store as Arc<dyn TraceArtifactStore>,
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    run_id_cell.set(created.run_id).unwrap();
+    assert_eq!(count_files_under(dir.path()), 1, "the source envelope");
+
+    let expired = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the stale Review commit is recorded");
+    assert_eq!(expired.state, PipelineRunState::Retry);
+    assert_eq!(
+        expired.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        1,
+        "the refused attempt's approved object is deleted"
+    );
+
+    force_due(&backend, &tenant, created.run_id).await;
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the retry commits Review");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the retry's approved object"
+    );
+}
+
+/// Finding 4, for Score: the objects it wrote (its index command, and its
+/// neighbour set when it has one) go when the commit is refused for a
+/// stale lease.
+#[tokio::test]
+async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("score-stale-objects-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run_id_cell = Arc::new(std::sync::OnceLock::<uuid::Uuid>::new());
+    let hook_tenant = tenant.clone();
+    let hook_run = run_id_cell.clone();
+    let store = Arc::new(RunOnWriteStore {
+        inner: artifact_store(&dir),
+        trigger_object_id_prefix: "pipeline-index-command-",
+        triggered: AtomicBool::new(false),
+        hook: Box::new(move || {
+            expire_the_lease_hook(hook_tenant.clone(), *hook_run.get().expect("the run id"))()
+        }),
+    });
+    let (service, _, _) = test_service(
+        backend.clone(),
+        store as Arc<dyn TraceArtifactStore>,
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    run_id_cell.set(created.run_id).unwrap();
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review commits");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the source envelope and the approved object"
+    );
+
+    let expired = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the stale Score commit is recorded");
+    assert_eq!(expired.state, PipelineRunState::Retry);
+    assert_eq!(
+        expired.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the refused attempt's Score objects are deleted"
+    );
+
+    force_due(&backend, &tenant, created.run_id).await;
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the retry commits Score");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(scored.index_command_ref.is_some());
+    assert_eq!(
+        count_files_under(dir.path()),
+        2 + usize::from(scored.index_command_ref.is_some())
+            + usize::from(scored.score_neighbor_ref.is_some()),
+        "only the retry's own Score objects"
+    );
+}
