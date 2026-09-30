@@ -8,7 +8,7 @@
 //! qualification. Detailed reports and drill output stay in operator-owned
 //! evidence storage.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -388,20 +388,27 @@ pub fn evaluate_promotion(
         }
     }
     blockers.sort();
-    let canonical = serde_json::to_vec(&(
-        "trace_commons.pipeline_promotion.v1",
-        now.timestamp(),
-        &blockers,
-        evidence
-            .iter()
-            .map(|item| (&item.check.check_id, &item.check.evidence_hash))
-            .collect::<BTreeSet<_>>(),
-    ))
-    .map_err(|_| "qualification_evidence_invalid".to_string())?;
+    let checks = evidence
+        .iter()
+        .map(|item| {
+            (
+                item.check.check_id.clone(),
+                item.check.evidence_hash.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let canonical = serde_json::json!({
+        "schema": "trace_commons.pipeline_promotion.v1",
+        "evaluated_at": now.timestamp(),
+        "blockers": blockers.clone(),
+        "checks": checks,
+    });
+    let evidence_digest =
+        evidence_hash(&canonical).map_err(|_| "qualification_evidence_invalid".to_string())?;
     Ok(PromotionDecision {
         ready: blockers.is_empty(),
         evaluated_at: now,
-        evidence_hash: sha256_prefixed(&canonical),
+        evidence_hash: evidence_digest,
         safe_blockers: blockers,
     })
 }
@@ -901,6 +908,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(evaluate_promotion(&evidence, now).unwrap().ready);
+
+        let reversed = evidence.iter().rev().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            evaluate_promotion(&evidence, now).unwrap().evidence_hash,
+            evaluate_promotion(&reversed, now).unwrap().evidence_hash
+        );
 
         let stale = evaluate_promotion(&evidence, now + Duration::hours(2)).unwrap();
         assert!(!stale.ready);
