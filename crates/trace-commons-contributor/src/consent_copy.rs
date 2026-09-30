@@ -1443,11 +1443,14 @@ pub const DISCLOSURE_UNREADABLE: &str = "Where sessions go could not be read.";
 /// Approved by Zaki with #1102.
 pub const DISCLOSURE_SESSION_UNREADABLE: &str = "Where this session goes could not be read.";
 
-/// [`DISCLOSURE_UNREADABLE`] and [`DISCLOSURE_SESSION_UNREADABLE`], for a
-/// shell that cannot hold them as constants (the C ABI's
-/// `tc_route_disclosure_unreadable_copy`).
+/// [`DISCLOSURE_UNREADABLE`] and [`DISCLOSURE_SESSION_UNREADABLE`], with the
+/// section's [`DISCLOSURE_TITLE`] so an unreadable panel is still named, for
+/// a shell that cannot hold them as constants (the C ABI's
+/// `tc_route_disclosure_unreadable_copy`, Tauri's
+/// `route_disclosure_unreadable_copy`).
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct DisclosureUnreadableCopy {
+    pub title: &'static str,
     pub panel: &'static str,
     pub session: &'static str,
 }
@@ -1455,6 +1458,7 @@ pub struct DisclosureUnreadableCopy {
 #[must_use]
 pub fn disclosure_unreadable_copy() -> DisclosureUnreadableCopy {
     DisclosureUnreadableCopy {
+        title: DISCLOSURE_TITLE,
         panel: DISCLOSURE_UNREADABLE,
         session: DISCLOSURE_SESSION_UNREADABLE,
     }
@@ -1972,6 +1976,17 @@ mod tests {
         origin["witness"]["origin"] = serde_json::json!("an_operator");
         assert!(route_disclosure_for_wire(&origin).is_none());
         assert!(route_disclosure_for_wire(&serde_json::json!("witness")).is_none());
+    }
+
+    /// An unreadable disclosure keeps its title: a shell that could not read
+    /// the route still names the section, from the core rather than a
+    /// literal of its own.
+    #[test]
+    fn the_unreadable_copy_carries_the_disclosure_title() {
+        let copy = disclosure_unreadable_copy();
+        assert_eq!(copy.title, DISCLOSURE_TITLE);
+        assert_eq!(copy.panel, DISCLOSURE_UNREADABLE);
+        assert_eq!(copy.session, DISCLOSURE_SESSION_UNREADABLE);
     }
 
     #[test]

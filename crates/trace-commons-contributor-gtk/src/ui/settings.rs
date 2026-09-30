@@ -3127,9 +3127,8 @@ fn text_of(view: &gtk::TextView) -> String {
 }
 
 /// K11: ask the daemon what leaves this machine and draw the core's words
-/// for it. A failed call is drawn as unreadable, never as a route, and
-/// without the section title, which would head a disclosure that is not
-/// there.
+/// for it. A failed call is drawn as unreadable, never as a route, under
+/// the core's section title so the section is still named.
 fn render_disclosure(app: &Rc<App>) {
     app.call("route_disclosure", serde_json::json!({}), |app, result| {
         let panel = crate::disclosure::panel(result.as_ref().ok());
@@ -3137,9 +3136,7 @@ fn render_disclosure(app: &Rc<App>) {
         while let Some(child) = section.first_child() {
             section.remove(&child);
         }
-        if let Some(title) = &panel.title {
-            section.append(&style::section(title));
-        }
+        section.append(&style::section(&panel.title));
         let card = style::card(gtk::Orientation::Vertical, space::S);
         super::fill_disclosure_rows(&card, &panel.rows);
         section.append(&card);

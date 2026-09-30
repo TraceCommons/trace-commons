@@ -3200,7 +3200,7 @@ pub unsafe extern "C" fn tc_route_disclosure_copy(facts_json: *const c_char) -> 
 }
 
 /// What a disclosure surface says when [`tc_route_disclosure_copy`] answers
-/// NULL: `panel` and `session`. Owned JSON; free it with [`tc_string_free`].
+/// NULL: `title`, `panel` and `session`. Owned JSON; free it with [`tc_string_free`].
 /// NULL only on a caught panic.
 #[unsafe(no_mangle)]
 pub extern "C" fn tc_route_disclosure_unreadable_copy() -> *mut c_char {
