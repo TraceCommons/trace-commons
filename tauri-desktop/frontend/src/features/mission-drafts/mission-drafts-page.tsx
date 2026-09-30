@@ -1,5 +1,3 @@
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRef } from "react";
 import { useForm } from "react-hook-form";
@@ -8,6 +6,7 @@ import { ConfirmActionButton } from "../../components/confirm-action-button";
 import { useContributorDisclosureCopy } from "../../lib/tauri/use-contributor-copy";
 import { type MissionImportFormValues, missionImportFormSchema } from "./forms";
 import { useMissionDrafts } from "./hooks/use-mission-drafts";
+import { ButtonPrimary, GlassButton, Input } from "@/design-system";
 
 export function MissionDraftsPage() {
   const drafts = useMissionDrafts();
@@ -41,22 +40,20 @@ export function MissionDraftsPage() {
           published, or funded.
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => input.current?.click()}
             disabled={drafts.state === "busy"}
           >
             {drafts.state === "busy" ? "Working…" : "Choose proposal"}
-          </Button>
-          <Button
-            className="tc-btn tc-btn--glass"
+          </ButtonPrimary>
+          <GlassButton
             type="button"
             onClick={() => void drafts.refresh()}
             disabled={drafts.state === "busy"}
           >
             Refresh drafts
-          </Button>
+          </GlassButton>
         </div>
         <Input
           {...fileField}
@@ -173,7 +170,7 @@ export function MissionDraftsPage() {
         ) : (
           <div className="mt-3 grid gap-px">
             {drafts.drafts.map((draft) => (
-              <Button
+              <button
                 className="grid w-full grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg border-0 bg-transparent px-1.5 py-2 text-left text-inherit hover:bg-white/5 tc-hairline-bottom"
                 type="button"
                 key={draft.id}
@@ -191,12 +188,12 @@ export function MissionDraftsPage() {
                   <strong>{draft.status}</strong>
                   <span>Review required</span>
                 </span>
-              </Button>
+              </button>
             ))}
           </div>
         )}
       </section>
-      <section className="tc-card bg-muted/70">
+      <section className="tc-card bg-tc-tint/70">
         <span className="mb-1.5 block tc-eyebrow">
           AUTHORITY
         </span>

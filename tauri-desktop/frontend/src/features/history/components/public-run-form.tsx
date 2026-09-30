@@ -1,8 +1,3 @@
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useController, useForm } from "react-hook-form";
@@ -17,6 +12,7 @@ import type {
   PublicRunEditorInput,
   PublicRunReusePermission,
 } from "../types";
+import { ButtonPrimary, Checkbox, GlassButton, Input, Radio, RadioGroup, TextArea } from "@/design-system";
 
 type Props = {
   detail: HistoryDetail;
@@ -93,7 +89,7 @@ export function PublicRunForm({
         Choose exact fields that become public. Publication is separate from
         Commons contribution and profile attribution.
       </p>
-      <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-muted-foreground">
+      <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-tc-secondary">
         Page title
         <span className="tc-mono tc-text-tertiary">
           {title.length}/100
@@ -110,12 +106,12 @@ export function PublicRunForm({
           message={errors.title?.message}
         />
       </label>
-      <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-muted-foreground">
+      <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-tc-secondary">
         Public outcome summary
         <span className="tc-mono tc-text-tertiary">
           {outcomeSummary.length}/600
         </span>
-        <Textarea
+        <TextArea
           {...form.register("outcome_summary")}
           rows={4}
           maxLength={600}
@@ -130,12 +126,12 @@ export function PublicRunForm({
           message={errors.outcome_summary?.message}
         />
       </label>
-      <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-muted-foreground">
+      <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-tc-secondary">
         Reusable instructions
         <span className="tc-mono tc-text-tertiary">
           {workflow.length}/4000
         </span>
-        <Textarea
+        <TextArea
           {...form.register("workflow")}
           rows={6}
           maxLength={4000}
@@ -154,7 +150,7 @@ export function PublicRunForm({
         <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
           <Checkbox
             checked={correction.field.value !== null}
-            onCheckedChange={(checked) =>
+            onChange={(checked) =>
               correction.field.onChange(
                 checked === true ? detail.human_correction : null,
               )
@@ -191,7 +187,7 @@ export function PublicRunForm({
             >
               <Checkbox
                 checked={checked}
-                onCheckedChange={() => toggleEvidence(item.event_id, item.excerpt)}
+                onChange={() => toggleEvidence(item.event_id, item.excerpt)}
                 disabled={
                   working || (!checked && evidence.field.value.length >= 4)
                 }
@@ -216,15 +212,15 @@ export function PublicRunForm({
         <legend>Reuse permission</legend>
         <RadioGroup
           className="gap-px"
-          value={reusePermission.field.value}
-          onValueChange={(value) => reusePermission.field.onChange(value)}
+          value={reusePermission.field.value ?? ""}
+          onChange={(value) => reusePermission.field.onChange(value)}
         >
         {permissions.map((permission) => (
           <label
             className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal"
             key={permission.value}
           >
-            <RadioGroupItem
+            <Radio
               value={permission.value}
               disabled={working}
               aria-invalid={Boolean(errors.reuse_permission)}
@@ -244,7 +240,7 @@ export function PublicRunForm({
           message={errors.reuse_permission?.message}
         />
       </fieldset>
-      <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-muted-foreground">
+      <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-tc-secondary">
         Source public run
         <Input
           {...form.register("source")}
@@ -265,16 +261,14 @@ export function PublicRunForm({
         </p>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onCancel}
           disabled={working}
         >
           Cancel
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="submit"
           disabled={working || !form.formState.isValid}
         >
@@ -283,7 +277,7 @@ export function PublicRunForm({
             : editingPublished
               ? "Review update"
               : "Create public page"}
-        </Button>
+        </ButtonPrimary>
       </div>
     </form>
   );

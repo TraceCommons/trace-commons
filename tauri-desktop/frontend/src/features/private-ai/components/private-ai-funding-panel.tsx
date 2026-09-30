@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { usePrivateAi } from "../hooks/use-private-ai";
+import { GlassButton, TertiaryLink } from "@/design-system";
 
 type PrivateAiController = ReturnType<typeof usePrivateAi>;
 
@@ -19,14 +19,13 @@ export function PrivateAiFundingPanel({
           </span>
           <h2>Manage credits</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void privateAi.refreshFunding()}
           disabled={privateAi.busy}
         >
           Refresh account
-        </Button>
+        </TertiaryLink>
       </div>
       {funding ? (
         <>
@@ -37,25 +36,23 @@ export function PrivateAiFundingPanel({
             </p>
           )}
           {funding.browserUrl && !verifiedFundingUrl && (
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={() => void privateAi.verifyFunding()}
               disabled={privateAi.busy}
             >
               Verify current account
-            </Button>
+            </GlassButton>
           )}
           {verifiedFundingUrl && (
             <p className="m-0 tc-caption tc-text-tertiary">
-              <Button
-                className="tc-link"
+              <TertiaryLink
                 type="button"
                 onClick={() => void privateAi.openBrowser(verifiedFundingUrl)}
                 disabled={privateAi.busy}
               >
                 Open verified billing
-              </Button>
+              </TertiaryLink>
             </p>
           )}
         </>

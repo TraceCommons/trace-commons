@@ -1,9 +1,9 @@
-import { Button } from "@/components/ui/button";
 import type {
   InstalledSkill,
   SkillCopy,
   SkillInstallPlan,
 } from "../skill-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 export function SkillInstallPreview({
   copy,
@@ -34,14 +34,14 @@ export function SkillInstallPreview({
         <p className="m-0 tc-caption tc-text-tertiary">
           {copy.rollback_disclosure}
         </p>
-        <Button
-          className="tc-btn tc-btn--glass tc-text-outside"
+        <GlassButton
+          className="tc-text-outside"
           type="button"
           onClick={onRollback}
           disabled={busy}
         >
           {busy ? copy.rolling_back : copy.rollback}
-        </Button>
+        </GlassButton>
       </div>
     );
   if (!plan) return null;
@@ -51,7 +51,7 @@ export function SkillInstallPreview({
         <strong>{copy.install_preview}</strong>
         <span>{copy.install_disclosure}</span>
       </div>
-      <div className="grid gap-0 border-t border-border pt-4">
+      <div className="grid gap-0 border-t border-tc-hairline pt-4">
         <Path label={copy.target_path} value={plan.target_location} />
         <Path label={copy.skill_file} value={plan.skill_location} />
         <Path label={copy.ownership_marker} value={plan.marker_location} />
@@ -61,14 +61,13 @@ export function SkillInstallPreview({
         {plan.marker_json}
       </pre>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        <ButtonPrimary size="sm"
           type="button"
           onClick={onInstall}
           disabled={busy || !plan.can_install || plan.occupied}
         >
           {busy ? copy.installing : copy.install_action}
-        </Button>
+        </ButtonPrimary>
       </div>
       {plan.occupied && (
         <p className="tc-alert">

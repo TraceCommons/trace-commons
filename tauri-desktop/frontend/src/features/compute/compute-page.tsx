@@ -1,5 +1,3 @@
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -8,6 +6,7 @@ import { PageHeader } from "../../components/page-header";
 import { StatCard } from "../../components/stat-card";
 import { type ComputeFormValues, computeFormSchema } from "./forms";
 import { useComputeStatus } from "./hooks/use-compute-status";
+import { ButtonPrimary, GlassButton, Input } from "@/design-system";
 
 export function ComputePage() {
   const compute = useComputeStatus();
@@ -79,7 +78,7 @@ export function ComputePage() {
                 ),
             )}
           >
-            <label className="mt-[22px] grid max-w-[340px] gap-2 text-[11px] font-bold text-muted-foreground">
+            <label className="mt-[22px] grid max-w-[340px] gap-2 text-[11px] font-bold text-tc-secondary">
               {snapshot.copy.allowance_label}
               <Input
                 {...form.register("allowance")}
@@ -96,8 +95,7 @@ export function ComputePage() {
               <FormFieldError id="allowance-error" message={allowanceError} />
             </label>
             <div className="mt-3 flex flex-wrap gap-2">
-              <Button
-                className="tc-btn tc-btn--primary tc-btn--sm"
+              <ButtonPrimary size="sm"
                 type="submit"
                 disabled={
                   compute.state === "busy" ||
@@ -107,31 +105,29 @@ export function ComputePage() {
                 }
               >
                 {snapshot.copy.enable}
-              </Button>
-              <Button
-                className="tc-btn tc-btn--glass"
+              </ButtonPrimary>
+              <GlassButton
                 type="button"
                 onClick={() => void compute.command("resume_compute")}
                 disabled={compute.state === "busy" || !snapshot.consent_granted}
               >
                 {snapshot.copy.resume}
-              </Button>
-              <Button
-                className="tc-btn tc-btn--glass"
+              </GlassButton>
+              <GlassButton
                 type="button"
                 onClick={() => void compute.command("pause_compute")}
                 disabled={compute.state === "busy" || !snapshot.consent_granted}
               >
                 {snapshot.copy.pause}
-              </Button>
-              <Button
-                className="tc-card text-[11px] font-bold text-foreground hover:bg-primary/80 text-destructive"
+              </GlassButton>
+              <GlassButton
+                className="tc-text-outside"
                 type="button"
                 onClick={() => void compute.command("disable_compute")}
                 disabled={compute.state === "busy" || !snapshot.consent_granted}
               >
                 {snapshot.copy.disable}
-              </Button>
+              </GlassButton>
             </div>
           </form>
         </section>

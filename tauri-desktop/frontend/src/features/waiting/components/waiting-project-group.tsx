@@ -1,8 +1,8 @@
-import { Button } from "@/components/ui/button";
 import type { WaitingEntry } from "../types";
 import { WaitingEntryRow } from "./waiting-entry-row";
 import { useEligibilityGroupCopy } from "../../../lib/tauri/use-contributor-copy";
 import { SubmitAllAsControl } from "./submit-all-as-control";
+import { GlassButton } from "@/design-system";
 
 export function WaitingProjectGroup({
   projectId,
@@ -29,7 +29,7 @@ export function WaitingProjectGroup({
 }) {
   const eligibility = useEligibilityGroupCopy(entries);
   return (
-    <section className="border-t border-border py-[18px] first:border-t-0 first:pt-0">
+    <section className="border-t border-tc-hairline py-[18px] first:border-t-0 first:pt-0">
       <div className="flex items-start justify-between gap-3">
         <div>
           <span className="mb-1.5 block tc-eyebrow">
@@ -40,7 +40,7 @@ export function WaitingProjectGroup({
             {entries.length} waiting session{entries.length === 1 ? "" : "s"}
           </span>
           {eligibility.data && (
-            <p className="m-0 mt-1 text-sm text-muted-foreground">
+            <p className="m-0 mt-1 text-sm text-tc-secondary">
               {eligibility.data.eligible_count} eligible
               {eligibility.data.withheld_line
                 ? ` · ${eligibility.data.withheld_line}`
@@ -48,15 +48,14 @@ export function WaitingProjectGroup({
             </p>
           )}
           {eligibility.isError && (
-            <p className="m-0 mt-1 text-sm text-destructive">
+            <p className="m-0 mt-1 text-sm text-tc-outside">
               Eligibility unavailable. Review sessions individually.
             </p>
           )}
         </div>
         {showSubmitAll && eligibility.data?.can_contribute === true && (
           <div className="flex flex-wrap gap-2">
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={() => onSubmitAll(projectId)}
               disabled={busy}
@@ -64,7 +63,7 @@ export function WaitingProjectGroup({
               {busy
                 ? "Submitting…"
                 : `Submit all eligible (${eligibility.data.eligible_count})`}
-            </Button>
+            </GlassButton>
             <SubmitAllAsControl
               eligibleCount={eligibility.data.eligible_count}
               busy={busy}

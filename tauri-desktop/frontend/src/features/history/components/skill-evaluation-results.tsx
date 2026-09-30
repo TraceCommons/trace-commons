@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { SkillCopy, SkillEvaluationReport } from "../skill-types";
+import { ButtonPrimary, TertiaryLink } from "@/design-system";
 
 export function SkillEvaluationResults({
   copy,
@@ -71,16 +71,15 @@ export function SkillEvaluationResults({
               </strong>
               <small>{trial.arm}</small>
             </summary>
-            <div className="grid gap-2 pb-[13px] text-[11px] leading-[1.5] text-muted-foreground">
+            <div className="grid gap-2 pb-[13px] text-[11px] leading-[1.5] text-tc-secondary">
               <p>{trial.task}</p>
               {trial.source_url && (
-                <Button
-                  className="tc-link"
+                <TertiaryLink
                   type="button"
                   onClick={() => onInspect(trial.source_url)}
                 >
                   {copy.open_fixture_source}
-                </Button>
+                </TertiaryLink>
               )}
               {trial.answer && (
                 <>
@@ -93,7 +92,7 @@ export function SkillEvaluationResults({
                 </>
               )}
               {trial.failure_reasons.length > 0 && (
-                <span className="text-destructive">
+                <span className="text-tc-outside">
                   {trial.failure_reasons.join(" · ")}
                 </span>
               )}
@@ -107,14 +106,13 @@ export function SkillEvaluationResults({
       </div>
       {report.install_allowed && (
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          <ButtonPrimary size="sm"
             type="button"
             onClick={onReviewInstall}
             disabled={busy}
           >
             {busy ? copy.preparing : copy.review_install}
-          </Button>
+          </ButtonPrimary>
         </div>
       )}
     </div>
@@ -129,7 +127,7 @@ function ResultGroup({
   items: SkillEvaluationReport["summaries"];
 }) {
   return (
-    <div className="grid gap-px border-t border-border pt-3">
+    <div className="grid gap-px border-t border-tc-hairline pt-3">
       <span className="mb-1.5 block tc-eyebrow">
         {title}
       </span>

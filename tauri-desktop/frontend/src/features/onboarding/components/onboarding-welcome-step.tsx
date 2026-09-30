@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, TertiaryLink } from "@/design-system";
 
 export function OnboardingWelcomeStep({
   onboarding,
@@ -22,25 +22,23 @@ export function OnboardingWelcomeStep({
       ) : (
         <p role="alert">Shared onboarding copy unavailable. Retry loading it.</p>
       )}
-      <Button
-        className="tc-link"
+      <TertiaryLink
         type="button"
         onClick={onOpenScrubDisclosure}
       >
         What gets removed?
-      </Button>
+      </TertiaryLink>
       <p className="mt-2 font-bold text-[var(--tc-text-primary)]">
         You decide what gets contributed. Nothing is sent unless you say so.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        <ButtonPrimary size="sm"
           type="button"
           onClick={onboarding.startRoots}
           disabled={!copy}
         >
           Get started
-        </Button>
+        </ButtonPrimary>
       </div>
     </section>
   );

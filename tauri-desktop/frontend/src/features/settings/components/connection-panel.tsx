@@ -33,7 +33,7 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
           <h2>{connected ? "Connected" : "Not connected"}</h2>
         </div>
         <span
-          className={`tc-chip tc-chip--glass self-start ${connected ? "" : "bg-muted text-muted-foreground"}`}
+          className={`tc-chip tc-chip--glass self-start ${connected ? "" : "bg-tc-tint text-tc-secondary"}`}
         >
           {connected ? "Ready" : "Local only"}
         </span>
@@ -53,11 +53,11 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
       <div className="mt-3 grid gap-px">
         {sources.map(([label, key]) => (
           <div
-            className="flex items-start gap-2.5 border-b border-border py-3"
+            className="flex items-start gap-2.5 border-b border-tc-hairline py-3"
             key={key}
           >
             <span
-              className={`mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full border border-input text-[10px] text-muted-foreground ${settings?.[key] === "watch" ? "border-primary bg-primary text-primary-foreground" : ""}`}
+              className={`mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full border border-tc-hairline text-[10px] text-tc-secondary ${settings?.[key] === "watch" ? "border-tc-purple bg-tc-purple text-tc-on-accent" : ""}`}
               aria-hidden="true"
             >
               {settings?.[key] === "watch" ? "✓" : "–"}
@@ -68,9 +68,9 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
             </span>
           </div>
         ))}
-        <div className="flex items-start gap-2.5 border-b border-border py-3">
+        <div className="flex items-start gap-2.5 border-b border-tc-hairline py-3">
           <span
-            className={`mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full border border-input text-[10px] text-muted-foreground ${settings?.near_ai_configured === true ? "border-primary bg-primary text-primary-foreground" : ""}`}
+            className={`mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full border border-tc-hairline text-[10px] text-tc-secondary ${settings?.near_ai_configured === true ? "border-tc-purple bg-tc-purple text-tc-on-accent" : ""}`}
             aria-hidden="true"
           >
             {settings?.near_ai_configured === true ? "✓" : "–"}

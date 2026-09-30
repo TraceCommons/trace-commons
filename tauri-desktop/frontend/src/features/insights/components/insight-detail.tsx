@@ -1,5 +1,3 @@
-import { NativeSelect } from "@/components/ui/native-select";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useRef } from "react";
 import { useForm } from "react-hook-form";
@@ -9,6 +7,7 @@ import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor
 import { type AnnotationFormValues, annotationFormSchema } from "../forms";
 import type { Insight } from "../types";
 import { InsightEvidencePanel } from "./insight-evidence-panel";
+import { ButtonPrimary, GlassButton, Select } from "@/design-system";
 
 type InsightDetailProps = {
   insight: Insight;
@@ -116,7 +115,7 @@ export function InsightDetail({
         <div className="my-3 flex gap-3">
           <label>
             Category
-            <NativeSelect
+            <Select
               {...form.register("category")}
               disabled={!saved || busy}
               aria-invalid={Boolean(form.formState.errors.category)}
@@ -132,11 +131,11 @@ export function InsightDetail({
               <option value="docs">Documentation</option>
               <option value="debugging">Debugging</option>
               <option value="other">Other</option>
-            </NativeSelect>
+            </Select>
           </label>
           <label>
             Outcome
-            <NativeSelect
+            <Select
               {...form.register("outcome")}
               disabled={!saved || busy}
               aria-invalid={Boolean(form.formState.errors.outcome)}
@@ -150,7 +149,7 @@ export function InsightDetail({
               <option value="accepted">Accepted</option>
               <option value="partial">Partial</option>
               <option value="rejected">Rejected</option>
-            </NativeSelect>
+            </Select>
           </label>
         </div>
         <FormFieldError
@@ -162,8 +161,7 @@ export function InsightDetail({
           message={form.formState.errors.outcome?.message}
         />
         <div className="flex flex-wrap justify-end gap-[9px]">
-          <Button
-            className="tc-btn tc-btn--glass"
+          <GlassButton
             type="button"
             onClick={async () => {
               if (await onClearAnnotation())
@@ -172,14 +170,13 @@ export function InsightDetail({
             disabled={!saved || busy}
           >
             Clear assessment
-          </Button>
-          <Button
-            className="tc-btn tc-btn--glass"
+          </GlassButton>
+          <GlassButton
             type="submit"
             disabled={!saved || busy}
           >
             Save assessment
-          </Button>
+          </GlassButton>
         </div>
       </form>
       <InsightEvidencePanel
@@ -204,14 +201,13 @@ export function InsightDetail({
             onConfirm={onDelete}
           />
         ) : (
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          <ButtonPrimary size="sm"
             type="button"
             onClick={onSave}
             disabled={busy}
           >
             Re-read and save
-          </Button>
+          </ButtonPrimary>
         )}
       </div>
     </section>

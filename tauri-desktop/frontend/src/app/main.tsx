@@ -2,7 +2,6 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
-import { TooltipProvider } from "../components/ui/tooltip";
 import { AppShell } from "./app-shell";
 import "./app.css";
 import { createQueryClient } from "../lib/query/query-client";
@@ -14,12 +13,10 @@ const queryClient = createQueryClient();
 
 createRoot(root).render(
   <StrictMode>
-    <TooltipProvider>
-      <QueryClientProvider client={queryClient}>
-        <HashRouter>
-          <AppShell />
-        </HashRouter>
-      </QueryClientProvider>
-    </TooltipProvider>
+    <QueryClientProvider client={queryClient}>
+      <HashRouter>
+        <AppShell />
+      </HashRouter>
+    </QueryClientProvider>
   </StrictMode>,
 );

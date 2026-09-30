@@ -22,7 +22,7 @@ export function InsightSummary({ summary }: { summary: InsightSummaryData }) {
           Rust-provided
         </span>
       </div>
-      <div className="mt-7 grid grid-cols-3 gap-px border-y border-border">
+      <div className="mt-7 grid grid-cols-3 gap-px border-y border-tc-hairline">
         <div>
           <span>Saved snapshots</span>
           <strong>{summary.saved_snapshots}</strong>

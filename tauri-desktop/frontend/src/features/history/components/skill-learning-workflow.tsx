@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button";
 import { useSkillLearning } from "../hooks/use-skill-learning";
 import type { HistoryDetail } from "../types";
 import { SkillLearningStage } from "./skill-learning-stage";
+import { GlassButton } from "@/design-system";
 
 function stageTitle(
   stage: ReturnType<typeof useSkillLearning>["stage"],
@@ -52,14 +52,13 @@ export function SkillLearningWorkflow({
         </p>
       )}
       {skill.statusUnavailable && (
-        <Button
+        <GlassButton
           className="w-fit"
           type="button"
-          variant="outline"
           onClick={() => void skill.retryInstallStatus()}
         >
           Retry installed skill status
-        </Button>
+        </GlassButton>
       )}
       <SkillLearningStage skill={skill} />
     </section>

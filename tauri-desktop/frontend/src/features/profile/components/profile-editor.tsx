@@ -1,9 +1,7 @@
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
 import { useFormContext } from "react-hook-form";
 import { FormFieldError } from "../../../components/form-field-error";
 import type { ProfileFormValues } from "../forms";
+import { ButtonPrimary, GlassButton, Input, TertiaryLink, TextArea } from "@/design-system";
 
 export function ProfileEditor({
   saved,
@@ -38,7 +36,7 @@ export function ProfileEditor({
           </span>
           <h2>Shape your profile</h2>
         </div>
-        <span className="tc-card whitespace-nowrap font-mono text-[10px] font-extrabold tracking-[.08em] text-primary">
+        <span className="tc-card whitespace-nowrap font-mono text-[10px] font-extrabold tracking-[.08em] text-tc-accent">
           {published ? "Published" : saved ? "Saved in memory" : "Not published"}
         </span>
       </div>
@@ -61,7 +59,7 @@ export function ProfileEditor({
         </label>
         <label>
           Bio
-          <Textarea
+          <TextArea
             {...form.register("bio")}
             placeholder="A short context for your contribution"
             rows={4}
@@ -77,7 +75,7 @@ export function ProfileEditor({
       <div className="flex items-center justify-between gap-[18px] pt-[17px]">
         <div aria-live="polite" className="grid gap-1">
           {actionError ? (
-            <p role="alert" className="text-destructive">
+            <p role="alert" className="text-tc-outside">
               {actionError}
             </p>
           ) : actionNotice ? (
@@ -90,17 +88,15 @@ export function ProfileEditor({
           )}
         </div>
         <div className="flex flex-wrap justify-end gap-[9px]">
-          <Button
-            className="tc-btn tc-btn--glass"
+          <GlassButton
             type="submit"
             disabled={
               actionState === "publishing" || actionState === "withdrawing"
             }
           >
             Save draft
-          </Button>
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          </GlassButton>
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => void form.handleSubmit(onPublish)()}
             disabled={
@@ -112,16 +108,16 @@ export function ProfileEditor({
               : published
                 ? "Update profile"
                 : "Go public"}
-          </Button>
+          </ButtonPrimary>
           {published && (
-            <Button
-              className="tc-link text-destructive"
+            <TertiaryLink
+              className="text-tc-outside"
               type="button"
               onClick={onWithdraw}
               disabled={actionState !== "idle"}
             >
               {actionState === "withdrawing" ? "Withdrawing…" : "Withdraw"}
-            </Button>
+            </TertiaryLink>
           )}
         </div>
       </div>

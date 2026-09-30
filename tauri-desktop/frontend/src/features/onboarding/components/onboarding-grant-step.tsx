@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button";
 import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { GlassButton } from "@/design-system";
 
 // The Flow 1 grant. Reachable only after connect, a chosen scope, the
 // automatic path and both disclosure screens; the button stays off while any
@@ -29,7 +29,7 @@ export function OnboardingGrantStep({
         </div>
       ) : (
         <p
-          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-tc-outside" : "text-tc-secondary"}`}
           role={grantCopy.isError ? "alert" : "status"}
         >
           {grantCopy.isError
@@ -38,32 +38,29 @@ export function OnboardingGrantStep({
         </p>
       )}
       <div className="mt-6 flex flex-wrap gap-2.5">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy}
         >
           Back
-        </Button>
-        <Button
+        </GlassButton>
+        <GlassButton
           type="button"
-          variant="outline"
           onClick={onboarding.skipGrant}
           disabled={busy}
         >
           Ask me each time instead
-        </Button>
-        <Button
+        </GlassButton>
+        <GlassButton
           type="button"
-          variant="outline"
           onClick={() => void onboarding.grant()}
           disabled={busy || !copy || blocked}
         >
           {onboarding.grantMutation.isPending
             ? "Turning on…"
             : "Contribute automatically"}
-        </Button>
+        </GlassButton>
       </div>
     </section>
   );

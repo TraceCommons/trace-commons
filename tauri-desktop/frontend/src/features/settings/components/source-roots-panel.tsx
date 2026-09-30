@@ -1,6 +1,3 @@
-import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
@@ -10,6 +7,7 @@ import type { ContributorDisclosureCopy } from "../../../lib/tauri/contributor-c
 import { useDirectoryPicker } from "../../../lib/tauri/use-platform-actions";
 import type { SourceMode, SourceName } from "../api/source-roots-api";
 import { type SourceRootFormValues, sourceRootFormSchema } from "../forms";
+import { GlassButton, Input, Select } from "@/design-system";
 
 type SourceRootsPanelProps = {
   snapshot: Record<string, unknown>;
@@ -165,7 +163,7 @@ function SourceRootRow({
   };
   return (
     <form
-      className="grid grid-cols-[170px_minmax(0,1fr)] gap-[18px] border-b border-border py-[15px]"
+      className="grid grid-cols-[170px_minmax(0,1fr)] gap-[18px] border-b border-tc-hairline py-[15px]"
       onSubmit={form.handleSubmit(save)}
     >
       <div>
@@ -173,7 +171,7 @@ function SourceRootRow({
         <span>{statusLine || copy?.unavailable}</span>
       </div>
       <div className="flex flex-wrap items-start gap-2">
-        <NativeSelect
+        <Select
           {...form.register("mode")}
           disabled={busy}
           aria-label={`${label} source mode`}
@@ -186,7 +184,7 @@ function SourceRootRow({
           <option value="off">
             {tool?.decline ?? copy?.no_candidate ?? "Off"}
           </option>
-        </NativeSelect>
+        </Select>
         {modeValue === "watch" && (
           <>
             <label>
@@ -204,8 +202,7 @@ function SourceRootRow({
               />
               <FormFieldError id={`${source}-path-error`} message={pathError} />
             </label>
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={() => void chooseRoot()}
               disabled={busy || choosing}
@@ -213,22 +210,21 @@ function SourceRootRow({
               {choosing
                 ? "Choosing…"
                 : (tool?.choose_folder ?? copy?.choose_folder ?? "Choose folder")}
-            </Button>
+            </GlassButton>
           </>
         )}
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="submit"
           disabled={busy || !form.formState.isValid}
         >
           Save
-        </Button>
+        </GlassButton>
         <FormFieldError
           id={`${source}-mode-error`}
           message={form.formState.errors.mode?.message}
         />
         {pickerError && (
-          <p className="m-0 text-[11px] text-destructive">{pickerError}</p>
+          <p className="m-0 text-[11px] text-tc-outside">{pickerError}</p>
         )}
       </div>
     </form>

@@ -1,14 +1,13 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useMemo } from "react";
 import { useController, useForm } from "react-hook-form";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { FormFieldError } from "../../../components/form-field-error";
 import type { ConsentOption } from "../../onboarding/public";
 import {
   type ConsentSettingsFormValues,
   consentSettingsFormSchema,
 } from "../forms";
+import { Checkbox, TertiaryLink } from "@/design-system";
 
 export function ConsentSettingsPanel({
   options,
@@ -82,14 +81,13 @@ export function ConsentSettingsPanel({
           </span>
           <h2>How may your traces be used?</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
         Applies to traces sent from now on. Always-included scope cannot be
@@ -120,7 +118,7 @@ export function ConsentSettingsPanel({
                 const checked = scopes.field.value.includes(option.name);
                 return (
                   <label
-                    className="flex items-start gap-2.5 border-b border-border py-3 text-[12px] font-normal text-[var(--tc-text-primary)]"
+                    className="flex items-start gap-2.5 border-b border-tc-hairline py-3 text-[12px] font-normal text-[var(--tc-text-primary)]"
                     htmlFor={`settings-consent-${option.name}`}
                     key={option.name}
                   >
@@ -128,7 +126,7 @@ export function ConsentSettingsPanel({
                       id={`settings-consent-${option.name}`}
                       checked={checked || option.always_on}
                       disabled={busy || option.always_on}
-                      onCheckedChange={() => toggle(option.name)}
+                      onChange={() => toggle(option.name)}
                       aria-invalid={Boolean(scopeError)}
                       aria-describedby={
                         scopeError ? "settings-consent-error" : undefined

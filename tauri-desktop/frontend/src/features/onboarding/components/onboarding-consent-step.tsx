@@ -1,10 +1,9 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { initialScopeSelection, scopeChoice } from "../flow1";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, Checkbox, GlassButton } from "@/design-system";
 
 // R7's scope picker: immediately after connect, before the path question,
 // with nothing selected -- the floor scope included -- so no grant ships at
@@ -51,7 +50,7 @@ export function OnboardingConsentStep({
         </p>
       ) : (
         <p
-          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-tc-outside" : "text-tc-secondary"}`}
           role={grantCopy.isError ? "alert" : "status"}
         >
           {grantCopy.isError
@@ -75,7 +74,7 @@ export function OnboardingConsentStep({
             >
               <Checkbox
                 checked={selected.includes(option.name)}
-                onCheckedChange={() => toggle(option.name)}
+                onChange={() => toggle(option.name)}
                 disabled={busy}
                 aria-invalid={
                   showMissing && choice.missingRequired.includes(option.name)
@@ -102,7 +101,7 @@ export function OnboardingConsentStep({
         </div>
         {showMissing && (
           <p
-            className="m-0 text-xs text-destructive"
+            className="m-0 text-xs text-tc-outside"
             id="onboarding-scope-missing"
             role="alert"
           >
@@ -118,46 +117,42 @@ export function OnboardingConsentStep({
           </p>
         )}
         {showPrivacy === null && (
-          <div className="grid gap-2 text-sm text-destructive" role="alert">
+          <div className="grid gap-2 text-sm text-tc-outside" role="alert">
             <p>Privacy settings are unavailable. Refresh before continuing.</p>
-            <Button
+            <GlassButton
               type="button"
-              variant="outline"
               onClick={() => void settings.refresh()}
               disabled={settings.isFetching}
             >
               {settings.isFetching ? "Refreshing…" : "Refresh privacy settings"}
-            </Button>
+            </GlassButton>
           </div>
         )}
         <div className="mt-3 flex flex-wrap gap-2">
           {!alreadyEnrolled && (
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={onboarding.back}
               disabled={busy}
             >
               Back
-            </Button>
+            </GlassButton>
           )}
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => onboarding.declineScopes(showPrivacy === true)}
             disabled={busy || !privacyKnown}
           >
             Decide later
-          </Button>
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          </GlassButton>
+          <ButtonPrimary size="sm"
             type="submit"
             disabled={
               busy || !copy || settings.state === "loading" || !privacyKnown
             }
           >
             Continue
-          </Button>
+          </ButtonPrimary>
         </div>
       </form>
     </section>

@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 import { openSystemSettings } from "../../../lib/tauri/platform-api";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import { usePlatformCapabilities } from "../../settings/public";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 export function OnboardingDoneStep({
   onboarding,
@@ -35,48 +35,45 @@ export function OnboardingDoneStep({
           <p>{copy.onboarding.review}</p>
           <p>{copy.onboarding.follow_up}</p>
           <p>{copy.onboarding.agent_setup}</p>
-          <section className="grid gap-2 border-t border-border pt-4">
+          <section className="grid gap-2 border-t border-tc-hairline pt-4">
             <h3>{copy.onboarding_shell.notification_heading}</h3>
-            <p className="m-0 text-sm text-muted-foreground">
+            <p className="m-0 text-sm text-tc-secondary">
               {copy.onboarding_shell.notification_purpose}
             </p>
             {notificationState === "requires_approval" && !notificationDismissed && (
               <p className="m-0 text-sm">{copy.onboarding_shell.notification_offer}</p>
             )}
             {notificationText && (
-              <p className="m-0 text-sm text-muted-foreground" role="status">
+              <p className="m-0 text-sm text-tc-secondary" role="status">
                 {notificationText}
               </p>
             )}
             {notificationState === "requires_approval" && !notificationDismissed && (
               <div className="flex flex-wrap gap-2">
-                <Button
+                <GlassButton
                   type="button"
-                  variant="outline"
                   disabled={platform.busy}
                   onClick={() => void platform.requestNotifications()}
                 >
                   {platform.busy
                     ? "Requesting…"
                     : copy.onboarding_shell.notification_allow}
-                </Button>
-                <Button
+                </GlassButton>
+                <GlassButton
                   type="button"
-                  variant="ghost"
                   onClick={() => setNotificationDismissed(true)}
                 >
                   {copy.onboarding_shell.not_now}
-                </Button>
+                </GlassButton>
               </div>
             )}
             {notificationState === "denied" && (
-              <Button
+              <GlassButton
                 type="button"
-                variant="outline"
                 onClick={() => void openSystemSettings("notifications")}
               >
                 {copy.onboarding_shell.system_settings}
-              </Button>
+              </GlassButton>
             )}
           </section>
         </div>
@@ -90,24 +87,22 @@ export function OnboardingDoneStep({
         </p>
       )}
       {onboarding.granted && !onboarding.withdrawn && (
-        <Button
+        <GlassButton
           className="mb-3 mr-2.5"
           type="button"
-          variant="outline"
           onClick={() => void onboarding.withdrawGrant()}
           disabled={onboarding.state === "busy"}
         >
           Turn off automatic contributing
-        </Button>
+        </GlassButton>
       )}
-      <Button
-        className="tc-btn tc-btn--primary tc-btn--sm"
+      <ButtonPrimary size="sm"
         type="button"
         onClick={onComplete}
         disabled={!copy}
       >
         Done
-      </Button>
+      </ButtonPrimary>
     </section>
   );
 }

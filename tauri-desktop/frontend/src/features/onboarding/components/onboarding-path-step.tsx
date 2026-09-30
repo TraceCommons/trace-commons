@@ -1,10 +1,9 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { ContributionPath } from "../flow1";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton, Radio, RadioGroup } from "@/design-system";
 
 // The path question, after the scope picker. No default: neither path is
 // selected until the contributor picks one.
@@ -25,7 +24,7 @@ export function OnboardingPathStep({
       <h2 id="onboarding-path-heading">How should contributing work?</h2>
       {!copy && (
         <p
-          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-tc-outside" : "text-tc-secondary"}`}
           role={grantCopy.isError ? "alert" : "status"}
         >
           {grantCopy.isError
@@ -35,19 +34,19 @@ export function OnboardingPathStep({
       )}
       <RadioGroup
         aria-labelledby="onboarding-path-heading"
-        className="my-[18px] gap-px border-t border-border"
+        className="my-[18px] gap-px border-t border-tc-hairline"
         value={path ?? ""}
-        onValueChange={(value) => setPath(value as ContributionPath)}
+        onChange={(value) => setPath(value as ContributionPath)}
       >
         <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
-          <RadioGroupItem value="ask_first" disabled={busy || !copy} />
+          <Radio value="ask_first" disabled={busy || !copy} />
           <span>
             <strong>Ask me each time</strong>
             <small>{copy?.path_ask_first}</small>
           </span>
         </label>
         <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
-          <RadioGroupItem value="automatic" disabled={busy || !copy} />
+          <Radio value="automatic" disabled={busy || !copy} />
           <span>
             <strong>Contribute automatically</strong>
             <small>{copy?.path_automatic}</small>
@@ -55,16 +54,14 @@ export function OnboardingPathStep({
         </label>
       </RadioGroup>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy}
         >
           Back
-        </Button>
-        <Button
-          className="tc-btn tc-btn--primary tc-btn--sm"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={() => {
             if (path) onboarding.choosePath(path, showPrivacy === true);
@@ -72,7 +69,7 @@ export function OnboardingPathStep({
           disabled={busy || !copy || path === null || showPrivacy === null}
         >
           Continue
-        </Button>
+        </ButtonPrimary>
       </div>
     </section>
   );

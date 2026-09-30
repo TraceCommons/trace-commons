@@ -1,8 +1,8 @@
-import { Button } from "@/components/ui/button";
 import type { WaitingEntry } from "../types";
 import { useEligibilityGroupCopy } from "../../../lib/tauri/use-contributor-copy";
 import { IgnoreProjectControl } from "./ignore-project-control";
 import { SubmitAllAsControl } from "./submit-all-as-control";
+import { GlassButton } from "@/design-system";
 export function WaitingProjectFolder({
   projectId,
   label,
@@ -31,12 +31,12 @@ export function WaitingProjectFolder({
   const eligibility = useEligibilityGroupCopy(entries);
   return (
     <article className="tc-card tc-card--quiet flex items-center justify-between gap-[18px]">
-      <Button
+      <button
         className="flex min-w-0 items-center gap-3 border-0 bg-transparent p-0 text-left text-[var(--tc-text-primary)]"
         type="button"
         onClick={() => onOpen(projectId)}
       >
-        <span className="tc-card tc-card--quiet grid h-[38px] w-[38px] place-items-center text-[12px] font-extrabold text-primary-foreground">
+        <span className="tc-card tc-card--quiet grid h-[38px] w-[38px] place-items-center text-[12px] font-extrabold text-tc-on-accent">
           {label.slice(0, 1).toUpperCase()}
         </span>
         <span>
@@ -56,12 +56,11 @@ export function WaitingProjectFolder({
             <small>Eligibility unavailable. Review sessions individually.</small>
           )}
         </span>
-      </Button>
+      </button>
       <div className="flex flex-wrap items-center justify-end gap-2.5">
         {eligibility.data?.can_contribute === true && (
           <>
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={() => onSubmitAll(projectId)}
               disabled={busy}
@@ -69,7 +68,7 @@ export function WaitingProjectFolder({
               {busy
                 ? "Submitting…"
                 : `Submit all eligible (${eligibility.data.eligible_count})`}
-            </Button>
+            </GlassButton>
             <SubmitAllAsControl
               eligibleCount={eligibility.data.eligible_count}
               busy={busy}

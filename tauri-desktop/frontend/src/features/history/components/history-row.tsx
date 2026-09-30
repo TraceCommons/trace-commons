@@ -1,4 +1,3 @@
-import { Button } from "@/components/ui/button";
 import { isTauriRuntime } from "../../../lib/tauri/core-api";
 import {
   canWithdrawStatus,
@@ -12,6 +11,7 @@ import {
 import type { HistoryRecord, WithdrawalResult } from "../types";
 import { AccountSignInControl } from "./account-sign-in-control";
 import { WithdrawalControl } from "./withdrawal-control";
+import { GlassButton } from "@/design-system";
 
 export function HistoryRow({
   record,
@@ -72,7 +72,7 @@ export function HistoryRow({
         : []
       : visibleExplanations;
   return (
-    <article className="grid grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3.5 border-b border-border py-3.5">
+    <article className="grid grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3.5 border-b border-tc-hairline py-3.5">
       <div className="tc-tool-tile tc-tool-tile--lg tc-tool-tile--folder">
         {record.project_label.slice(0, 1).toUpperCase()}
       </div>
@@ -83,21 +83,20 @@ export function HistoryRow({
         </span>
         <small>Status: {status}</small>
         {rowExplanations.map((explanation) => (
-          <small className="text-muted-foreground" key={explanation}>
+          <small className="text-tc-secondary" key={explanation}>
             {explanation}
           </small>
         ))}
         {creditLine && <small>{creditLine}</small>}
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="button"
           onClick={onOpen}
           disabled={!onOpen}
         >
           Open
-        </Button>
+        </GlassButton>
         {canWithdraw && accountSignedIn === true && onWithdrawRequest && onWithdrawConfirm && onWithdrawCancel && (
           <WithdrawalControl
             record={record}

@@ -1,11 +1,10 @@
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { FormFieldError } from "../../../components/form-field-error";
 import type { BehaviorSetting } from "../api/behavior-api";
 import { type BehaviorFormValues, behaviorFormSchema } from "../forms";
+import { GlassButton, Input } from "@/design-system";
 
 export function BehaviorSettingRow({
   label,
@@ -48,7 +47,7 @@ export function BehaviorSettingRow({
   };
   return (
     <form
-      className="flex items-center justify-between gap-5 border-b border-border py-[15px]"
+      className="flex items-center justify-between gap-5 border-b border-tc-hairline py-[15px]"
       onSubmit={form.handleSubmit(submit)}
     >
       <div>
@@ -70,13 +69,12 @@ export function BehaviorSettingRow({
           <span>{unit}</span>
           <FormFieldError id={`${setting}-error`} message={error} />
         </label>
-        <Button
-          className="tc-btn tc-btn--glass"
+        <GlassButton
           type="submit"
           disabled={busy || !form.formState.isValid}
         >
           Save
-        </Button>
+        </GlassButton>
       </div>
     </form>
   );

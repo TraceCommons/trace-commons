@@ -1,17 +1,9 @@
 import type { UseMutationResult } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Field,
-  FieldDescription,
-  FieldGroup,
-  FieldLabel,
-} from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import type { AdmissionPreparation } from "../api/native-review-api";
+import { ButtonPrimary, Checkbox, GlassButton, Input } from "@/design-system";
 
 type AdmissionMutation = UseMutationResult<AdmissionPreparation, Error, boolean, unknown>;
 
@@ -48,14 +40,13 @@ export function AdmissionPreparationOverlay({
       description={disclosure?.disclosure}
       footer={
         <div className="flex justify-end gap-2">
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => onOpenChange(false)}
           >
             {disclosure?.cancel ?? "Cancel"}
-          </Button>
-          <Button
+          </GlassButton>
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => mutation.mutate(true)}
             disabled={
@@ -69,39 +60,39 @@ export function AdmissionPreparationOverlay({
             {mutation.isPending
               ? "Preparing…"
               : (disclosure?.confirm ?? "Confirm preparation")}
-          </Button>
+          </ButtonPrimary>
         </div>
       }
     >
-      <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor="admission-backend">
+      <div className="flex flex-col gap-4">
+        <div className="tc-field">
+          <label className="tc-label" htmlFor="admission-backend">
             {disclosure?.backend ?? "Inference backend"}
-          </FieldLabel>
+          </label>
           <Input
             id="admission-backend"
             value={backend}
             onChange={(event) => onBackendChange(event.target.value)}
             disabled={mutation.isPending}
           />
-          <FieldDescription>
+          <p className="m-0 tc-caption tc-text-tertiary">
             {disclosure?.prerequisite ??
               "Backend label is bound into admission evidence."}
-          </FieldDescription>
-        </Field>
-      </FieldGroup>
+          </p>
+        </div>
+      </div>
       {!disclosure && (
-        <p className="mt-4 text-[12px] text-muted-foreground">
+        <p className="mt-4 text-[12px] text-tc-secondary">
           {copy.isError
             ? "Admission disclosure unavailable. Preparation is disabled."
             : "Loading admission disclosure…"}
         </p>
       )}
       {disclosure && (
-        <label className="tc-card tc-card--quiet mt-4 flex items-start gap-2.5 text-[12px] text-foreground">
+        <label className="tc-card tc-card--quiet mt-4 flex items-start gap-2.5 text-[12px] text-tc-primary">
           <Checkbox
             checked={confirmed}
-            onCheckedChange={(value) => setConfirmed(value === true)}
+            onChange={(value) => setConfirmed(value === true)}
             disabled={mutation.isPending || mutation.isSuccess}
             aria-label="Confirm admission preparation"
           />
@@ -109,27 +100,27 @@ export function AdmissionPreparationOverlay({
         </label>
       )}
       {disclosure && (
-        <p className="mt-3 text-[11px] text-muted-foreground">
+        <p className="mt-3 text-[11px] text-tc-secondary">
           {disclosure.permission}
         </p>
       )}
       {error && (
-        <p className="tc-card tc-card--quiet mt-4 border-destructive/30 text-[12px] text-destructive">
+        <p className="tc-card tc-card--quiet mt-4 border-tc-outside/30 text-[12px] text-tc-outside">
           {error}
         </p>
       )}
       {mutation.isPending && disclosure && (
-        <p className="mt-3 text-[12px] text-muted-foreground">
+        <p className="mt-3 text-[12px] text-tc-secondary">
           {disclosure.working}
         </p>
       )}
       {mutation.isSuccess && mutation.data.ready && disclosure && (
-        <p className="mt-3 text-[12px] text-muted-foreground">
+        <p className="mt-3 text-[12px] text-tc-secondary">
           {disclosure.ready}
         </p>
       )}
       {mutation.isSuccess && mutation.data.ready && (
-        <p className="mt-4 text-[12px] text-muted-foreground">
+        <p className="mt-4 text-[12px] text-tc-secondary">
           {mutation.data.message}
         </p>
       )}

@@ -1,7 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   getLegacyMigrationOffer,
   migrateLegacyInvite,
@@ -11,6 +9,7 @@ import {
   parseLegacyMigrationStatus,
 } from "../../../lib/tauri/legacy-migration";
 import { coreKeys } from "../../../lib/tauri/query-keys";
+import { ButtonPrimary, Input } from "@/design-system";
 
 /**
  * The opt-in to move a legacy invite identity to the contributor's NEAR AI
@@ -53,7 +52,7 @@ export function LegacyMigrationPanel({ status }: { status: unknown }) {
         ACCOUNT
       </span>
       <h2>{copy.data.title}</h2>
-      <p className="mt-2 text-[13px] leading-[1.55] text-muted-foreground">
+      <p className="mt-2 text-[13px] leading-[1.55] text-tc-secondary">
         {copy.data.body}
       </p>
       {needsInvite && (
@@ -71,22 +70,21 @@ export function LegacyMigrationPanel({ status }: { status: unknown }) {
         </div>
       )}
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        <Button
+        <ButtonPrimary size="sm"
           type="button"
-          size="sm"
           disabled={migrate.isPending || (needsInvite && invite.trim() === "")}
           onClick={() => migrate.mutate(needsInvite ? invite.trim() : null)}
         >
           {migrate.isPending ? copy.data.working : copy.data.action}
-        </Button>
+        </ButtonPrimary>
       </div>
       {answer && answer.kind !== "migrated" && (
-        <p className="mt-3 text-[13px] text-muted-foreground" role="status">
+        <p className="mt-3 text-[13px] text-tc-secondary" role="status">
           {answer.line}
         </p>
       )}
       {migrate.isError && (
-        <p className="mt-3 text-[13px] text-destructive" role="alert">
+        <p className="mt-3 text-[13px] text-tc-outside" role="alert">
           {copy.data.start_failed}
         </p>
       )}

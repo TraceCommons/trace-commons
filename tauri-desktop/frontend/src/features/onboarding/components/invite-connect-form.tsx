@@ -1,11 +1,10 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { FormFieldError } from "../../../components/form-field-error";
 import { type ResolvedInvite, resolveInvite } from "../api/invite-link";
 import { type InviteFormValues, inviteFormSchema } from "../forms";
+import { ButtonPrimary, GlassButton, TextArea } from "@/design-system";
 
 export function InviteConnectForm({
   busy,
@@ -54,7 +53,7 @@ export function InviteConnectForm({
     <form className="grid gap-3" onSubmit={form.handleSubmit(resolve)}>
       <div className="grid gap-1.5">
         <label htmlFor="invite-link">Invite link</label>
-        <Textarea
+        <TextArea
           id="invite-link"
           {...form.register("invite", {
             onChange: () => {
@@ -71,25 +70,24 @@ export function InviteConnectForm({
         <FormFieldError id="invite-error" message={inviteError} />
       </div>
       <div className="flex flex-wrap gap-2.5">
-        <Button
+        <GlassButton
           type="submit"
-          variant="outline"
           disabled={busy || joining || !form.formState.isValid}
         >
           Look up
-        </Button>
+        </GlassButton>
         {resolved && (
-          <Button
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => void join()}
             disabled={busy || joining}
           >
             {joining ? "Connecting…" : `Join ${resolved.issuerHost}`}
-          </Button>
+          </ButtonPrimary>
         )}
       </div>
       {invalid && (
-        <p className="m-0 text-[12px] text-destructive">
+        <p className="m-0 text-[12px] text-tc-outside">
           This invite link is no longer valid. Ask whoever sent it for a new
           one.
         </p>

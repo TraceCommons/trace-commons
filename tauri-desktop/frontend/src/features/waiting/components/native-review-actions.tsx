@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 import { useNativeReviewActions } from "../hooks/use-native-review-actions";
 import { AdmissionPreparationOverlay } from "./admission-preparation-overlay";
 import { WitnessReviewOverlay } from "./witness-review-overlay";
+import { GlassButton } from "@/design-system";
 
 export function NativeReviewActions({
   entryId,
@@ -29,8 +29,8 @@ export function NativeReviewActions({
     return null;
   }
   return (
-    <div className="mt-4 grid gap-2 border-t border-border pt-4">
-      <span className="font-mono text-[10px] font-extrabold tracking-[.16em] text-primary">
+    <div className="mt-4 grid gap-2 border-t border-tc-hairline pt-4">
+      <span className="font-mono text-[10px] font-extrabold tracking-[.16em] text-tc-accent">
         NATIVE REVIEW
       </span>
       <p className="m-0 tc-caption tc-text-tertiary">
@@ -38,28 +38,26 @@ export function NativeReviewActions({
       </p>
       <div className="flex flex-wrap gap-2.5">
         {actions.admissionRequired && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => {
               actions.admission.reset();
               setAdmissionOpen(true);
             }}
           >
             Prepare admission
-          </Button>
+          </GlassButton>
         )}
         {actions.canWitnessReview && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => {
               actions.review.reset();
               setWitnessOpen(true);
             }}
           >
             Request witness review
-          </Button>
+          </GlassButton>
         )}
       </div>
       <AdmissionPreparationOverlay

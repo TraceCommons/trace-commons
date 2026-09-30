@@ -8,7 +8,7 @@ export function ComparisonSpecificationResult({
   result: ComparisonResult;
 }) {
   return (
-    <div className="mt-[22px] border-t border-border pt-5">
+    <div className="mt-[22px] border-t border-tc-hairline pt-5">
       <span className="mb-1.5 block tc-eyebrow">
         {title}
       </span>
@@ -27,7 +27,7 @@ export function ComparisonSpecificationResult({
             <small>{cohort.included_tasks} included tasks</small>
             {Object.entries(cohort.outcomes).map(([key, value]) => (
               <div
-                className="flex justify-between gap-3 border-t border-border pt-2 text-[11px] text-muted-foreground"
+                className="flex justify-between gap-3 border-t border-tc-hairline pt-2 text-[11px] text-tc-secondary"
                 key={key}
               >
                 <span>{key}</span>

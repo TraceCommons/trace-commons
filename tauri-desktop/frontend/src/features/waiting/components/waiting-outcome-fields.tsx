@@ -1,7 +1,6 @@
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import type { OutcomeCopy } from "../../../lib/tauri/contributor-copy-api";
 import type { OutcomeVerdict } from "../types";
+import { GlassButton, TextArea } from "@/design-system";
 
 export function WaitingOutcomeFields({
   copy,
@@ -31,16 +30,15 @@ export function WaitingOutcomeFields({
       </legend>
       <div className="flex flex-wrap gap-2" role="group" aria-label={copy.verdict_question}>
         {verdicts.map(([value, label]) => (
-          <Button
+          <GlassButton
             key={value}
             type="button"
-            variant={verdict === value ? "default" : "outline"}
             aria-pressed={verdict === value}
             disabled={disabled}
             onClick={() => onVerdictChange(verdict === value ? null : value)}
           >
             {label}
-          </Button>
+          </GlassButton>
         ))}
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
@@ -54,7 +52,7 @@ export function WaitingOutcomeFields({
           >
             {copy.correction_question}
           </label>
-          <Textarea
+          <TextArea
             id="waiting-correction"
             value={correction}
             onChange={(event) => onCorrectionChange(event.target.value)}
@@ -71,7 +69,7 @@ export function WaitingOutcomeFields({
           </p>
           <small
             id="waiting-correction-count"
-            className="text-right text-[10px] text-muted-foreground"
+            className="text-right text-[10px] text-tc-secondary"
           >
             {correction.length}/{copy.max_correction_chars}
           </small>

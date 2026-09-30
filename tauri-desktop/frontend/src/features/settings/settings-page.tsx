@@ -1,6 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { ReactNode } from "react";
-import { SectionRule } from "../../design-system";
+import { ButtonPrimary, GlassButton, SectionRule, TertiaryLink } from "../../design-system";
 import { settingsSections } from "./sections";
 import { RouteDisclosurePanel } from "../../components/route-disclosure";
 import { useCoreStatus } from "../../lib/tauri/use-core-status";
@@ -98,7 +97,7 @@ export function SettingsPage({
               <h2>Contribution watcher</h2>
             </div>
             <span
-              className={`tc-chip tc-chip--glass self-start ${core.data.daemon.paused ? "bg-muted text-muted-foreground" : ""}`}
+              className={`tc-chip tc-chip--glass self-start ${core.data.daemon.paused ? "bg-tc-tint text-tc-secondary" : ""}`}
             >
               {core.data.daemon.paused ? "Paused" : "Watching"}
             </span>
@@ -113,22 +112,20 @@ export function SettingsPage({
             </p>
           )}
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button
-              className="tc-btn tc-btn--glass"
+            <GlassButton
               type="button"
               onClick={() => void daemon.command("pause_daemon")}
               disabled={daemon.busy || core.data.daemon.paused}
             >
               Pause watcher
-            </Button>
-            <Button
-              className="tc-btn tc-btn--primary tc-btn--sm"
+            </GlassButton>
+            <ButtonPrimary size="sm"
               type="button"
               onClick={() => void daemon.command("resume_daemon")}
               disabled={daemon.busy || !core.data.daemon.paused}
             >
               Resume watcher
-            </Button>
+            </ButtonPrimary>
           </div>
         </section>
       )}
@@ -142,13 +139,12 @@ export function SettingsPage({
                 </span>
                 <h2>Session discovery</h2>
               </div>
-              <Button
-                className="tc-link"
+              <TertiaryLink
                 type="button"
                 onClick={() => void settings.refresh()}
               >
                 Refresh
-              </Button>
+              </TertiaryLink>
             </div>
             <SettingRow
               label="Poll interval"

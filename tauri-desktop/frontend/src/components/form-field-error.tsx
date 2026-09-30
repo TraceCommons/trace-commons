@@ -7,7 +7,7 @@ export function FormFieldError({
 }) {
   if (!message) return null;
   return (
-    <p id={id} role="alert" className="m-0 text-xs text-destructive">
+    <p id={id} role="alert" className="m-0 text-xs text-tc-outside">
       {message}
     </p>
   );

@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
 import type { BehaviorSetting } from "../api/behavior-api";
 import { BehaviorSettingRow } from "./behavior-setting-row";
+import { TertiaryLink } from "@/design-system";
 
 function numberValue(
   settings: Record<string, unknown>,
@@ -34,14 +34,13 @@ export function BehaviorSettingsPanel({
           </span>
           <h2>How contribution behaves</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy !== null}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
         These controls change local timing and hard upload limits. They do not

@@ -1,5 +1,5 @@
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
-import { Button } from "@/components/ui/button";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 export function PrivateInferenceOffer({
   offered,
   busy,
@@ -17,7 +17,7 @@ export function PrivateInferenceOffer({
   return (
     <section className="tc-card mb-4">
       {copy && (
-        <span className="mb-3 block font-mono text-[10px] font-extrabold uppercase leading-none tracking-[.16em] text-primary">
+        <span className="mb-3 block font-mono text-[10px] font-extrabold uppercase leading-none tracking-[.16em] text-tc-accent">
           {copy.destination}
         </span>
       )}
@@ -32,29 +32,27 @@ export function PrivateInferenceOffer({
               <p className="m-0">{copy.offer_asked_once}</p>
             </div>
           ) : (
-            <p className="text-destructive">
+            <p className="text-tc-outside">
               {disclosure.isError
                 ? "Disclosure unavailable. Enabling is disabled."
                 : "Loading disclosure…"}
             </p>
           )}
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button
-              className="tc-btn tc-btn--primary tc-btn--sm"
+            <ButtonPrimary size="sm"
               type="button"
               onClick={() => onAnswer(true)}
               disabled={busy || !copy}
             >
               {copy?.offer_accept ?? "Turn it on"}
-            </Button>
-            <Button
-              className="tc-btn tc-btn--glass"
+            </ButtonPrimary>
+            <GlassButton
               type="button"
               onClick={() => onAnswer(false)}
               disabled={busy}
             >
               {copy?.offer_decline ?? "Not now"}
-            </Button>
+            </GlassButton>
           </div>
         </>
       )}

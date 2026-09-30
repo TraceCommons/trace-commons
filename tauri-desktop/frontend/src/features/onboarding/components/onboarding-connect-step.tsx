@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
 import { OnboardingConnectionOptions } from "./onboarding-connection-options";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary } from "@/design-system";
 
 export function OnboardingConnectStep({
   onboarding,
@@ -28,9 +28,9 @@ export function OnboardingConnectStep({
           <p className="m-0 tc-label font-normal tc-text-secondary">
             This device is already connected.
           </p>
-          <Button type="button" onClick={() => void onboarding.markEnrolled()}>
+          <ButtonPrimary size="sm" type="button" onClick={() => void onboarding.markEnrolled()}>
             Continue
-          </Button>
+          </ButtonPrimary>
         </div>
       ) : (
         <OnboardingConnectionOptions

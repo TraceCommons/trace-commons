@@ -1,12 +1,10 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { FormFieldError } from "../../../components/form-field-error";
 import type { WitnessStatus } from "../api/witness-api";
 import { type WitnessFormValues, witnessFormSchema } from "../forms";
+import { ButtonPrimary, GlassButton, Input, TertiaryLink, TextArea } from "@/design-system";
 
 export function WitnessPanel({
   data,
@@ -71,14 +69,13 @@ export function WitnessPanel({
           </span>
           <h2>Certificate boundary</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
         A witness receives raw sessions only after local consent and measurement
@@ -95,8 +92,8 @@ export function WitnessPanel({
           className={`mt-5 grid gap-[6px] border-l-[3px] p-3.5 ${
             data.state.startsWith("refusing_") ||
             data.state === "settings_unreadable"
-              ? "border-destructive/40 bg-destructive/10"
-              : "border-primary bg-primary/10"
+              ? "border-tc-outside/40 bg-tc-outside/10"
+              : "border-tc-purple bg-tc-purple/10"
           }`}
         >
           <strong>{data.state_line}</strong>
@@ -141,7 +138,7 @@ export function WitnessPanel({
         </label>
         <label htmlFor="witness-measurements">
           Expected measurements
-          <Textarea
+          <TextArea
             id="witness-measurements"
             {...form.register("measurements")}
             rows={4}
@@ -161,22 +158,21 @@ export function WitnessPanel({
           />
         </label>
         <div className="mt-2 flex gap-2.5">
-          <Button
-            className="tc-btn tc-btn--primary tc-btn--sm"
+          <ButtonPrimary size="sm"
             type="submit"
             disabled={busy || !form.formState.isValid}
           >
             Save witness
-          </Button>
+          </ButtonPrimary>
           {configured && (
-            <Button
-              className="tc-btn tc-btn--glass tc-text-outside"
+            <GlassButton
+              className="tc-text-outside"
               type="button"
               onClick={() => void onClear()}
               disabled={busy}
             >
               Return to local redaction
-            </Button>
+            </GlassButton>
           )}
         </div>
       </form>

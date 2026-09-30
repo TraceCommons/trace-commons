@@ -15,7 +15,7 @@ export function RedactedTranscript({ body, turns }: RedactedTranscriptProps) {
       {segments.map((segment) => (
         <span key={segment.id}>
           {segment.kind === "turn" && (
-            <span className="mt-2 block font-bold text-muted-foreground">
+            <span className="mt-2 block font-bold text-tc-secondary">
               — {segment.label} · turn {segment.turn} —{"\n"}
             </span>
           )}
@@ -88,7 +88,7 @@ function highlightRedactions(text: string, keyPrefix: string): ReactNode[] {
     if (index > lastIndex) parts.push(text.slice(lastIndex, index));
     parts.push(
       <mark
-        className="rounded-[3px] bg-chart-4/20 px-1 font-bold text-[var(--tc-text-primary)]"
+        className="rounded-[3px] bg-tc-ask/20 px-1 font-bold text-[var(--tc-text-primary)]"
         key={`${keyPrefix}-${index}`}
       >
         {match[0]}

@@ -1,8 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
-import { Button } from "../components/ui/button";
 import { retryDaemonStartup } from "../lib/tauri/core-api";
 import type { CoreStatus } from "../lib/tauri/types";
+import { GlassButton, Notice } from "@/design-system";
 
 export function DaemonStartupNotice({ startup }: { startup: CoreStatus["startup"] | undefined }) {
   const queryClient = useQueryClient();
@@ -14,27 +13,24 @@ export function DaemonStartupNotice({ startup }: { startup: CoreStatus["startup"
   if (startup !== "daemon_unavailable") return null;
 
   return (
-    <Alert className="tc-alert tc-alert--ask">
-      <AlertTitle>Rust core could not start</AlertTitle>
-      <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+    <Notice tone="ask" title="Rust core could not start">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <span>
           Source roots remain saved. Retry when the core is ready to restore live contribution controls.
         </span>
-        <Button
+        <GlassButton
           type="button"
-          size="sm"
-          variant="outline"
           disabled={retry.isPending}
           onClick={() => retry.mutate()}
         >
           {retry.isPending ? "Retrying…" : "Retry core startup"}
-        </Button>
+        </GlassButton>
         {retry.isError && (
-          <span className="w-full text-destructive" role="alert">
+          <span className="w-full text-tc-outside" role="alert">
             Core is still unavailable. Check local setup, then retry.
           </span>
         )}
-      </AlertDescription>
-    </Alert>
+      </div>
+    </Notice>
   );
 }

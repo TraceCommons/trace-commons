@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { InsightOutcomeLink } from "../types";
+import { TertiaryLink } from "@/design-system";
 
 type OutcomeLinkListProps = {
   links: InsightOutcomeLink[];
@@ -35,7 +35,7 @@ export function OutcomeLinkList({
             <code>{link.id}</code>
           </div>
           {link.evidence.type === "git_commit" ? (
-            <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-[10px] text-muted-foreground">
+            <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-[10px] text-tc-secondary">
               <span>Object {link.evidence.evidence.object_id}</span>
               <span>Tree {link.evidence.evidence.tree_id}</span>
               <span>
@@ -43,7 +43,7 @@ export function OutcomeLinkList({
               </span>
             </div>
           ) : (
-            <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-[10px] text-muted-foreground">
+            <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-[10px] text-tc-secondary">
               <span>Runner {link.evidence.evidence.runner}</span>
               <span>Passed {link.evidence.evidence.passed}</span>
               <span>Failed {link.evidence.evidence.failed}</span>
@@ -54,14 +54,14 @@ export function OutcomeLinkList({
             User-linked evidence. It does not prove task success, merge
             acceptance, or test execution here.
           </p>
-          <Button
-            className="tc-link text-destructive"
+          <TertiaryLink
+            className="text-tc-outside"
             type="button"
             onClick={() => onUnlink(link.id)}
             disabled={busy}
           >
             Unlink evidence
-          </Button>
+          </TertiaryLink>
         </article>
       ))}
     </div>

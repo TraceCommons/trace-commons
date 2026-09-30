@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { HarnessList, HarnessPlan } from "../api/harness-api";
+import { ButtonPrimary, GlassButton, TertiaryLink } from "@/design-system";
 
 export function HarnessListPanel({
   data,
@@ -33,14 +33,13 @@ export function HarnessListPanel({
           </span>
           <h2>{data?.view.title ?? "Configured tools"}</h2>
         </div>
-        <Button
-          className="tc-link"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={state === "loading"}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
       {view?.what && <p>{view.what}</p>}
       {view?.spend_line && (
@@ -80,7 +79,7 @@ export function HarnessListPanel({
         <div className="mt-3 grid gap-px">
           {rows.map((row) => (
             <div
-              className="flex justify-between gap-[18px] border-b border-border py-[15px]"
+              className="flex justify-between gap-[18px] border-b border-tc-hairline py-[15px]"
               key={row.id}
             >
               <div>
@@ -100,24 +99,23 @@ export function HarnessListPanel({
                     : "Not connected"}
                 </span>
                 {row.can_connect && (
-                  <Button
-                    className="tc-btn tc-btn--glass"
+                  <GlassButton
                     type="button"
                     onClick={() => void onPlan(row.id, "connect")}
                     disabled={actionState === "busy"}
                   >
                     Connect
-                  </Button>
+                  </GlassButton>
                 )}
                 {row.can_disconnect && (
-                  <Button
-                    className="tc-btn tc-btn--glass tc-text-outside"
+                  <GlassButton
+                    className="tc-text-outside"
                     type="button"
                     onClick={() => void onPlan(row.id, "disconnect")}
                     disabled={actionState === "busy"}
                   >
                     Disconnect
-                  </Button>
+                  </GlassButton>
                 )}
               </div>
             </div>
@@ -133,14 +131,13 @@ export function HarnessListPanel({
               </span>
               <h3>{plan.view.preview_title}</h3>
             </div>
-            <Button
-              className="tc-link"
+            <TertiaryLink
               type="button"
               onClick={onCancel}
               disabled={actionState === "busy"}
             >
               Cancel
-            </Button>
+            </TertiaryLink>
           </div>
           {plan.path && <code>{plan.path}</code>}
           {plan.view.outcome_line && <p>{plan.view.outcome_line}</p>}
@@ -160,14 +157,13 @@ export function HarnessListPanel({
             </>
           )}
           {plan.view.can_commit && (
-            <Button
-              className="tc-btn tc-btn--primary tc-btn--sm"
+            <ButtonPrimary size="sm"
               type="button"
               onClick={() => void onCommit()}
               disabled={actionState === "busy"}
             >
               {plan.view.confirm}
-            </Button>
+            </ButtonPrimary>
           )}
         </div>
       )}

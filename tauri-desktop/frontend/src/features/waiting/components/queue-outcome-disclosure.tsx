@@ -1,9 +1,5 @@
-import { useState } from "react";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { useId, useState } from "react";
+import { Expander } from "@/design-system";
 
 export function QueueOutcomeDisclosure({
   reasons,
@@ -13,21 +9,26 @@ export function QueueOutcomeDisclosure({
   lines: Record<string, string>;
 }) {
   const [open, setOpen] = useState(false);
+  const contentId = useId();
   const entries = reasons
     ? Object.entries(reasons).filter(([, count]) => count > 0)
     : [];
   if (entries.length === 0) return null;
   const total = entries.reduce((sum, [, count]) => sum + count, 0);
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="mb-4">
-      <div className="tc-card tc-card--quiet">
-        <CollapsibleTrigger className="flex w-full items-center gap-2 text-left text-[12px] font-bold text-[var(--tc-text-primary)]">
-          <span aria-hidden="true" className="text-primary">
-            {open ? "⌄" : "›"}
-          </span>
-          Sessions no longer waiting ({total})
-        </CollapsibleTrigger>
-        <CollapsibleContent className="grid gap-2 pl-5 pt-3 text-[11px] text-muted-foreground">
+    <div className="mb-4 tc-card tc-card--quiet">
+      <Expander
+        open={open}
+        onToggle={() => setOpen((current) => !current)}
+        controls={contentId}
+      >
+        Sessions no longer waiting ({total})
+      </Expander>
+      {open && (
+        <div
+          id={contentId}
+          className="grid gap-2 pl-5 pt-3 text-[11px] text-tc-secondary"
+        >
           {entries
             .sort(([left], [right]) => left.localeCompare(right))
             .map(([label, count]) => (
@@ -39,8 +40,8 @@ export function QueueOutcomeDisclosure({
             This covers sessions that reached the queue. Sessions never queued
             are not counted here.
           </span>
-        </CollapsibleContent>
-      </div>
-    </Collapsible>
+        </div>
+      )}
+    </div>
   );
 }
