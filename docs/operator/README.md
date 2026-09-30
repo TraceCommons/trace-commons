@@ -27,7 +27,7 @@ the link.
 | Publishing the public `tracecommons.ai` leaderboard | [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
-| Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
+| Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback, withdrawal tombstone repair) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
 | Running the versioned pipeline lab (design stage) | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate (design stage) | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Activating or containing the versioned pipeline (design stage) | [`./pipeline-activation.md`](./pipeline-activation.md) |
@@ -38,6 +38,7 @@ the link.
 | Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
+| Sending a native-app user to the browser passkey step-up page (URL contract, origin list) | [`./native-step-up-page.md`](./native-step-up-page.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
 | Provisioning the public register-stats read role | [`./register-stats-role.md`](./register-stats-role.md) |
 | Reviewing account invite trust and its activation blockers | [`./account-invite-trust.md`](./account-invite-trust.md) |

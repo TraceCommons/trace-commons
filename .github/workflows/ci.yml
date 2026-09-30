@@ -998,6 +998,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Verify native wallet browser state transitions
         run: node scripts/ci/test-near-wallet-browser.cjs
+      - name: Verify the browser step-up page script
+        run: node scripts/ci/test-step-up-page.cjs
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v5
         with:
@@ -1179,6 +1181,22 @@ jobs:
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.
       - uses: ./.github/actions/trim-cargo-cache
+
+  # scripts/check-aasa.sh, the smoke test for the apple-app-site-association
+  # file (Z2 S4 of #1118), against local stand-ins for the origin and Apple's
+  # CDN. The file itself is built and served by
+  # TraceCommons/trace-commons-community. Not a required check.
+  check-aasa-script:
+    name: check-aasa.sh tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      # Pinned to the version the Tauri jobs use. curl and jq are on the image.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: node --test scripts/ci/test-check-aasa.mjs
 
   privacy-filter-shim-tests:
     name: privacy-filter shim tests

@@ -1078,7 +1078,19 @@ async fn drain_approved(
                 if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
                     q.record_attestation(entry.entry_id, mark.state, mark.reason);
                 }
-                if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
+                if reason_label == crate::submit::REASON_TRANSIENT_REDACTION
+                    && q.record_transient_redaction_failure(entry.entry_id)
+                        >= MAX_TRANSIENT_REDACTION_FAILURES
+                {
+                    // The budget is spent. Stop re-sending the session to
+                    // the classifier and put it in front of a person, held
+                    // so a standing opt-in does not simply re-approve it.
+                    q.record_attempt(entry.entry_id, None);
+                    q.revoke_approval(
+                        entry.entry_id,
+                        crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
+                    );
+                } else if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
                     let attempt = q
                         .get(entry.entry_id)
                         .map(|e| e.attempts.saturating_add(1))
@@ -1228,8 +1240,16 @@ fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chron
     chrono::Duration::seconds((entry_id.as_u128() % span) as i64)
 }
 
-/// One minute, doubling per failed attempt and capped at one hour. There is
-/// no per-session attempt limit: an upstream outage must not consume a trace.
+/// How many transient classifier failures in a row an approval survives.
+///
+/// With [`transient_redaction_retry_delay`] that is about nineteen hours of
+/// retrying. After it the approval is revoked and the session is held for a
+/// person ([`crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED`]), not
+/// refused: an outage longer than that still does not consume the trace, but
+/// a failure that only looks transient stops being re-sent to the classifier.
+const MAX_TRANSIENT_REDACTION_FAILURES: u32 = 24;
+
+/// One minute, doubling per failed attempt and capped at one hour.
 fn transient_redaction_retry_delay(attempts: u32) -> chrono::Duration {
     let exponent = attempts.saturating_sub(1).min(6);
     chrono::Duration::seconds((60_i64 * (1_i64 << exponent)).min(3_600))
@@ -2854,6 +2874,80 @@ mod tests {
                 "attempt {attempts}"
             );
         }
+    }
+
+    /// A failure the classifier reports as transient is not always passing:
+    /// an over-limit window can come back as a 502 every time. Without a cap
+    /// the session stayed approved forever and was re-sent in full to the
+    /// classifier every hour. After the cap it goes back to a person instead,
+    /// held so no standing opt-in re-approves it, and is left alone until
+    /// someone does; their approval starts a fresh budget.
+    #[tokio::test]
+    async fn transient_retries_return_the_session_to_a_person_after_the_cap() {
+        let h = TransientRetryHarness::new().await;
+        let original = h.entry();
+        h.classifier_status.store(500, Ordering::SeqCst);
+
+        // Two real failed passes, and the rest of the run counted directly:
+        // each pass spends the adapter's own in-client retries, and a whole
+        // day of them would cost this test most of a minute.
+        let mut now = TransientRetryHarness::now();
+        for _ in 0..2 {
+            h.pass(now).await;
+            let waiting = h.entry();
+            assert_eq!(waiting.state, queue::QueueState::Approved);
+            assert_eq!(
+                waiting.reason_label.as_deref(),
+                Some(crate::submit::REASON_TRANSIENT_REDACTION)
+            );
+            now = waiting.retry_after.expect("a scheduled retry");
+        }
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            for _ in 2..MAX_TRANSIENT_REDACTION_FAILURES - 1 {
+                q.record_transient_redaction_failure(original.entry_id);
+            }
+        }
+        h.pass(now).await;
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED)
+        );
+        assert!(held.retry_after.is_none());
+        assert!(held.approved_scopes.is_none(), "the approval is revoked");
+        assert!(
+            held.held_for_review(),
+            "a standing opt-in must not re-approve it on the next poll"
+        );
+        assert_eq!(held.attempts, 3, "three real failed passes");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        // Nothing tries it again on its own, however long it waits.
+        h.pass(now + chrono::Duration::days(2)).await;
+        assert_eq!(h.entry().attempts, 3);
+        assert_eq!(h.entry().state, queue::QueueState::Pending);
+
+        // A person approving it again gets a whole budget, not one attempt.
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            assert!(q.approve(
+                original.entry_id,
+                original.approved_scopes.as_deref().unwrap(),
+                original.approved_inputs.as_deref(),
+                None,
+                None,
+                None,
+            ));
+        }
+        h.pass(now + chrono::Duration::days(2)).await;
+        let retried = h.entry();
+        assert_eq!(retried.state, queue::QueueState::Approved, "{retried:?}");
+        assert_eq!(
+            retried.reason_label.as_deref(),
+            Some(crate::submit::REASON_TRANSIENT_REDACTION)
+        );
     }
 
     #[tokio::test]

@@ -8064,6 +8064,14 @@ fn app(state: Arc<AppState>) -> Router {
             "/account/passkey/login/finish",
             post(account_passkey_login_finish_handler),
         )
+        // The browser passkey step-up page (Z2 S7). Un-versioned and un-authed
+        // beside the login it drives: a plain page whose one script calls the
+        // routes above and the authenticated passkey and payout routes, so a
+        // weak native session's owner can get a strong cookie session.
+        .route(
+            step_up_page::STEP_UP_PATH,
+            get(step_up_page::step_up_page_handler),
+        )
         // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
         // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
         // IS the credential. No RPC at login — the signature is verified offline.
@@ -8253,6 +8261,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/audit-chain-repair",
             post(audit_chain_repair_handler),
         )
+        .route("/v1/admin/tombstone-repair", post(tombstone_repair_handler))
         .route(
             "/v1/admin/db-reconciliation-drill",
             post(db_reconciliation_drill_handler),
@@ -16442,7 +16451,7 @@ async fn account_auth_middleware(
             request.extensions_mut().insert(binding);
             next.run(request).await
         };
-        if let Some(token) = rotated_secret_value {
+        if let Some((token, _)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
                     .headers_mut()
@@ -16464,7 +16473,7 @@ async fn account_auth_middleware(
         next.run(request).await
     };
 
-    if let Some(cookie_value) = rotated_secret_value {
+    if let Some((cookie_value, expires_at)) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
         // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
         // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
@@ -16475,7 +16484,7 @@ async fn account_auth_middleware(
             .http_only(true)
             .same_site(cookie::SameSite::Strict)
             .path("/")
-            .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+            .max_age(rotated_cookie_max_age(expires_at, Utc::now()))
             .build();
         if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
             // APPEND, not insert: a handler may have already set its OWN Set-Cookie
@@ -16497,6 +16506,19 @@ async fn account_auth_middleware(
     }
 
     response
+}
+
+/// Max-Age for a rotated session cookie: the usual lifetime, capped at what
+/// is left of the session's absolute `expires_at`, so rotation can never make
+/// the cookie outlive its row. That matters for a step-up session
+/// (`STEP_UP_SESSION_TTL_MINUTES`), whose row expires long before a fresh
+/// seven-day cookie would.
+fn rotated_cookie_max_age(
+    expires_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> cookie::time::Duration {
+    let remaining = (expires_at - now).num_seconds().max(0);
+    cookie::time::Duration::seconds(remaining.min(ACCOUNT_SESSION_TTL_DAYS * 24 * 60 * 60))
 }
 
 #[cfg(test)]
@@ -16564,6 +16586,10 @@ async fn account_binding_handler(
     response
 }
 
+/// A session that rotated on this request: the new credential value (cookie
+/// value or native token) and the session's unchanged absolute expiry.
+type RotatedSession = (String, chrono::DateTime<Utc>);
+
 /// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
 /// rotated session secret (cookie path only) so the auth middleware can attach a
 /// fresh `Set-Cookie` on EVERY authenticated response. The bearer / both-creds /
@@ -16573,7 +16599,7 @@ async fn resolve_account_ctx_with_rotation(
     headers: &HeaderMap,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let bearer = headers
@@ -16637,7 +16663,7 @@ async fn resolve_account_ctx_native(
     bearer: &str,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let invalid = || {
@@ -16673,9 +16699,10 @@ async fn resolve_account_ctx_native(
     // middleware hands the new secret back in a response header (the bearer
     // analogue of `Set-Cookie`) so the client can swap before the short
     // prev-token grace lapses.
+    let expires_at = session.expires_at;
     let rotated = session
         .rotated_secret
-        .map(|new_secret| native_token_value(&tenant_id, &new_secret));
+        .map(|new_secret| (native_token_value(&tenant_id, &new_secret), expires_at));
 
     Ok((
         AccountCtx {
@@ -16706,7 +16733,7 @@ async fn resolve_account_ctx_cookie(
     cookie: &str,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let invalid = || {
@@ -16735,11 +16762,15 @@ async fn resolve_account_ctx_cookie(
     // (`{b64url(tenant)}.{new_secret}`) so the middleware can attach a fresh
     // `Set-Cookie`. The browser still holds the old secret until that header lands;
     // `validate_session` already parked the old hash as the within-grace prev token.
+    let expires_at = session.expires_at;
     let rotated_cookie_value = session.rotated_secret.map(|new_secret| {
-        format!(
-            "{}.{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
-            new_secret,
+        (
+            format!(
+                "{}.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
+                new_secret,
+            ),
+            expires_at,
         )
     });
 
@@ -17581,21 +17612,26 @@ async fn delete_withdrawn_trace_objects(
 /// Must run before the content is deleted: the tombstone's redaction hash
 /// comes from the stored envelope. On a retry the tombstone already exists
 /// and is left as first written.
+///
+/// The file tombstone is also written to the DB's `trace_tombstones`, as an
+/// operator revocation's mirror writes it, so the two tombstone records stay
+/// consistent: the rollback drill compares them by submission id.
 async fn revoke_withdrawn_trace_file_records(
     state: &AppState,
     db: &Arc<dyn Database>,
     tenant_id: &str,
     submission_id: Uuid,
+    created_by_principal_ref: &str,
 ) -> anyhow::Result<()> {
     let record = read_submission_record(&state.root, tenant_id, submission_id)?;
     let derived = read_derived_record(&state.root, tenant_id, submission_id)?;
     if record.is_none() && derived.is_none() {
         return Ok(());
     }
-    if read_revocation(&state.root, tenant_id, submission_id)?.is_none() {
-        write_revocation(
-            &state.root,
-            &TraceCommonsRevocation {
+    let file_tombstone = match read_revocation(&state.root, tenant_id, submission_id)? {
+        Some(existing) => existing,
+        None => {
+            let tombstone = TraceCommonsRevocation {
                 tenant_id: tenant_id.to_string(),
                 tenant_storage_ref: tenant_storage_ref(tenant_id),
                 submission_id,
@@ -17607,9 +17643,25 @@ async fn revoke_withdrawn_trace_file_records(
                 canonical_summary_hash: derived
                     .as_ref()
                     .map(|derived| derived.canonical_summary_hash.clone()),
-            },
-        )?;
-    }
+            };
+            write_revocation(&state.root, &tombstone)?;
+            tombstone
+        }
+    };
+    let trace_id = match record.as_ref() {
+        Some(record) => Some(record.trace_id),
+        None => db
+            .get_trace_submission(tenant_id, submission_id)
+            .await?
+            .map(|db_record| db_record.trace_id),
+    };
+    write_file_tombstone_to_db(
+        db.as_ref(),
+        &file_tombstone,
+        trace_id,
+        created_by_principal_ref,
+    )
+    .await?;
     if let Some(mut record) = record {
         let purged_at = db
             .get_trace_submission(tenant_id, submission_id)
@@ -17629,6 +17681,37 @@ async fn revoke_withdrawn_trace_file_records(
         write_derived_record(&state.root, &derived)?;
     }
     Ok(())
+}
+
+/// Write a file revocation tombstone's DB row in `trace_tombstones`, with the
+/// file tombstone's own reason, hashes and time, under the same deterministic
+/// tombstone id the revocation mirror uses. First writer wins
+/// (`ON CONFLICT DO NOTHING`), so a retry, or a repair run over a withdrawal
+/// that already has its row, changes nothing.
+async fn write_file_tombstone_to_db(
+    db: &dyn Database,
+    file_tombstone: &TraceCommonsRevocation,
+    trace_id: Option<Uuid>,
+    created_by_principal_ref: &str,
+) -> anyhow::Result<()> {
+    db.write_trace_tombstone(StorageTraceTombstoneWrite {
+        tombstone_id: deterministic_trace_uuid_for(
+            "revocation-tombstone",
+            &file_tombstone.tenant_id,
+            file_tombstone.submission_id,
+        ),
+        tenant_id: file_tombstone.tenant_id.clone(),
+        submission_id: file_tombstone.submission_id,
+        trace_id,
+        redaction_hash: file_tombstone.redaction_hash.clone(),
+        canonical_summary_hash: file_tombstone.canonical_summary_hash.clone(),
+        reason: file_tombstone.reason.clone(),
+        effective_at: file_tombstone.revoked_at,
+        retain_until: None,
+        created_by_principal_ref: created_by_principal_ref.to_string(),
+    })
+    .await
+    .context("failed to write the DB row for a file revocation tombstone")
 }
 
 /// Evict a withdrawn trace from every derived surface that would otherwise
@@ -17848,10 +17931,18 @@ async fn account_trace_withdraw_handler(
 
     // The file side records the withdrawal too, before any content is deleted:
     // the file tombstone's redaction hash is read from the stored envelope.
+    // Its DB row is written from the same tombstone.
+    let tombstone_actor = account_audit_tenant(&ctx).principal_ref;
     for affected_id in affected_ids.iter().copied() {
-        revoke_withdrawn_trace_file_records(state.as_ref(), &db, &ctx.tenant_id, affected_id)
-            .await
-            .map_err(|error| withdrawal_failed(&error))?;
+        revoke_withdrawn_trace_file_records(
+            state.as_ref(),
+            &db,
+            &ctx.tenant_id,
+            affected_id,
+            &tombstone_actor,
+        )
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
     }
 
     // Retained mappings make this list stable across retries. Complete the
@@ -18180,6 +18271,9 @@ use native_passkey::{
     native_passkey_login_finish_handler, native_passkey_login_start_handler,
 };
 
+#[path = "trace_commons_ingest_internal/step_up_page.rs"]
+mod step_up_page;
+
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
@@ -18382,6 +18476,12 @@ where
 
 /// Issued session lifetime. Matches the spec's ~7d browser session.
 const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
+
+/// Lifetime of a browser passkey session minted for the step-up page (Z2 S7):
+/// a sign-in whose `login/start` asked for `purpose=step_up`. Absolute, like
+/// every session's `expires_at`: activity and rotation-on-use never move it.
+/// A constant, as the other session lifetimes are.
+const STEP_UP_SESSION_TTL_MINUTES: i64 = 15;
 
 /// The session cookie name. Value is `{b64url(tenant_id)}.{secret}`; only the
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
@@ -20515,6 +20615,34 @@ where
     }
 }
 
+/// What a browser passkey sign-in is for, fixed at `login/start` and carried
+/// in the ceremony to `finish`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasskeyLoginPurpose {
+    /// An ordinary sign-in: a session of `ACCOUNT_SESSION_TTL_DAYS`.
+    Session,
+    /// The step-up page's sign-in (Z2 S7): a session of
+    /// `STEP_UP_SESSION_TTL_MINUTES`.
+    StepUp,
+}
+
+/// The `purpose` of a `login/start`, from its raw query. No `purpose` is an
+/// ordinary sign-in and other parameters are ignored, as before. A `purpose`
+/// must be exactly `step_up`, once; any other value (or a repeat) is `None`,
+/// which the handler answers with the uniform deny. The value is compared, not
+/// decoded, and never logged.
+fn passkey_login_purpose(query: Option<&str>) -> Option<PasskeyLoginPurpose> {
+    let mut purposes = query.unwrap_or_default().split('&').filter_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "purpose").then_some(value)
+    });
+    match (purposes.next(), purposes.next()) {
+        (None, _) => Some(PasskeyLoginPurpose::Session),
+        (Some("step_up"), None) => Some(PasskeyLoginPurpose::StepUp),
+        _ => None,
+    }
+}
+
 /// `POST /account/passkey/login/start` — begin a discoverable passkey login
 /// (Slice 2 Task 6). UNAUTHENTICATED. Fails closed (uniform deny) when the
 /// relying party is unconfigured. Rate-limited per-IP + global. Issues a
@@ -20526,7 +20654,13 @@ where
 async fn account_passkey_login_start_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> axum::response::Response {
+    // The one optional input: `purpose=step_up` from the step-up page. Checked
+    // before anything else so a refused purpose costs nothing.
+    let Some(purpose) = passkey_login_purpose(query.as_deref()) else {
+        return passkey_login_generic_deny();
+    };
     // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
     // in the `REDEEM_MIN_LATENCY` timing floor. It performs NO credential or tenant
     // lookup — it only mints a fresh discoverable-auth challenge — so there is no
@@ -20559,7 +20693,10 @@ async fn account_passkey_login_start_handler(
     let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
-        CeremonyState::DiscoverableAuthentication(auth_state),
+        match purpose {
+            PasskeyLoginPurpose::Session => CeremonyState::DiscoverableAuthentication(auth_state),
+            PasskeyLoginPurpose::StepUp => CeremonyState::StepUpDiscoverable(auth_state),
+        },
     );
 
     // Same short-lived ceremony cookie shape as enrollment (Task 5): opaque id
@@ -20735,14 +20872,21 @@ async fn account_passkey_login_finish_inner(
 
     // 3. Recover and CONSUME (single-use `take`) the pending discoverable-auth
     //    state via the ceremony cookie. Missing / expired / already-consumed /
-    //    wrong-variant all collapse to the uniform deny.
-    let auth_state = match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
-        Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-            Some(CeremonyState::DiscoverableAuthentication(auth_state)) => auth_state,
-            Some(_) | None => return passkey_login_generic_deny(),
-        },
-        None => return passkey_login_generic_deny(),
-    };
+    //    wrong-variant all collapse to the uniform deny. The purpose was bound
+    //    into the ceremony at `start`; nothing here can change it.
+    let (auth_state, purpose) =
+        match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
+            Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+                Some(CeremonyState::DiscoverableAuthentication(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::Session)
+                }
+                Some(CeremonyState::StepUpDiscoverable(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::StepUp)
+                }
+                Some(_) | None => return passkey_login_generic_deny(),
+            },
+            None => return passkey_login_generic_deny(),
+        };
 
     // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
     //    the advanced sign counter: the verification core shared with native
@@ -20762,9 +20906,22 @@ async fn account_passkey_login_finish_inner(
     //    hash-only audit in one RLS-scoped tx under the resolved tenant. NO
     //    ensure_trace_tenant: the credential is verified, so the tenant provably
     //    exists via its FK.
+    //    A step-up sign-in's session lasts `STEP_UP_SESSION_TTL_MINUTES`, in
+    //    the row's absolute `expires_at` and in the cookie's Max-Age alike.
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
-    let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
+    let (lifetime, metadata) = match purpose {
+        PasskeyLoginPurpose::Session => (
+            Duration::days(ACCOUNT_SESSION_TTL_DAYS),
+            // Hash-only / label-only: never the credential id or key material.
+            serde_json::json!({ "client_kind": "passkey" }),
+        ),
+        PasskeyLoginPurpose::StepUp => (
+            Duration::minutes(STEP_UP_SESSION_TTL_MINUTES),
+            serde_json::json!({ "client_kind": "passkey", "purpose": "step_up" }),
+        ),
+    };
+    let expires_at = Utc::now() + lifetime;
     if db
         .issue_passkey_session(
             &tenant,
@@ -20778,8 +20935,7 @@ async fn account_passkey_login_finish_inner(
             trace_commons_server::db::RedeemAudit {
                 action: "account_passkey_login".to_string(),
                 outcome: "success".to_string(),
-                // Hash-only / label-only: never the credential id or key material.
-                metadata: serde_json::json!({ "client_kind": "passkey" }),
+                metadata,
             },
         )
         .await
@@ -20801,7 +20957,7 @@ async fn account_passkey_login_finish_inner(
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
         .path("/")
-        .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+        .max_age(cookie::time::Duration::seconds(lifetime.num_seconds()))
         .build();
     // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
     let clear_ceremony = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ""))
@@ -22046,6 +22202,10 @@ const RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND: &str =
 /// file lines it restored from the DB. Hash-only.
 const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str = "audit_chain_repair";
 
+/// The file audit event recording an operator tombstone repair: how many DB
+/// tombstone rows it wrote from file tombstones. Hash-only.
+const TOMBSTONE_REPAIR_AUDIT_KIND: &str = "tombstone_repair";
+
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -22053,6 +22213,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+            | TOMBSTONE_REPAIR_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -67431,6 +67592,230 @@ async fn run_audit_chain_repair(
     })
 }
 
+fn default_tombstone_repair_dry_run() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceTombstoneRepairRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    /// Defaults to true: a repair writes only when asked to.
+    #[serde(default = "default_tombstone_repair_dry_run")]
+    dry_run: bool,
+}
+
+/// Hash-only: counts and the purpose's hash. No submission ids and no
+/// revocation reasons, which an operator revocation may carry as free text.
+#[derive(Debug, Serialize)]
+struct TraceTombstoneRepairResponse {
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose_hash: String,
+    dry_run: bool,
+    /// Both counts as read before the repair wrote anything.
+    file_tombstone_count: usize,
+    db_tombstone_count: usize,
+    /// File tombstones with no `trace_tombstones` row.
+    file_tombstones_missing_in_db: usize,
+    /// Of those, the ones an account withdrawal wrote.
+    withdrawal_tombstones_missing_in_db: usize,
+    /// Of those, the ones whose DB submission is `revoked`: the rows this
+    /// repair writes, or would write on a dry run.
+    repairable: usize,
+    /// Skipped: the DB has no submission row for the tombstone to reference.
+    skipped_db_submission_missing: usize,
+    /// Skipped: the DB submission is not `revoked`, so a tombstone row alone
+    /// would disagree with it. Read these with the db-reconciliation drill's
+    /// `status_mismatches`; this repair does not change a submission's status.
+    skipped_db_submission_not_revoked: usize,
+    db_tombstones_written: usize,
+    /// The repair's own audit event; absent for a dry run.
+    repair_audit_event_id: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct TraceTombstoneRepairRequiresDbMirror;
+
+impl std::fmt::Display for TraceTombstoneRepairRequiresDbMirror {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons tombstone repair requires TRACE_COMMONS_DB_DUAL_WRITE"
+        )
+    }
+}
+
+impl std::error::Error for TraceTombstoneRepairRequiresDbMirror {}
+
+async fn tombstone_repair_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceTombstoneRepairRequest>,
+) -> ApiResult<Json<TraceTombstoneRepairResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_tombstone_repair(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
+/// Writes the missing `trace_tombstones` row for each of the caller's
+/// tenant's file revocation tombstones that has none, from the file
+/// tombstone itself (its reason, hashes and time), so the file and DB
+/// tombstone records are consistent again. An account withdrawal made by a
+/// build that wrote only the file tombstone is the case this exists for.
+///
+/// Writes only where the DB submission exists and is already `revoked`. A
+/// dry run (the default) counts and writes nothing. Idempotent: the rows are
+/// first-writer-wins, and a second run finds nothing missing. A non-dry run
+/// is itself audited, as a hash-only `tombstone_repair` counts event.
+async fn run_tombstone_repair(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceTombstoneRepairRequest,
+) -> anyhow::Result<TraceTombstoneRepairResponse> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or(TraceTombstoneRepairRequiresDbMirror)?;
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_tombstone_repair");
+    let purpose_hash = sha256_prefixed(purpose);
+
+    let file_tombstones = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let db_tombstones = db
+        .list_trace_tombstones(&tenant.tenant_id)
+        .await
+        .context("failed to list DB tombstones for tombstone repair")?;
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|tombstone| tombstone.submission_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut file_tombstones_missing_in_db = 0usize;
+    let mut withdrawal_tombstones_missing_in_db = 0usize;
+    let mut repairable = 0usize;
+    let mut skipped_db_submission_missing = 0usize;
+    let mut skipped_db_submission_not_revoked = 0usize;
+    let mut db_tombstones_written = 0usize;
+    for file_tombstone in &file_tombstones {
+        if db_tombstone_submission_ids.contains(&file_tombstone.submission_id) {
+            continue;
+        }
+        file_tombstones_missing_in_db += 1;
+        if file_tombstone.reason == TRACE_WITHDRAWAL_REASON {
+            withdrawal_tombstones_missing_in_db += 1;
+        }
+        let Some(db_submission) = db
+            .get_trace_submission(&tenant.tenant_id, file_tombstone.submission_id)
+            .await
+            .context("failed to read the DB submission for tombstone repair")?
+        else {
+            skipped_db_submission_missing += 1;
+            continue;
+        };
+        if db_submission.status != StorageTraceCorpusStatus::Revoked {
+            skipped_db_submission_not_revoked += 1;
+            continue;
+        }
+        repairable += 1;
+        if request.dry_run {
+            continue;
+        }
+        write_file_tombstone_to_db(
+            db.as_ref(),
+            file_tombstone,
+            Some(db_submission.trace_id),
+            &tenant.principal_ref,
+        )
+        .await?;
+        db_tombstones_written += 1;
+    }
+
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        dry_run = request.dry_run,
+        file_tombstones_missing_in_db,
+        withdrawal_tombstones_missing_in_db,
+        repairable,
+        skipped_db_submission_missing,
+        skipped_db_submission_not_revoked,
+        db_tombstones_written,
+        "Trace Commons tombstone repair"
+    );
+
+    let repair_audit_event_id = if request.dry_run {
+        None
+    } else {
+        let saturate = |count: usize| count.min(u32::MAX as usize) as u32;
+        let mut action_counts = BTreeMap::new();
+        action_counts.insert(
+            "file_tombstones_missing_in_db".to_string(),
+            saturate(file_tombstones_missing_in_db),
+        );
+        action_counts.insert(
+            "db_tombstones_written".to_string(),
+            saturate(db_tombstones_written),
+        );
+        action_counts.insert(
+            "skipped_db_submission_missing".to_string(),
+            saturate(skipped_db_submission_missing),
+        );
+        action_counts.insert(
+            "skipped_db_submission_not_revoked".to_string(),
+            saturate(skipped_db_submission_not_revoked),
+        );
+        let event = append_audit_event_mirrored(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::lifecycle_counts(
+                tenant,
+                Uuid::nil(),
+                TOMBSTONE_REPAIR_AUDIT_KIND,
+                Some(&purpose_hash),
+                &action_counts,
+            ),
+            AuditRowMirror {
+                action: StorageTraceAuditAction::Retain,
+                metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(TOMBSTONE_REPAIR_AUDIT_KIND.to_string()),
+                    purpose_hash: Some(purpose_hash.clone()),
+                    dry_run: false,
+                    action_counts,
+                },
+                object_ref_id: None,
+                actor_role_label: None,
+            },
+            "tombstone repair audit event",
+        )
+        .await?;
+        Some(event.event_id)
+    };
+
+    Ok(TraceTombstoneRepairResponse {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at: Utc::now(),
+        purpose_hash,
+        dry_run: request.dry_run,
+        file_tombstone_count: file_tombstones.len(),
+        db_tombstone_count: db_tombstones.len(),
+        file_tombstones_missing_in_db,
+        withdrawal_tombstones_missing_in_db,
+        repairable,
+        skipped_db_submission_missing,
+        skipped_db_submission_not_revoked,
+        db_tombstones_written,
+        repair_audit_event_id,
+    })
+}
+
 /// Chains and appends a file-only event: for a deployment without a DB
 /// mirror, and for tests. Production paths go through
 /// [`append_audit_event_mirrored`], which holds the append lock.
@@ -70327,9 +70712,9 @@ fn audit_backfill_storage_projection(
             .status
             .map(lifecycle_status_audit_action)
             .unwrap_or(StorageTraceAuditAction::Review),
-        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND | AUDIT_CHAIN_REPAIR_AUDIT_KIND => {
-            StorageTraceAuditAction::Retain
-        }
+        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
+        | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        | TOMBSTONE_REPAIR_AUDIT_KIND => StorageTraceAuditAction::Retain,
         RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND => StorageTraceAuditAction::Purge,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
@@ -70454,6 +70839,7 @@ fn audit_backfill_storage_projection(
         | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        | TOMBSTONE_REPAIR_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -71333,6 +71719,22 @@ async fn reconcile_db_mirror(
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
     let file_revocations = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let file_tombstone_submission_ids = file_revocations
+        .iter()
+        .map(|revocation| revocation.submission_id)
+        .collect::<BTreeSet<_>>();
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|tombstone| tombstone.submission_id)
+        .collect::<BTreeSet<_>>();
+    let missing_tombstone_submission_ids_in_db = file_tombstone_submission_ids
+        .difference(&db_tombstone_submission_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_tombstone_submission_ids_in_files = db_tombstone_submission_ids
+        .difference(&file_tombstone_submission_ids)
+        .copied()
+        .collect::<Vec<_>>();
     let file_credit_event_ids = file_credit_events
         .iter()
         .map(|event| event.event_id)
@@ -72203,6 +72605,8 @@ async fn reconcile_db_mirror(
                 .collect(),
         file_revocation_tombstone_count: file_revocations.len(),
         db_tombstone_count: db_tombstones.len(),
+        missing_tombstone_submission_ids_in_db,
+        missing_tombstone_submission_ids_in_files,
         db_object_ref_count,
         accepted_without_active_envelope_object_ref,
         unreadable_active_envelope_object_refs,
@@ -72855,6 +73259,9 @@ fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     }
     if let Some(error) = error.downcast_ref::<TraceAuditChainRepairRefused>() {
         return api_error(StatusCode::CONFLICT, error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<TraceTombstoneRepairRequiresDbMirror>() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
     internal_error(error)
 }
@@ -75041,6 +75448,10 @@ struct TraceDbReconciliationReport {
     active_export_manifest_ids_with_ineligible_items: Vec<Uuid>,
     file_revocation_tombstone_count: usize,
     db_tombstone_count: usize,
+    /// File revocation tombstones with no `trace_tombstones` row, and the
+    /// reverse, compared by submission id as the rollback drill compares them.
+    missing_tombstone_submission_ids_in_db: Vec<Uuid>,
+    missing_tombstone_submission_ids_in_files: Vec<Uuid>,
     db_object_ref_count: usize,
     accepted_without_active_envelope_object_ref: Vec<Uuid>,
     unreadable_active_envelope_object_refs: Vec<Uuid>,
@@ -75315,6 +75726,16 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "current_retention_job_item_count_mismatches",
             self.current_retention_job_item_count_mismatches.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_tombstone_submission_ids_in_db",
+            self.missing_tombstone_submission_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_tombstone_submission_ids_in_files",
+            self.missing_tombstone_submission_ids_in_files.len(),
         );
         push_gap_count(
             &mut gaps,
