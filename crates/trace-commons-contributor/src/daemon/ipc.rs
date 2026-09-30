@@ -352,6 +352,7 @@ pub const METHODS: &[&str] = &[
     "preview_request",
     "witness_preview_request",
     "preview_turns",
+    "preview_unsure_spans",
     "preview_visible",
     "probe_routed_tools",
     "probe_routing",
@@ -2145,6 +2146,16 @@ pub fn entry_value(
     if let Some(reason) = e.attestation_reason.as_deref() {
         value["attestation_reason"] = serde_json::Value::from(reason);
     }
+    // THE FLOW 2 SCRUB STATE: `scrub`, `marks`, `second_look`.
+    //
+    // `scrub` is `not-yet-scrubbed` until a preview of this entry has run,
+    // and `marks` is ABSENT until then -- never `0`, which would read as
+    // "nothing matched" for a session the scrubber has not read.
+    // `second_look` holds the fixed reasons from
+    // `second_look::second_look_reasons`, the one predicate every surface
+    // shares; `trimmed-to-fit` is known from discovery and can appear before
+    // any preview.
+    super::second_look::insert_fields(&mut value, e.scrub(), e.subagents_dropped);
     value
 }
 
@@ -2300,6 +2311,10 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("witness_preview_request", "witness-review-requires-async"),
     ("preview_body", "preview-body-requires-async"),
     ("preview_turns", "preview-turns-requires-async"),
+    (
+        "preview_unsure_spans",
+        "preview-unsure-spans-requires-async",
+    ),
     ("quiesce", "quiesce-requires-async"),
     ("probe_routing", "probe-routing-requires-async"),
     ("probe_routed_tools", "probe-routed-tools-requires-async"),
@@ -3810,6 +3825,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "preview_body" => handle_preview_body(shared, req).await,
         "quiesce" => handle_quiesce(shared, req).await,
         "preview_turns" => handle_preview_turns(shared, req).await,
+        "preview_unsure_spans" => handle_preview_unsure_spans(shared, req).await,
         "search_original" => handle_search_original(shared, req).await,
         "probe_routing" => handle_probe_routing(req).await,
         "probe_routed_tools" => handle_probe_routed_tools(req).await,
@@ -4787,8 +4803,14 @@ async fn handle_witness_preview_request_inner(
         id,
         &review.summary.envelope_digest,
         review.artifact.attested_inference().cloned(),
-    ) || queue.save(&shared.store).is_err()
-    {
+    ) || {
+        queue.record_scrub(
+            id,
+            &review.summary.envelope_digest,
+            review.summary.scrub_counts,
+        );
+        queue.save(&shared.store).is_err()
+    } {
         *queue = previous_queue;
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
     }
@@ -4805,8 +4827,14 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     if entry.holds_witness_certificate() {
         return match open_preview(shared, id).await {
             Ok((summary, _)) => {
+                let scrub = super::second_look::Scrub::Scrubbed(summary.scrub_counts);
+                let dropped = summary.subagents_dropped;
                 let mut value =
                     serde_json::to_value(summary).expect("preview summary serialization");
+                super::second_look::insert_fields(&mut value, scrub, dropped);
+                // Re-read: the build above recorded its counts on the pinned
+                // entry, and the entry this response describes should say so.
+                let entry = entry_by_id(shared, req, id).unwrap_or(entry);
                 value["entry"] = entry_value(&entry, shared.admission_evidence());
                 Response::ok(req.id, value)
             }
@@ -4880,6 +4908,20 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
 pub(crate) fn preview_card_value(
     summary: &super::preview::PreviewCardSummary,
 ) -> serde_json::Value {
+    let mut value = preview_card_fields(summary);
+    // The same scrub fields `entry_value` carries, describing THIS build: a
+    // card is a scrub, so it is always `scrubbed`. A card pins nothing, so
+    // nothing here is recorded on the queue entry -- see
+    // `QueueEntry::scrub`.
+    super::second_look::insert_fields(
+        &mut value,
+        super::second_look::Scrub::Scrubbed(summary.scrub_counts),
+        summary.subagents_dropped,
+    );
+    value
+}
+
+fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_json::Value {
     serde_json::json!({
         "would_send_bytes": summary.would_send_bytes,
         "raw_session_bytes": summary.raw_session_bytes,
@@ -5057,7 +5099,7 @@ async fn build_and_pin_preview(
         if transcript.session_hash != entry.session_hash {
             return Err((ERR_UNAVAILABLE, "witness-review-stale"));
         }
-        return super::preview::summarize_witnessed_preview(
+        let built = super::preview::summarize_witnessed_preview(
             &artifact,
             cfg.ok_or(unavailable)?,
             near_ai,
@@ -5065,7 +5107,17 @@ async fn build_and_pin_preview(
             session_ref.size_bytes,
             attested_bodies,
         )
-        .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"));
+        .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"))?;
+        // The stored artifact this summary was rebuilt from is the one the
+        // entry is pinned to (checked above), so its counts describe the
+        // bytes an approval would send.
+        record_scrub(
+            shared,
+            entry_id,
+            &built.0.envelope_digest,
+            built.0.scrub_counts,
+        );
+        return Ok(built);
     }
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
         &shared.store,
@@ -5094,6 +5146,28 @@ async fn build_and_pin_preview(
         pin_previewed_envelope(shared, entry_id, &summary, &envelope);
     }
     Ok((summary, body, envelope))
+}
+
+/// Record what the scrubber found in the envelope `entry_id` is pinned to,
+/// so `list_pending` can say "Scrubbed · 7 marks" -- or "worth a second
+/// look" -- without re-running the pipeline. See `QueueEntry::scrub` and
+/// `second_look`.
+///
+/// Only for the pinned bytes: `Queue::record_scrub` refuses a digest the
+/// entry is not pinned to, so a card, an unenrolled build, or a pin that
+/// failed to write records nothing. Counts only. Best effort, like
+/// `pin_previewed_envelope`: a queue that cannot be saved keeps the record in
+/// memory, and a lost record reads as not yet scrubbed, the safe direction.
+pub(crate) fn record_scrub(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    envelope_digest: &str,
+    counts: super::second_look::ScrubCounts,
+) {
+    let mut queue = shared.queue.lock().expect("queue lock");
+    if queue.record_scrub(entry_id, envelope_digest, counts) {
+        let _ = queue.save(&shared.store);
+    }
 }
 
 /// Full preview -- summary *and* redacted body -- for one queue entry, for a
@@ -5424,6 +5498,7 @@ async fn handle_preview_turns(shared: &DaemonShared, req: &Request) -> Response 
             "envelope_digest": envelope_digest,
             "turn_count": turns.len(),
             "turns": turns,
+            "leaves_this_mac": leaves_this_mac_value(shared, id, &envelope, turns.len()),
         }),
     )
 }
@@ -5457,8 +5532,151 @@ pub async fn open_preview_turns(
         "envelope_digest": envelope_digest,
         "turn_count": turns.len(),
         "turns": turns,
+        "leaves_this_mac": leaves_this_mac_value(shared, entry_id, &envelope, turns.len()),
     }))
     .map_err(|_| "turns-serialize-failed")
+}
+
+/// The review sheet's "Leaves this Mac" object: the envelope metadata that
+/// leaves with the conversation, as fixed labels read off the envelope
+/// itself (`consent_copy::leaves_this_mac_fields`), the size and turn count
+/// the line quotes, and the finished DRAFT line. Labels and counts only: no
+/// field VALUE rides along -- not the tool name, not the model, not the
+/// fingerprint.
+///
+/// `would_send_bytes` is `null` in the (unreachable) case that the
+/// envelope cannot be measured, and `line` is then absent: a line quoting a
+/// size nobody measured would be a claim the daemon cannot back.
+fn leaves_this_mac_value(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+    turn_count: usize,
+) -> serde_json::Value {
+    let fields = crate::consent_copy::leaves_this_mac_fields(envelope);
+    let size = crate::envelope::envelope_size(envelope).ok();
+    // The folder's own names, from the entry: the basename of the project
+    // root, of the unfolded path, and of the directory the session ran in.
+    // Only absolute paths are scrubbed, so a relative path in the
+    // conversation can still name the folder, and the line must say so
+    // rather than promise it never leaves.
+    let folders: Vec<String> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue
+            .get(entry_id)
+            .map(|e| {
+                [
+                    Some(e.project_key.as_str()),
+                    e.project_path.as_deref(),
+                    e.session_cwd.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.rsplit(['/', '\\']).find(|seg| !seg.is_empty()))
+                .map(str::to_string)
+                .collect()
+            })
+            .unwrap_or_default()
+    };
+    let folder_refs: Vec<&str> = folders.iter().map(String::as_str).collect();
+    let (in_metadata, in_conversation) =
+        crate::consent_copy::folder_named_in(envelope, &folder_refs);
+    let mut value = serde_json::json!({
+        "fields": fields,
+        "would_send_bytes": size,
+        "turn_count": turn_count,
+        "folder_named_in_conversation": in_conversation,
+        "folder_named_in_metadata": in_metadata,
+    });
+    if let Some(bytes) = size {
+        value["line"] = serde_json::Value::from(crate::consent_copy::leaves_this_mac_line(
+            bytes,
+            turn_count,
+            &fields,
+            (in_metadata, in_conversation),
+        ));
+    }
+    value
+}
+
+/// Spans of the redacted preview body that look like personal data the
+/// scrubber did not mark -- an email the email pass did not redact, a phone
+/// number, a credential-shaped string -- so the review sheet can put "looks
+/// like an email. Not matched. Your call." under that line.
+///
+/// # What crosses
+///
+/// Byte offsets into the body and a fixed label from
+/// `unsure_spans::UNSURE_LABELS`. **Never the text**: the shell already
+/// holds the body from `preview_body` and renders the span from it. The body
+/// is trace content under the preview content boundary; this response is
+/// not, in the same way `preview_turns` is not, and it is served under the
+/// same rules -- only for an entry the caller already holds
+/// (`unknown-entry-id` otherwise), and never logged, audited or notified.
+///
+/// # Anchoring
+///
+/// `body_digest` is **required** on every call, exactly as for
+/// `preview_turns`: the offsets index one specific string, and against any
+/// other they are not stale but wrong. A mismatch is
+/// [`ERR_PREVIEW_BODY_CHANGED`]; the caller re-reads the body from
+/// `offset: 0` and asks again. The body and the spans are resolved through
+/// `resolve_preview_envelope`, the same path as `preview_body` and
+/// `preview_turns`, so the three can never come from two builds.
+///
+/// # Fail-closed
+///
+/// A body the detector cannot index exactly -- or any span that does not
+/// re-verify against the bytes it points at -- refuses the whole response
+/// with `unsure_spans::REASON_UNSURE_INDEX_FAILED`. A partial list is only
+/// ever returned flagged: `span_count` is the total, `spans` holds at most
+/// `unsure_spans::MAX_UNSURE_SPANS` of them, and `spans_truncated` says
+/// whether it was cut.
+async fn handle_preview_unsure_spans(shared: &DaemonShared, req: &Request) -> Response {
+    let id = try_response!(entry_id_param(req));
+    let expected_digest = match req.params.get("body_digest") {
+        None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_BODY_DIGEST_REQUIRED),
+        Some(v) => match v.as_str() {
+            Some(s) => s.to_string(),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "body-digest-invalid"),
+        },
+    };
+    match open_preview_unsure_spans(shared, id, &expected_digest).await {
+        Ok(value) => Response::ok(req.id, value),
+        Err((code, label)) => Response::err(req.id, code, label),
+    }
+}
+
+/// The unsure-span index for one entry, for a caller holding `shared`
+/// directly (a future C ABI export) as well as for the socket method, so
+/// the two cannot describe the same entry differently. Anchored by the
+/// caller's `body_digest` exactly as `open_preview_turns` is. Errors are
+/// `(code, fixed label)`, never content.
+pub async fn open_preview_unsure_spans(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    expected_body_digest: &str,
+) -> Result<serde_json::Value, (&'static str, &'static str)> {
+    let (envelope, envelope_digest, _enrolled) = resolve_preview_envelope(shared, entry_id).await?;
+    let body =
+        super::preview::body_of(&envelope).map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
+    let body_digest = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+    if expected_body_digest != body_digest {
+        return Err((ERR_UNAVAILABLE, ERR_PREVIEW_BODY_CHANGED));
+    }
+    let mut spans =
+        super::unsure_spans::unsure_spans_in(&body).map_err(|label| (ERR_UNAVAILABLE, label))?;
+    let span_count = spans.len();
+    let truncated = span_count > super::unsure_spans::MAX_UNSURE_SPANS;
+    spans.truncate(super::unsure_spans::MAX_UNSURE_SPANS);
+    Ok(serde_json::json!({
+        "entry_id": entry_id,
+        "body_digest": body_digest,
+        "envelope_digest": envelope_digest,
+        "span_count": span_count,
+        "spans": spans,
+        "spans_truncated": truncated,
+    }))
 }
 
 /// The redacted body for one entry, plus its envelope digest and whether the
@@ -5564,6 +5782,9 @@ fn pin_previewed_envelope(
         return;
     }
     if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None) {
+        // The counts go down with the pin they describe; see
+        // `QueueEntry::scrub`.
+        queue.record_scrub(entry_id, &summary.envelope_digest, summary.scrub_counts);
         // A failed queue write leaves the pin in memory and the bytes on
         // disk -- consistent with each other, and the next queue save
         // persists it. Nothing is removed here: the bytes are what the
@@ -12449,7 +12670,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 35);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 36);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -12879,7 +13100,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 50, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 42, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

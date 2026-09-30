@@ -33,19 +33,20 @@ use trace_commons_contributor_ffi::{
     tc_last_error, tc_legacy_migration_notice, tc_near_ai_credential_action,
     tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
     tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
-    tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
-    tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
-    tc_private_inference_should_offer, tc_private_inference_state_line,
-    tc_private_inference_state_tone, tc_public_run_copy, tc_public_run_error_line,
-    tc_public_run_validate_editor, tc_routing_copy, tc_routing_discovery_line,
-    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
-    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
-    tc_session_notification_copy, tc_skill_draft_validate, tc_skill_learning_copy,
-    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
-    tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_preview_summary_json, tc_preview_turns_json, tc_preview_unsure_spans_json,
+    tc_private_inference_copy, tc_private_inference_quit_needs_notice,
+    tc_private_inference_serving_line, tc_private_inference_should_offer,
+    tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
+    tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
+    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
+    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
+    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
+    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
+    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
+    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
+    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
+    tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -1267,6 +1268,68 @@ fn tc_preview_open_refuses_a_freed_handle() {
             .map(|e| e.contains("invalid-handle-pointer"))
             .unwrap_or(false)
     );
+}
+
+#[test]
+fn tc_preview_unsure_spans_json_refuses_a_bad_or_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    // A string pointer passed where a handle belongs.
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_unsure_spans_json(
+            out as *mut tc_handle,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+    unsafe { tc_string_free(out) };
+
+    // A live handle and an entry it does not hold: the same fixed label
+    // the socket method gives.
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_unsure_spans_json(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("unknown-entry-id"), "{msg}");
+
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_unsure_spans_json(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
 }
 
 #[test]
