@@ -889,8 +889,8 @@ async fn settlement_amounts_are_bounded_by_the_database() {
 }
 
 /// Corrupts a stored package's pinned `network` for one instrument, as an
-/// owner connection with the immutability trigger dropped and recreated
-/// exactly like `tamper_stored_bundle_package`. Unlike that helper, this
+/// owner connection with the immutability trigger disabled exactly like
+/// `tamper_stored_bundle_package`. Unlike that helper, this
 /// keeps the artifact bytes intact and instead breaks the manifest itself,
 /// so a later load fails `BundleManifest`'s own deserialize-time validation
 /// (#971 round 3) rather than `BundlePackage::validate`'s artifact-hash
@@ -909,60 +909,17 @@ async fn tamper_stored_bundle_manifest_network(
 }
 
 /// Rewrites a stored package's manifest JSON with `edit`, as an owner
-/// connection with the immutability trigger dropped and recreated exactly
-/// like `tamper_stored_bundle_package`, keeping the artifact bytes intact.
+/// connection with the immutability trigger disabled exactly like
+/// `tamper_stored_bundle_package`, keeping the artifact bytes intact.
 async fn tamper_stored_bundle_manifest(
     tenant_id: &str,
     bundle_id: &str,
     edit: impl FnOnce(&mut serde_json::Value),
 ) {
-    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
-        .expect("TRACE_COMMONS_PG_TEST_DATABASE_URL must be set for this test");
-    let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-        .await
-        .expect("connect as the migration owner");
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("open owner transaction for tampering");
-    tx.batch_execute(
-        "DROP TRIGGER pipeline_bundle_packages_reject_update ON pipeline_bundle_packages;",
-    )
-    .await
-    .expect("drop the immutability trigger");
-
-    let row = tx
-        .query_one(
-            "SELECT package FROM pipeline_bundle_packages
-             WHERE tenant_id = $1 AND bundle_id = $2",
-            &[&tenant_id, &bundle_id],
-        )
-        .await
-        .expect("load the stored package");
-    let mut package: serde_json::Value = row.get("package");
-    edit(&mut package["manifest"]);
-
-    tx.execute(
-        "UPDATE pipeline_bundle_packages SET package = $3
-         WHERE tenant_id = $1 AND bundle_id = $2",
-        &[&tenant_id, &bundle_id, &package],
-    )
-    .await
-    .expect("tamper the stored manifest");
-
-    tx.batch_execute(
-        "CREATE TRIGGER pipeline_bundle_packages_reject_update
-             BEFORE UPDATE ON pipeline_bundle_packages
-             FOR EACH ROW EXECUTE FUNCTION reject_pipeline_bundle_package_mutation();",
-    )
-    .await
-    .expect("recreate the immutability trigger");
-
-    tx.commit().await.expect("commit the tampering transaction");
+    rewrite_stored_bundle_package(tenant_id, bundle_id, |package| {
+        edit(&mut package["manifest"]);
+    })
+    .await;
 }
 
 /// Packages build at the current manifest format version (2), and a stored
@@ -1167,31 +1124,59 @@ fn db_error_message(error: &tokio_postgres::Error) -> String {
 /// Corrupts the stored `package` for `(tenant_id, bundle_id)` in place, as
 /// an owner connection rather than through `PgPipelineStore` -- proving a
 /// tampered row, not a tampering API `PgPipelineStore` would ever offer.
-/// `pipeline_bundle_packages` carries its own immutability trigger
-/// (`pipeline_bundle_packages_reject_update`, migration V93), so this drops
-/// it and recreates it -- exactly as the migration defines it -- inside the
-/// same transaction that performs the `UPDATE`. Flips one hex digit of the
-/// first stored artifact so its bytes no longer hash to the key they are
-/// stored under (`BundlePackage::validate`'s `ArtifactHashMismatch`).
+/// Flips one hex digit of the first stored artifact so its bytes no longer
+/// hash to the key they are stored under (`BundlePackage::validate`'s
+/// `ArtifactHashMismatch`).
 async fn tamper_stored_bundle_package(tenant_id: &str, bundle_id: &str) {
-    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
-        .expect("TRACE_COMMONS_PG_TEST_DATABASE_URL must be set for this test");
-    let (mut client, connection) = tokio_postgres::connect(&url, NoTls)
-        .await
-        .expect("connect as the migration owner");
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
+    rewrite_stored_bundle_package(tenant_id, bundle_id, |package| {
+        let artifacts = package
+            .get_mut("artifacts")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("the package carries an artifacts object");
+        let (_, value) = artifacts
+            .iter_mut()
+            .next()
+            .expect("the package carries at least one artifact");
+        let hex = value
+            .as_str()
+            .expect("artifact bytes are hex-encoded")
+            .to_string();
+        let mut corrupted = hex.chars().collect::<Vec<_>>();
+        corrupted[0] = if corrupted[0] == '0' { '1' } else { '0' };
+        *value = serde_json::Value::String(corrupted.into_iter().collect());
+    })
+    .await;
+}
 
+/// Rewrites the stored `package` JSON for `(tenant_id, bundle_id)` with
+/// `edit`, as the database owner. `pipeline_bundle_packages` carries its
+/// own immutability trigger (`pipeline_bundle_packages_reject_update`,
+/// migration V93), so this disables it only inside the one transaction that
+/// makes the change, and no other connection ever sees it disabled.
+///
+/// `ALTER TABLE ... DISABLE TRIGGER` takes a single SHARE ROW EXCLUSIVE lock
+/// on the table before it does anything else, and that mode conflicts with
+/// itself, so two tests tampering at once queue on the table instead of
+/// deadlocking. `DROP TRIGGER`, which this used to do, locks the trigger
+/// object under a weaker table lock and then upgrades to ACCESS EXCLUSIVE,
+/// and two concurrent drops each waited on the other's lock (SQLSTATE
+/// 40P01).
+async fn rewrite_stored_bundle_package(
+    tenant_id: &str,
+    bundle_id: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) {
+    let mut client = owner_client().await;
     let tx = client
         .transaction()
         .await
         .expect("open owner transaction for tampering");
     tx.batch_execute(
-        "DROP TRIGGER pipeline_bundle_packages_reject_update ON pipeline_bundle_packages;",
+        "ALTER TABLE pipeline_bundle_packages
+             DISABLE TRIGGER pipeline_bundle_packages_reject_update;",
     )
     .await
-    .expect("drop the immutability trigger");
+    .expect("disable the immutability trigger");
 
     let row = tx
         .query_one(
@@ -1202,37 +1187,24 @@ async fn tamper_stored_bundle_package(tenant_id: &str, bundle_id: &str) {
         .await
         .expect("load the stored package");
     let mut package: serde_json::Value = row.get("package");
-    let artifacts = package
-        .get_mut("artifacts")
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("the package carries an artifacts object");
-    let (_, value) = artifacts
-        .iter_mut()
-        .next()
-        .expect("the package carries at least one artifact");
-    let hex = value
-        .as_str()
-        .expect("artifact bytes are hex-encoded")
-        .to_string();
-    let mut corrupted = hex.chars().collect::<Vec<_>>();
-    corrupted[0] = if corrupted[0] == '0' { '1' } else { '0' };
-    *value = serde_json::Value::String(corrupted.into_iter().collect());
+    edit(&mut package);
 
-    tx.execute(
-        "UPDATE pipeline_bundle_packages SET package = $3
-         WHERE tenant_id = $1 AND bundle_id = $2",
-        &[&tenant_id, &bundle_id, &package],
-    )
-    .await
-    .expect("tamper the stored package");
+    let updated = tx
+        .execute(
+            "UPDATE pipeline_bundle_packages SET package = $3
+             WHERE tenant_id = $1 AND bundle_id = $2",
+            &[&tenant_id, &bundle_id, &package],
+        )
+        .await
+        .expect("tamper the stored package");
+    assert_eq!(updated, 1, "one stored package");
 
     tx.batch_execute(
-        "CREATE TRIGGER pipeline_bundle_packages_reject_update
-             BEFORE UPDATE ON pipeline_bundle_packages
-             FOR EACH ROW EXECUTE FUNCTION reject_pipeline_bundle_package_mutation();",
+        "ALTER TABLE pipeline_bundle_packages
+             ENABLE TRIGGER pipeline_bundle_packages_reject_update;",
     )
     .await
-    .expect("recreate the immutability trigger");
+    .expect("enable the immutability trigger");
 
     tx.commit().await.expect("commit the tampering transaction");
 }
