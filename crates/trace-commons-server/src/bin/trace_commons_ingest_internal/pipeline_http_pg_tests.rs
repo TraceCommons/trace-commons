@@ -1383,6 +1383,113 @@ async fn real_http_pipeline_receipt_replays_on_retry() {
     join_within(server, 20, "replay-on-retry test server").await;
 }
 
+/// Zaki review 1, fix round, item 5: a tenant rolled back from
+/// `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` to
+/// `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` still replays a pipeline receipt
+/// for a retried upload that completed admission on the pipeline path: the
+/// replay lookup reads the drain list as well as the receipts list. Without
+/// it the retry falls through to the legacy record the pipeline never wrote
+/// and answers 500 (`admission_record_unavailable`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_tenant_retry_replays_its_pipeline_receipt() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let url = pipeline_http_database_url()
+        .await
+        .expect("checked by runtime_backend, which already returned Some");
+    let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+        .await
+        .expect("connect as the migration owner for the near-account fixture rows");
+
+    let token = "near-drain-retry-fixture-token";
+    let principal = o1_principal_for(token);
+    let (tenant, anchor, _device) =
+        admission_pg_tests::provision_synthetic_near_account(&admin, &principal).await;
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, token, TokenRole::Contributor);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = o1_pipeline_service(backend.clone(), &dir);
+    let (provider, provider_key, signer, trust) = o1_evidence_identity();
+
+    let mut state = test_state_with_tokens(dir.path().to_path_buf(), tokens);
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.db_mirror = Some(backend.clone() as Arc<dyn Database>);
+    state_mut.require_db_mirror_writes = true;
+    state_mut.accept_medium_risk_submissions = true;
+    state_mut.pipeline_service = Some(service);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    state_mut.admission = Some(admission::AdmissionConfig {
+        limits: o1_admission_limits(),
+        providers: trust.clone(),
+    });
+    let (body, evidence_headers, policy_version) = evidenced_upload(
+        &state,
+        token,
+        &anchor,
+        &signer,
+        &provider,
+        &provider_key,
+        trust,
+        None,
+        "the drain tenant's upload",
+    )
+    .await;
+    Arc::make_mut(&mut state).witness_bypass =
+        trace_commons_server::redaction_witness::config::witness_bypass_config_from_values(
+            Some("true"),
+            Some(&signer.address()),
+            Some("synthetic-admission-measurement"),
+            Some(&policy_version),
+            None,
+        )
+        .unwrap();
+    let mut rolled_back = state.clone();
+
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token)))
+        .headers(reqwest_headers(evidence_headers))
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("first, evidence-verified upload over real HTTP");
+    assert_eq!(first.status(), 200, "the routed upload is accepted");
+    let first_receipt: serde_json::Value = first.json().await.expect("first receipt body");
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "the routed app").await;
+
+    // The rollback: the tenant leaves the receipts list for the drain list.
+    let rolled_back_mut = Arc::make_mut(&mut rolled_back);
+    rolled_back_mut.tenant_rollout_gates = TraceTenantRolloutGates::default();
+    rolled_back_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+    let (base, stop, server) = serve_pipeline_app(rolled_back).await;
+    let retry = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token)))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("the retry over real HTTP");
+    assert_eq!(
+        retry.status(),
+        200,
+        "a drain tenant's retry replays, not 500"
+    );
+    let retry_receipt: serde_json::Value = retry.json().await.expect("retry receipt body");
+    assert_eq!(retry_receipt, first_receipt);
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "the rolled-back app").await;
+}
+
 /// The `submission_id` a `TraceContributionEnvelope`'s raw JSON bytes carry,
 /// read back out rather than threaded through as a separate value --
 /// `evidenced_upload`'s first call does not return the envelope it built,

@@ -44,7 +44,10 @@ the union of the two lists. The drain list also needs a runtime: without
 one, ingest refuses to start with
 `pipeline_drain_tenants_configured_without_runtime`.
 `GET /v1/pipeline/readiness` reports the drain list's size as
-`drain_tenant_count` (a count, no tenant ids).
+`drain_tenant_count` (a count, no tenant ids). A retried upload from a drain
+tenant that completed admission on the pipeline path replays its pipeline
+receipt, as it did while the tenant was routed; a new upload takes the
+legacy path.
 
 To roll a tenant back from the pipeline, move it from
 `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` to

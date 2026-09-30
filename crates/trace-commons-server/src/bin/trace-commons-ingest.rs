@@ -13863,6 +13863,25 @@ fn pipeline_runtime_for_tenant<'a>(
     state.pipeline_service.as_ref()
 }
 
+/// The pipeline runtime whose receipts a retried upload of `tenant` may
+/// replay: `Some` when a runtime is injected and the tenant is routed to
+/// `PipelineReceipts` or on `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`. A
+/// tenant rolled back from the first list to the second still made its
+/// earlier uploads through the pipeline, so their retries replay the
+/// pipeline receipt instead of reading the legacy record the pipeline never
+/// wrote (Zaki review 1, fix round, item 5). Only this read-only replay
+/// lookup takes the drain list: a new receipt is routed only for a tenant
+/// on the receipts list (`pipeline_runtime_for_tenant`).
+fn pipeline_runtime_for_replay<'a>(
+    state: &'a AppState,
+    tenant: &TenantCtx,
+) -> Option<&'a Arc<PipelineService>> {
+    if state.pipeline_drain_tenant_ids.contains(tenant.tenant_id()) {
+        return state.pipeline_service.as_ref();
+    }
+    pipeline_runtime_for_tenant(state, tenant)
+}
+
 /// The fixed receipt a pipeline-routed submission returns for `Created` and
 /// `Replayed` alike -- shared between `route_pipeline_receipt` (a fresh
 /// submission or its ordinary retry) and the completed-admission branch of
@@ -14108,7 +14127,7 @@ async fn submit_trace_handler(
         // and the same ownership predicate the legacy fallback below applies
         // (`can_access_submission`, here via its principal-ref form) is
         // applied to it before either pipeline outcome is returned.
-        if let Some(pipeline_service) = pipeline_runtime_for_tenant(state.as_ref(), &tenant) {
+        if let Some(pipeline_service) = pipeline_runtime_for_replay(state.as_ref(), &tenant) {
             let idempotency_key = envelope.submission_id.to_string();
             if let Some(PipelineReplayReceipt {
                 result,
