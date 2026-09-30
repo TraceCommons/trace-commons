@@ -456,7 +456,15 @@ to NEAR.
   Other instruments never use the NEAR outbox.
 - Score records a leg's payout state when it adds the leg. A run scored
   while payout was disabled has payout `disabled` and is never paid, even
-  after payout is turned on.
+  after payout is turned on. Only a Trace Credit leg that settles into a
+  batch is seeded `pending`; any other instrument on the `near` rail is
+  `disabled`. A leg is paid only when Score marked it payout-eligible
+  (`payout_eligible`, V105): a `pending` leg seeded by earlier code, whose
+  batch line has no account settlement key or hold, is never paid.
+- A leg Settle completed and ledgered is paid even when its run later fails
+  for good (attempts exhausted, or a crash before Settle's own commit on its
+  last attempt), as a withdrawal does not stop it either. The contributor
+  status then reads the leg's payout state.
 - The NEAR call goes to the contract `main` is configured with,
   `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`. Ingest refuses to start
   a runtime whose payout is enabled with no contract or another contract.

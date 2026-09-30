@@ -342,6 +342,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     for (table, column) in [
         ("pipeline_runs", "admission_reason"),
         ("pipeline_runs", "index_invalidation_state"),
+        ("pipeline_run_settlements", "payout_eligible"),
         ("pipeline_index_invalidations", "next_attempt_at"),
     ] {
         let present: bool = admin

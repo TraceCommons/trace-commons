@@ -96,13 +96,22 @@ CREATE INDEX idx_pipeline_index_invalidations_work
     ON pipeline_index_invalidations (tenant_id, next_attempt_at, run_id)
     WHERE state = 'pending';
 
--- The NEAR payout pass's work list (PgPipelineStore::
--- list_runs_with_pending_payout): a tenant's batched Trace Credit legs on
--- the `near` rail whose payout is still to make or to confirm, least
--- recently updated first.
+-- Whether the payout may pay a leg: Score seeded it `pending` for a batch
+-- Settle writes under the account's settlement key and hold. A leg the
+-- V94-era code seeded `pending` has no such batch line and stays false, so
+-- it is never paid. Set once, when Score inserts the leg (the runtime's
+-- table-wide INSERT covers it); nothing updates it.
+ALTER TABLE pipeline_run_settlements
+    ADD COLUMN payout_eligible BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- The NEAR payout pass's work list (PgPipelineStore::list_payout_work_on):
+-- a tenant's batched, payout-eligible Trace Credit legs on the `near` rail
+-- whose payout is still to make or to confirm, least recently updated
+-- first.
 CREATE INDEX idx_pipeline_run_settlements_payout_work
     ON pipeline_run_settlements (tenant_id, updated_at, run_id)
     WHERE payout_rail = 'near'
+      AND payout_eligible
       AND payout_state IN ('pending', 'submitted')
       AND settlement_batch_id IS NOT NULL;
 

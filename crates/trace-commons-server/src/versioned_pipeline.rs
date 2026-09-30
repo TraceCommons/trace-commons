@@ -681,6 +681,12 @@ pub struct PipelineSettlementRecord {
     pub settlement_batch_id: Option<Uuid>,
     pub payout_rail: String,
     pub payout_state: String,
+    /// Whether the payout may pay this leg: Score seeded it `pending` for a
+    /// batch Settle writes under the account's settlement key and hold
+    /// (Zaki review 1, round 2, finding 16). A leg the earlier V94 code
+    /// seeded has `false` and is never paid.
+    #[serde(default)]
+    pub payout_eligible: bool,
     /// Diagnostic count of dispatches that ended `retry` or `failed`; the
     /// run's own attempt budget governs retries.
     pub attempt_count: u32,
@@ -2103,9 +2109,16 @@ impl PgPipelineStore {
             let payout_rail = payout_rails.get(instrument_id).ok_or_else(|| {
                 DatabaseError::Constraint(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL.to_string())
             })?;
-            let never_paid = instrument_id == InstrumentId::trace_credit().as_str()
-                && trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility;
-            let payout_state = if payout_rail == "near" && payout_enabled && !never_paid {
+            // Zaki review 1, round 2, finding 16: only a Trace Credit leg
+            // that settles into a batch is ever paid, so only it is seeded
+            // `pending`; any other instrument on the `near` rail, and a
+            // `NoveltyUtility` leg, is seeded `disabled`. A seeded leg is
+            // marked payout-eligible: Settle writes its batch line under the
+            // account's settlement key and hold.
+            let paid = instrument_id == InstrumentId::trace_credit().as_str()
+                && trace_credit_event == PipelineTraceCreditEvent::PipelineScore;
+            let payout_eligible = payout_rail == "near" && payout_enabled && paid;
+            let payout_state = if payout_eligible {
                 "pending"
             } else {
                 "disabled"
@@ -2115,8 +2128,9 @@ impl PgPipelineStore {
             tx.execute(
                 "INSERT INTO pipeline_run_settlements (
                     tenant_id, run_id, instrument_id, atomic_units,
-                    operation_ref_hash, result_ref_hash, payout_rail, payout_state
-                 ) VALUES ($1,$2,$3,$4::TEXT::NUMERIC,$5,$6,$7,$8)",
+                    operation_ref_hash, result_ref_hash, payout_rail, payout_state,
+                    payout_eligible
+                 ) VALUES ($1,$2,$3,$4::TEXT::NUMERIC,$5,$6,$7,$8,$9)",
                 &[
                     &run.tenant_id,
                     &run.run_id,
@@ -2126,6 +2140,7 @@ impl PgPipelineStore {
                     &Option::<&str>::None,
                     &payout_rail.as_str(),
                     &payout_state,
+                    &payout_eligible,
                 ],
             )
             .await?;
@@ -3452,13 +3467,11 @@ impl PgPipelineStore {
             .query(
                 "SELECT s.run_id, s.payout_state
                    FROM pipeline_run_settlements s
-                   JOIN pipeline_runs r
-                     ON r.tenant_id = s.tenant_id AND r.run_id = s.run_id
                   WHERE s.tenant_id = $1
-                    AND r.state = 'complete'
                     AND s.instrument_id = $2
                     AND s.operation_state = 'complete'
                     AND s.payout_rail = 'near'
+                    AND s.payout_eligible
                     AND s.settlement_batch_id IS NOT NULL
                     AND (
                         (
@@ -4836,6 +4849,7 @@ fn pipeline_settlement_from_row(row: &Row) -> Result<PipelineSettlementRecord, D
         settlement_batch_id: row.get("settlement_batch_id"),
         payout_rail: row.get("payout_rail"),
         payout_state: row.get("payout_state"),
+        payout_eligible: row.get("payout_eligible"),
         attempt_count,
         last_error_label: row.get("last_error_label"),
         dispatched_at: row.get("dispatched_at"),
@@ -9241,10 +9255,14 @@ impl PipelineService {
         let Some(run) = row.as_ref().map(pipeline_run_from_row).transpose()? else {
             return Ok(None);
         };
-        if run.state == PipelineRunState::Complete {
-            self.dispatch_near_settlements(client, &run, may_submit, retry_failed)
-                .await?;
-        }
+        // Zaki review 1, round 2, finding 16: a leg Settle completed and
+        // ledgered is final, whatever the run did afterwards -- a run that
+        // then failed for good (attempts exhausted, or a crash before Settle's
+        // own commit on its last attempt) still pays its completed leg, as a
+        // withdrawal does not stop one. `dispatch_near_settlements` pays only
+        // complete, payout-eligible legs.
+        self.dispatch_near_settlements(client, &run, may_submit, retry_failed)
+            .await?;
         Ok(Some(run))
     }
 
@@ -9339,6 +9357,7 @@ impl PipelineService {
             settlement.instrument_id == InstrumentId::trace_credit().as_str()
                 && settlement.operation_state == "complete"
                 && settlement.payout_rail == "near"
+                && settlement.payout_eligible
                 && match settlement.payout_state.as_str() {
                     "pending" | "submitted" => true,
                     "failed" => retry_failed,
@@ -10367,6 +10386,7 @@ mod tests {
                 settlement_batch_id: None,
                 payout_rail: "none".to_string(),
                 payout_state: "none".to_string(),
+                payout_eligible: false,
                 attempt_count: 1,
                 last_error_label: last_error_label.map(str::to_string),
                 dispatched_at,

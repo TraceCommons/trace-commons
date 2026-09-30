@@ -22306,3 +22306,191 @@ async fn a_novelty_utility_ledger_row_names_the_pipeline_issuer() {
     );
     assert_eq!(row.get::<_, String>("actor_role"), "vector_worker");
 }
+
+/// Finding 16, first bullet: the payout pays only a leg Score seeded for
+/// the batches Settle writes now -- a batch line under the account's
+/// settlement key, carrying the account's hold (`payout_eligible`). A
+/// `pending` leg without that marker (one the earlier V94 code seeded) is
+/// never paid, by the pass or by a direct `process_payout`.
+#[tokio::test]
+async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-unmarked-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "pending");
+    assert!(leg.payout_eligible, "a leg this code seeds is marked");
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements SET payout_eligible = FALSE
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    service
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("a direct payout of an unmarked leg changes nothing");
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty());
+}
+
+/// Finding 16, second bullet (and addendum C-16): a Trace Credit leg that
+/// Settle completed and ledgered is paid even when its run then fails for
+/// good -- here Settle crashes after the leg completes and before its own
+/// commit, and the run is then failed `attempts_exhausted` as the sweep
+/// fails a run with no attempt left. The payout pass lists the leg (it does
+/// not require the run to be `complete`), submits it, and the contributor
+/// status reads its payout state.
+#[tokio::test]
+async fn a_completed_leg_of_a_run_that_later_failed_is_still_paid() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let crashing = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        Some(PipelineCrashPoint::AfterInstrumentOperation),
+    )
+    .await;
+    let tenant = format!("payout-failed-run-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&crashing, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    for phase in ["Review", "Score"] {
+        crashing
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    crashing
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect_err("Settle crashes after the leg completes");
+    let leg = trace_credit_settlement(&crashing, &tenant, created.run_id).await;
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert!(leg.settlement_batch_id.is_some());
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET state = 'failed', last_error_label = 'attempts_exhausted',
+                lease_token = NULL, lease_expires_at = NULL
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &created.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "submitted");
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, RECEIPT_PRINCIPAL, &[created.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .expect("the owner reads the run's status");
+    assert_eq!(status.processing, PipelineProcessingStatus::Failed);
+    let trace_credit = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("the trace_credit instrument");
+    assert_eq!(trace_credit.payout_state, "submitted");
+}
+
+/// Finding 16, third bullet: `commit_score` seeds a `pending` payout only
+/// for `trace_credit`, the one instrument the payout pays. Another
+/// instrument on the `near` rail is seeded `disabled`, even with payout
+/// enabled.
+#[tokio::test]
+async fn only_trace_credit_is_seeded_a_pending_payout() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            RecordingSettlementAdapter::new(
+                InstrumentId::new("storage_rebate").unwrap(),
+                "recording_storage_rebate_near_rail_test_only",
+                "near",
+            ) as Arc<dyn SettlementAdapter>,
+            near_rail_trace_credit_adapter(),
+        ],
+        Arc::new(RecordingNearAdapter::new()),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-seed-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let legs = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|leg| (leg.instrument_id, leg.payout_rail, leg.payout_state))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        legs,
+        vec![
+            (
+                "storage_rebate".to_string(),
+                "near".to_string(),
+                "disabled".to_string()
+            ),
+            (
+                "trace_credit".to_string(),
+                "near".to_string(),
+                "pending".to_string()
+            ),
+        ]
+    );
+}
