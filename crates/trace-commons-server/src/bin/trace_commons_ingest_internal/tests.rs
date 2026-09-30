@@ -6268,6 +6268,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
@@ -28576,6 +28577,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
@@ -30079,7 +30081,9 @@ fn audit_chain_repair_plan_refuses_anything_but_a_verifiable_db_ahead_tail() {
 
     // The file's head is not in the DB: a fork, not a lost append.
     assert_eq!(
-        plan_audit_chain_repair(&events, &rows[..1]).expect_err("fork refused"),
+        plan_audit_chain_repair(&events, &rows[..1])
+            .expect_err("fork refused")
+            .label(),
         "file_head_not_in_db"
     );
     // A tampered payload no longer reproduces its row's hash.
@@ -30089,14 +30093,18 @@ fn audit_chain_repair_plan_refuses_anything_but_a_verifiable_db_ahead_tail() {
         .as_ref()
         .map(|json| json.replace("idempotent_submit", "idempotent_submiT"));
     assert_eq!(
-        plan_audit_chain_repair(&events[..1], &tampered).expect_err("tamper refused"),
+        plan_audit_chain_repair(&events[..1], &tampered)
+            .expect_err("tamper refused")
+            .label(),
         "db_row_hash_mismatch"
     );
     // A hashed row without its payload cannot be restored.
     let mut bare = rows.clone();
     bare[1].canonical_event_json = None;
     assert_eq!(
-        plan_audit_chain_repair(&events[..1], &bare).expect_err("bare row refused"),
+        plan_audit_chain_repair(&events[..1], &bare)
+            .expect_err("bare row refused")
+            .label(),
         "db_row_missing_canonical_payload"
     );
 }
@@ -30108,40 +30116,40 @@ fn audit_chain_repair_plan_refuses_anything_but_a_verifiable_db_ahead_tail() {
 #[test]
 fn legacy_segment_resume_plan_accepts_only_a_file_ahead_through_legacy_rows() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let events = chained_file_read_events(temp.path(), 5);
-    // e0, e1: mirrored by the new build. Then the rollback: e2 and e4 were
-    // mirrored by the old build with no chain fields, e3 was written to the
-    // file only.
-    let rows = vec![
-        audit_chain_repair_test_row(&events[0], 1),
-        audit_chain_repair_test_row(&events[1], 2),
-        db_audit_row_for_file_event(&events[2], 3, false),
-        db_audit_row_for_file_event(&events[4], 4, false),
-    ];
+    // e0: mirrored by the new build. Then the rollback: two `submitted`
+    // events and a re-POST written to the file only (with a derived-id row
+    // for each submission), and a read mirrored with no chain fields.
+    let LegacySegmentFixture { events, rows } = legacy_segment_fixture(temp.path());
     assert_eq!(
-        plan_audit_chain_repair(&events, &rows).expect_err("not a DB-ahead tail"),
+        plan_audit_chain_repair(&events, &rows)
+            .expect_err("not a DB-ahead tail")
+            .label(),
         "file_head_not_in_db"
     );
+    assert!(matches!(
+        plan_audit_chain_repair(&events, &rows),
+        Err(AuditChainRepairPlanRefusal::FileAheadOfDb)
+    ));
     let resume = plan_legacy_segment_resume(&events, &rows)
         .expect("a file ahead through legacy rows plans")
         .expect("there is a segment to resume across");
     assert_eq!(
         Some(resume.db_head_event_hash.as_str()),
-        events[1].event_hash.as_deref()
+        events[0].event_hash.as_deref()
     );
-    assert_eq!(resume.file_events, 3);
-    assert_eq!(resume.unhashed_db_rows, 2);
-    assert_eq!(resume.file_only_events, 1);
+    assert_eq!(resume.file_events, 4);
+    assert_eq!(resume.unhashed_db_rows, 3);
+    assert_eq!(resume.file_only_events, 3);
 
     // Nothing after the DB head is unhashed: no old build wrote there, so a
     // file ahead of the DB is unexplained and stays refused.
     assert_eq!(
-        plan_legacy_segment_resume(&events, &rows[..2]).expect_err("unexplained file-ahead"),
+        plan_legacy_segment_resume(&events, &rows[..1]).expect_err("unexplained file-ahead"),
         "file_head_not_in_db"
     );
     // The DB head is not a file event: a fork.
     let mut forked = rows.clone();
-    forked[1].event_hash = Some(sha256_prefixed("forked-head"));
+    forked[0].event_hash = Some(sha256_prefixed("forked-head"));
     assert_eq!(
         plan_legacy_segment_resume(&events, &forked).expect_err("fork refused"),
         "db_head_not_in_file"
@@ -30155,14 +30163,14 @@ fn legacy_segment_resume_plan_accepts_only_a_file_ahead_through_legacy_rows() {
         "file_chain_break_after_db_head"
     );
     let mut tampered = events.clone();
-    tampered[2].reason = Some("surface=tampered".to_string());
+    tampered[4].reason = Some("surface=tampered".to_string());
     assert_eq!(
         plan_legacy_segment_resume(&tampered, &rows).expect_err("tampered file event refused"),
         "file_chain_break_after_db_head"
     );
     // A legacy row that disagrees with the file event of its id.
     let mut misattributed = rows.clone();
-    misattributed[2].submission_id = Some(Uuid::new_v4());
+    misattributed[3].submission_id = Some(Uuid::new_v4());
     assert_eq!(
         plan_legacy_segment_resume(&events, &misattributed).expect_err("mismatch refused"),
         "legacy_row_mismatch"
@@ -30170,14 +30178,512 @@ fn legacy_segment_resume_plan_accepts_only_a_file_ahead_through_legacy_rows() {
     // No hashed row at all: the DB accepts any first hashed row, so nothing
     // is locked; and a caught-up file has no segment.
     assert!(
-        plan_legacy_segment_resume(&events, &rows[2..])
+        plan_legacy_segment_resume(&events, &rows[1..])
             .expect("plans")
             .is_none()
     );
     assert!(
-        plan_legacy_segment_resume(&events[..2], &rows[..2])
+        plan_legacy_segment_resume(&events[..1], &rows[..1])
             .expect("plans")
             .is_none()
+    );
+}
+
+fn legacy_contributor_auth(principal: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: principal.to_string(),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+/// A `submitted` event as the build rolled back to (5f239be4) wrote it: the
+/// file line only. The DB got the store's derived-id row instead.
+fn legacy_submitted_event(auth: &TenantAuth, submission_id: Uuid) -> TraceCommonsAuditEvent {
+    TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: auth.tenant_id.clone(),
+        submission_id,
+        kind: "submitted".to_string(),
+        created_at: Utc::now(),
+        status: Some(TraceCorpusStatus::Accepted),
+        actor_role: Some(auth.role),
+        actor_principal_ref: Some(auth.principal_ref.clone()),
+        reason: Some("auth_method=static_token".to_string()),
+        export_count: None,
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    }
+}
+
+/// The derived-id `submit-audit` row the old build's store wrote beside a
+/// file-only `submitted` event.
+fn legacy_submit_audit_row(
+    event: &TraceCommonsAuditEvent,
+    audit_sequence: i64,
+) -> StorageTraceAuditEventRecord {
+    StorageTraceAuditEventRecord {
+        audit_event_id: deterministic_trace_uuid_for(
+            "submit-audit",
+            &event.tenant_id,
+            event.submission_id,
+        ),
+        tenant_id: event.tenant_id.clone(),
+        audit_sequence,
+        actor_principal_ref: event.actor_principal_ref.clone().expect("principal"),
+        actor_role: "contributor".to_string(),
+        action: StorageTraceAuditAction::Submit,
+        reason: Some("auth_method=static_token".to_string()),
+        request_id: None,
+        submission_id: Some(event.submission_id),
+        object_ref_id: Some(Uuid::new_v4()),
+        export_manifest_id: None,
+        decision_inputs_hash: Some(sha256_prefixed("canonical summary")),
+        previous_event_hash: None,
+        event_hash: None,
+        canonical_event_json: None,
+        metadata: StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Accepted,
+            privacy_risk: "low".to_string(),
+        },
+        occurred_at: event.created_at,
+    }
+}
+
+/// The row the old build mirrored an event as: written before the file
+/// append chained the event, so with no chain fields and no payload, and
+/// otherwise exactly the row the current build writes for it.
+fn legacy_mirror_row(
+    auth: &TenantAuth,
+    event: &TraceCommonsAuditEvent,
+    audit_sequence: i64,
+    action: StorageTraceAuditAction,
+    metadata: StorageTraceAuditSafeMetadata,
+) -> StorageTraceAuditEventRecord {
+    let mut unchained = event.clone();
+    unchained.previous_event_hash = None;
+    unchained.event_hash = None;
+    let write = audit_event_storage_write(
+        auth,
+        &unchained,
+        AuditRowMirror {
+            action,
+            metadata,
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+    )
+    .expect("legacy mirror row builds");
+    StorageTraceAuditEventRecord {
+        audit_event_id: write.audit_event_id,
+        tenant_id: write.tenant_id,
+        audit_sequence,
+        actor_principal_ref: write.actor_principal_ref,
+        actor_role: write.actor_role,
+        action: write.action,
+        reason: write.reason,
+        request_id: write.request_id,
+        submission_id: write.submission_id,
+        object_ref_id: write.object_ref_id,
+        export_manifest_id: write.export_manifest_id,
+        decision_inputs_hash: write.decision_inputs_hash,
+        previous_event_hash: write.previous_event_hash,
+        event_hash: write.event_hash,
+        canonical_event_json: write.canonical_event_json,
+        metadata: write.metadata,
+        occurred_at: event.created_at,
+    }
+}
+
+/// The rollback rehearsal's segment (#1100 follow-up), as the build rolled
+/// back to left it: two submissions, one idempotent re-POST and one status
+/// read. The file holds four events past the DB head; the DB holds two
+/// derived-id submit rows and one unhashed mirror of the read.
+struct LegacySegmentFixture {
+    events: Vec<TraceCommonsAuditEvent>,
+    rows: Vec<StorageTraceAuditEventRecord>,
+}
+
+fn legacy_segment_fixture(root: &Path) -> LegacySegmentFixture {
+    let reviewer = test_reviewer_auth("tenant-a");
+    let alice = legacy_contributor_auth("principal-alice");
+    let bob = legacy_contributor_auth("principal-bob");
+    let head = append_audit_event(
+        root,
+        "tenant-a",
+        TraceCommonsAuditEvent::read(&reviewer, "review_queue", 2),
+    )
+    .expect("head appends");
+    let submitted_alice = append_audit_event(
+        root,
+        "tenant-a",
+        legacy_submitted_event(&alice, Uuid::new_v4()),
+    )
+    .expect("appends");
+    let submitted_bob = append_audit_event(
+        root,
+        "tenant-a",
+        legacy_submitted_event(&bob, Uuid::new_v4()),
+    )
+    .expect("appends");
+    let re_post = append_audit_event(
+        root,
+        "tenant-a",
+        TraceCommonsAuditEvent::idempotent_submit(&alice, Uuid::new_v4()),
+    )
+    .expect("appends");
+    let status_read = append_audit_event(
+        root,
+        "tenant-a",
+        TraceCommonsAuditEvent::read(&alice, "contributor_status", 3),
+    )
+    .expect("appends");
+    let head_row = StorageTraceAuditEventRecord {
+        previous_event_hash: head.previous_event_hash.clone(),
+        event_hash: head.event_hash.clone(),
+        canonical_event_json: Some(
+            canonical_audit_event_json(
+                head.previous_event_hash.as_deref().expect("chained"),
+                &head,
+            )
+            .expect("canonical"),
+        ),
+        ..legacy_mirror_row(
+            &reviewer,
+            &head,
+            1,
+            StorageTraceAuditAction::Read,
+            trace_read_audit_metadata("review_queue", 2),
+        )
+    };
+    let rows = vec![
+        head_row,
+        legacy_submit_audit_row(&submitted_alice, 2),
+        legacy_submit_audit_row(&submitted_bob, 3),
+        legacy_mirror_row(
+            &alice,
+            &status_read,
+            4,
+            StorageTraceAuditAction::Read,
+            trace_read_audit_metadata("contributor_status", 3),
+        ),
+    ];
+    LegacySegmentFixture {
+        events: vec![head, submitted_alice, submitted_bob, re_post, status_read],
+        rows,
+    }
+}
+
+fn legacy_plan_label(
+    events: &[TraceCommonsAuditEvent],
+    rows: &[StorageTraceAuditEventRecord],
+) -> &'static str {
+    match plan_legacy_segment_resume(events, rows) {
+        Ok(Some(_)) => "accepted",
+        Ok(None) => "nothing_to_resume",
+        Err(label) => label,
+    }
+}
+
+/// The shape a real rollback leaves is accepted, with the counts the
+/// rehearsal saw and the time range the operator checks against the
+/// rollback window.
+#[test]
+fn legacy_segment_resume_accepts_the_rollback_rehearsal_shape() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let fixture = legacy_segment_fixture(temp.path());
+    let resume = plan_legacy_segment_resume(&fixture.events, &fixture.rows)
+        .expect("a real rollback plans")
+        .expect("there is a segment");
+    assert_eq!(resume.file_events, 4);
+    assert_eq!(resume.unhashed_db_rows, 3);
+    assert_eq!(resume.file_only_events, 3);
+    let segment_times = fixture.events[1..]
+        .iter()
+        .map(|event| event.created_at)
+        .chain(fixture.rows[1..].iter().map(|row| row.occurred_at))
+        .collect::<Vec<_>>();
+    assert_eq!(resume.earliest_at, segment_times.iter().min().copied());
+    assert_eq!(resume.latest_at, segment_times.iter().max().copied());
+    assert!(resume.interrupted_resume.is_none());
+}
+
+/// #1100 review M1(a): someone with DB access strips the hashes from the
+/// chain's tail and rewrites what the rows say. The file still says what
+/// happened, and the rows no longer agree with it, so this is not a legacy
+/// segment and the repair refuses.
+#[test]
+fn legacy_segment_resume_refuses_a_db_side_tail_rewrite() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let reviewer = test_reviewer_auth("tenant-a");
+    // Five events the new build mirrored with their chain fields.
+    let events = (0..5)
+        .map(|index| {
+            append_audit_event(
+                temp.path(),
+                "tenant-a",
+                TraceCommonsAuditEvent::read(&reviewer, "review_queue", index),
+            )
+            .expect("appends")
+        })
+        .collect::<Vec<_>>();
+    let hashed_rows = events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| StorageTraceAuditEventRecord {
+            previous_event_hash: event.previous_event_hash.clone(),
+            event_hash: event.event_hash.clone(),
+            canonical_event_json: Some(
+                canonical_audit_event_json(
+                    event.previous_event_hash.as_deref().expect("chained"),
+                    event,
+                )
+                .expect("canonical"),
+            ),
+            ..legacy_mirror_row(
+                &reviewer,
+                event,
+                index as i64 + 1,
+                StorageTraceAuditAction::Read,
+                trace_read_audit_metadata("review_queue", index),
+            )
+        })
+        .collect::<Vec<_>>();
+    // The tail after row 2, stripped of its chain fields.
+    let strip = |rows: &mut Vec<StorageTraceAuditEventRecord>| {
+        for row in rows.iter_mut().skip(2) {
+            row.previous_event_hash = None;
+            row.event_hash = None;
+            row.canonical_event_json = None;
+        }
+    };
+    // Stripping alone leaves rows that still say what the file says.
+    let mut stripped = hashed_rows.clone();
+    strip(&mut stripped);
+    assert_eq!(legacy_plan_label(&events, &stripped), "accepted");
+
+    // Rewriting the action of one stripped row.
+    let mut rewritten_action = stripped.clone();
+    rewritten_action[3].action = StorageTraceAuditAction::Export;
+    assert_eq!(
+        legacy_plan_label(&events, &rewritten_action),
+        "legacy_row_mismatch"
+    );
+    // Rewriting its metadata.
+    let mut rewritten_metadata = stripped.clone();
+    rewritten_metadata[3].metadata = trace_read_audit_metadata("review_queue", 99);
+    assert_eq!(
+        legacy_plan_label(&events, &rewritten_metadata),
+        "legacy_row_mismatch"
+    );
+}
+
+/// #1100 review M1(b): someone with DB access deletes the hashed tail and
+/// inserts one unhashed row, the old build's mark. The deleted events are
+/// now file-only, and events of their kind were never file-only on the old
+/// build; a deleted `submitted` event has no derived-id row beside it; and
+/// the inserted row matches nothing the old build wrote.
+#[test]
+fn legacy_segment_resume_refuses_a_db_side_tail_deletion() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let reviewer = test_reviewer_auth("tenant-a");
+    let alice = legacy_contributor_auth("principal-alice");
+    let events = vec![
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&reviewer, "review_queue", 1),
+        )
+        .expect("appends"),
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&reviewer, "review_queue", 2),
+        )
+        .expect("appends"),
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            legacy_submitted_event(&alice, Uuid::new_v4()),
+        )
+        .expect("appends"),
+    ];
+    let head_row = StorageTraceAuditEventRecord {
+        previous_event_hash: events[0].previous_event_hash.clone(),
+        event_hash: events[0].event_hash.clone(),
+        canonical_event_json: Some(
+            canonical_audit_event_json(
+                events[0].previous_event_hash.as_deref().expect("chained"),
+                &events[0],
+            )
+            .expect("canonical"),
+        ),
+        ..legacy_mirror_row(
+            &reviewer,
+            &events[0],
+            1,
+            StorageTraceAuditAction::Read,
+            trace_read_audit_metadata("review_queue", 1),
+        )
+    };
+    // The inserted row: shaped like an old-build mirror, of an event the
+    // file does not hold.
+    let planted_event = TraceCommonsAuditEvent::read(&reviewer, "review_queue", 7);
+    let planted = legacy_mirror_row(
+        &reviewer,
+        &planted_event,
+        2,
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("review_queue", 7),
+    );
+
+    // The deleted `read` row: a `read` event was never file-only.
+    assert_eq!(
+        legacy_plan_label(&events[..2], &[head_row.clone(), planted.clone()]),
+        "legacy_file_only_event_unexpected"
+    );
+    // The deleted `submitted` row, with the read's row kept: no derived-id
+    // row stands beside the `submitted` event.
+    let read_row = legacy_mirror_row(
+        &reviewer,
+        &events[1],
+        2,
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("review_queue", 2),
+    );
+    assert_eq!(
+        legacy_plan_label(&events, &[head_row.clone(), read_row.clone()]),
+        "legacy_submit_row_missing"
+    );
+    // Every event explained, plus the planted row: it is not the old
+    // build's.
+    let mut explained = vec![head_row, read_row, legacy_submit_audit_row(&events[2], 3)];
+    let mut planted_late = planted;
+    planted_late.audit_sequence = 4;
+    explained.push(planted_late);
+    assert_eq!(
+        legacy_plan_label(&events, &explained),
+        "legacy_row_unexplained"
+    );
+    explained.pop();
+    assert_eq!(legacy_plan_label(&events, &explained), "accepted");
+}
+
+/// Every field the old build copied from the event into its mirror row is
+/// compared: changing any one of them refuses the segment. (Removing a
+/// comparison from `legacy_audit_row_matches_file_event` turns this red.)
+#[test]
+fn legacy_segment_resume_compares_every_field_the_old_build_copied() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let fixture = legacy_segment_fixture(temp.path());
+    assert_eq!(
+        legacy_plan_label(&fixture.events, &fixture.rows),
+        "accepted"
+    );
+    // Row 3 is the unhashed mirror of the status read.
+    let mutations: Vec<(&str, Box<dyn Fn(&mut StorageTraceAuditEventRecord)>)> = vec![
+        (
+            "tenant",
+            Box::new(|row| row.tenant_id = "tenant-b".to_string()),
+        ),
+        (
+            "submission",
+            Box::new(|row| row.submission_id = Some(Uuid::new_v4())),
+        ),
+        (
+            "action",
+            Box::new(|row| row.action = StorageTraceAuditAction::Export),
+        ),
+        (
+            "metadata",
+            Box::new(|row| row.metadata = trace_read_audit_metadata("contributor_status", 4)),
+        ),
+        (
+            "actor_role",
+            Box::new(|row| row.actor_role = "admin".to_string()),
+        ),
+        (
+            "actor_principal_ref",
+            Box::new(|row| row.actor_principal_ref = "principal-mallory".to_string()),
+        ),
+        (
+            "reason",
+            Box::new(|row| {
+                row.reason = Some("surface=contributor_status;item_count=4".to_string())
+            }),
+        ),
+        (
+            "request_id",
+            Box::new(|row| row.request_id = Some("request".to_string())),
+        ),
+        (
+            "export_manifest_id",
+            Box::new(|row| row.export_manifest_id = Some(Uuid::new_v4())),
+        ),
+        (
+            "decision_inputs_hash",
+            Box::new(|row| row.decision_inputs_hash = Some(sha256_prefixed("inputs"))),
+        ),
+        (
+            "previous_event_hash",
+            Box::new(|row| row.previous_event_hash = Some(sha256_prefixed("previous"))),
+        ),
+        (
+            "canonical_event_json",
+            Box::new(|row| row.canonical_event_json = Some("{}".to_string())),
+        ),
+    ];
+    for (field, mutate) in mutations {
+        let mut rows = fixture.rows.clone();
+        mutate(&mut rows[3]);
+        assert_eq!(
+            legacy_plan_label(&fixture.events, &rows),
+            "legacy_row_mismatch",
+            "changing {field} must refuse the segment"
+        );
+    }
+    // A matching row that sits at or before the DB head is not one the
+    // rolled-back build wrote after it.
+    let mut rows = fixture.rows.clone();
+    rows[3].audit_sequence = 0;
+    assert_eq!(
+        legacy_plan_label(&fixture.events, &rows),
+        "legacy_row_before_db_head"
+    );
+}
+
+/// The old build wrote every event with its principal. An event without
+/// one cannot be matched to the row's principal, so the segment is refused
+/// rather than accepting any principal.
+#[test]
+fn legacy_segment_resume_refuses_an_event_without_a_principal() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let fixture = legacy_segment_fixture(temp.path());
+    let mut events = fixture.events.clone();
+    events[4].actor_principal_ref = None;
+    // Re-chain the file events after the change, so only the principal
+    // differs.
+    let mut previous = events[3].event_hash.clone().expect("hashed");
+    for event in events.iter_mut().skip(4) {
+        event.previous_event_hash = Some(previous.clone());
+        event.event_hash = None;
+        let hash = compute_audit_event_hash(&previous, event).expect("hash");
+        event.event_hash = Some(hash.clone());
+        previous = hash;
+    }
+    assert_eq!(
+        legacy_plan_label(&events, &fixture.rows),
+        "legacy_row_mismatch"
     );
 }
 
@@ -30253,6 +30759,83 @@ fn chain_mismatch_failures(report: &TraceDbAuditChainReport) -> Vec<&String> {
         .collect()
 }
 
+/// #1100 review Lows: the audit-chain drill's evidence shows a resume --
+/// how many, and how many file events it skips -- and each property of the
+/// repair row that lets the chain resume is load-bearing. Removing the
+/// `Retain` check, or the ancestry check, turns this red.
+#[test]
+fn db_audit_chain_resume_is_counted_and_every_repair_row_property_is_checked() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut file_events = chained_file_read_events(temp.path(), 4);
+    let db_head = file_events[1].event_hash.clone().expect("hashed");
+    let (resume_event, resume_row) = legacy_segment_resume_test_row(temp.path(), &db_head, 5);
+    file_events.push(resume_event);
+    // e0, e1 hashed; e2 and e3 from the rolled-back build (e3 file-only);
+    // then the repair's resume row.
+    let rows_with = |resume: StorageTraceAuditEventRecord| {
+        vec![
+            db_audit_row_for_file_event(&file_events[0], 1, true),
+            db_audit_row_for_file_event(&file_events[1], 2, true),
+            db_audit_row_for_file_event(&file_events[2], 3, false),
+            resume,
+        ]
+    };
+    let report = verify_db_audit_chain_records(&rows_with(resume_row.clone()), &file_events)
+        .expect("report computes");
+    assert!(
+        chain_mismatch_failures(&report).is_empty(),
+        "{:?}",
+        report.failures
+    );
+    assert_eq!(report.legacy_segment_resume_count, 1);
+    assert_eq!(report.legacy_segment_file_event_count, 2);
+
+    let refused = |resume: StorageTraceAuditEventRecord| {
+        let rows = rows_with(resume);
+        collect_db_audit_hash_chain_failures(&rows, &file_events).len() == 1
+            && verify_db_audit_chain_records(&rows, &file_events)
+                .expect("report computes")
+                .legacy_segment_resume_count
+                == 0
+    };
+    // Its action is not the repair's.
+    let mut wrong_action = resume_row.clone();
+    wrong_action.action = StorageTraceAuditAction::Read;
+    assert!(refused(wrong_action), "a non-Retain row must not resume");
+    // A dry run's row.
+    let mut dry_run = resume_row.clone();
+    dry_run.metadata = StorageTraceAuditSafeMetadata::Maintenance {
+        surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
+        purpose_hash: None,
+        dry_run: true,
+        action_counts: BTreeMap::new(),
+    };
+    assert!(refused(dry_run), "a dry-run row must not resume");
+    // No canonical payload, so the declaration is not covered by a hash.
+    let mut bare = resume_row.clone();
+    bare.canonical_event_json = None;
+    assert!(refused(bare), "a row without its payload must not resume");
+    // The declared head is not an ancestor of the resume in the file chain:
+    // the file forked after the DB head.
+    let forked_file = file_events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut event = event.clone();
+            if index == 2 {
+                event.previous_event_hash = Some(sha256_prefixed("elsewhere"));
+            }
+            event
+        })
+        .collect::<Vec<_>>();
+    let rows = rows_with(resume_row);
+    assert_eq!(
+        collect_db_audit_hash_chain_failures(&rows, &forked_file).len(),
+        1,
+        "a resume across a fork must not verify"
+    );
+}
+
 #[test]
 fn db_audit_chain_resumes_only_at_a_repair_row_declaring_the_db_head() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -30325,23 +30908,32 @@ fn db_audit_chain_resumes_only_at_a_repair_row_declaring_the_db_head() {
     );
 }
 
-/// Roll back to a build from before #1043, let it take traffic, then roll
-/// forward. The old build chained its events into the file but mirrored them
-/// with no chain fields, so the new build's next append chains from a file
-/// head the DB never hashed, and is refused as stale. The repair's legacy
-/// path resumes the DB chain across that segment: dry run first, then once,
-/// idempotently, audited hash-only. After it the tenant submits again and
-/// both drills read the chain as whole.
-#[tokio::test]
-async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
+async fn submit_low_risk_trace(state: Arc<AppState>) -> ApiResult<Uuid> {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
+        .await
+        .map(|_| submission_id)
+}
+
+/// A tenant after a binary rollback to a build from before #1043 and a roll
+/// forward, in the shape the cutover rehearsal saw: the rolled-back build
+/// took two submissions, one idempotent re-POST and one status read, so the
+/// file holds four events past the DB's latest hashed row, and the DB three
+/// rows without chain fields.
+struct RolledBackTenant {
+    state: Arc<AppState>,
+    /// The DB's latest hashed row: the new build's last before the rollback.
+    db_head: String,
+    /// Submitted on the new build, and re-POSTed during the rollback.
+    re_posted_submission: Uuid,
+}
+
+async fn roll_back_and_forward(backend: &Arc<PgBackend>, root: &Path) -> RolledBackTenant {
     let db_mirror: Arc<dyn Database> = backend.clone();
     let mut state = test_state_with_options(
-        temp.path().to_path_buf(),
+        root.to_path_buf(),
         Some(db_mirror),
         None,
         false,
@@ -30350,15 +30942,7 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
         false,
     );
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
-    let submit = |state: Arc<AppState>| async move {
-        let mut envelope = sample_envelope().await;
-        make_metadata_only_low_risk(&mut envelope);
-        let submission_id = envelope.submission_id;
-        submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
-            .await
-            .map(|_| submission_id)
-    };
-    submit(state.clone())
+    let re_posted_submission = submit_low_risk_trace(state.clone())
         .await
         .expect("submission on the new build");
     let db_head = backend
@@ -30370,81 +30954,130 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
         .find_map(|row| row.event_hash)
         .expect("the new build hashed its row");
 
-    // The rollback. A submission on the old build: its file `submitted`
-    // event chains from the file head, and the DB gets the store's own
-    // derived-id row with no chain fields instead of a mirror. (Modelled by
-    // submitting on this build and rewriting the DB row into that shape.)
-    let rolled_back_submission = submit(state.clone())
-        .await
-        .expect("submission during the rollback");
-    let submitted_event = read_all_audit_events(temp.path(), "tenant-a")
-        .expect("file log")
-        .into_iter()
-        .rfind(|event| event.kind == "submitted")
-        .expect("submitted event");
-    assert_eq!(submitted_event.submission_id, rolled_back_submission);
-    {
-        let client = backend
-            .raw_pool_for_tests_and_diagnostics()
-            .get()
-            .await
-            .expect("raw client");
-        client
-            .execute(
-                "DELETE FROM trace_audit_events WHERE tenant_id = 'tenant-a' AND audit_event_id = $1",
-                &[&submitted_event.event_id],
-            )
-            .await
-            .expect("new-build row removed");
+    // The rollback. Two submissions on the old build: each `submitted` event
+    // chains from the file head, and the DB gets the store's own derived-id
+    // row with no chain fields instead of a mirror. (Modelled by submitting on
+    // this build and rewriting the DB row into that shape.)
+    // Both submit before either row is rewritten: a rewritten row leaves the
+    // DB head behind the file, and this build would refuse the next append.
+    let mut rolled_back_submissions = Vec::new();
+    for _ in 0..2 {
+        rolled_back_submissions.push(
+            submit_low_risk_trace(state.clone())
+                .await
+                .expect("submission during the rollback"),
+        );
     }
-    let record = read_submission_record(temp.path(), "tenant-a", rolled_back_submission)
-        .expect("record reads")
-        .expect("record exists");
-    backend
-        .append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id: deterministic_trace_uuid("submit-audit", &record),
-            tenant_id: "tenant-a".to_string(),
-            actor_principal_ref: record.auth_principal_ref.clone(),
-            actor_role: "contributor".to_string(),
-            action: StorageTraceAuditAction::Submit,
-            reason: Some("auth_method=static_token".to_string()),
-            request_id: None,
-            submission_id: Some(rolled_back_submission),
-            object_ref_id: None,
-            export_manifest_id: None,
-            decision_inputs_hash: None,
-            previous_event_hash: None,
-            event_hash: None,
-            canonical_event_json: None,
-            metadata: StorageTraceAuditSafeMetadata::Submission {
-                status: storage_corpus_status(record.status),
-                privacy_risk: serde_storage_string(&record.privacy_risk).expect("risk"),
-            },
-        })
-        .await
-        .expect("old-build store row writes");
-    // And an event the old build mirrored: the DB row first, from the
+    for rolled_back_submission in rolled_back_submissions {
+        let submitted_event = read_all_audit_events(root, "tenant-a")
+            .expect("file log")
+            .into_iter()
+            .find(|event| {
+                event.kind == "submitted" && event.submission_id == rolled_back_submission
+            })
+            .expect("submitted event");
+        {
+            let client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .expect("raw client");
+            client
+                .execute(
+                    "DELETE FROM trace_audit_events WHERE tenant_id = 'tenant-a' AND audit_event_id = $1",
+                    &[&submitted_event.event_id],
+                )
+                .await
+                .expect("new-build row removed");
+        }
+        let record = read_submission_record(root, "tenant-a", rolled_back_submission)
+            .expect("record reads")
+            .expect("record exists");
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: deterministic_trace_uuid("submit-audit", &record),
+                tenant_id: "tenant-a".to_string(),
+                actor_principal_ref: record.auth_principal_ref.clone(),
+                actor_role: "contributor".to_string(),
+                action: StorageTraceAuditAction::Submit,
+                reason: Some("auth_method=static_token".to_string()),
+                request_id: None,
+                submission_id: Some(rolled_back_submission),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: None,
+                metadata: StorageTraceAuditSafeMetadata::Submission {
+                    status: storage_corpus_status(record.status),
+                    privacy_risk: serde_storage_string(&record.privacy_risk).expect("risk"),
+                },
+            })
+            .await
+            .expect("old-build store row writes");
+    }
+    // A re-POST of the submission from before the rollback: the old build
+    // wrote its `idempotent_submit` event to the file only.
+    let contributor = legacy_contributor_auth("principal-alice");
+    append_audit_event(
+        root,
+        "tenant-a",
+        TraceCommonsAuditEvent::idempotent_submit(&contributor, re_posted_submission),
+    )
+    .expect("old-build file append");
+    // And a status read the old build mirrored: the DB row first, from the
     // unchained event, then the file append chains it.
-    let reviewer = test_reviewer_auth("tenant-a");
-    let unchained = TraceCommonsAuditEvent::trace_content_read(
-        &reviewer,
-        rolled_back_submission,
-        "review_decision",
-        None,
-    );
+    let unchained = TraceCommonsAuditEvent::read(&contributor, "contributor_status", 3);
     mirror_audit_event_to_db(
         state.as_ref(),
-        &reviewer,
+        &contributor,
         &unchained,
         StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        trace_read_audit_metadata("contributor_status", 3),
     )
     .await
     .expect("old-build mirror row writes");
-    append_audit_event(temp.path(), "tenant-a", unchained).expect("old-build file append");
+    append_audit_event(root, "tenant-a", unchained).expect("old-build file append");
+    RolledBackTenant {
+        state,
+        db_head,
+        re_posted_submission,
+    }
+}
 
-    // Roll forward: the tenant is locked out, and the DB-ahead repair path
-    // has nothing to restore.
+/// Roll back to a build from before #1043, let it take traffic, then roll
+/// forward. The old build chained its events into the file but mirrored them
+/// with no chain fields, or not at all, so the new build's next append chains
+/// from a file head the DB never hashed, and is refused as stale. The
+/// repair's legacy path resumes the DB chain across that segment: dry run
+/// first, then once, idempotently, audited hash-only. After it the tenant
+/// submits again and every drill reads the tenant as whole.
+#[tokio::test]
+async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let RolledBackTenant {
+        state,
+        db_head,
+        re_posted_submission,
+    } = roll_back_and_forward(&backend, temp.path()).await;
+    let submit = submit_low_risk_trace;
+
+    // Roll forward: the tenant is locked out. The audit-chain drill says so
+    // before any audited write fails.
+    let (audit_chain, _) = run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(!audit_chain.ready, "a locked-out tenant is not ready");
+    assert!(
+        audit_chain
+            .blocking_gaps
+            .contains(&"audit_chain_file_head_not_db_head=1".to_string()),
+        "{:?}",
+        audit_chain.blocking_gaps
+    );
     let (status, _) = submit(state.clone())
         .await
         .expect_err("the first append after the roll-forward is refused as stale");
@@ -30465,9 +31098,17 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
     .await;
     assert_eq!(status, StatusCode::OK, "{dry_run}");
     assert_eq!(dry_run["divergence"], "file_ahead_through_legacy_rows");
-    assert_eq!(dry_run["legacy_segment_file_events"], 2);
-    assert_eq!(dry_run["legacy_segment_unhashed_db_rows"], 2);
-    assert_eq!(dry_run["legacy_segment_file_only_events"], 1);
+    // Two `submitted` and one `idempotent_submit` file-only; two derived-id
+    // rows and the read's unhashed mirror in the DB.
+    assert_eq!(dry_run["legacy_segment_file_events"], 4);
+    assert_eq!(dry_run["legacy_segment_unhashed_db_rows"], 3);
+    assert_eq!(dry_run["legacy_segment_file_only_events"], 3);
+    assert_eq!(dry_run["legacy_segment_resume_interrupted"], false);
+    assert!(
+        dry_run["legacy_segment_earliest_at"].is_string()
+            && dry_run["legacy_segment_latest_at"].is_string(),
+        "{dry_run}"
+    );
     assert_eq!(dry_run["chain_resumed"], false);
     assert!(dry_run["repair_audit_event_id"].is_null());
     assert_eq!(
@@ -30567,21 +31208,56 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
         .await
         .expect("the tenant submits again after the repair");
 
-    // Both drills read the chain as whole.
+    // Every drill reads the chain as whole. The file-only events inside the
+    // accepted segment -- the re-POST, which has no DB row at all -- are
+    // counted apart, not as drift.
     let (audit_chain, reconciliation) =
         run_audit_chain_and_reconciliation_drills(&state, false).await;
     assert!(audit_chain.ready, "{:?}", audit_chain.blocking_gaps);
     assert_eq!(audit_chain.db_verified, Some(true));
     assert!(audit_chain.file_verified);
+    assert_eq!(audit_chain.db_legacy_segment_resume_count, Some(1));
+    assert_eq!(audit_chain.db_legacy_segment_file_event_count, Some(4));
     for gap in &reconciliation.blocking_gaps {
         assert!(
             !gap.starts_with("db_audit_hash_chain_failures")
                 && !gap.starts_with("db_audit_canonical_projection_failures")
-                && !gap.starts_with("missing_audit_event_ids"),
+                && !gap.starts_with("missing_audit_event_ids")
+                && !gap.starts_with("audit_reader_parity")
+                && !gap.starts_with("audit_reader_sample"),
             "{:?}",
             reconciliation.blocking_gaps
         );
     }
+    assert_eq!(
+        reconciliation.db_audit_legacy_segment_file_only_event_count,
+        3
+    );
+    let Json(rollback) = rollback_drill_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceRollbackDrillRequest {
+            purpose: None,
+            record_evidence: false,
+        }),
+    )
+    .await
+    .expect("rollback drill runs");
+    for gap in &rollback.blocking_gaps {
+        assert!(
+            !gap.starts_with("missing_file_audit_events_in_db")
+                && !gap.starts_with("db_audit_events_not_in_file_fallback"),
+            "{:?}",
+            rollback.blocking_gaps
+        );
+    }
+    // The re-POST's submission is still whole: only its audit event was
+    // file-only.
+    assert!(
+        read_submission_record(temp.path(), "tenant-a", re_posted_submission)
+            .expect("record reads")
+            .is_some()
+    );
     for row in backend
         .list_trace_audit_events("tenant-a")
         .await
@@ -30592,6 +31268,174 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
             !row_text.contains("free text"),
             "free text leaked into audit row {}",
             row.audit_event_id
+        );
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+fn test_admin_auth(tenant_id: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_string(),
+        role: TokenRole::Admin,
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+async fn plan_rolled_back_tenant(backend: &PgBackend, root: &Path) -> LegacySegmentResume {
+    let file_events = read_audit_events_in_file_order(root, "tenant-a").expect("file log");
+    let db_rows = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("DB rows");
+    plan_legacy_segment_resume(&file_events, &db_rows)
+        .expect("a rollback plans")
+        .expect("there is a segment")
+}
+
+/// #1100 review M2: two repairs that overlap -- the old and the new process
+/// on one file root, each planning against the same DB head. The first
+/// resumes the chain. The second's plan is stale, and it must fail without
+/// touching the file: a resume line chained after the first's, with no DB
+/// row, would leave the file ahead of a hashed DB head with no legacy row
+/// after it, and lock the tenant out with no repair.
+#[tokio::test]
+async fn overlapping_legacy_segment_resumes_leave_the_tenant_appendable() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let RolledBackTenant { state, .. } = roll_back_and_forward(&backend, temp.path()).await;
+    let admin = test_admin_auth("tenant-a");
+    let purpose_hash = sha256_prefixed("overlap");
+    let db = state.db_mirror.clone().expect("DB mirror");
+
+    // Both plan before either writes.
+    let plan_a = plan_rolled_back_tenant(&backend, temp.path()).await;
+    let plan_b = plan_rolled_back_tenant(&backend, temp.path()).await;
+    write_legacy_segment_resume_event(&state, &admin, db.as_ref(), &plan_a, &purpose_hash)
+        .await
+        .expect("the first repair resumes the chain");
+    let file_after_first = read_all_audit_events(temp.path(), "tenant-a")
+        .expect("file log")
+        .len();
+    write_legacy_segment_resume_event(&state, &admin, db.as_ref(), &plan_b, &purpose_hash)
+        .await
+        .expect_err("the second repair planned against a DB head that has moved");
+    assert_eq!(
+        read_all_audit_events(temp.path(), "tenant-a")
+            .expect("file log")
+            .len(),
+        file_after_first,
+        "a refused resume writes nothing to the file"
+    );
+    submit_low_risk_trace(state.clone())
+        .await
+        .expect("the tenant is not locked out");
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// #1100 review Low: a resume whose file line went in but whose DB row did
+/// not commit leaves that line file-only. A rerun completes it -- writes its
+/// DB row -- instead of writing a second resume event past it, so no repair
+/// event stays file-only, and reconciliation can become ready.
+#[tokio::test]
+async fn an_interrupted_legacy_segment_resume_is_completed_on_rerun() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let RolledBackTenant { state, db_head, .. } =
+        roll_back_and_forward(&backend, temp.path()).await;
+    let admin = test_admin_auth("tenant-a");
+
+    // The file line of a resume, as a run whose commit failed left it.
+    let plan = plan_rolled_back_tenant(&backend, temp.path()).await;
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "legacy_segment_file_events".to_string(),
+        plan.file_events as u32,
+    );
+    action_counts.insert(
+        "legacy_segment_unhashed_db_rows".to_string(),
+        plan.unhashed_db_rows as u32,
+    );
+    action_counts.insert(
+        "legacy_segment_file_only_events".to_string(),
+        plan.file_only_events as u32,
+    );
+    let purpose_hash = sha256_prefixed("interrupted");
+    let mut interrupted = TraceCommonsAuditEvent::lifecycle_counts(
+        &admin,
+        Uuid::nil(),
+        AUDIT_CHAIN_REPAIR_AUDIT_KIND,
+        Some(&purpose_hash),
+        &action_counts,
+    );
+    interrupted.decision_inputs_hash = Some(db_head.clone());
+    let interrupted =
+        append_audit_event(temp.path(), "tenant-a", interrupted).expect("file line appends");
+    let file_count = read_all_audit_events(temp.path(), "tenant-a")
+        .expect("file log")
+        .len();
+
+    let (status, dry_run) =
+        post_audit_chain_repair(state.clone(), serde_json::json!({"dry_run": true})).await;
+    assert_eq!(status, StatusCode::OK, "{dry_run}");
+    assert_eq!(dry_run["divergence"], "file_ahead_through_legacy_rows");
+    assert_eq!(dry_run["legacy_segment_resume_interrupted"], true);
+    assert_eq!(dry_run["legacy_segment_file_events"], 4);
+
+    let (status, repaired) = post_audit_chain_repair(
+        state.clone(),
+        serde_json::json!({"dry_run": false, "accept_legacy_segment": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repaired}");
+    assert_eq!(repaired["chain_resumed"], true);
+    assert_eq!(
+        repaired["repair_audit_event_id"],
+        serde_json::json!(interrupted.event_id),
+        "the rerun completes the interrupted resume"
+    );
+    assert_eq!(
+        read_all_audit_events(temp.path(), "tenant-a")
+            .expect("file log")
+            .len(),
+        file_count,
+        "and writes no second resume event"
+    );
+    let row = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("DB rows")
+        .into_iter()
+        .find(|row| row.audit_event_id == interrupted.event_id)
+        .expect("the interrupted resume has its DB row now");
+    assert_eq!(row.event_hash, interrupted.event_hash);
+    assert_eq!(row.decision_inputs_hash.as_deref(), Some(db_head.as_str()));
+
+    submit_low_risk_trace(state.clone())
+        .await
+        .expect("the tenant submits again");
+    let (audit_chain, reconciliation) =
+        run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(audit_chain.ready, "{:?}", audit_chain.blocking_gaps);
+    for gap in &reconciliation.blocking_gaps {
+        assert!(
+            !gap.starts_with("missing_audit_event_ids")
+                && !gap.starts_with("db_audit_hash_chain_failures"),
+            "{:?}",
+            reconciliation.blocking_gaps
         );
     }
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -96205,7 +97049,7 @@ fn every_driver_registers_a_distinct_name() {
     }
     assert_eq!(
         seen.len(),
-        12,
+        13,
         "every spawned driver loop must register; got {seen:?}"
     );
 }
@@ -101376,6 +102220,10 @@ async fn near_provisioning_default_disabled_returns_uniform_denial() {
 }
 #[path = "admission_pg_tests.rs"]
 mod admission_pg_tests;
+
+/// The migrated PostgreSQL the two ignored ceremony suites below share.
+#[path = "migrated_pg_fixture.rs"]
+mod migrated_pg_fixture;
 
 /// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
 ///

@@ -1171,6 +1171,7 @@ fn visit_session(
         reason_label: None,
         attempts: 0,
         retry_after: None,
+        transient_redaction_failures: 0,
         submission_id: None,
         approved_scopes: armed.then(|| ctx.consent_scopes.clone()),
         // A fresh entry has no answer to give yet, armed or not: it is

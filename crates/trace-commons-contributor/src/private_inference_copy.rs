@@ -2539,6 +2539,12 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         health::LABEL_PII_FILTER_UNAVAILABLE => "Waiting for the privacy scan",
         health::LABEL_CANARY_FAILED => "Privacy scan failed its self-test",
         health::LABEL_WITNESS_SATURATED => "Waiting for the privacy witness; not sent yet",
+        crate::submit::REASON_TRANSIENT_REDACTION => {
+            "Waiting for the privacy scan; it will be tried again, not sent yet"
+        }
+        crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED => {
+            "The privacy scan kept failing; not sent. Approve it again to retry"
+        }
         _ => "Status unavailable",
     }
 }
@@ -2686,6 +2692,8 @@ mod tests {
             health::LABEL_PII_FILTER_UNAVAILABLE,
             health::LABEL_CANARY_FAILED,
             health::LABEL_WITNESS_SATURATED,
+            crate::submit::REASON_TRANSIENT_REDACTION,
+            crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
         ] {
             let line = queue_outcome_line(label);
             assert_ne!(line, "Status unavailable", "{label}");

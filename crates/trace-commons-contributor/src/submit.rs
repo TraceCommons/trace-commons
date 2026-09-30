@@ -138,6 +138,12 @@ pub const PRECONDITION_NOT_LOGGED_IN: &str = "not-logged-in";
 /// Upstream classifier outage after its own retries. The daemon may retry
 /// this exact outcome with its approval and current-source checks intact.
 pub(crate) const REASON_TRANSIENT_REDACTION: &str = "privacy-filter-transient";
+/// [`REASON_TRANSIENT_REDACTION`] kept recurring until the daemon's retry
+/// budget ran out. The approval is revoked and the session is held for a
+/// person: a "transient" failure that never clears (an over-limit window the
+/// classifier reports as a 5xx, say) must not re-send the session to the
+/// classifier every hour for ever.
+pub(crate) const REASON_TRANSIENT_REDACTION_EXHAUSTED: &str = "privacy-filter-transient-exhausted";
 /// The witness answered `503 witness_saturated`: it is at capacity and
 /// judged nothing. Like [`REASON_TRANSIENT_REDACTION`], the daemon keeps the
 /// approval and retries after the witness's own delay; unlike every other
