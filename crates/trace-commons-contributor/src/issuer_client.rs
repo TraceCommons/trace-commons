@@ -167,6 +167,56 @@ impl IssuerClient {
     }
 }
 
+impl IssuerClient {
+    /// Ask the issuer whether an invite is usable, who issued it and what it
+    /// pays, WITHOUT joining: unlike [`Self::onboard`] this spends no use and
+    /// registers nothing. The code goes in the body, never the URL. A refused
+    /// invite is `Ok` with `valid == false` and a `reason_label`; `Err` is a
+    /// transport failure or an issuer refusal such as its rate limit
+    /// (`invite_lookup_rate_limited`) or an issuer that predates the route.
+    ///
+    /// Do NOT call this per keystroke. Validate the code's format on the
+    /// client first and call once, on an explicit "Look up" action: the
+    /// issuer's lookup budget is small and shared, every call counts against
+    /// it, so partial codes burn it and the user is throttled just as the
+    /// code completes.
+    ///
+    /// Clients MUST present the returned `credit_range` as "estimated credit
+    /// per accepted trace, not yet settled", never as a payment promise. The
+    /// range is operator-set and not enforced by the ledger.
+    pub async fn lookup_invite(
+        &self,
+        issuer_url: &str,
+        invite_code: &str,
+    ) -> Result<trace_commons_protocol::invite_lookup::InviteLookupResponse> {
+        use trace_commons_protocol::invite_lookup::{
+            INVITE_LOOKUP_PATH, INVITE_LOOKUP_REQUEST_SCHEMA_VERSION, InviteLookupRequest,
+            InviteLookupResponse,
+        };
+        let url = format!("{}{INVITE_LOOKUP_PATH}", issuer_url.trim_end_matches('/'));
+        let parsed = reqwest::Url::parse(&url).context("parsing the issuer URL")?;
+        self.allowlist.check(&parsed)?;
+        let request = InviteLookupRequest {
+            schema_version: INVITE_LOOKUP_REQUEST_SCHEMA_VERSION.to_string(),
+            invite_code: invite_code.trim().to_string(),
+        };
+        let response = self
+            .http
+            .post(parsed)
+            .json(&request)
+            .send()
+            .await
+            .context("sending the invite lookup request")?;
+        if !response.status().is_success() {
+            return Err(error_from_response(response, "invite lookup refused").await);
+        }
+        response
+            .json::<InviteLookupResponse>()
+            .await
+            .context("parsing the invite lookup response")
+    }
+}
+
 /// What the issuer said about this device's invite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InviteSubjectAnswer {
@@ -293,6 +343,80 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn lookup_invite_posts_the_code_in_the_body_and_parses_the_answer() {
+        let router = Router::new().route(
+            "/v1/invite/lookup",
+            post(|uri: axum::http::Uri, body: String| async move {
+                assert_eq!(uri.query(), None, "the code must never ride in the URL");
+                let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(sent["invite_code"], "ABCDEFGHJKLMNPQR");
+                assert_eq!(
+                    sent["schema_version"],
+                    "trace_commons.invite_lookup_request.v1"
+                );
+                Json(serde_json::json!({
+                    "valid": true,
+                    "issuer_display_name": "Trace Commons Pilot",
+                    "credit_range": {"min": 2, "max": 6, "unit": "points_per_accepted_trace"},
+                }))
+            }),
+        );
+        let base = spawn(router).await;
+        let client = IssuerClient::new(
+            trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+        )
+        .unwrap();
+        let answer = client
+            .lookup_invite(&base, "  ABCDEFGHJKLMNPQR ")
+            .await
+            .unwrap();
+        assert!(answer.valid);
+        assert_eq!(
+            answer.issuer_display_name.as_deref(),
+            Some("Trace Commons Pilot")
+        );
+        let range = answer.credit_range.unwrap();
+        assert_eq!((range.min, range.max), (2, 6));
+    }
+
+    #[tokio::test]
+    async fn lookup_invite_surfaces_a_refusal_label_and_a_rate_limit() {
+        let router = Router::new().route(
+            "/v1/invite/lookup",
+            post(|body: String| async move {
+                if body.contains("LIMITEDLIMITEDLI") {
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        Json(serde_json::json!({"error": "invite_lookup_rate_limited"})),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(serde_json::json!({"valid": false, "reason_label": "expired"})),
+                    )
+                }
+            }),
+        );
+        let base = spawn(router).await;
+        let client = IssuerClient::new(
+            trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+        )
+        .unwrap();
+        let answer = client
+            .lookup_invite(&base, "ABCDEFGHJKLMNPQR")
+            .await
+            .unwrap();
+        assert!(!answer.valid);
+        assert_eq!(answer.reason_label.as_deref(), Some("expired"));
+        let error = client
+            .lookup_invite(&base, "LIMITEDLIMITEDLI")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invite_lookup_rate_limited"));
+        assert!(!error.to_string().contains("LIMITEDLIMITEDLI"));
     }
 
     #[tokio::test]
