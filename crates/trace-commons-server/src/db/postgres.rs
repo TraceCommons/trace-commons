@@ -1554,26 +1554,34 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "native_passkey_creation",
         include_str!("../../../../migrations/V98__native_passkey_creation.sql"),
     ),
-    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V99 is claimed
-    // by S5 (the unbound reaper) in flight; V100 depends only on V97 and V90.
+    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V100 depends
+    // only on V97 and V90. V99 was never used: S5 held it in flight and took
+    // V101 when it rebased onto main.
     (
         100,
         "near_ai_bind",
         include_str!("../../../../migrations/V100__near_ai_bind.sql"),
     ),
-    // V101 and V102 add human review claims and assessments, index
+    // Z2 S5: the unbound passkey-account reaper. Depends only on V30, V32
+    // and V97.
+    (
+        101,
+        "unbound_account_reaper",
+        include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
+    ),
+    // V102 and V103 add human review claims and assessments, index
     // invalidations with retry columns, pipeline_runs.index_invalidation_state,
     // and immutable customer export snapshots. Every table forces RLS; there
     // is no cross-tenant claim function.
     (
-        101,
+        102,
         "versioned_pipeline_review_invalidation",
-        include_str!("../../../../migrations/V101__versioned_pipeline_review_invalidation.sql"),
+        include_str!("../../../../migrations/V102__versioned_pipeline_review_invalidation.sql"),
     ),
     (
-        102,
+        103,
         "versioned_pipeline_exports",
-        include_str!("../../../../migrations/V102__versioned_pipeline_exports.sql"),
+        include_str!("../../../../migrations/V103__versioned_pipeline_exports.sql"),
     ),
 ];
 
@@ -3859,6 +3867,7 @@ impl Database for PgBackend {
         let row = tx
             .query_opt(
                 "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
+                        s.expires_at,
                         (s.token_hash = $1) AS matched_current,
                         (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate,
                         b.state AS binding_state
@@ -3908,6 +3917,7 @@ impl Database for PgBackend {
         let account_id: Uuid = row.get("account_id");
         let auth_credential_id: Option<String> = row.get("auth_credential_id");
         let client_kind: String = row.get("client_kind");
+        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
         let needs_rotate: bool = row.get("needs_rotate");
@@ -3982,6 +3992,7 @@ impl Database for PgBackend {
             client_kind,
             rotated_secret,
             binding,
+            expires_at,
         }))
     }
 
@@ -6879,8 +6890,8 @@ mod tests {
         (93, 4),
         (94, 4),
         (95, 4),
-        (101, 4),
         (102, 4),
+        (103, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7473,47 +7484,6 @@ mod tests {
         );
     }
 
-    /// Two changes that each add a `V75` pass every check on their own branch
-    /// and collide on merge. On a fresh database the second insert fails its
-    /// primary key; on a database that already applied the first, the runner
-    /// used to skip the second silently. Refuse the table outright instead.
-    #[test]
-    fn migration_versions_are_unique_and_strictly_increasing() {
-        for pair in super::MIGRATIONS.windows(2) {
-            let ((earlier, earlier_name, _), (later, later_name, _)) = (&pair[0], &pair[1]);
-            assert!(
-                later > earlier,
-                "MIGRATIONS must be strictly increasing by version: V{earlier}                  ({earlier_name}) is followed by V{later} ({later_name})"
-            );
-        }
-    }
-
-    /// The directory can hold two files with one version and different stems
-    /// (two branches, both merged); the table test above only sees the one the
-    /// table lists. Catch the duplicate at the file level too.
-    #[test]
-    fn no_two_migration_files_share_a_version() {
-        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
-        let mut seen: std::collections::BTreeMap<i32, String> = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(MIGRATIONS_DIR).expect("read migrations/") {
-            let name = entry
-                .expect("dir entry")
-                .file_name()
-                .into_string()
-                .expect("utf-8 name");
-            let Some(rest) = name.strip_prefix('V') else {
-                continue;
-            };
-            let Some((version, _)) = rest.split_once("__") else {
-                continue;
-            };
-            let version: i32 = version.parse().expect("numeric migration version");
-            if let Some(previous) = seen.insert(version, name.clone()) {
-                panic!("V{version} is claimed by both {previous} and {name}");
-            }
-        }
-    }
-
     #[test]
     fn an_unrecorded_version_is_applied() {
         assert!(!super::recorded_migration_state(None, 75, "account_trust").expect("not an error"));
@@ -7541,6 +7511,12 @@ mod tests {
         );
     }
 
+    /// Also the check for two migrations claiming one version, whether from
+    /// two branches that each added a `V75` or from a hand-edited table:
+    /// `migrations_on_disk` lists every file, duplicates included, so a second
+    /// `V75__*.sql` makes the table and the directory disagree, and a second
+    /// `V75` row in `MIGRATIONS` fails the strictly-increasing loop. A separate
+    /// test for either would repeat this one.
     #[test]
     fn every_migration_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
@@ -7655,8 +7631,8 @@ mod tests {
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
-            include_str!("../../../../migrations/V101__versioned_pipeline_review_invalidation.sql"),
-            include_str!("../../../../migrations/V102__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V102__versioned_pipeline_review_invalidation.sql"),
+            include_str!("../../../../migrations/V103__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7688,8 +7664,8 @@ mod tests {
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
-            include_str!("../../../../migrations/V101__versioned_pipeline_review_invalidation.sql"),
-            include_str!("../../../../migrations/V102__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V102__versioned_pipeline_review_invalidation.sql"),
+            include_str!("../../../../migrations/V103__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7773,8 +7749,8 @@ mod tests {
         let content =
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql");
         let review_invalidation =
-            include_str!("../../../../migrations/V101__versioned_pipeline_review_invalidation.sql");
-        let exports = include_str!("../../../../migrations/V102__versioned_pipeline_exports.sql");
+            include_str!("../../../../migrations/V102__versioned_pipeline_review_invalidation.sql");
+        let exports = include_str!("../../../../migrations/V103__versioned_pipeline_exports.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -7855,7 +7831,7 @@ mod tests {
         ] {
             assert!(
                 review_invalidation.contains(required),
-                "V101 is missing `{required}`"
+                "V102 is missing `{required}`"
             );
         }
         for forbidden in [
@@ -7869,7 +7845,7 @@ mod tests {
         ] {
             assert!(
                 !review_invalidation.contains(forbidden),
-                "V101 must not contain `{forbidden}`"
+                "V102 must not contain `{forbidden}`"
             );
         }
         for required in [
@@ -7883,12 +7859,12 @@ mod tests {
             "ALTER TABLE pipeline_export_snapshots FORCE ROW LEVEL SECURITY;",
             "ALTER TABLE pipeline_export_snapshot_items FORCE ROW LEVEL SECURITY;",
         ] {
-            assert!(exports.contains(required), "V102 is missing `{required}`");
+            assert!(exports.contains(required), "V103 is missing `{required}`");
         }
         for forbidden in ["SECURITY DEFINER", "SET search_path", "attempt_count"] {
             assert!(
                 !exports.contains(forbidden),
-                "V102 must not contain `{forbidden}`"
+                "V103 must not contain `{forbidden}`"
             );
         }
     }

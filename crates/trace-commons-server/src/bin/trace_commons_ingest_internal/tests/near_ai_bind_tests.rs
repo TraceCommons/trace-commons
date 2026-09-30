@@ -1072,6 +1072,136 @@ async fn pg_binding_an_existing_near_ai_account_refuses_and_returns_its_session(
     }
 }
 
+/// (tenants, accounts, bindings, credentials, sessions) in one tenant.
+async fn passkey_rows(admin: &deadpool_postgres::Object, tenant: &str) -> [i64; 5] {
+    let mut out = [0; 5];
+    for (slot, table) in out.iter_mut().zip([
+        "trace_tenants",
+        "trace_accounts",
+        "trace_account_bindings",
+        "trace_webauthn_credentials",
+        "trace_sessions",
+    ]) {
+        *slot = count(
+            admin,
+            &format!("SELECT count(*) FROM {table} WHERE tenant_id = $1"),
+            &[tenant],
+        )
+        .await;
+    }
+    out
+}
+
+/// The closed account S3's refuse branch leaves is what the reaper's closed
+/// window reclaims (Z2 S5, V101). The account is closed over the real bind
+/// route, so by the real `near_ai_bind_close_refused`, not by the hand-copied
+/// `close_like_s3` in `unbound_account_reaper_pg`. Only the close time it
+/// stamped is backdated. The reaper runs as its own unprivileged login.
+///
+/// The database is shared with the rest of the bin, so the sweep's counts
+/// are checked as lower bounds and the assertions are about P and X.
+#[tokio::test]
+async fn pg_a_refused_bind_closes_an_account_the_reaper_reclaims_after_thirty_days() {
+    use trace_commons_server::account_reaper::{
+        DEFAULT_CLOSED_TTL_DAYS, DEFAULT_UNBOUND_TTL_DAYS, MAX_BATCH, UnboundAccountReaper,
+    };
+    let Some(h) = harness().await else {
+        return;
+    };
+    let admin = h.admin().await;
+    let x = provision(&h, &Device::new()).await;
+    let x_tenant = x["tenant_id"].as_str().expect("tenant").to_string();
+    let x_account = Uuid::parse_str(x["account_id"].as_str().expect("account")).expect("uuid");
+    let p = unbound_account(&h.backend).await;
+
+    let reply = bind(&h, &p, &Device::new()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+    assert_eq!(reply.json()["outcome"], "existing_account");
+    assert_eq!(
+        binding_row(&admin, &p.tenant, p.account_id).await,
+        ("closed".to_string(), false)
+    );
+
+    let login = format!("tc_z2_s5_reaper_{}", std::process::id());
+    let _ = admin
+        .batch_execute(&format!("DROP ROLE IF EXISTS {login};"))
+        .await;
+    admin
+        .batch_execute(&format!(
+            "CREATE ROLE {login} LOGIN NOSUPERUSER NOBYPASSRLS;
+             GRANT trace_unbound_account_reaper TO {login};"
+        ))
+        .await
+        .expect("reaper login");
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("url");
+    let mut url = reqwest::Url::parse(&url).expect("url");
+    url.set_username(&login).expect("user");
+    url.set_password(None).expect("password");
+    let reaper = UnboundAccountReaper::connect(url.as_str()).expect("reaper pool");
+    reaper
+        .verify_login()
+        .await
+        .expect("the reaper login may execute the function");
+
+    // Just closed: inside the 30-day window, so P is kept whole.
+    reaper
+        .reap(DEFAULT_UNBOUND_TTL_DAYS, DEFAULT_CLOSED_TTL_DAYS, MAX_BATCH)
+        .await
+        .expect("sweep inside the window");
+    assert_eq!(passkey_rows(&admin, &p.tenant).await, [1, 1, 1, 1, 1]);
+
+    // Move the close time S3 stamped back past the window, and nothing else.
+    let moved = admin
+        .execute(
+            "UPDATE trace_accounts SET closed_at = closed_at - interval '31 days'
+              WHERE tenant_id = $1 AND account_id = $2 AND closed_at IS NOT NULL",
+            &[&p.tenant, &p.account_id],
+        )
+        .await
+        .expect("backdate the close");
+    assert_eq!(moved, 1, "S3 set closed_at");
+
+    let summary = reaper
+        .reap(DEFAULT_UNBOUND_TTL_DAYS, DEFAULT_CLOSED_TTL_DAYS, MAX_BATCH)
+        .await
+        .expect("sweep past the window");
+    assert!(
+        summary.reaped_closed >= 1,
+        "the closed account was reaped: {summary:?}"
+    );
+    // P's account and everything that cascades from it are gone; its tenant
+    // row and its audit, the refusal among it, stay.
+    assert_eq!(passkey_rows(&admin, &p.tenant).await, [1, 0, 0, 0, 0]);
+    assert!(
+        audit_actions(&admin, &p.tenant)
+            .await
+            .contains(&"account_binding_refused".to_string())
+    );
+    // X, which the refused bind provisioned into, is untouched.
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_accounts WHERE tenant_id = $1 AND closed_at IS NULL",
+            &[&x_tenant],
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        anchors_for(&admin, &h.anchor_hash()).await,
+        vec![(x_tenant.clone(), x_account)]
+    );
+
+    drop(reaper);
+    drop_tenants(&admin, &[&x_tenant, &p.tenant]).await;
+    admin
+        .batch_execute(&format!("DROP ROLE {login};"))
+        .await
+        .unwrap_or_else(|error| panic!("drop {login}: {error}"));
+}
+
 /// A ceremony started by account A cannot be finished by account B, neither
 /// with A's signature nor with a signature the same device key makes for B.
 #[tokio::test]

@@ -305,6 +305,18 @@ is refused: the passkey account is closed (its sessions and passkey revoked)
 and the response carries the existing account's session. Nothing moves between
 the two accounts; folding the passkey into the existing account is not built.
 
+### Browser passkey step-up page (Z2 S7)
+
+`GET /account/step-up` is where the native app sends a person to add or remove
+a passkey or change the payout, which a weak native session cannot do. It runs
+the browser passkey sign-in on the ingest origin, so that origin must be on the
+origin list above, e.g.
+`TRACE_COMMONS_WEBAUTHN_RP_ORIGIN=https://tracecommons.ai,https://ingest.tracecommons.ai`.
+Without it the page loads but every sign-in is refused. There is no other
+setting; with the relying party or the account database unset, the page is a
+scriptless 503. The URL contract, headers and log labels are in
+[`native-step-up-page.md`](./native-step-up-page.md).
+
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
 NEAR enrollment and login require the NEAR configuration. All **three** of these
@@ -731,10 +743,10 @@ table. Check before deploying:
 SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
 ```
 
-### V101 and V102: review, invalidation, and export tables
+### V102 and V103: review, invalidation, and export tables
 
-V101 adds the human review claims and assessments, the index invalidation
-queue, a column on `pipeline_runs`, and an index for the payout pass. V102
+V102 adds the human review claims and assessments, the index invalidation
+queue, a column on `pipeline_runs`, and an index for the payout pass. V103
 adds the export snapshots and their items. Like V92 to V95, each grants
 `trace_ingest_runtime` what the pipeline code reads and writes there, and
 nothing broader, and each refuses to apply if the group does not exist:
@@ -744,7 +756,7 @@ nothing broader, and each refuses to apply if the group does not exist:
 | `pipeline_review_claims` | `SELECT, INSERT, DELETE`; `UPDATE` on `reviewer_principal_ref`, `lease_token`, `lease_expires_at`, `claimed_at` | a reviewer's claim inserts the row, or takes over an expired claim or renews its own; the assessment deletes the spent claim |
 | `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
 | `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
-| `pipeline_runs` | `UPDATE (index_invalidation_state)`, the column V101 adds | queueing an invalidation marks the run `pending`; the worker marks it `complete` or `failed` |
+| `pipeline_runs` | `UPDATE (index_invalidation_state)`, the column V102 adds | queueing an invalidation marks the run `pending`; the worker marks it `complete` or `failed` |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
 | `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
 

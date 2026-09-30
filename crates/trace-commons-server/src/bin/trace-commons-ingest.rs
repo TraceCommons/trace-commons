@@ -961,6 +961,27 @@ const TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS: &str =
 /// 210 others were never touched, because the driver takes them oldest-first
 /// and nothing bounded the first one.
 const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
+/// The unbound-account reaper (Z2 S5). Off unless `_ENABLED`; when on it needs
+/// its own least-privilege login, never the runtime URL.
+const TRACE_COMMONS_UNBOUND_REAPER_ENABLED: &str = "TRACE_COMMONS_UNBOUND_REAPER_ENABLED";
+const TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL: &str = "TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL";
+const TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS";
+const TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS";
+/// Names an earlier, never-released draft of the reaper read. Neither is an
+/// alias: the idle window they configured no longer exists, so boot refuses
+/// either one rather than silently ignoring it.
+const TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS: &[&str] = &[
+    "TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS",
+    "TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS",
+];
+const TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS";
+const TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE: &str = "TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE";
+const TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS: u64 = 3600;
+/// Batches one tick may run back to back while each one comes back full.
+const TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK: usize = 10;
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -1458,6 +1479,7 @@ pub async fn run_ingest(
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
     spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
+    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1796,6 +1818,10 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
+    /// Unbound passkey-account reaper. `None` (the default) means it is off;
+    /// `TRACE_COMMONS_UNBOUND_REAPER_ENABLED` turns it on. Its own pool, built
+    /// at boot from its own login, so the runtime pool never runs the sweep.
+    unbound_account_reaper: Option<UnboundAccountReaperConfig>,
     /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
     /// posture every deployment ships in -- means an arriving certificate is
     /// ignored entirely and every content-bearing trace holds exactly as it
@@ -2121,6 +2147,19 @@ struct PiiBackstopDriverConfig {
     max_attempts: i32,
     backoff_base_seconds: i64,
     per_submission_timeout: StdDuration,
+}
+
+/// In-process unbound-account reaper config (Z2 S5). Like the PII-backstop
+/// driver it has no bearer-token worker route; unlike it, the cross-tenant
+/// pool is the reaper's own, held here rather than in `PgBackend`, and the
+/// only thing it can run is the V101 definer function.
+#[derive(Clone)]
+struct UnboundAccountReaperConfig {
+    interval: StdDuration,
+    unbound_ttl_days: i64,
+    closed_ttl_days: i64,
+    batch_size: i32,
+    reaper: trace_commons_server::account_reaper::UnboundAccountReaper,
 }
 
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
@@ -4080,6 +4119,29 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
+        let unbound_account_reaper = parse_unbound_account_reaper_config_from_env()?;
+        if let Some(reaper) = &unbound_account_reaper {
+            // The pool connects lazily; take one connection now and check the
+            // login may execute the reaper function, so a login that cannot
+            // connect, or lacks trace_unbound_account_reaper, fails boot, not
+            // the first tick. The error names the variable, never the URL.
+            reaper.reaper.verify_login().await.map_err(|error| {
+                let denied = matches!(
+                    &error,
+                    trace_commons_server::error::DatabaseError::Pool(label)
+                        if label == "unbound_reaper_execute_denied"
+                );
+                if denied {
+                    anyhow::anyhow!(
+                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} connects but cannot execute trace_reap_unbound_accounts (unbound_reaper_execute_denied)"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} did not accept a connection"
+                    )
+                }
+            })?;
+        }
         // Fail closed on configuration. An enabled bypass missing its signing
         // address, its measurement set, or its policy allowlist refuses to
         // boot naming the control, rather than running with a control an
@@ -4451,6 +4513,7 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
+            unbound_account_reaper,
             witness_bypass,
             witness_capture_pin,
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
@@ -7026,6 +7089,72 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
     }))
 }
 
+/// The unbound passkey-account reaper. Off by default (`Ok(None)`), so
+/// existing deployments and CI are unaffected until an operator opts in.
+///
+/// Fail-closed at boot: `_ENABLED` without a reaper login URL refuses with a
+/// missing-control label rather than silently leaving the reaper off, and a
+/// login that cannot connect refuses in `AppState::from_env`. The error text
+/// never includes the URL. The unbound TTL defaults to 7 days from binding
+/// creation and the closed TTL to 30 days from `closed_at`; neither can be set
+/// under one day, and the V101 function refuses that too. A variable from the
+/// earlier draft's idle window refuses boot.
+fn parse_unbound_account_reaper_config_from_env()
+-> anyhow::Result<Option<UnboundAccountReaperConfig>> {
+    use trace_commons_server::account_reaper::{
+        DEFAULT_BATCH, DEFAULT_CLOSED_TTL_DAYS, DEFAULT_UNBOUND_TTL_DAYS, MAX_BATCH, MAX_TTL_DAYS,
+        MIN_TTL_DAYS, UnboundAccountReaper,
+    };
+    for removed in TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS {
+        if optional_trimmed_env(removed)?.is_some() {
+            anyhow::bail!(
+                "{removed} is no longer read; use {TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS} and {TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS}"
+            );
+        }
+    }
+    if !env_truthy(TRACE_COMMONS_UNBOUND_REAPER_ENABLED) {
+        return Ok(None);
+    }
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL)? else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_UNBOUND_REAPER_ENABLED}=true but {TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is not set"
+        );
+    };
+    let unbound_ttl_days = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS,
+        DEFAULT_UNBOUND_TTL_DAYS,
+        MIN_TTL_DAYS,
+        MAX_TTL_DAYS,
+    )?;
+    let closed_ttl_days = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS,
+        DEFAULT_CLOSED_TTL_DAYS,
+        MIN_TTL_DAYS,
+        MAX_TTL_DAYS,
+    )?;
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS,
+        TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS,
+        60,
+        86_400,
+    )?;
+    let batch_size = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE,
+        i64::from(DEFAULT_BATCH),
+        1,
+        i64::from(MAX_BATCH),
+    )?;
+    let reaper = UnboundAccountReaper::connect(&url)
+        .map_err(|_| anyhow::anyhow!("{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is invalid"))?;
+    Ok(Some(UnboundAccountReaperConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+        unbound_ttl_days,
+        closed_ttl_days,
+        batch_size: batch_size as i32,
+        reaper,
+    }))
+}
+
 fn parse_trace_credit_cycle_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
@@ -8187,6 +8316,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/account/passkey/login/finish",
             post(account_passkey_login_finish_handler),
+        )
+        // The browser passkey step-up page (Z2 S7). Un-versioned and un-authed
+        // beside the login it drives: a plain page whose one script calls the
+        // routes above and the authenticated passkey and payout routes, so a
+        // weak native session's owner can get a strong cookie session.
+        .route(
+            step_up_page::STEP_UP_PATH,
+            get(step_up_page::step_up_page_handler),
         )
         // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
         // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
@@ -10229,6 +10366,7 @@ const CREDIT_CYCLE_SCHEDULER_DRIVER_NAME: &str = "credit_cycle_scheduler";
 const CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME: &str = "credit_settlement_scheduler";
 const PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME: &str = "process_evaluation_scheduler";
 const REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME: &str = "revocation_propagation_scheduler";
+const UNBOUND_ACCOUNT_REAPER_DRIVER_NAME: &str = "unbound_account_reaper";
 
 /// Every driver the liveness registry knows about. The distinctness test
 /// reads this; keep it in sync when adding a driver.
@@ -10245,6 +10383,7 @@ const ALL_DRIVER_NAMES: &[&str] = &[
     CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
     PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
     REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
+    UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
 ];
 
 /// Run `tick` forever on `interval`, recording liveness and emitting the
@@ -10408,6 +10547,67 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
                     "Trace Commons PII backstop driver tick completed"
                 );
                 pii_backstop_tick_outcome(&summary)
+            }
+        },
+    );
+}
+
+/// Spawn the in-process unbound-account reaper (Z2 S5). Copies
+/// `spawn_pii_backstop_driver_task`: `spawn_driver_loop`, a cross-tenant pool
+/// that is not the runtime pool, no bearer-token worker route, hash-free
+/// count-only logging. A tick runs bounded batches back to back while each
+/// comes back full of deletions, up to `TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK`.
+fn spawn_unbound_account_reaper_task(
+    state: &Arc<AppState>,
+    config: Option<UnboundAccountReaperConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        unbound_ttl_days = config.unbound_ttl_days,
+        closed_ttl_days = config.closed_ttl_days,
+        batch_size = config.batch_size,
+        "Trace Commons unbound account reaper enabled"
+    );
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
+        config.interval,
+        move |_state| {
+            let config = tick_config.clone();
+            async move {
+                let mut reaped_unbound = 0u64;
+                let mut reaped_closed = 0u64;
+                let mut skipped = 0u64;
+                for _ in 0..TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK {
+                    let summary = config
+                        .reaper
+                        .reap(
+                            config.unbound_ttl_days,
+                            config.closed_ttl_days,
+                            config.batch_size,
+                        )
+                        .await
+                        .context("unbound account reaper batch failed")?;
+                    reaped_unbound += summary.reaped_unbound;
+                    reaped_closed += summary.reaped_closed;
+                    skipped += summary.skipped;
+                    if summary.reaped() < u64::try_from(config.batch_size).unwrap_or(0) {
+                        break;
+                    }
+                }
+                tracing::info!(
+                    reaped_unbound,
+                    reaped_closed,
+                    skipped,
+                    unbound_ttl_days = config.unbound_ttl_days,
+                    closed_ttl_days = config.closed_ttl_days,
+                    "Trace Commons unbound account reaper tick completed"
+                );
+                Ok(())
             }
         },
     );
@@ -17229,7 +17429,7 @@ async fn account_auth_middleware(
             request.extensions_mut().insert(binding);
             next.run(request).await
         };
-        if let Some(token) = rotated_secret_value {
+        if let Some((token, _)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
                     .headers_mut()
@@ -17251,7 +17451,7 @@ async fn account_auth_middleware(
         next.run(request).await
     };
 
-    if let Some(cookie_value) = rotated_secret_value {
+    if let Some((cookie_value, expires_at)) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
         // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
         // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
@@ -17262,7 +17462,7 @@ async fn account_auth_middleware(
             .http_only(true)
             .same_site(cookie::SameSite::Strict)
             .path("/")
-            .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+            .max_age(rotated_cookie_max_age(expires_at, Utc::now()))
             .build();
         if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
             // APPEND, not insert: a handler may have already set its OWN Set-Cookie
@@ -17284,6 +17484,19 @@ async fn account_auth_middleware(
     }
 
     response
+}
+
+/// Max-Age for a rotated session cookie: the usual lifetime, capped at what
+/// is left of the session's absolute `expires_at`, so rotation can never make
+/// the cookie outlive its row. That matters for a step-up session
+/// (`STEP_UP_SESSION_TTL_MINUTES`), whose row expires long before a fresh
+/// seven-day cookie would.
+fn rotated_cookie_max_age(
+    expires_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> cookie::time::Duration {
+    let remaining = (expires_at - now).num_seconds().max(0);
+    cookie::time::Duration::seconds(remaining.min(ACCOUNT_SESSION_TTL_DAYS * 24 * 60 * 60))
 }
 
 #[cfg(test)]
@@ -17351,6 +17564,10 @@ async fn account_binding_handler(
     response
 }
 
+/// A session that rotated on this request: the new credential value (cookie
+/// value or native token) and the session's unchanged absolute expiry.
+type RotatedSession = (String, chrono::DateTime<Utc>);
+
 /// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
 /// rotated session secret (cookie path only) so the auth middleware can attach a
 /// fresh `Set-Cookie` on EVERY authenticated response. The bearer / both-creds /
@@ -17360,7 +17577,7 @@ async fn resolve_account_ctx_with_rotation(
     headers: &HeaderMap,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let bearer = headers
@@ -17424,7 +17641,7 @@ async fn resolve_account_ctx_native(
     bearer: &str,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let invalid = || {
@@ -17460,9 +17677,10 @@ async fn resolve_account_ctx_native(
     // middleware hands the new secret back in a response header (the bearer
     // analogue of `Set-Cookie`) so the client can swap before the short
     // prev-token grace lapses.
+    let expires_at = session.expires_at;
     let rotated = session
         .rotated_secret
-        .map(|new_secret| native_token_value(&tenant_id, &new_secret));
+        .map(|new_secret| (native_token_value(&tenant_id, &new_secret), expires_at));
 
     Ok((
         AccountCtx {
@@ -17493,7 +17711,7 @@ async fn resolve_account_ctx_cookie(
     cookie: &str,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let invalid = || {
@@ -17522,11 +17740,15 @@ async fn resolve_account_ctx_cookie(
     // (`{b64url(tenant)}.{new_secret}`) so the middleware can attach a fresh
     // `Set-Cookie`. The browser still holds the old secret until that header lands;
     // `validate_session` already parked the old hash as the within-grace prev token.
+    let expires_at = session.expires_at;
     let rotated_cookie_value = session.rotated_secret.map(|new_secret| {
-        format!(
-            "{}.{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
-            new_secret,
+        (
+            format!(
+                "{}.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
+                new_secret,
+            ),
+            expires_at,
         )
     });
 
@@ -19202,6 +19424,9 @@ use native_passkey::{
     native_passkey_login_finish_handler, native_passkey_login_start_handler,
 };
 
+#[path = "trace_commons_ingest_internal/step_up_page.rs"]
+mod step_up_page;
+
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
@@ -19404,6 +19629,12 @@ where
 
 /// Issued session lifetime. Matches the spec's ~7d browser session.
 const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
+
+/// Lifetime of a browser passkey session minted for the step-up page (Z2 S7):
+/// a sign-in whose `login/start` asked for `purpose=step_up`. Absolute, like
+/// every session's `expires_at`: activity and rotation-on-use never move it.
+/// A constant, as the other session lifetimes are.
+const STEP_UP_SESSION_TTL_MINUTES: i64 = 15;
 
 /// The session cookie name. Value is `{b64url(tenant_id)}.{secret}`; only the
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
@@ -21537,6 +21768,34 @@ where
     }
 }
 
+/// What a browser passkey sign-in is for, fixed at `login/start` and carried
+/// in the ceremony to `finish`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasskeyLoginPurpose {
+    /// An ordinary sign-in: a session of `ACCOUNT_SESSION_TTL_DAYS`.
+    Session,
+    /// The step-up page's sign-in (Z2 S7): a session of
+    /// `STEP_UP_SESSION_TTL_MINUTES`.
+    StepUp,
+}
+
+/// The `purpose` of a `login/start`, from its raw query. No `purpose` is an
+/// ordinary sign-in and other parameters are ignored, as before. A `purpose`
+/// must be exactly `step_up`, once; any other value (or a repeat) is `None`,
+/// which the handler answers with the uniform deny. The value is compared, not
+/// decoded, and never logged.
+fn passkey_login_purpose(query: Option<&str>) -> Option<PasskeyLoginPurpose> {
+    let mut purposes = query.unwrap_or_default().split('&').filter_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "purpose").then_some(value)
+    });
+    match (purposes.next(), purposes.next()) {
+        (None, _) => Some(PasskeyLoginPurpose::Session),
+        (Some("step_up"), None) => Some(PasskeyLoginPurpose::StepUp),
+        _ => None,
+    }
+}
+
 /// `POST /account/passkey/login/start` — begin a discoverable passkey login
 /// (Slice 2 Task 6). UNAUTHENTICATED. Fails closed (uniform deny) when the
 /// relying party is unconfigured. Rate-limited per-IP + global. Issues a
@@ -21548,7 +21807,13 @@ where
 async fn account_passkey_login_start_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> axum::response::Response {
+    // The one optional input: `purpose=step_up` from the step-up page. Checked
+    // before anything else so a refused purpose costs nothing.
+    let Some(purpose) = passkey_login_purpose(query.as_deref()) else {
+        return passkey_login_generic_deny();
+    };
     // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
     // in the `REDEEM_MIN_LATENCY` timing floor. It performs NO credential or tenant
     // lookup — it only mints a fresh discoverable-auth challenge — so there is no
@@ -21581,7 +21846,10 @@ async fn account_passkey_login_start_handler(
     let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
-        CeremonyState::DiscoverableAuthentication(auth_state),
+        match purpose {
+            PasskeyLoginPurpose::Session => CeremonyState::DiscoverableAuthentication(auth_state),
+            PasskeyLoginPurpose::StepUp => CeremonyState::StepUpDiscoverable(auth_state),
+        },
     );
 
     // Same short-lived ceremony cookie shape as enrollment (Task 5): opaque id
@@ -21757,14 +22025,21 @@ async fn account_passkey_login_finish_inner(
 
     // 3. Recover and CONSUME (single-use `take`) the pending discoverable-auth
     //    state via the ceremony cookie. Missing / expired / already-consumed /
-    //    wrong-variant all collapse to the uniform deny.
-    let auth_state = match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
-        Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-            Some(CeremonyState::DiscoverableAuthentication(auth_state)) => auth_state,
-            Some(_) | None => return passkey_login_generic_deny(),
-        },
-        None => return passkey_login_generic_deny(),
-    };
+    //    wrong-variant all collapse to the uniform deny. The purpose was bound
+    //    into the ceremony at `start`; nothing here can change it.
+    let (auth_state, purpose) =
+        match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
+            Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+                Some(CeremonyState::DiscoverableAuthentication(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::Session)
+                }
+                Some(CeremonyState::StepUpDiscoverable(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::StepUp)
+                }
+                Some(_) | None => return passkey_login_generic_deny(),
+            },
+            None => return passkey_login_generic_deny(),
+        };
 
     // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
     //    the advanced sign counter: the verification core shared with native
@@ -21784,9 +22059,22 @@ async fn account_passkey_login_finish_inner(
     //    hash-only audit in one RLS-scoped tx under the resolved tenant. NO
     //    ensure_trace_tenant: the credential is verified, so the tenant provably
     //    exists via its FK.
+    //    A step-up sign-in's session lasts `STEP_UP_SESSION_TTL_MINUTES`, in
+    //    the row's absolute `expires_at` and in the cookie's Max-Age alike.
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
-    let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
+    let (lifetime, metadata) = match purpose {
+        PasskeyLoginPurpose::Session => (
+            Duration::days(ACCOUNT_SESSION_TTL_DAYS),
+            // Hash-only / label-only: never the credential id or key material.
+            serde_json::json!({ "client_kind": "passkey" }),
+        ),
+        PasskeyLoginPurpose::StepUp => (
+            Duration::minutes(STEP_UP_SESSION_TTL_MINUTES),
+            serde_json::json!({ "client_kind": "passkey", "purpose": "step_up" }),
+        ),
+    };
+    let expires_at = Utc::now() + lifetime;
     if db
         .issue_passkey_session(
             &tenant,
@@ -21800,8 +22088,7 @@ async fn account_passkey_login_finish_inner(
             trace_commons_server::db::RedeemAudit {
                 action: "account_passkey_login".to_string(),
                 outcome: "success".to_string(),
-                // Hash-only / label-only: never the credential id or key material.
-                metadata: serde_json::json!({ "client_kind": "passkey" }),
+                metadata,
             },
         )
         .await
@@ -21823,7 +22110,7 @@ async fn account_passkey_login_finish_inner(
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
         .path("/")
-        .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+        .max_age(cookie::time::Duration::seconds(lifetime.num_seconds()))
         .build();
     // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
     let clear_ceremony = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ""))

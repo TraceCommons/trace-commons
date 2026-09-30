@@ -158,7 +158,7 @@ CREATE POLICY trace_corpus_tenant_isolation ON pipeline_index_invalidations
 -- column the code does not use gets no grant.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
-        RAISE EXCEPTION 'V101: trace_ingest_runtime is missing; V90 creates it';
+        RAISE EXCEPTION 'V102: trace_ingest_runtime is missing; V90 creates it';
     END IF;
 END $$;
 

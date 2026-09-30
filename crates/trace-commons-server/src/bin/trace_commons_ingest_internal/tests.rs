@@ -19,6 +19,8 @@ mod public_run_lifecycle_tests;
 mod public_run_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
+#[path = "tests/step_up_page_tests.rs"]
+mod step_up_page_tests;
 
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
@@ -6268,6 +6270,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
@@ -29314,6 +29317,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
@@ -84078,8 +84082,12 @@ fn softpasskey_authenticate_discoverable(
 
 /// Call `login/start` and return `(challenge_json, ceremony_cookie_pair)`.
 async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, String) {
-    let response =
-        account_passkey_login_start_handler(State(state.clone()), HeaderMap::new()).await;
+    let response = account_passkey_login_start_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        axum::extract::RawQuery(None),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -95317,6 +95325,7 @@ impl Database for NativeAuthTestDb {
                 client_kind: s.client_kind.clone(),
                 rotated_secret: rotated_secret.clone(),
                 binding,
+                expires_at: s.expires_at,
             });
         // The binding state is read in the same query as the session, so a
         // failure is a failure of the whole validation.
@@ -97158,7 +97167,7 @@ fn every_driver_registers_a_distinct_name() {
     }
     assert_eq!(
         seen.len(),
-        12,
+        13,
         "every spawned driver loop must register; got {seen:?}"
     );
 }
@@ -102329,6 +102338,10 @@ async fn near_provisioning_default_disabled_returns_uniform_denial() {
 }
 #[path = "admission_pg_tests.rs"]
 mod admission_pg_tests;
+
+/// The migrated PostgreSQL the two ignored ceremony suites below share.
+#[path = "migrated_pg_fixture.rs"]
+mod migrated_pg_fixture;
 
 /// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
 ///
