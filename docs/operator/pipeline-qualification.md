@@ -77,8 +77,13 @@ contract" below). In order:
 6. The report is written to `.local/pipeline-qualification-report.json`
    (and only archived with `--archive`).
 
-A failure anywhere still writes a report -- `status: fail` with the safe
-label that failed it -- before the command exits nonzero. On success:
+`qualify` first removes the previous `.local` report, so an older passing
+report never stays the latest one. A failed run writes its report --
+`status: fail` with the safe label that failed it -- before the command
+exits nonzero. An interrupt (Ctrl-C) writes the report under
+`qualify_interrupted` and exits 130. The only failed run that leaves no
+report is one whose report itself cannot be written (for example, a full
+disk). On success:
 
 ```
 PipelineQualificationOK: report=.local/pipeline-qualification-report.json checks=16
@@ -148,6 +153,14 @@ lists to have a result that is **current**, meaning all of:
 - carrying its required digests, for checks that must bind a package
   (`check_result_digest_missing:<id>`).
 
+A result file that is empty or not valid JSON (a test that died while it
+wrote its result leaves an empty one) fails with
+`check_result_schema_invalid`, the same label as a result of the wrong
+shape; an evidence file that is not valid JSON fails with
+`check_evidence_malformed`. `observed_at` may carry up to nine fractional
+digits (Rust writes nine on Linux); the tooling reads it to the microsecond
+on every Python 3 it supports, including 3.9 and 3.10.
+
 The evidence file must independently hash to the result's `evidence_hash`
 and pass the evidence validator (labels, `sha256:` hashes, and ISO
 timestamps only -- no URL, tenant id, trace text, or secret-shaped value).
@@ -178,6 +191,14 @@ evidence the check reached PostgreSQL.
   `restore-fingerprint.json`; `run` (and `qualify`'s corpus scenarios) write
   `corpus-report-<label>.json`. Nothing here is deleted automatically; clean
   it up like any other build output when disk space matters.
+
+In CI, a failed `pipeline qualification and restore` job uploads
+`.local/pipeline/runs/` -- every run directory except its encrypted
+`artifacts/` -- as the workflow artifact `pipeline-qualification-runs`,
+kept for 7 days, so the failing step's protected log, the results, the
+evidence, and the report can be read without reproducing the run. Every
+value in them comes from the synthetic fixtures and test constants; the
+artifact master key only ever reaches a child process's environment.
 
 ## `--archive` and the catalog
 

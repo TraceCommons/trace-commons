@@ -158,9 +158,12 @@ admits raw trace text), `database_check_executed_nothing:<step>` (the
 scenario database shows fewer than 5 committed transactions),
 `corpus_report_missing` / `corpus_report_malformed` /
 `corpus_report_has_failures` / `corpus_evidence_mismatch` (the harness's own
-report or evidence did not check out), and `step_failed:<step>` for any test
+report or evidence did not check out), `step_failed:<step>` for any test
 or export step that exited nonzero -- its log is at the path the failure
-line names. A pin whose source or sample order no longer matches the
+line names -- and `cargo_test_list_failed:<step>` when the step's
+`cargo test -- --list` exited nonzero (usually a compile error: the list
+builds the test binary); its log, at the path the line names, holds the
+list's own output. A pin whose source or sample order no longer matches the
 recorded digest fails this way too: the export binary itself refuses with
 "source digest changed" or "sample order digest changed", which surfaces as
 `step_failed:hf_corpus_export`; the step's protected log holds the export's

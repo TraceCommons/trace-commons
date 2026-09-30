@@ -134,20 +134,45 @@ container mode is unaffected: it starts and restores against its own
 digest-pinned `postgres:16` image regardless of the host's installed
 client tools.
 
-**After a real restore,** rebuild the pipeline's index before starting
-ingest, in this order:
+**After a real restore,** rebuild the pipeline's index before the pipeline
+worker processes any tenant. A worker that runs first scores pending runs
+against an empty or partial index, so their novelty, and their credit,
+comes out too high. The rebuild route is served only by an ingest build
+that injects a pipeline runtime; the repository binary injects none and
+answers `404` there. Do these steps in this order:
 
 1. Restore PostgreSQL (the pipeline's rows restore with everything else --
    there is no separate pipeline backup or restore path for the database).
 2. Restore the encrypted object store.
-3. Rebuild the pipeline's index: `POST /v1/workers/pipeline/index-rebuild`,
-   behind the same vector worker bearer-token gate as `main`'s vector index
-   worker route (see [`operator-binaries.md`](operator-binaries.md) for the
-   credential). It replays every complete, included run's authoritative
-   commands through the service's own index writer and returns a hash-only
-   report. It creates no outcomes and no credit, so it is safe to run again
-   if it is interrupted.
-4. Start `trace-commons-ingest`.
+3. Start every `trace-commons-ingest` process with
+   `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
+   `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` both unset. The pipeline
+   runtime still starts, and the rebuild route still serves every tenant.
+   The worker reads both lists once, at start, so it drains no tenant: it
+   scores no pending run, and it pays and invalidates nothing. Keep these
+   processes out of client traffic until step 5: while a tenant is on
+   neither list, a new upload of that tenant takes the legacy path.
+4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
+   tenant's vector worker bearer token or an admin token -- the same gate
+   as `main`'s vector index worker route (see
+   [`operator-binaries.md`](operator-binaries.md) for the credential). It
+   replays every complete, included run's sealed index command through the
+   service's own index writer, returns a hash-only report
+   (`command_count`, `entry_count`, `unchanged_entry_count`,
+   `skipped_run_count`, `command_set_hash`), and appends one `vector_index`
+   audit row. It creates no outcomes and no credit. It is safe to run again
+   if it is interrupted: a repeat reports the entries it already wrote as
+   unchanged. A withdrawal during the rebuild is safe too: a run withdrawn
+   before its entries are written is skipped, and a withdrawal of a run
+   whose entries are being written waits for them and then queues their
+   removal.
+5. Restart every `trace-commons-ingest` process with both lists set back to
+   their values before the restore. The worker then resumes the pending
+   runs, and processes the queued invalidations and payouts, against the
+   rebuilt index.
+
+`pipeline.py restore-drill` does not exercise this route: it rebuilds the
+index in process, before its app starts.
 
 ## Model weights
 

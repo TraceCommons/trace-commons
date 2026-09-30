@@ -124,14 +124,22 @@ inspects only the dependencies `PipelineService::default_package()` --
 the package this service registers as every rollout tenant's active bundle
 -- actually uses: the scorer and embedder it names, the held index reader
 and writer, one settlement-adapter check per instrument the package pins,
-the authority provider, the privacy boundary, and payout when the package
-pins `trace_credit`. A non-production-qualified dependency the default
-bundle never touches (for example, a scorer registered for a different
-bundle that is not yet the active one) does not block startup. The same
-per-bundle check is available as `PipelineService::bundle_qualification`
-for any package, which is what the `pipeline_bundle_qualification` required
-check (`qualification_inspects_the_objects_the_constructor_receives`)
-exercises.
+the authority provider, and the privacy boundary. A non-production-qualified
+scorer, embedder, or settlement adapter the default bundle never touches
+(for example, a scorer registered for a different bundle that is not yet
+the active one) does not block startup.
+
+The NEAR payout adapter is the exception: it is checked whenever payout is
+enabled, whatever the default package pins. Payout is service-wide, like
+the index writer: the payout pass pays the complete runs of every bundle,
+including runs bound to an earlier default package. An unqualified payout
+adapter with payout enabled refuses startup under the same conditions as
+any other unqualified dependency.
+
+The same per-bundle check, with payout, is available as
+`PipelineService::bundle_qualification` for any package, which is what the
+`pipeline_bundle_qualification` required check
+(`qualification_inspects_the_objects_the_constructor_receives`) exercises.
 
 ## Per-phase claim lease
 
@@ -188,11 +196,12 @@ lease rather than being renewed forever. The commit fences
 (`ensure_current_lease`, `ensure_live_lease`, every lease-checked `UPDATE`)
 stay the only authority over what a phase is allowed to write; renewal only
 keeps an honest slow phase from being reclaimed out from under it before it
-finishes. This closes both gaps above for a live worker: it renews its own
-lease before `lease_expires_at` passes, rather than finding out about an
-expiry only after the fact. The gap only reopens for a lease that was never
-renewed at all -- a worker that crashes before its first renewal, or one
-held past the renewal cap.
+finishes. Renewal closes only the second gap above, and only for a live
+worker: it renews its own lease before `lease_expires_at` passes, so no
+other worker reclaims a phase that is merely slow. The first gap stays: a
+crashed worker still records nothing. The second gap reopens when a live
+worker's lease expires anyway -- its phase runs past the renewal cap, or
+its renewal does not get to run before the lease expires.
 
 ## Authority and privacy at the receipt
 
@@ -915,10 +924,11 @@ pre-switch receipt, unique ledger sources, tenant expansion gates,
 rollback, containment, suspension instead of rebinding, and writer
 retirement after pending work completes.
 
-[`pipeline.py qualify`](pipeline-qualification.md) runs the
-`versioned_pipeline_runtime_pg` suite as one of its required database
-checks. Corpus and package evidence stays in local files; these PostgreSQL
-integration tests remain separate schema and recovery checks.
+[`pipeline.py qualify`](pipeline-qualification.md) runs nine exact tests
+from the `versioned_pipeline_runtime_pg` suite as required database checks;
+`pipeline.py test --check postgres` runs the whole suite. Corpus and package
+evidence stays in local files; these PostgreSQL integration tests remain
+separate schema and recovery checks.
 
 ## Local operator routes
 
