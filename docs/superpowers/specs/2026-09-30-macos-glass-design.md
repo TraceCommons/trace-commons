@@ -78,10 +78,10 @@ the macOS app keeps `main`'s behaviour. In particular:
      separately.
 
    Recommendation: (b), reviewed by the brand owner.
-2. **Brand.** #1146's purple (`#6D14F3`) replaces the current green
-   (`#178F70`), which came from the community site. Confirm the macOS app
-   moves to purple, and that the community site either follows or is
-   deliberately left behind.
+2. **Brand: decided 2026-09-30, the macOS app moves from green to purple.**
+   #1146's purple (`#6D14F3`) replaces the current green (`#178F70`), which
+   came from the community site. Whether the community site follows is
+   still open.
 3. **Minimum OS: decided 2026-09-30, keep macOS 14 with a fallback.** The
    app is built with the macOS 26 SDK (Xcode 26) and keeps
    `.macOS(.v14)` as its deployment target.
