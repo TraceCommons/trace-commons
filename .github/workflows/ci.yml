@@ -206,7 +206,7 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_growth_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
-      # V99: the unbound-account reaper, run as a login holding only
+      # V101: the unbound-account reaper, run as a login holding only
       # trace_unbound_account_reaper, with a control that a superuser-owned
       # function would fail.
       - name: unbound_account_reaper_pg

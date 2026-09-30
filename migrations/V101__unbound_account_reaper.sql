@@ -22,10 +22,11 @@
 -- Either kind is reaped only when it holds no LIVE SESSION (unrevoked and
 -- unexpired), so a session is never reaped from under its holder.
 --
--- Renumbering: S1 is V97, S2 takes V98 and S3 V100, so this is V99. Main
--- stood at V95 when this was written. It depends only on V30 (accounts,
--- sessions), V32 (credentials), V97 (bindings) and the tables the cascade
--- reaches, so it may be renumbered freely at merge.
+-- Numbering: S1 is V97, S2 V98 and S3 V100. This was drafted as V99 and
+-- became V101 when it was rebased onto a main that already held V100, since
+-- migrations must be applied in strictly increasing order. It depends only on
+-- V30 (accounts, sessions), V32 (credentials), V97 (bindings) and the tables
+-- the cascade reaches, so it may be renumbered freely at merge.
 --
 -- CROSS-TENANT, SO A DEFINER FUNCTION. The sweep spans tenants, and the
 -- runtime pool is tenant-scoped under forced RLS, so nothing here grants the
@@ -163,9 +164,9 @@ CREATE POLICY trace_unbound_reaper_read ON trace_sessions
 DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_submissions;
 
 -- Converge a database that ran an earlier draft of this migration (CI and
--- scratch databases only; V99 was never released). That draft deleted the
--- tenant, so it gave the guard SELECT/DELETE/UPDATE on trace_tenants with
--- three policies there, and a SELECT grant plus a trace_unbound_reaper_scope
+-- scratch databases only; the draft, numbered V99, was never released).
+-- That draft deleted the tenant, so it gave the guard SELECT/DELETE/UPDATE
+-- on trace_tenants with three policies there, and a SELECT grant plus a trace_unbound_reaper_scope
 -- policy on every tenant-keyed table. None of it is used now. Each step is a
 -- no-op on a fresh database.
 DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_tenants;

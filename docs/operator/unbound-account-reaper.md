@@ -88,7 +88,7 @@ its replacement.
 
 ## Login
 
-V99 creates two NOLOGIN roles:
+V101 creates two NOLOGIN roles:
 
 - `trace_unbound_account_reaper_guard` owns the `SECURITY DEFINER` function
   `trace_reap_unbound_accounts(BIGINT, BIGINT, INTEGER)`. It holds

@@ -1,7 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The passkey-account reaper (V99) against a real PostgreSQL, run as the
+//! The passkey-account reaper (V101) against a real PostgreSQL, run as the
 //! non-superuser login it runs as in production. Explicit isolated database
 //! only; never falls back to DATABASE_URL.
 
@@ -948,7 +948,7 @@ async fn a_bad_reaper_login_fails_the_startup_check() {
     assert!(bad.verify_login().await.is_err());
 }
 
-/// Re-applying V99 changes nothing and leaves the reaper working. The
+/// Re-applying V101 changes nothing and leaves the reaper working. The
 /// non-superuser migrator case is covered by migration_atomicity_pg.
 #[tokio::test]
 async fn reapplying_the_migration_changes_nothing() {
@@ -957,7 +957,7 @@ async fn reapplying_the_migration_changes_nothing() {
     let closed = seed_closed(&fx, 400, 31).await;
     fx.admin
         .batch_execute(include_str!(
-            "../../../migrations/V99__unbound_account_reaper.sql"
+            "../../../migrations/V101__unbound_account_reaper.sql"
         ))
         .await
         .unwrap();
@@ -966,9 +966,9 @@ async fn reapplying_the_migration_changes_nothing() {
     assert_eq!(rows(&fx, &closed.tenant).await, [1, 0, 0, 0, 0, 2, 1]);
 }
 
-/// A database that ran the earlier draft of V99 (CI and scratch only) held a
+/// A database that ran the earlier draft of V101 (CI and scratch only) held a
 /// guard grant and a `trace_unbound_reaper_scope` policy on every tenant-keyed
-/// table, and grants and policies on trace_tenants. Re-applying V99 must
+/// table, and grants and policies on trace_tenants. Re-applying V101 must
 /// remove all of it, leaving the guard with privileges and policies on exactly
 /// the three tables it reads.
 #[tokio::test]
@@ -1006,7 +1006,7 @@ async fn reapplying_the_migration_removes_the_earlier_drafts_scope_grants() {
     );
     fx.admin
         .batch_execute(include_str!(
-            "../../../migrations/V99__unbound_account_reaper.sql"
+            "../../../migrations/V101__unbound_account_reaper.sql"
         ))
         .await
         .unwrap();

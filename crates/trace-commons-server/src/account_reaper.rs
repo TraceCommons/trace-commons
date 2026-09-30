@@ -1,7 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The passkey-account reaper (Z2, slice S5; V99).
+//! The passkey-account reaper (Z2, slice S5; V101).
 //!
 //! Cancel leaves an unbound passkey account inert, and S3's refuse branch
 //! leaves a closed one. This is what reclaims both:
@@ -73,7 +73,7 @@ pub struct UnboundAccountReaper {
 
 impl UnboundAccountReaper {
     /// Build the pool from the reaper login's connection string. The login
-    /// must inherit `trace_unbound_account_reaper` (V99) and nothing else;
+    /// must inherit `trace_unbound_account_reaper` (V101) and nothing else;
     /// never pass the runtime URL. The pool connects lazily; call
     /// [`Self::verify_login`] at boot.
     pub fn connect(url: &str) -> Result<Self, DatabaseError> {

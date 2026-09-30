@@ -2119,7 +2119,7 @@ struct PiiBackstopDriverConfig {
 /// In-process unbound-account reaper config (Z2 S5). Like the PII-backstop
 /// driver it has no bearer-token worker route; unlike it, the cross-tenant
 /// pool is the reaper's own, held here rather than in `PgBackend`, and the
-/// only thing it can run is the V99 definer function.
+/// only thing it can run is the V101 definer function.
 #[derive(Clone)]
 struct UnboundAccountReaperConfig {
     interval: StdDuration,
@@ -6988,7 +6988,7 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
 /// login that cannot connect refuses in `AppState::from_env`. The error text
 /// never includes the URL. The unbound TTL defaults to 7 days from binding
 /// creation and the closed TTL to 30 days from `closed_at`; neither can be set
-/// under one day, and the V99 function refuses that too. A variable from the
+/// under one day, and the V101 function refuses that too. A variable from the
 /// earlier draft's idle window refuses boot.
 fn parse_unbound_account_reaper_config_from_env()
 -> anyhow::Result<Option<UnboundAccountReaperConfig>> {
