@@ -14,6 +14,7 @@ import {
   getBalance,
   getCredentialStatus,
   getFunding,
+  migrateCredential,
   openExternalUrl,
   setPrivateInference,
   startCredential,
@@ -112,6 +113,20 @@ export function usePrivateAi() {
       ]);
     },
   });
+  const migrateMutation = useMutation({
+    mutationFn: migrateCredential,
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: privateAiKeys.credential(core.scope),
+        }),
+        queryClient.invalidateQueries({ queryKey: coreKeys.status }),
+        queryClient.invalidateQueries({
+          queryKey: privateAiKeys.balance(core.scope),
+        }),
+      ]);
+    },
+  });
   const verifyFundingMutation = useMutation({
     mutationFn: (input: {
       organizationId: string;
@@ -200,6 +215,18 @@ export function usePrivateAi() {
       setActionError("Credential was not forgotten locally.");
     }
   }, [forgetMutation]);
+  const migrate = useCallback(async () => {
+    setActionError(null);
+    try {
+      await migrateMutation.mutateAsync();
+    } catch {
+      // The core's sentence, as the macOS shell uses for the same failure.
+      setActionError(
+        writeUnconfirmed ??
+          "The change could not be confirmed. Refresh status before retrying.",
+      );
+    }
+  }, [migrateMutation, writeUnconfirmed]);
   const openBrowser = useCallback(
     async (url: string) => {
       setActionError(null);
@@ -217,6 +244,7 @@ export function usePrivateAi() {
     startMutation.isPending ||
     cancelMutation.isPending ||
     forgetMutation.isPending ||
+    migrateMutation.isPending ||
     verifyFundingMutation.isPending ||
     openBrowserMutation.isPending ||
     balanceQuery.isFetching ||
@@ -237,6 +265,7 @@ export function usePrivateAi() {
     start,
     cancel,
     forget,
+    migrate,
     openBrowser,
     credentialQuery,
     balanceQuery,

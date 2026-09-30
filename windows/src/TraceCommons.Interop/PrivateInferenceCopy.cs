@@ -341,6 +341,17 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("credential_forget_explains")]
     public string CredentialForgetExplains { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The button behind <c>migration_available</c>, and the sentence drawn
+    /// beside it. Only macOS produces that state; decoded here so the payload
+    /// is read whole and no field is invented or dropped.
+    /// </summary>
+    [JsonPropertyName("credential_migrate")]
+    public string CredentialMigrate { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_migrate_explains")]
+    public string CredentialMigrateExplains { get; init; } = string.Empty;
+
     [JsonPropertyName("credential_absent")]
     public string CredentialAbsent { get; init; } = string.Empty;
 
@@ -699,6 +710,8 @@ public sealed record PrivateInferenceCopy
             CredentialCancel,
             CredentialForget,
             CredentialForgetExplains,
+            CredentialMigrate,
+            CredentialMigrateExplains,
             CredentialAbsent,
             CredentialObtaining,
             CredentialFailed,

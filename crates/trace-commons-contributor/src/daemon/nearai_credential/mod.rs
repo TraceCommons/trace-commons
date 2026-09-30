@@ -77,6 +77,13 @@ pub const LABEL_CREDENTIAL_CANCELLED: &str = "cancelled";
 pub const LABEL_CREDENTIAL_PRESENT: &str = "present";
 /// The OS entry could not be read; no plaintext fallback is permitted.
 pub const LABEL_CREDENTIAL_STORAGE_UNAVAILABLE: &str = "storage_unavailable";
+/// This build is not entitled to the store that holds the credential. No
+/// unlock, retry or restart changes that; a differently signed build does.
+pub const LABEL_CREDENTIAL_STORAGE_UNENTITLED: &str = "storage_unentitled";
+/// macOS: the sign-in an earlier build kept in the legacy keychain has not
+/// been moved into the store this build uses. The contributor moves it; it
+/// is never moved at startup, because reading the legacy keychain can prompt.
+pub const LABEL_CREDENTIAL_MIGRATION_AVAILABLE: &str = "migration_available";
 /// Authority was removed locally, but OS deletion still needs a retry.
 pub const LABEL_CREDENTIAL_CLEANUP_REQUIRED: &str = "cleanup_required";
 
@@ -107,6 +114,17 @@ fn state_from(attempt: Option<&str>, stored: bool) -> &'static str {
     }
 }
 
+pub(crate) fn storage_failure_label(
+    failure: crate::daemon::settings::CloudStorageFailure,
+) -> &'static str {
+    use crate::daemon::settings::CloudStorageFailure;
+    match failure {
+        CloudStorageFailure::Unavailable => LABEL_CREDENTIAL_STORAGE_UNAVAILABLE,
+        CloudStorageFailure::Unentitled => LABEL_CREDENTIAL_STORAGE_UNENTITLED,
+        CloudStorageFailure::LegacyOnly => LABEL_CREDENTIAL_MIGRATION_AVAILABLE,
+    }
+}
+
 struct CredentialStates {
     inference: &'static str,
     session: &'static str,
@@ -124,7 +142,9 @@ impl CredentialStates {
     ) -> Self {
         let common = match attempt {
             Some("starting" | "waiting_for_browser") => Some(LABEL_CREDENTIAL_OBTAINING),
-            _ if settings.cloud_storage_unavailable => Some(LABEL_CREDENTIAL_STORAGE_UNAVAILABLE),
+            _ if settings.cloud_storage_unavailable => {
+                Some(storage_failure_label(settings.cloud_storage_failure))
+            }
             _ if cleanup_pending
                 && settings.near_ai_inference.is_none()
                 && settings.near_ai_session.is_none() =>
@@ -359,6 +379,8 @@ fn forget_local(shared: &DaemonShared, req: &Request) -> Response {
                 settings.near_ai_session = None;
                 settings.cloud_credentials = None;
                 settings.cloud_storage_unavailable = false;
+                settings.cloud_storage_failure =
+                    crate::daemon::settings::CloudStorageFailure::default();
             }
             // Any balance this directory had cached was read with the session
             // just removed. Serving it again would put a figure from a
@@ -375,6 +397,10 @@ fn forget_local(shared: &DaemonShared, req: &Request) -> Response {
 
 pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
     let response = forget_local(shared, req);
+    if response.error.is_none() {
+        // Contributor-initiated, so a legacy-store prompt here is explicable.
+        crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&shared.store);
+    }
     if response.error.is_none()
         && crate::daemon::cloud_credential_lifecycle::cleanup_native(&shared.store).is_err()
     {
@@ -403,6 +429,9 @@ pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Respon
         let store = shared.store.clone();
         if !matches!(
             tokio::task::spawn_blocking(move || {
+                // Contributor-initiated, so a legacy-store prompt here is
+                // explicable. Blocking with the cleanup it sits beside.
+                crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&store);
                 crate::daemon::cloud_credential_lifecycle::cleanup_native(&store)
             })
             .await,
@@ -416,6 +445,62 @@ pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Respon
         }
     }
     response
+}
+
+/// Move the sign-in an earlier build kept in the legacy keychain into the
+/// store this build uses. The action behind `migration_available`.
+///
+/// **Contributor-initiated by construction.** The legacy read may ask for the
+/// login password, and this is the only path that makes it. Startup infers
+/// the state without reading the legacy keychain, so an upgrade itself never
+/// prompts.
+///
+/// Answers `{"migrated": bool, "state": <label>}`, with the state re-read
+/// after the running daemon has picked the key up, so a shell draws what is
+/// now true:
+///
+/// - copied (or already copied): `migrated: true`, and the proxy is cycled
+///   onto the key exactly as after a ceremony -- the change counter the
+///   ceremony uses is advanced, and the reconcile absorbs it;
+/// - neither store holds it: `migrated: false`. The dangling reference is
+///   forgotten, which leaves `absent` and a sign-in on offer instead of a
+///   button that can never work. There was nothing to lose.
+///
+/// A legacy read that fails for any other reason -- the contributor denied
+/// the prompt, say -- is an error, and changes nothing.
+pub async fn handle_migrate(shared: &DaemonShared, req: &Request) -> Response {
+    use crate::daemon::cloud_credential_lifecycle::{LegacyMigration, migrate_legacy_cloud_entry};
+
+    let store = shared.store.clone();
+    let outcome = tokio::task::spawn_blocking(move || migrate_legacy_cloud_entry(&store)).await;
+    let migrated = match outcome {
+        Ok(Ok(LegacyMigration::Migrated)) => {
+            ceremony::record_change_after_migration(shared.store.dir());
+            shared.reconcile_private_inference().await;
+            true
+        }
+        Ok(Ok(LegacyMigration::NothingToMigrate)) => {
+            let forgot = handle_forget_async(shared, req).await;
+            if let Some(error) = forgot.error {
+                return Response::err(req.id, &error.code, &error.message);
+            }
+            false
+        }
+        Ok(Err(error)) => {
+            let label = error
+                .downcast_ref::<crate::daemon::credential_store::CredentialError>()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "near_ai_credential_unavailable".to_owned());
+            return Response::err(req.id, ERR_UNAVAILABLE, &label);
+        }
+        Err(_) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
+        }
+    };
+    Response::ok(
+        req.id,
+        serde_json::json!({ "migrated": migrated, "state": credential_state(shared) }),
+    )
 }
 
 /// What the contributor's NEAR AI account has left.

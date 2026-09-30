@@ -10,26 +10,27 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
     TC_CONTRIBUTION_CONTROL_CONTRIBUTE, TC_CONTRIBUTION_CONTROL_NONE, TC_CREDENTIAL_ACTION_CANCEL,
-    TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_NONE, TC_CREDENTIAL_ACTION_OBTAIN,
-    TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE, TC_HARNESS_PLAN_NO_CONFIG_PATH,
-    TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED, TC_HARNESS_PLAN_UNKNOWN,
-    TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED, TC_HARNESS_STATE_ANSWERING,
-    TC_HARNESS_STATE_CONNECTED_NO_CALLS, TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN,
-    TC_PRIVATE_INFERENCE_TONE_ATTENTION, TC_PRIVATE_INFERENCE_TONE_CLEAR,
-    TC_PRIVATE_INFERENCE_TONE_HELD, TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
-    TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT, TC_WITNESS_STATE_NOT_ENROLLED,
-    TC_WITNESS_STATE_PINNED, TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING,
-    TC_WITNESS_STATE_REFUSING_PIN_MALFORMED, TC_WITNESS_STATE_REFUSING_UNPINNED,
-    TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION, TC_WITNESS_TONE_CLEAR,
-    TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
-    tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy, tc_consent_gate_help,
-    tc_contribution_attestation_line, tc_contribution_attestation_reason_line,
-    tc_contribution_attestation_tone, tc_contribution_eligibility_control,
-    tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
-    tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
-    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
-    tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error,
-    tc_legacy_migration_notice, tc_near_ai_credential_action, tc_near_ai_credential_state_line,
+    TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_MIGRATE, TC_CREDENTIAL_ACTION_NONE,
+    TC_CREDENTIAL_ACTION_OBTAIN, TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE,
+    TC_HARNESS_PLAN_NO_CONFIG_PATH, TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED,
+    TC_HARNESS_PLAN_UNKNOWN, TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED,
+    TC_HARNESS_STATE_ANSWERING, TC_HARNESS_STATE_CONNECTED_NO_CALLS,
+    TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN, TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+    TC_PRIVATE_INFERENCE_TONE_CLEAR, TC_PRIVATE_INFERENCE_TONE_HELD,
+    TC_PRIVATE_INFERENCE_TONE_NEUTRAL, TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT,
+    TC_WITNESS_STATE_NOT_ENROLLED, TC_WITNESS_STATE_PINNED,
+    TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
+    TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
+    TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
+    tc_call, tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy,
+    tc_consent_gate_help, tc_contribution_attestation_line,
+    tc_contribution_attestation_reason_line, tc_contribution_attestation_tone,
+    tc_contribution_eligibility_control, tc_contribution_eligibility_line,
+    tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
+    tc_contribution_group_control, tc_contribution_withheld_line, tc_daemon_start,
+    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_grant_void_notice,
+    tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_legacy_migration_notice,
+    tc_near_ai_credential_action, tc_near_ai_credential_state_line,
     tc_near_ai_credential_state_tone, tc_near_ai_enroll_line, tc_near_ai_enroll_tone, tc_preview,
     tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
     tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
@@ -39,11 +40,12 @@ use trace_commons_contributor_ffi::{
     tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
     tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
     tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
-    tc_session_detail_error_line, tc_skill_draft_validate, tc_skill_learning_copy,
-    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
-    tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
+    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
+    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
+    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
+    tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -3389,6 +3391,48 @@ fn the_consent_bundle_crossing_the_abi_is_the_one_in_the_rust() {
     );
 }
 
+/// K9 (#1118): the per-session notification's copy crosses the ABI as the
+/// payload the crate builds, and its body is the consent sentence itself.
+#[test]
+fn the_session_notification_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy as copy;
+    let json = take_owned(tc_session_notification_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::session_notification_copy()).expect("the payload serialises");
+    assert_eq!(
+        parsed, expected,
+        "the ABI must hand over the payload unchanged"
+    );
+    assert_eq!(parsed["body"], copy::GATE_STATEMENT);
+    assert_eq!(parsed["action"], copy::NOTIFICATION_LOOK_THEN_DECIDE_ACTION);
+    assert_eq!(
+        parsed.as_object().map(|o| o.len()),
+        Some(2),
+        "body and action, nothing else: {json}"
+    );
+}
+
+/// K9 (#1118): the submit toast crosses the ABI unchanged, argument order
+/// intact, and a negative count (nobody's honest answer) clamps to zero
+/// instead of wrapping.
+#[test]
+fn the_sent_toast_crosses_the_abi_and_clamps_negatives() {
+    use trace_commons_contributor::consent_copy as copy;
+    assert_eq!(
+        take_owned(tc_toast_sent_text(7, 20, 1)),
+        copy::toast_sent_text(7, 20, 1)
+    );
+    assert_eq!(
+        take_owned(tc_toast_sent_text(7, 20, 1)),
+        "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
+    );
+    assert_eq!(
+        take_owned(tc_toast_sent_text(-3, -1, -9)),
+        copy::toast_sent_text(0, 0, 0)
+    );
+}
+
 #[test]
 fn the_gate_help_branch_crosses_the_abi() {
     use trace_commons_contributor::consent_copy as copy;
@@ -3749,6 +3793,9 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
         "failed",
         "cancelled",
         "present",
+        "storage_unavailable",
+        "storage_unentitled",
+        "migration_available",
         "",
         "PRESENT",
         "a_state_from_a_later_daemon",
@@ -3759,6 +3806,7 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
             copy::CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
             copy::CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
             copy::CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+            copy::CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
         };
         assert_eq!(action(state), expected, "{state:?}");
     }
@@ -3768,6 +3816,11 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
     assert_eq!(tone("present"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
     assert_eq!(action("present"), TC_CREDENTIAL_ACTION_FORGET);
     assert_eq!(tone("obtaining"), TC_PRIVATE_INFERENCE_TONE_HELD);
+
+    // An upgraded macOS contributor is offered the move, and a build that
+    // cannot reach the store is offered nothing.
+    assert_eq!(action("migration_available"), TC_CREDENTIAL_ACTION_MIGRATE);
+    assert_eq!(action("storage_unentitled"), TC_CREDENTIAL_ACTION_NONE);
 
     // Nothing read offers the button that opens a browser, and no pointer at
     // all is the same answer.
@@ -4051,6 +4104,7 @@ fn the_contribution_controls_share_no_number_with_an_action_or_a_tone() {
             TC_CREDENTIAL_ACTION_OBTAIN,
             TC_CREDENTIAL_ACTION_CANCEL,
             TC_CREDENTIAL_ACTION_FORGET,
+            TC_CREDENTIAL_ACTION_MIGRATE,
             TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
             TC_PRIVATE_INFERENCE_TONE_HELD,
             TC_PRIVATE_INFERENCE_TONE_CLEAR,
@@ -4070,6 +4124,7 @@ fn the_credential_actions_share_no_number_with_a_tone() {
         TC_CREDENTIAL_ACTION_OBTAIN,
         TC_CREDENTIAL_ACTION_CANCEL,
         TC_CREDENTIAL_ACTION_FORGET,
+        TC_CREDENTIAL_ACTION_MIGRATE,
     ] {
         for tone in [
             TONE_NEUTRAL,
