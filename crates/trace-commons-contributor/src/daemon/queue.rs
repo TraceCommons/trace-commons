@@ -403,33 +403,41 @@ pub struct QueueEntry {
     pub attestation: Option<String>,
     #[serde(default)]
     pub attestation_reason: Option<String>,
-    /// How many marks the latest preview of this entry made, or `None` when
-    /// no preview has run for it yet.
+    /// What the scrubber found in the bytes this entry is pinned to, bound
+    /// to their digest, or `None` when nothing has counted them.
     ///
     /// **`None` is "not yet scrubbed", never zero.** A session nobody has
-    /// scrubbed and a session the scrubber read and found nothing in are
-    /// different facts, and only the second one is "nothing matched" --
-    /// see `second_look::Scrub`. Recorded by every preview path (the card,
-    /// the scheduled card and the pinning build) through
-    /// `Queue::record_scrub`, for a `Pending` entry only; the latest preview
-    /// wins, so under an LLM-backed privacy filter, which does not reproduce
-    /// its own output, the count describes the most recent build rather than
-    /// a fixed property of the session.
+    /// counted and a session the scrubber read and found nothing personal in
+    /// are different facts, and only the second is "nothing matched" -- see
+    /// `second_look::Scrub`.
     ///
-    /// A count, never content: no label, value or offset rides along.
+    /// Written only by the pinning build (`Queue::record_scrub`, from
+    /// `ipc::pin_previewed_envelope` and the witnessed review), never by a
+    /// card, an unenrolled build, or any build that pins nothing. Read back
+    /// only while `previewed_envelope_digest` names the same digest
+    /// ([`QueueEntry::scrub`]), so a released, replaced or revoked pin --
+    /// after an enrolment, a filter change, a revoked approval -- reads as
+    /// not yet scrubbed with nothing to clear by hand.
+    ///
+    /// Counts and a digest, never content.
     ///
     /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
     /// field existed must still load; such an entry reads as not yet
-    /// scrubbed, which is true of it until it is previewed again.
+    /// scrubbed until it is previewed again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scrub_marks: Option<u32>,
+    pub scrub: Option<super::second_look::ScrubRecord>,
 }
 
 impl QueueEntry {
     /// Whether the scrubber has run on this entry, and how many marks it
     /// made. See `second_look::Scrub`.
     pub fn scrub(&self) -> super::second_look::Scrub {
-        super::second_look::Scrub::from_marks(self.scrub_marks)
+        match (&self.scrub, self.previewed_envelope_digest.as_deref()) {
+            (Some(record), Some(pinned)) if record.envelope_digest == pinned => {
+                super::second_look::Scrub::Scrubbed(record.counts)
+            }
+            _ => super::second_look::Scrub::NotYetScrubbed,
+        }
     }
 
     /// [`super::second_look::second_look_reasons`] for this entry: the
@@ -1317,21 +1325,35 @@ impl Queue {
         true
     }
 
-    /// Record the mark count a preview of `entry_id` just made. Returns
-    /// whether anything changed, so a caller saves the queue only when it
-    /// has to.
+    /// Record what the scrubber found in the envelope `entry_id` is pinned
+    /// to. Returns whether anything changed, so a caller saves the queue
+    /// only when it has to.
     ///
-    /// `Pending` only, like `record_previewed_envelope`: an entry already
-    /// approved is bound to the artifact it was approved as, and a later
-    /// card build (which pins nothing) must not relabel it.
-    pub fn record_scrub(&mut self, entry_id: Uuid, marks: u32) -> bool {
+    /// Refused unless the entry is `Pending` and its pin names exactly
+    /// `envelope_digest`: a count is only ever stored beside the bytes it
+    /// describes, which are the bytes an approval would send.
+    pub fn record_scrub(
+        &mut self,
+        entry_id: Uuid,
+        envelope_digest: &str,
+        counts: super::second_look::ScrubCounts,
+    ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
-        if e.state != QueueState::Pending || e.scrub_marks == Some(marks) {
+        if e.state != QueueState::Pending
+            || e.previewed_envelope_digest.as_deref() != Some(envelope_digest)
+        {
             return false;
         }
-        e.scrub_marks = Some(marks);
+        let record = super::second_look::ScrubRecord {
+            envelope_digest: envelope_digest.to_string(),
+            counts,
+        };
+        if e.scrub.as_ref() == Some(&record) {
+            return false;
+        }
+        e.scrub = Some(record);
         true
     }
 
@@ -2877,6 +2899,41 @@ mod tests {
         q.set_state(id, QueueState::Approved, None);
         q.cancel(id).unwrap();
         assert_eq!(q.get(id).unwrap().state, QueueState::Pending);
+    }
+
+    #[test]
+    fn a_scrub_count_is_bound_to_the_pinned_bytes() {
+        use crate::daemon::second_look::{Scrub, ScrubCounts};
+        let counts = ScrubCounts {
+            marks: 7,
+            content_marks: 2,
+            unsure_spans: 0,
+            unsure_unreadable: false,
+        };
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+
+        // Nothing pinned: a count has nothing to describe.
+        assert!(!q.record_scrub(id, "sha256:envelope", counts));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        // A count for other bytes than the pin is refused.
+        assert!(!q.record_scrub(id, "sha256:other", counts));
+        assert!(q.record_scrub(id, "sha256:envelope", counts));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::Scrubbed(counts));
+
+        // Re-pinned to a new build (a filter change, a re-enrolment): the
+        // old count no longer describes what would be sent.
+        assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+
+        // Released: likewise.
+        assert!(q.record_scrub(id, "sha256:rebuilt", counts));
+        assert!(q.release_preview_pin(id));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
     }
 
     #[test]

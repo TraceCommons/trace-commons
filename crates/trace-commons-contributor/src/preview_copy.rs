@@ -66,9 +66,12 @@ pub fn scrub_state_line(marks: Option<u32>) -> String {
 /// for a label this build does not know.
 pub fn second_look_line(reason: &str) -> Option<&'static str> {
     match reason {
-        crate::daemon::second_look::REASON_NOTHING_MATCHED => {
-            Some("0 marks. No detector matched; that is why this one waits.")
-        }
+        crate::daemon::second_look::REASON_NOTHING_MATCHED => Some(
+            "No personal details matched, only file paths or nothing at all; that is why this one waits.",
+        ),
+        crate::daemon::second_look::REASON_LOOKS_UNSURE => Some(
+            "Something here looks like an email, phone number or key that was not matched; that is why this one waits.",
+        ),
         crate::daemon::second_look::REASON_TRIMMED_TO_FIT => Some(
             "Trimmed to fit the upload limit, so part of this session is not in what would be sent. That is why this one waits.",
         ),

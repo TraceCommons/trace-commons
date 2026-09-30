@@ -89,9 +89,10 @@
  * another thread is inside an accessor for it; the check narrows accidental
  * misuse to a clean error, it does not replace ownership discipline.
  *
- * The six functions that borrow rather than free a tc_handle* --
+ * The seven functions that borrow rather than free a tc_handle* --
  * tc_daemon_stop, tc_call, tc_subscribe, tc_unsubscribe, tc_preview_open,
- * and tc_preview_turns_json -- run the same shape of check on handle
+ * tc_preview_turns_json and tc_preview_unsure_spans_json -- run the same
+ * shape of check on handle
  * before they dereference it: a pointer that is not currently a live
  * tc_handle* (already freed by tc_handle_free, or a tc_preview* passed
  * here by mistake) is refused with the fixed tc_last_error label
@@ -314,7 +315,8 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  *     another window, and a shell that did not start it does not get to end
  *     it. tc_call(h, "shutdown", ...) is refused for the same reason, with
  *     the error frame code "refused" and message "attached-stop-refused".
- *   - tc_preview_open and tc_preview_turns_json are refused with
+ *   - tc_preview_open, tc_preview_turns_json and
+ *     tc_preview_unsure_spans_json are refused with
  *     "preview-requires-embedded". The redacted BODY is this ABI's
  *     in-process content exemption; the socket's "preview" carries the
  *     summary only, and answering with a summary where a body was asked for
@@ -2167,6 +2169,29 @@ int32_t     tc_search_original(tc_handle*, const char* entry_id, const char* nee
  */
 char*       tc_preview_turns_json(tc_handle*, const char* entry_id,
                                   const char* body_digest, char** err);
+
+/* Spans of a redacted preview body that look like personal data the
+ * scrubber did not mark:
+ *   {entry_id, body_digest, envelope_digest, span_count,
+ *    spans: [{label, byte_offset, byte_len}], spans_truncated}
+ *
+ * label is one of looks-like-email, looks-like-phone, looks-like-key. The
+ * offsets index the exact bytes tc_preview_body returned; the text at them
+ * is never repeated here. span_count is the total; spans holds at most 2000
+ * and spans_truncated says whether it was cut.
+ *
+ * body_digest is required and is the anchor, exactly as for
+ * tc_preview_turns_json: a body that is not that one is refused with
+ * preview-body-changed. A body that cannot be indexed exactly is refused
+ * with preview-unsure-index-failed.
+ *
+ * Returns an OWNED JSON string; free with tc_string_free. Returns NULL and
+ * sets *err (owned; also freed with tc_string_free) on failure. A non-NULL
+ * handle that is not a live tc_handle* is refused with
+ * "invalid-handle-pointer".
+ */
+char*       tc_preview_unsure_spans_json(tc_handle*, const char* entry_id,
+                                         const char* body_digest, char** err);
 
 /* The instance an invite link names, as an owned UTF-8 string, or NULL if
  * the argument is not a usable invite.

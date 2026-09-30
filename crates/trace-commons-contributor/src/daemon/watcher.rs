@@ -1193,7 +1193,7 @@ fn visit_session(
         attested_inference: None,
         // Not yet scrubbed: nothing has previewed this offer. Never zero,
         // which would read as "nothing matched". See `second_look::Scrub`.
-        scrub_marks: None,
+        scrub: None,
     };
     let entry_id = entry.entry_id;
 

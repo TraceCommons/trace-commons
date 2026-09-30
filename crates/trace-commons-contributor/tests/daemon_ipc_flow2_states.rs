@@ -22,7 +22,8 @@ use trace_commons_contributor::daemon::ipc::{
 use trace_commons_contributor::daemon::preview_scheduler;
 use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, entry_id_for};
 use trace_commons_contributor::daemon::second_look::{
-    REASON_NOTHING_MATCHED, REASON_TRIMMED_TO_FIT, SCRUB_NOT_YET_SCRUBBED, SCRUB_SCRUBBED,
+    REASON_LOOKS_UNSURE, REASON_NOTHING_MATCHED, REASON_TRIMMED_TO_FIT, SCRUB_NOT_YET_SCRUBBED,
+    SCRUB_SCRUBBED,
 };
 use trace_commons_contributor::daemon::settings::DaemonSettings;
 use trace_commons_contributor::daemon::unsure_spans::LABEL_LOOKS_LIKE_EMAIL;
@@ -206,8 +207,9 @@ async fn an_unpreviewed_entry_is_not_yet_scrubbed_and_never_zero_marks() {
         "an unscrubbed session is not 'nothing matched': {before}"
     );
 
-    // A preview counts the marks -- here none -- and says so, and the entry
-    // remembers it for the next listing.
+    // A card describes its own build -- none matched -- but pins nothing,
+    // so the ENTRY is still not scrubbed: no count describes the bytes an
+    // approval would send.
     let r = c
         .call("preview", serde_json::json!({ "entry_id": entry_id }))
         .await;
@@ -218,8 +220,11 @@ async fn an_unpreviewed_entry_is_not_yet_scrubbed_and_never_zero_marks() {
         r["result"]["second_look"],
         serde_json::json!([REASON_NOTHING_MATCHED])
     );
-    assert_eq!(r["result"]["entry"]["marks"], 0, "{r}");
+    let after_card = c.pending_entry(entry_id).await;
+    assert_eq!(after_card["scrub"], SCRUB_NOT_YET_SCRUBBED, "{after_card}");
 
+    // Opening the body pins the envelope, and the count goes down with it.
+    let _ = c.whole_body(entry_id).await;
     let after = c.pending_entry(entry_id).await;
     assert_eq!(after["scrub"], SCRUB_SCRUBBED, "{after}");
     assert_eq!(after["marks"], 0, "{after}");
@@ -235,32 +240,60 @@ async fn a_scrubbed_entry_reports_its_marks_and_is_not_flagged() {
     let (_dir, store_dir, entry_id) =
         daemon_with_one_message("please email fixture-user@example.com about it", 0).await;
     let mut c = Client::connect(&store_dir).await;
-    let r = c
-        .call("preview", serde_json::json!({ "entry_id": entry_id }))
-        .await;
-    assert!(r["error"].is_null(), "{r}");
+    let _ = c.whole_body(entry_id).await;
     let after = c.pending_entry(entry_id).await;
     assert_eq!(after["scrub"], SCRUB_SCRUBBED, "{after}");
     assert!(after["marks"].as_u64().unwrap() >= 1, "{after}");
+    assert!(after["content_marks"].as_u64().unwrap() >= 1, "{after}");
     assert_eq!(after["second_look"], serde_json::json!([]), "{after}");
 }
 
 #[tokio::test]
+async fn an_entry_whose_only_marks_are_paths_is_nothing_matched() {
+    let (_dir, store_dir, entry_id) = daemon_with_one_message(
+        "open /Users/testuser/code/orchard-api/src/main.rs please",
+        0,
+    )
+    .await;
+    let mut c = Client::connect(&store_dir).await;
+    let _ = c.whole_body(entry_id).await;
+    let after = c.pending_entry(entry_id).await;
+    assert!(after["marks"].as_u64().unwrap() >= 1, "{after}");
+    assert_eq!(after["content_marks"], 0, "{after}");
+    assert_eq!(
+        after["second_look"],
+        serde_json::json!([REASON_NOTHING_MATCHED]),
+        "path removals alone are not a match: {after}"
+    );
+}
+
+#[tokio::test]
 async fn a_trimmed_entry_is_trimmed_to_fit_before_and_after_a_preview() {
-    let (_dir, store_dir, entry_id) = daemon_with_one_message("please list the files", 2).await;
+    let (_dir, store_dir, entry_id) =
+        daemon_with_one_message("please email fixture-user@example.com about it", 2).await;
     let mut c = Client::connect(&store_dir).await;
     let before = c.pending_entry(entry_id).await;
+    assert_eq!(before["scrub"], SCRUB_NOT_YET_SCRUBBED, "{before}");
     assert_eq!(
         before["second_look"],
         serde_json::json!([REASON_TRIMMED_TO_FIT]),
         "{before}"
     );
+    let _ = c.whole_body(entry_id).await;
+    let after = c.pending_entry(entry_id).await;
+    assert_eq!(after["scrub"], SCRUB_SCRUBBED, "the preview ran: {after}");
+    assert_eq!(
+        after["second_look"],
+        serde_json::json!([REASON_TRIMMED_TO_FIT]),
+        "{after}"
+    );
 }
 
 #[tokio::test]
 async fn an_unmatched_email_is_hinted_at_exact_body_offsets_without_its_text() {
-    // Bracket-obfuscated, so the deterministic email pass (which needs an
-    // `@`) leaves it in the body: a real survivor, not a planted one.
+    // Planted in the session, before redaction. Bracket-obfuscated, so the
+    // deterministic email pass (which needs an `@`) leaves it in the body:
+    // a real survivor, not one added to a finished envelope.
     let survivor = "ops [at] acme [dot] io";
     let (_dir, store_dir, entry_id) =
         daemon_with_one_message(&format!("Use the staging key from {survivor} for it."), 0).await;
@@ -293,6 +326,17 @@ async fn an_unmatched_email_is_hinted_at_exact_body_offsets_without_its_text() {
     // Offsets and labels only. The shell holds the body; the hint never
     // repeats it.
     assert!(!r.to_string().contains("acme"), "{r}");
+
+    // And the entry is held for it: an unsure span is a second-look reason.
+    let entry = c.pending_entry(entry_id).await;
+    assert_eq!(entry["unsure_spans"], 1, "{entry}");
+    assert!(
+        entry["second_look"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::Value::from(REASON_LOOKS_UNSURE)),
+        "{entry}"
+    );
 }
 
 #[tokio::test]
@@ -350,6 +394,9 @@ async fn unsure_spans_refuse_an_unanchored_stale_or_unknown_request() {
 
 #[tokio::test]
 async fn preview_turns_says_what_leaves_this_mac_from_the_envelope() {
+    use trace_commons_contributor::consent_copy::{
+        LEAVES_FOLDER_IN_CONVERSATION, LEAVES_METADATA_NEVER,
+    };
     let (_dir, store_dir, entry_id) = daemon_with_one_message("please list the files", 0).await;
     let mut c = Client::connect(&store_dir).await;
     let (_body, digest) = c.whole_body(entry_id).await;
@@ -367,16 +414,55 @@ async fn preview_turns_says_what_leaves_this_mac_from_the_envelope() {
         .iter()
         .map(|f| f.as_str().unwrap())
         .collect();
-    for expected in ["tool", "timing", "outcome", "uses", "folder-fingerprint"] {
+    for expected in [
+        "conversation",
+        "tool",
+        "timing",
+        "outcome",
+        "uses",
+        "tenant",
+        "redaction-summary",
+        "trace-ids",
+        "folder-fingerprint",
+    ] {
         assert!(fields.contains(&expected), "{expected} missing: {leaves}");
     }
+    assert!(!fields.contains(&"other"), "{leaves}");
     assert_eq!(leaves["turn_count"], r["result"]["turn_count"]);
     assert!(leaves["would_send_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(leaves["folder_named_in_conversation"], false, "{leaves}");
     let line = leaves["line"].as_str().unwrap();
-    assert!(
-        line.ends_with(trace_commons_contributor::consent_copy::LEAVES_NEVER),
-        "{line}"
-    );
+    assert!(line.ends_with(LEAVES_METADATA_NEVER), "{line}");
+    assert!(!line.contains(LEAVES_FOLDER_IN_CONVERSATION), "{line}");
     // The folder's name is not among what leaves, so it is not claimed.
     assert!(!r.to_string().contains("orchard"), "{r}");
+}
+
+#[tokio::test]
+async fn a_conversation_that_names_the_folder_is_not_promised_otherwise() {
+    use trace_commons_contributor::consent_copy::{
+        LEAVES_FOLDER_IN_CONVERSATION, LEAVES_METADATA_NEVER,
+    };
+    // Only absolute paths are scrubbed; a relative one keeps the folder name.
+    let (_dir, store_dir, entry_id) =
+        daemon_with_one_message("cd orchard-api && cat ../orchard-api/src/main.rs", 0).await;
+    let mut c = Client::connect(&store_dir).await;
+    let (body, digest) = c.whole_body(entry_id).await;
+    assert!(
+        body.contains("orchard-api"),
+        "the fixture must name the folder"
+    );
+    let r = c
+        .call(
+            "preview_turns",
+            serde_json::json!({ "entry_id": entry_id, "body_digest": digest }),
+        )
+        .await;
+    assert!(r["error"].is_null(), "{r}");
+    let leaves = &r["result"]["leaves_this_mac"];
+    assert_eq!(leaves["folder_named_in_conversation"], true, "{leaves}");
+    assert_eq!(leaves["folder_named_in_metadata"], false, "{leaves}");
+    let line = leaves["line"].as_str().unwrap();
+    assert!(line.contains(LEAVES_METADATA_NEVER), "{line}");
+    assert!(line.ends_with(LEAVES_FOLDER_IN_CONVERSATION), "{line}");
 }

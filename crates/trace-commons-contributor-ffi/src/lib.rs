@@ -1011,14 +1011,15 @@ const ERR_DAEMON_NOT_RUNNING: &str = "daemon-not-running";
 ///
 /// Mirrors [`preview_pointer_is_live`] exactly, for the same reason and
 /// against the same threat. `tc_daemon_stop`, `tc_call`, `tc_subscribe`,
-/// `tc_unsubscribe`, `tc_preview_open`, and `tc_preview_turns_json` each
+/// `tc_unsubscribe`, `tc_preview_open`, `tc_preview_turns_json` and
+/// `tc_preview_unsure_spans_json` each
 /// null-checked `handle` and then dereferenced it, with nothing in
 /// between confirming it was ever a live `tc_handle*` at all -- a stale
 /// pointer (already freed by `tc_handle_free`) or a cross-type one (a
 /// `tc_preview*` passed here by mistake) was a use-after-free or a type
 /// confusion, not the fixed error the free functions and the preview
 /// accessors already promise. `registry_is`, not `registry_take`: every
-/// one of these six functions borrows the handle rather than consuming
+/// one of these seven functions borrows the handle rather than consuming
 /// it, exactly like the preview accessors borrow the preview.
 ///
 /// This runs *outside* [`guard`] where the existing null check already
@@ -1026,7 +1027,8 @@ const ERR_DAEMON_NOT_RUNNING: &str = "daemon-not-running";
 /// null check but still before the first dereference where the null
 /// check already lives inside a `guard`/`guard_forwarding` closure
 /// (`tc_call`, `tc_subscribe`, `tc_preview_open`,
-/// `tc_preview_turns_json`) -- in both places, strictly before any use of
+/// `tc_preview_turns_json`, `tc_preview_unsure_spans_json`) -- in both
+/// places, strictly before any use of
 /// `handle` as a reference. The reason is the same one
 /// `preview_pointer_is_live` gives: `guard` discards the underlying error
 /// text and substitutes `"operation-failed"`, which would hide the one
@@ -1224,6 +1226,88 @@ pub unsafe extern "C" fn tc_call(
         Ok(to_owned_cstring(&body))
     });
     outcome.unwrap_or_else(|_| to_owned_cstring(&error_frame("unavailable", "panic")))
+}
+
+/// The unsure-span index over a redacted preview body, as an owned JSON
+/// string: `{entry_id, body_digest, envelope_digest, span_count, spans:
+/// [{label, byte_offset, byte_len}], spans_truncated}`. Free it with
+/// [`tc_string_free`]. Returns NULL and sets `*err` (if non-null, also
+/// owned, also freed with `tc_string_free`) on failure.
+///
+/// The C ABI twin of the socket's `preview_unsure_spans`, answered by the
+/// same `ipc::open_preview_unsure_spans`, so the two cannot describe one
+/// entry differently. Offsets into the body `tc_preview_body` returned and
+/// a fixed label (`looks-like-email`, `looks-like-phone`,
+/// `looks-like-key`); never the text at them.
+///
+/// `body_digest` is required and is the anchor, exactly as for
+/// [`tc_preview_turns_json`]: a body that is not that one is refused with
+/// `preview-body-changed`. A body the detector cannot index exactly is
+/// refused with `preview-unsure-index-failed`.
+///
+/// A non-NULL `handle` that is not a live `tc_handle*` is refused before
+/// any dereference: NULL plus `*err` set to `"invalid-handle-pointer"`.
+///
+/// # Safety
+/// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` and
+/// `body_digest` must be valid NUL-terminated C strings (or NULL, which is
+/// an error). `err`, if non-null, must point to writable `*mut c_char`
+/// storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_preview_unsure_spans_json(
+    handle: *mut tc_handle,
+    entry_id: *const c_char,
+    body_digest: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    // Every error below is a fixed, content-free label, as in
+    // `tc_preview_turns_json`.
+    let outcome = guard_forwarding(|| {
+        if handle.is_null() {
+            anyhow::bail!("null-handle");
+        }
+        if !handle_pointer_is_live(handle) {
+            anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
+        }
+        let handle = unsafe { &*handle };
+        if handle.attached.is_some() {
+            anyhow::bail!("{ERR_PREVIEW_REQUIRES_EMBEDDED}");
+        }
+        let entry_id = unsafe { borrow_str(entry_id) }?;
+        let digest = unsafe { borrow_str(body_digest) }?.to_string();
+        let id = entry_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("entry-id-invalid"))?;
+        let Some(shared) = shared_of(handle) else {
+            anyhow::bail!("daemon-stopped");
+        };
+        // Its own thread and runtime, for the reason `tc_preview_open`
+        // gives: this may be called from inside a `tc_subscribe` callback.
+        let spans = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "runtime-unavailable")?;
+            rt.block_on(ipc::open_preview_unsure_spans(&shared, id, &digest))
+                .map_err(|(_code, label)| label)
+                .and_then(|value| {
+                    serde_json::to_string(&value).map_err(|_| "unsure-spans-serialize-failed")
+                })
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("unsure-spans-thread-panicked"))?;
+        spans.map_err(|label| anyhow::anyhow!("{label}"))
+    });
+    match outcome {
+        Ok(json) => to_owned_cstring(&json),
+        Err(e) => {
+            set_last_error(&e);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(&e) };
+            }
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// The instance an invite link names, as an owned UTF-8 string, or NULL if
