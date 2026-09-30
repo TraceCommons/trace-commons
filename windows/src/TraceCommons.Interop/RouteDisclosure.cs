@@ -64,6 +64,16 @@ public sealed record WitnessDisclosureCopy
     /// <summary>The second enclave. Only on the witness route.</summary>
     [JsonPropertyName("classifier")] public string? Classifier { get; init; }
     [JsonPropertyName("origin")] public string Origin { get; init; } = string.Empty;
+
+    /// <summary>
+    /// The nested <c>copy.witness</c> fields this shell decodes, compared
+    /// against the export: the both-enclaves and origin sentences live here.
+    /// </summary>
+    public static IReadOnlyList<string> ConsumedFields { get; } = new[]
+    {
+        "heading", "address_label", "signing_label", "measurements_label", "check",
+        "classifier", "origin",
+    };
 }
 
 public sealed record SessionSendCopy
@@ -73,6 +83,12 @@ public sealed record SessionSendCopy
     [JsonPropertyName("before_line")] public string BeforeLine { get; init; } = string.Empty;
     [JsonPropertyName("after_label")] public string AfterLabel { get; init; } = string.Empty;
     [JsonPropertyName("after_line")] public string AfterLine { get; init; } = string.Empty;
+
+    /// <summary>The nested <c>copy.session</c> fields this shell decodes, compared against the export.</summary>
+    public static IReadOnlyList<string> ConsumedFields { get; } = new[]
+    {
+        "heading", "before_label", "before_line", "after_label", "after_line",
+    };
 }
 
 /// <summary>What a surface says when the disclosure cannot be read, under its title.</summary>

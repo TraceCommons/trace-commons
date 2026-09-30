@@ -232,9 +232,20 @@ public class RouteDisclosureTests
         string json = NativeMethods.TakeOwnedString(NativeMethods.tc_route_disclosure_copy(WitnessFacts))
             ?? throw new InvalidOperationException("tc_route_disclosure_copy returned NULL");
         using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement copy = document.RootElement.GetProperty("copy");
         Assert.Equal(
             RouteDisclosure.ConsumedCopyFields.OrderBy(n => n, StringComparer.Ordinal),
-            document.RootElement.GetProperty("copy").EnumerateObject()
+            copy.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
+        // The nested blocks too, as macOS (RouteDisclosureBridgeTests): a
+        // sentence added to `witness` or `session` in Rust must not be dropped
+        // silently here. The witness route sends every witness key.
+        Assert.Equal(
+            WitnessDisclosureCopy.ConsumedFields.OrderBy(n => n, StringComparer.Ordinal),
+            copy.GetProperty("witness").EnumerateObject()
+                .Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Equal(
+            SessionSendCopy.ConsumedFields.OrderBy(n => n, StringComparer.Ordinal),
+            copy.GetProperty("session").EnumerateObject()
                 .Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
 
         Assert.False(string.IsNullOrEmpty(RouteDisclosureSurface.Unreadable()?.Title));
