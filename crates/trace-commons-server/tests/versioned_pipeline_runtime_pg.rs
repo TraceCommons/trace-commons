@@ -1050,6 +1050,107 @@ async fn renewal_never_shortens_a_lease() {
     assert_eq!(current.lease_expires_at, Some(original_expiry));
 }
 
+/// Wave 2 (rebase 10 review, M7): `renew_lease`'s liveness predicate reads
+/// the clock when it runs (`clock_timestamp()`), not when its transaction
+/// began (`NOW()`). Its UPDATE starts while the lease is live and waits on
+/// the run row, which another transaction has updated and holds; the lease
+/// expires during the wait; the holder commits, and PostgreSQL re-checks the
+/// UPDATE's `WHERE` against the new row version. With `NOW()` that re-check
+/// still saw the transaction's start, before the expiry, and renewed a lease
+/// that had expired; with `clock_timestamp()` the expired lease is not
+/// renewed, and its expiry is left as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_that_expires_while_its_renewal_waits_for_the_row_is_not_renewed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("renewal-waits-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(2))
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_token = claimed.lease_token.unwrap();
+    let expiry = claimed.lease_expires_at.unwrap();
+
+    let mut holder = owner_client().await;
+    let holder_tx = holder.transaction().await.unwrap();
+    holder_tx
+        .execute(
+            "UPDATE pipeline_runs SET updated_at = updated_at
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+
+    let renewal = {
+        let store = PgPipelineStore::new(backend.clone());
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        tokio::spawn(async move {
+            store
+                .renew_lease(
+                    &tenant,
+                    run_id,
+                    lease_token,
+                    chrono::Duration::seconds(10),
+                    chrono::Utc::now() + chrono::Duration::seconds(60),
+                )
+                .await
+        })
+    };
+    // Wait until the renewal's UPDATE is blocked on the row lock.
+    let observer = owner_client().await;
+    let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let waiting: i64 = observer
+            .query_one(
+                "SELECT COUNT(*) FROM pg_stat_activity
+                  WHERE wait_event_type = 'Lock'
+                    AND query LIKE '%SET lease_expires_at = GREATEST%'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting > 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < wait_deadline,
+            "the renewal never waited on the run row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        chrono::Utc::now() < expiry,
+        "the renewal must start waiting while the lease is still live"
+    );
+    assert!(!renewal.is_finished());
+
+    // Let the lease expire while the renewal waits, then release the row.
+    let past_expiry = (expiry - chrono::Utc::now()).to_std().unwrap_or_default()
+        + std::time::Duration::from_millis(300);
+    tokio::time::sleep(past_expiry).await;
+    holder_tx.commit().await.unwrap();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), renewal)
+        .await
+        .expect("the renewal returns once the row is released")
+        .expect("the renewal task did not panic")
+        .unwrap();
+    assert_eq!(
+        result, None,
+        "a lease that expired while its renewal waited for the row is not renewed"
+    );
+    let current = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(current.lease_expires_at, Some(expiry));
+    assert_eq!(current.lease_token, Some(lease_token));
+}
+
 /// `for_phase` picks each phase's own configured lease, and Admission --
 /// which never runs as a claim -- falls back to Review, the same as the
 /// claim SQL's `ELSE` arm (`claim_next`, `claim_run_with_lease_config`).

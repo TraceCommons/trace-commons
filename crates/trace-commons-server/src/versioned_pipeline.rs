@@ -1698,6 +1698,13 @@ impl PgPipelineStore {
     /// never renewed rather than renewed onto a run another worker now holds.
     /// Called only by `PipelineLeaseRenewal`'s background task, on its own
     /// connection checkout, never inside another transaction.
+    ///
+    /// The liveness predicate reads `clock_timestamp()`, the time the check
+    /// runs, not `NOW()`, the transaction's start (wave 2; rebase 10 review,
+    /// M7): when the UPDATE waits on another transaction's update of the run
+    /// row, PostgreSQL re-checks the `WHERE` once that transaction commits,
+    /// and a lease that expired during the wait is then not renewed. The new
+    /// expiry still counts from `NOW()`, which can only make it earlier.
     pub async fn renew_lease(
         &self,
         tenant_id: &str,
@@ -1718,7 +1725,7 @@ impl PgPipelineStore {
                         ),
                         updated_at = NOW()
                   WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
-                    AND lease_token = $3 AND lease_expires_at > NOW()
+                    AND lease_token = $3 AND lease_expires_at > clock_timestamp()
                   RETURNING lease_expires_at",
                 &[&tenant_id, &run_id, &lease_token, &extension_ms, &lease_cap],
             )
