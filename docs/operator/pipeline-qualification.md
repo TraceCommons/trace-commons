@@ -125,7 +125,7 @@ tenant count and fingerprint, and the hashed audit events verified):
 
 ```
 PipelineRestoreOK: database=sha256:... artifacts=sha256:... index=sha256:... legs_per_run=1 credit_events_per_run=1 pending_runs_resumed=1 duplicate_effects=0
-PipelineRestoreChecks: rls_tables=96 rls_policies=sha256:... rls_policy_count=... runtime_privileges=sha256:... runtime_privilege_count=412 tenants=2 tenant_fingerprint=sha256:... audit_events_verified=2
+PipelineRestoreChecks: rls_tables=96 rls_policies=sha256:... rls_policy_count=165 runtime_privileges=sha256:... runtime_privilege_count=412 tenants=2 tenant_fingerprint=sha256:... audit_events_verified=2
 PipelineRestoreScope: filesystem_restore_local_only -- the artifact restore is a local filesystem copy, local evidence only, not a remote object-store restore
 ```
 
