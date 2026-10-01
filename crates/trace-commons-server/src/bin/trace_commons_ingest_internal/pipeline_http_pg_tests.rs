@@ -2926,6 +2926,144 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
     );
 }
 
+/// The number of `run_id`'s attempt rows for `artifact` in `state`.
+async fn attempt_rows_in_state(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: Uuid,
+    artifact: &str,
+    state: &str,
+) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND artifact = $3 AND state = $4",
+            &[&tenant_id, &run_id, &artifact, &state],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+/// Rebase 9 review, M3 (wave 2): the worker's tenant drain
+/// (`drain_pipeline_tenant`) runs the attempt sweep, so a cadence change
+/// cannot gate it unnoticed. A Score attempt of a completed run that
+/// crashed after publishing its index command leaves a `staged` row whose
+/// `cleanup_after` has passed (staged here under an earlier lease token,
+/// with the object published at that attempt's own key); one drain, with no
+/// direct call into the sweep, deletes the object and the row, and leaves
+/// the run's committed rows alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_sweeps_a_due_attempt_artifact() {
+    use trace_commons_server::versioned_pipeline::{
+        PipelineAttemptArtifact, pipeline_attempt_object_id, pipeline_tenant_storage_ref,
+    };
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_drain_sweep_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-worker-attempt-sweep-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-worker-attempt-sweep-{suffix}"));
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+    let committed_before =
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "committed").await;
+    assert_eq!(committed_before, 1, "the completed Score committed its row");
+
+    let mut crashed = run.clone();
+    crashed.lease_token = Some(Uuid::new_v4());
+    let object_id = pipeline_attempt_object_id(
+        PipelineAttemptArtifact::IndexCommand.as_str(),
+        run.run_id,
+        crashed.lease_token.unwrap(),
+    );
+    let prepared = artifacts
+        .prepare_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &object_id,
+            br#"{"probe":"crashed_score_attempt"}"#,
+        )
+        .expect("prepare the crashed attempt's object");
+    service
+        .store()
+        .stage_attempt_artifact(
+            &crashed,
+            PipelineAttemptArtifact::IndexCommand,
+            &prepared.receipt().object_key,
+            &prepared.receipt().ciphertext_sha256,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("stage the crashed attempt's row, already due");
+    let receipt = artifacts
+        .publish_serialized_json(&prepared)
+        .expect("publish the crashed attempt's object");
+    let present = || {
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .unwrap()
+    };
+    assert_eq!(present(), Some(true));
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        1
+    );
+
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
+
+    assert_eq!(
+        present(),
+        Some(false),
+        "the drain's sweep deleted the object"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        0,
+        "and then its row"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "committed").await,
+        committed_before,
+        "the run's committed row is not the sweep's"
+    );
+}
+
 /// Zaki review 1, item 1: Score stores the index command (embeddings and
 /// content hashes) and the neighbour set as objects of their own. A run of
 /// the compatibility bundle has both. The run is withdrawn after Score and
