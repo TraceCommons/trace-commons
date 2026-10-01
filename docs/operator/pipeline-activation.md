@@ -715,8 +715,18 @@ invalidation queued). So of several near-duplicate traces received together,
 only the first earns `NoveltyUtility` and gets index entries; each later one
 completes with no award and no index entries, as on `main`, whose gate inserts
 a trace's entries before it scores the next one. A tenant's compatibility
-Score throughput is therefore one Score at a time; other tenants and the other
-phases are not serialized.
+Score throughput is therefore one Score at a time, across every replica. A
+Score that finds the lock held does not wait for it: its run waits in `retry`,
+uncharged, as `score_lock_busy`, for 2 seconds, and that replica ends the
+tenant's batch for the pass and goes on to its other tenants. Other tenants
+and the other phases are not serialized.
+
+The Score holds its transaction (and the lock) open while the scorer and the
+embedder run, so the ingest login must not have an
+`idle_in_transaction_session_timeout` (or a `statement_timeout`) shorter than
+the Score lease (`TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE`, 30 minutes by
+default). A shorter timeout ends the transaction mid-Score; the Score then
+fails as `database_unavailable`, uncharged, and is retried without end.
 
 Before Settle writes the ledger event, it applies `main`'s `NoveltyUtility`
 credit checks, in `main`'s order. A check that refuses the credit withholds

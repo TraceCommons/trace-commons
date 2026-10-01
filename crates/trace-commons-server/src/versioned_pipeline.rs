@@ -139,6 +139,15 @@ pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
 pub const PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL: &str = "artifact_store_unavailable";
+/// Safe label of a compatibility Score released, uncharged, because its
+/// tenant's Score lock was held by another Score (multi-lens review L3-2).
+/// The run is due again after `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS`,
+/// and the worker ends that tenant's batch for the pass.
+pub const PIPELINE_SCORE_LOCK_BUSY_LABEL: &str = "score_lock_busy";
+/// The fixed delay before a `score_lock_busy` run is due again: about one
+/// Score, so the lock holder has likely committed, and short, since the run
+/// waited for nothing of its own.
+pub const PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS: i64 = 2_000;
 /// Startup refusal labels of `PipelineService::check_tenant_bundles` that
 /// the default package's checks do not share: a tenant bundle whose scorer
 /// or embedder the service does not hold, one no policy family runs, and
@@ -3752,6 +3761,45 @@ impl PgPipelineStore {
                     AND lease_token = $4 AND lease_expires_at > NOW()
                   RETURNING *",
                 &[&run.tenant_id, &run.run_id, &error_label, &lease_token],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Releases a compatibility Score that found its tenant's Score lock held
+    /// by another Score (multi-lens review L3-2): uncharged, like
+    /// `mark_transient_retry`, but due again after the fixed
+    /// `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS`, not the phase-age
+    /// backoff, since the run waited for nothing of its own. Fenced by the
+    /// lease like `mark_transient_retry`.
+    pub async fn release_score_lock_busy(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET state = 'retry', lease_token = NULL, lease_expires_at = NULL,
+                        attempt_count = GREATEST(attempt_count - 1, 0),
+                        next_attempt_at = clock_timestamp()
+                            + ($3::bigint * INTERVAL '1 millisecond'),
+                        last_error_label = $4, updated_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND lease_token = $5 AND lease_expires_at > clock_timestamp()
+                  RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS,
+                    &PIPELINE_SCORE_LOCK_BUSY_LABEL,
+                    &lease_token,
+                ],
             )
             .await?
             .ok_or_else(stale_lease_error)?;
@@ -8138,8 +8186,10 @@ impl PipelineService {
     /// (`submission_guard_on_tx`) that the commit locks. No other path takes
     /// the Score lock, so none holds a run or submission row while it waits
     /// for it. The approved bytes are read before the transaction opens, so
-    /// the Score holds one pooled connection at a time. A Score that waited
-    /// for the lock past its lease stops before it scores (uncharged, as a
+    /// the Score holds one pooled connection at a time. The lock is tried,
+    /// never waited for (multi-lens review L3-2): a Score that finds it held
+    /// releases its run uncharged (`release_score_lock_busy`), and a lease
+    /// that has passed stops the Score before it scores (uncharged, as a
     /// stale lease). Another family's Score (the minimal one) takes no lock.
     async fn commit_score_phase(
         &self,
@@ -8158,11 +8208,23 @@ impl PipelineService {
         }
         let mut client = self.backend.trace_pool().get().await?;
         let lock = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
-        lock.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))",
-            &[&pipeline_compatibility_score_lock(&run.tenant_id)],
-        )
-        .await?;
+        // Multi-lens review L3-2: the lock is tried, never waited for. A
+        // replica that waited would hold this pooled connection and stall
+        // its other tenants behind one tenant's Score; a busy lock releases
+        // the run instead, uncharged, after a fixed delay, and the worker
+        // ends this tenant's batch for the pass.
+        let locked: bool = lock
+            .query_one(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))",
+                &[&pipeline_compatibility_score_lock(&run.tenant_id)],
+            )
+            .await?
+            .get(0);
+        if !locked {
+            drop(lock);
+            drop(client);
+            return Ok(self.store.release_score_lock_busy(run).await?);
+        }
         let lease_live = lock
             .query_opt(
                 "SELECT 1 FROM pipeline_runs

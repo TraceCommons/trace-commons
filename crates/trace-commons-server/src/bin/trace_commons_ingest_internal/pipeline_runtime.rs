@@ -576,6 +576,16 @@ pub(crate) async fn drain_pipeline_tenant(
 ) {
     for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
         match service.process_one(&tenant_id).await {
+            // Multi-lens review L3-2: another Score holds this tenant's Score
+            // lock, so this replica moves on to its other tenants for the pass.
+            Ok(Some(run))
+                if run.last_error_label.as_deref()
+                    == Some(
+                        trace_commons_server::versioned_pipeline::PIPELINE_SCORE_LOCK_BUSY_LABEL,
+                    ) =>
+            {
+                break;
+            }
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(error) => {

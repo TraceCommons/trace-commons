@@ -23063,9 +23063,9 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
     let (tenant, first, second) = identical_receipts().await;
     let principal = "principal_sha256:compat-near-duplicate";
     one.register_default_bundle(&tenant).await.unwrap();
-    receive_envelope(&one, &tenant, principal, &first).await;
-    receive_envelope(&two, &tenant, principal, &second).await;
-    for phase in ["Review", "Score", "Settle"] {
+    let first_run = receive_envelope(&one, &tenant, principal, &first).await;
+    let second_run = receive_envelope(&two, &tenant, principal, &second).await;
+    for phase in ["Review", "Score"] {
         barrier.armed.store(phase == "Score", Ordering::SeqCst);
         let (a, b) = tokio::join!(one.process_one(&tenant), two.process_one(&tenant));
         assert!(
@@ -23073,12 +23073,118 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
             "both workers ran a {phase}"
         );
     }
+    barrier.armed.store(false, Ordering::SeqCst);
     assert!(
         barrier.waited.load(Ordering::SeqCst) && barrier.entered.load(Ordering::SeqCst) >= 2,
         "the first Score waited while the second entered its Score"
     );
+    // The Score that found the tenant's lock held waits, uncharged, for a
+    // fixed delay (multi-lens review L3-2); make it due now.
+    let runs = PgPipelineStore::new(backend.clone());
+    for run_id in [first_run, second_run] {
+        if runs
+            .get_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_error_label
+            .as_deref()
+            == Some(PIPELINE_SCORE_LOCK_BUSY_LABEL)
+        {
+            force_due(&backend, &tenant, run_id).await;
+        }
+    }
     process_until_idle(&one, &tenant).await;
     assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Multi-lens review L3-2 (Zaki review 3, Z3-M2): a compatibility Score
+/// that finds its tenant's Score lock held does not wait for it. It is
+/// released at once, uncharged, as `score_lock_busy`, due again after a
+/// fixed delay (not the phase-age backoff), and runs once the lock is free.
+#[tokio::test]
+async fn a_score_that_finds_the_tenant_lock_held_is_released_uncharged() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let runs = PgPipelineStore::new(backend.clone());
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(
+        &service,
+        &tenant,
+        "principal_sha256:score-lock-busy",
+        &first,
+    )
+    .await;
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let before = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+
+    // Another replica's Score holds the tenant's lock.
+    let holder = backend.trace_pool_for_test().get().await.unwrap();
+    holder
+        .execute(
+            "SELECT pg_advisory_lock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    let released = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.process_run(&tenant, run_id),
+    )
+    .await
+    .expect("the Score does not wait for the lock")
+    .unwrap()
+    .expect("the Score is claimed");
+    assert_eq!(
+        (
+            released.state,
+            released.last_error_label.as_deref(),
+            released.attempt_count,
+            released.next_phase,
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_SCORE_LOCK_BUSY_LABEL),
+            before.attempt_count,
+            Some(Phase::Score),
+        )
+    );
+    let delay = released.next_attempt_at - released.updated_at;
+    assert!(
+        delay >= chrono::Duration::seconds(1) && delay <= chrono::Duration::seconds(5),
+        "a fixed short delay, not the phase-age backoff: {delay:?}"
+    );
+
+    holder
+        .execute(
+            "SELECT pg_advisory_unlock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    force_due(&backend, &tenant, run_id).await;
+    let scored = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the Score runs once the lock is free");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
 }
 
 /// Finding 12 on a pool of one: a compatibility Score reads its approved

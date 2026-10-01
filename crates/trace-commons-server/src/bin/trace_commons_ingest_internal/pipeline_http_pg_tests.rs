@@ -4690,6 +4690,134 @@ fn compatibility_test_config(novelty_utility_microcredits: u64) -> Compatibility
     config
 }
 
+/// Receives a fresh model-training envelope from `principal` in `tenant`
+/// and returns the new run.
+async fn received_compatibility_run(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    created
+}
+
+/// Multi-lens review L3-2 (Zaki review 3, Z3-M2): when a compatibility
+/// Score finds its tenant's Score lock held by another replica, the worker
+/// ends that tenant's batch for the pass: the Score is released uncharged
+/// (`score_lock_busy`), and a run of another phase due after it is left for
+/// a later pass rather than worked behind a busy tenant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_tenant_score_lock_ends_the_tenants_worker_batch() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-score-lock-busy-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-score-lock-busy-{suffix}"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(local_artifacts(&dir)),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let scoring = received_compatibility_run(&service, &tenant, &principal).await;
+    service
+        .process_run(&tenant, scoring.run_id)
+        .await
+        .expect("Review runs");
+    let reviewing = received_compatibility_run(&service, &tenant, &principal).await;
+
+    let holder = runtime.trace_pool_for_test().get().await.unwrap();
+    let lock_key = format!("pipeline-compatibility-score:{tenant}");
+    holder
+        .execute(
+            "SELECT pg_advisory_lock(hashtextextended($1, 1))",
+            &[&lock_key],
+        )
+        .await
+        .unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(
+        state,
+        service.clone(),
+        tenant.clone(),
+        Arc::new(std::sync::Mutex::new(
+            pipeline_runtime::PipelineFollowUpCadence::default(),
+        )),
+    )
+    .await;
+    holder
+        .execute(
+            "SELECT pg_advisory_unlock(hashtextextended($1, 1))",
+            &[&lock_key],
+        )
+        .await
+        .unwrap();
+
+    let run = |run_id| {
+        let service = service.clone();
+        let tenant = tenant.clone();
+        async move {
+            service
+                .store()
+                .get_run(&tenant, run_id)
+                .await
+                .unwrap()
+                .expect("the run exists")
+        }
+    };
+    assert_eq!(
+        run(scoring.run_id).await.last_error_label.as_deref(),
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_SCORE_LOCK_BUSY_LABEL)
+    );
+    let left = run(reviewing.run_id).await;
+    assert_eq!(
+        (left.next_phase, left.attempt_count),
+        (Some(Phase::Review), 0),
+        "the run due after the busy Score waits for a later pass"
+    );
+}
+
 /// `assemble_test_pipeline_service` for `CompatibilityTestAssembler`: the
 /// service comes out of `assemble_ingest_pipeline_runtime`, the seam ingest's
 /// real boot uses, over `configured_store`.
