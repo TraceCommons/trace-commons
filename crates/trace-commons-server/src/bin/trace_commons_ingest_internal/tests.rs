@@ -11117,7 +11117,12 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
     };
 
     let local = service(&CompatibilityBundleConfig::local_reference());
-    assert!(!local.dependency_qualification().bundle);
+    assert!(
+        !local
+            .bundle_qualification(local.default_package())
+            .expect("the local reference package resolves")
+            .configuration_qualifiable
+    );
     assert!(!pipeline_runtime_is_production_qualified(&local));
     // Wave 2 (rebase 9 review, M2): startup reads it as the bundle
     // qualification's own configuration term, the one `qualify_bundle`
@@ -11142,14 +11147,13 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
     )
     .expect("main's pilot floors validate");
     let production = service(&pilot);
-    assert!(production.dependency_qualification().bundle);
-    assert!(pipeline_runtime_is_production_qualified(&production));
     assert!(
         production
             .bundle_qualification(production.default_package())
             .expect("the pilot package resolves")
             .configuration_qualifiable
     );
+    assert!(pipeline_runtime_is_production_qualified(&production));
 }
 
 /// Builds a qualified compatibility service through the seam, with main's

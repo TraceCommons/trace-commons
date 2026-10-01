@@ -6061,11 +6061,11 @@ pub struct SubmissionGuard {
 /// runs). `payout` is the same for the NEAR payout adapter: true only when
 /// the service holds one and it is `production_qualified()`.
 ///
-/// Startup no longer reads this field-by-field check: see
+/// Startup does not read this field-by-field check: see
 /// [`PipelineService::bundle_qualification`], which scopes qualification to
 /// the one bundle a runtime actually starts (decision P4-D7), and whose
-/// `configuration_qualifiable` term replaced startup's read of `bundle`
-/// (wave 2). The
+/// `configuration_qualifiable` term carries the bundle's configuration
+/// (wave 2; the `bundle` field this struct had is gone). The
 /// `NoveltyUtility` production-gate check in `novelty_utility_withheld_reason`
 /// still reads this method directly -- that check is about every dependency
 /// the service could ever route a compatibility receipt to, not one bundle.
@@ -6079,11 +6079,6 @@ pub struct PipelineDependencyQualification {
     pub authority: bool,
     pub privacy: bool,
     pub payout: bool,
-    /// Whether the default bundle may run for real tenants: a compatibility
-    /// bundle's configuration is qualifiable
-    /// (`CompatibilityBundleConfig::is_qualifiable`; Zaki review 1, round 2,
-    /// finding 11). Any other bundle carries no such configuration.
-    pub bundle: bool,
 }
 
 /// One dependency's identity and production-qualification state, as
@@ -6686,10 +6681,6 @@ impl PipelineService {
                 .payout
                 .as_ref()
                 .is_some_and(|(adapter, _)| adapter.production_qualified()),
-            bundle: crate::versioned_pipeline_bundle::package_compatibility_config(
-                &self.default_package,
-            )
-            .is_none_or(|config| config.is_qualifiable()),
         }
     }
 
