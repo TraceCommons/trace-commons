@@ -1654,14 +1654,6 @@ impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         Ok(Vec::new())
     }
-
-    fn dependency_identity(&self) -> &str {
-        "pass_through_privacy_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
-    }
 }
 
 /// The Task 2 privacy boundary every harness service below defaults to: see
@@ -3993,14 +3985,6 @@ impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         anyhow::bail!("privacy classifier unavailable (test double)")
     }
-
-    fn dependency_identity(&self) -> &str {
-        "failing_privacy_boundary_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
-    }
 }
 
 /// Task 2: a rescrub failure fails the receipt closed -- no run, no staged
@@ -4050,14 +4034,6 @@ impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
         let text = serde_json::to_string(envelope)?;
         *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
         Ok(Vec::new())
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "marker_redacting_boundary_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
     }
 }
 
@@ -15000,10 +14976,6 @@ impl PipelineAuthorityProvider for SwitchableAuthority {
     fn authority_for_tenant(&self, _tenant_id: &str) -> Option<SubmissionAuthority> {
         Some(self.0.lock().unwrap().clone())
     }
-
-    fn dependency_identity(&self) -> &str {
-        "switchable_authority_test_only"
-    }
 }
 
 /// Ruling T15-8: Settle reads the tenant policy from the authority provider,
@@ -19612,10 +19584,6 @@ impl CountingNearAdapter {
 
 #[async_trait::async_trait]
 impl NearPayoutAdapter for CountingNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "counting_near_test_only"
-    }
-
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,
@@ -20232,10 +20200,6 @@ struct BadEvidenceNearAdapter {
 
 #[async_trait::async_trait]
 impl NearPayoutAdapter for BadEvidenceNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "bad_evidence_near_test_only"
-    }
-
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,
@@ -20453,10 +20417,6 @@ impl HoldingNearAdapter {
 
 #[async_trait::async_trait]
 impl NearPayoutAdapter for HoldingNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "holding_near_test_only"
-    }
-
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,
@@ -20583,10 +20543,6 @@ impl ConfirmationHoldingNearAdapter {
 
 #[async_trait::async_trait]
 impl NearPayoutAdapter for ConfirmationHoldingNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "confirmation_holding_near_test_only"
-    }
-
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,

@@ -204,14 +204,6 @@ impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         Ok(Vec::new())
     }
-
-    fn dependency_identity(&self) -> &str {
-        "pass_through_privacy_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
-    }
 }
 
 /// A `LocalEncryptedTraceArtifactStore` rooted at `dir`, reused by both the
@@ -5319,14 +5311,6 @@ impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
         *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
         Ok(Vec::new())
     }
-
-    fn dependency_identity(&self) -> &str {
-        "marker_redacting_boundary_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
-    }
 }
 
 /// A privacy boundary whose rescrub always fails: the classifier outage a
@@ -5341,14 +5325,6 @@ impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         anyhow::bail!("privacy classifier unavailable (test double)")
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "failing_privacy_boundary_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
     }
 }
 

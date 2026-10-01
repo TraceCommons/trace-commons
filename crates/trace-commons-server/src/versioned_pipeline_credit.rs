@@ -229,7 +229,8 @@ pub struct NearConfirmationEvidence {
 /// finding 2).
 #[async_trait]
 pub trait NearPayoutAdapter: Send + Sync {
-    fn dependency_identity(&self) -> &str;
+    /// The one answer to whether this adapter may pay out for a routed or
+    /// drained tenant: `false` by default, and readiness fails closed on it.
     fn production_qualified(&self) -> bool {
         false
     }
@@ -261,10 +262,6 @@ impl DryRunNearPayoutAdapter {
 
 #[async_trait]
 impl NearPayoutAdapter for DryRunNearPayoutAdapter {
-    fn dependency_identity(&self) -> &str {
-        "near_dry_run_payout"
-    }
-
     async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String> {
         call.validate()?;
         Ok(Self::transaction_hash(&call.idempotency_key))
@@ -348,10 +345,6 @@ impl RecordingNearAdapter {
 
 #[async_trait]
 impl NearPayoutAdapter for RecordingNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "recording_near_test_only"
-    }
-
     fn authenticated(&self) -> bool {
         self.authenticated
     }

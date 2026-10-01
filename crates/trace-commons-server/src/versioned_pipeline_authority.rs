@@ -20,7 +20,8 @@ pub const PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL: &str = "privacy_classifi
 
 pub trait PipelineAuthorityProvider: Send + Sync {
     fn authority_for_tenant(&self, tenant_id: &str) -> Option<SubmissionAuthority>;
-    fn dependency_identity(&self) -> &str;
+    /// The one answer to whether this provider may serve a routed or
+    /// drained tenant: `false` by default, and readiness fails closed on it.
     fn production_qualified(&self) -> bool {
         false
     }
@@ -30,18 +31,13 @@ pub trait PipelineAuthorityProvider: Send + Sync {
 pub struct StaticPipelineAuthorityProvider {
     authorities: BTreeMap<String, SubmissionAuthority>,
     fallback: Option<SubmissionAuthority>,
-    identity: String,
 }
 
 impl StaticPipelineAuthorityProvider {
-    pub fn new(
-        authorities: BTreeMap<String, SubmissionAuthority>,
-        identity: impl Into<String>,
-    ) -> Self {
+    pub fn new(authorities: BTreeMap<String, SubmissionAuthority>) -> Self {
         Self {
             authorities,
             fallback: None,
-            identity: identity.into(),
         }
     }
 
@@ -50,7 +46,6 @@ impl StaticPipelineAuthorityProvider {
         Self {
             authorities: BTreeMap::new(),
             fallback: Some(fallback),
-            identity: "static_authority_test_only".to_string(),
         }
     }
 }
@@ -62,10 +57,6 @@ impl PipelineAuthorityProvider for StaticPipelineAuthorityProvider {
             .cloned()
             .or_else(|| self.fallback.clone())
     }
-
-    fn dependency_identity(&self) -> &str {
-        &self.identity
-    }
 }
 
 #[async_trait]
@@ -75,8 +66,8 @@ pub trait PipelinePrivacyBoundary: Send + Sync {
         envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>>;
 
-    fn dependency_identity(&self) -> &str;
-    fn is_production_compatible(&self) -> bool;
+    /// The one answer to whether this boundary may serve a routed or
+    /// drained tenant: `false` by default, and readiness fails closed on it.
     fn production_qualified(&self) -> bool {
         false
     }
@@ -100,38 +91,25 @@ impl PipelinePrivacyBoundary for DeterministicPipelinePrivacyBoundary {
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         rescrub_trace_envelope(envelope).map_err(Into::into)
     }
-
-    fn dependency_identity(&self) -> &str {
-        "deterministic_privacy_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
-    }
 }
 
+/// The production privacy boundary: `main`'s deterministic rescrub, then the
+/// prose-PII classifier the assembly builds it with, whose findings join the
+/// residual-risk basis. It is the boundary `main`'s
+/// `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` asks for, so it reports itself
+/// production-qualified; the classifier adapter the assembly passes is the
+/// production one.
 pub struct ClassifierRedactorPipelinePrivacyBoundary {
     adapter: Arc<dyn PrivacyFilterAdapter>,
     policy: trace_commons_protocol::trace_contribution::PiiClassifyPolicy,
-    identity: String,
 }
 
 impl ClassifierRedactorPipelinePrivacyBoundary {
     pub fn new(
         adapter: Arc<dyn PrivacyFilterAdapter>,
         policy: trace_commons_protocol::trace_contribution::PiiClassifyPolicy,
-        identity: impl Into<String>,
-    ) -> anyhow::Result<Self> {
-        let identity = identity.into();
-        anyhow::ensure!(
-            !identity.trim().is_empty(),
-            PIPELINE_PRIVACY_CONTROL_MISSING_LABEL
-        );
-        Ok(Self {
-            adapter,
-            policy,
-            identity,
-        })
+    ) -> Self {
+        Self { adapter, policy }
     }
 }
 
@@ -158,11 +136,7 @@ impl PipelinePrivacyBoundary for ClassifierRedactorPipelinePrivacyBoundary {
         Ok(basis)
     }
 
-    fn dependency_identity(&self) -> &str {
-        &self.identity
-    }
-
-    fn is_production_compatible(&self) -> bool {
+    fn production_qualified(&self) -> bool {
         true
     }
 
@@ -245,9 +219,21 @@ mod tests {
         ClassifierRedactorPipelinePrivacyBoundary::new(
             Arc::new(PersonClassifier),
             PiiClassifyPolicy::AllEvents,
-            "person_classifier_test",
         )
-        .unwrap()
+    }
+
+    /// Zaki review 1, round 2, simplification: `production_qualified` is the
+    /// one answer a boundary gives. The classifier-backed boundary, the
+    /// production one, reports itself qualified (it used to say it was
+    /// production compatible while reporting itself unqualified), and the
+    /// deterministic test boundary reports itself unqualified.
+    #[test]
+    fn each_privacy_boundary_reports_what_it_is() {
+        let classifier = boundary();
+        assert!(classifier.production_qualified());
+        assert!(classifier.classifies_prose_pii());
+        assert!(!DeterministicPipelinePrivacyBoundary.production_qualified());
+        assert!(!DeterministicPipelinePrivacyBoundary.classifies_prose_pii());
     }
 
     #[tokio::test]
@@ -308,9 +294,7 @@ mod tests {
         let boundary = ClassifierRedactorPipelinePrivacyBoundary::new(
             Arc::new(FailingClassifier),
             PiiClassifyPolicy::AllEvents,
-            "failing_classifier_test",
-        )
-        .unwrap();
+        );
         let mut envelope = envelope_with_text("ordinary text").await;
         assert!(boundary.rescrub(&mut envelope).await.is_err());
     }

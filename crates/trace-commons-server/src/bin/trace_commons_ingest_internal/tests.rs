@@ -10764,10 +10764,6 @@ impl trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvid
         })
     }
 
-    fn dependency_identity(&self) -> &str {
-        "qualified_test_authority"
-    }
-
     fn production_qualified(&self) -> bool {
         true
     }
@@ -10787,14 +10783,6 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         Ok(Vec::new())
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "qualified_test_privacy"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
     }
 
     fn production_qualified(&self) -> bool {
@@ -11151,14 +11139,10 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
     let classifier =
         minimal_pipeline_service_builder(backend, test_artifact_store(dir.path()), None)
             .unwrap()
-            .with_privacy(Arc::new(
-                ClassifierRedactorPipelinePrivacyBoundary::new(
-                    Arc::new(NoopPrivacyFilterAdapter),
-                    PiiClassifyPolicy::default(),
-                    "classifier_test",
-                )
-                .unwrap(),
-            ))
+            .with_privacy(Arc::new(ClassifierRedactorPipelinePrivacyBoundary::new(
+                Arc::new(NoopPrivacyFilterAdapter),
+                PiiClassifyPolicy::default(),
+            )))
             .build()
             .unwrap();
     validate_pipeline_privacy_filter_requirement(true, &classifier)
@@ -11501,10 +11485,6 @@ struct QualifiedTestNearAdapter(
 impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
     for QualifiedTestNearAdapter
 {
-    fn dependency_identity(&self) -> &str {
-        "qualified_test_near"
-    }
-
     fn production_qualified(&self) -> bool {
         true
     }
