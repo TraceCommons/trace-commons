@@ -236,6 +236,8 @@ fn local_artifacts(dir: &tempfile::TempDir) -> Arc<LocalEncryptedTraceArtifactSt
 /// fills in, exercised here with reference dependencies instead.
 struct TestAssembler {
     index: Arc<IsolatedPipelineIndex>,
+    /// The service's index writer when it is not `index` itself.
+    writer: Option<Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>>,
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     crash_point: Option<PipelineCrashPoint>,
 }
@@ -266,7 +268,7 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
             context.artifact_store,
             package,
             self.index.clone(),
-            self.index.clone(),
+            self.writer.clone().unwrap_or_else(|| self.index.clone()),
             registry,
             caps,
         )
@@ -353,8 +355,29 @@ fn assemble_test_pipeline_service(
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     crash_point: Option<PipelineCrashPoint>,
 ) -> Arc<PipelineService> {
+    assemble_test_pipeline_service_with_writer(
+        backend,
+        artifacts,
+        index,
+        None,
+        adapters,
+        crash_point,
+    )
+}
+
+/// `assemble_test_pipeline_service`, with `writer` as the service's index
+/// writer when one is given (`index` stays its reader).
+fn assemble_test_pipeline_service_with_writer(
+    backend: Arc<PgBackend>,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    index: Arc<IsolatedPipelineIndex>,
+    writer: Option<Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
     let assembler = TestAssembler {
         index,
+        writer,
         adapters,
         crash_point,
     };
@@ -3631,6 +3654,188 @@ async fn the_index_rebuild_route_appends_an_audit_row() {
     let text = metadata.to_string();
     assert!(!text.contains(&run.run_id.to_string()));
     assert!(!text.contains(&run.submission_id.to_string()));
+}
+
+/// An index writer over a real `IsolatedPipelineIndex` whose next `upsert`
+/// after `arm` is held until the test releases it; every other call goes
+/// straight to the index underneath.
+struct HeldRebuildWriter {
+    inner: Arc<IsolatedPipelineIndex>,
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl HeldRebuildWriter {
+    fn new(inner: Arc<IsolatedPipelineIndex>) -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = Arc::new(Self {
+            inner,
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: std::sync::Mutex::new(release_rx),
+        });
+        (writer, release_tx)
+    }
+}
+
+impl trace_commons_gate_api::VectorIndexWriter for HeldRebuildWriter {
+    fn upsert(
+        &self,
+        key: &trace_commons_gate_api::IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<trace_commons_gate_api::IndexUpsertResult, trace_commons_gate_api::IndexWriteError>
+    {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the test releases the held write within 30 s");
+        }
+        self.inner.upsert(key, embedding, content_hash)
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, trace_commons_gate_api::IndexWriteError> {
+        self.inner
+            .invalidate_revision(tenant_storage_ref, index_id, revision_id)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexWriter for HeldRebuildWriter {
+    fn dependency_identity(&self) -> &str {
+        "held_rebuild_writer_test_only"
+    }
+}
+
+/// Whether another transaction holds a lock on the run's row that a
+/// withdrawal's `FOR UPDATE` would wait for.
+async fn run_row_locked(runtime: &Arc<PgBackend>, tenant: &str, run_id: Uuid) -> bool {
+    let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let locked = match tx
+        .query_opt(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE NOWAIT",
+            &[&tenant, &run_id],
+        )
+        .await
+    {
+        Ok(row) => {
+            assert!(row.is_some(), "the run row exists");
+            false
+        }
+        Err(error) => {
+            assert_eq!(
+                error.code(),
+                Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE),
+                "{error}"
+            );
+            true
+        }
+    };
+    drop(tx);
+    locked
+}
+
+/// Review of the follow-up wave, m1: a client that disconnects in the middle
+/// of `POST /v1/workers/pipeline/index-rebuild` drops the handler's future,
+/// but not the rebuild. While the rebuild's write is held, the run row stays
+/// locked, so a withdrawal's `FOR UPDATE` waits for the write; once it is
+/// released the rebuild commits and still appends its audit row. Before the
+/// handler spawned the rebuild, dropping it rolled the transaction back and
+/// released the lock while the write went on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_index_rebuild_request_keeps_its_run_locked_until_its_writes_commit() {
+    let index = IsolatedPipelineIndex::new();
+    let (writer, release) = HeldRebuildWriter::new(index.clone());
+    let service_writer = writer.clone();
+    let Some(mut fixture) = withdrawal_fixture_with(
+        move |runtime, artifacts| {
+            assemble_test_pipeline_service_with_writer(
+                runtime,
+                artifacts,
+                index,
+                Some(service_writer as Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_withdrawal_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let admin = format!("token-admin-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &admin, TokenRole::Admin);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    assert!(!run_row_locked(&fixture.runtime, &tenant, run.run_id).await);
+
+    writer
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut request = Box::pin(pipeline_index_rebuild_handler(
+        State(fixture.state.clone()),
+        auth_headers(&admin),
+    ));
+    tokio::select! {
+        _ = request.as_mut() => panic!("the rebuild returned while its write was held"),
+        () = writer.entered.notified() => {}
+    }
+    // The client disconnects.
+    drop(request);
+
+    // A second's worth of checks: a dropped transaction would have rolled
+    // back, and released the lock, well within it.
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            run_row_locked(&fixture.runtime, &tenant, run.run_id).await,
+            "the run row stays locked while the rebuild's write runs"
+        );
+    }
+
+    release.send(()).expect("the held write is waiting");
+    let audit_rows = || async {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM trace_audit_events
+                  WHERE tenant_id = $1
+                    AND metadata_json->'action_counts' ? 'pipeline_index_commands_replayed'",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while run_row_locked(&fixture.runtime, &tenant, run.run_id).await || audit_rows().await == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the released rebuild commits and appends its audit row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(audit_rows().await, 1, "one audit row for the one rebuild");
 }
 
 /// `POST /v1/pipeline/exports` for `use`, with `limit`, keyed by `key`.

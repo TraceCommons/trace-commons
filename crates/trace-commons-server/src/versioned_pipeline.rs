@@ -8386,7 +8386,8 @@ impl PipelineService {
     /// locks through every upsert, then commits. A withdrawal locks the run
     /// row `FOR UPDATE` first, so it either committed before the re-check
     /// (the run is `Skipped`) or waits until these writes are done, and the
-    /// invalidation it queues then removes them.
+    /// invalidation it queues then removes them -- as long as this future is
+    /// not dropped while its writes run (below).
     ///
     /// The committed Score evidence and the sealed command are read before
     /// the transaction opens, so it never holds two pooled connections at
@@ -8398,6 +8399,17 @@ impl PipelineService {
     /// pool while the transaction keeps both rows locked, as Settle's index
     /// writes do (PR 3, e2873401, N-6): the rebuild runs inside ingest's
     /// worker route and never parks a runtime worker the routes share.
+    ///
+    /// A blocking task is not cancelled when the future awaiting it is
+    /// dropped. If this future is dropped while the writes run, the
+    /// transaction rolls back and releases both locks, and the writes go on:
+    /// a withdrawal can then commit, and its invalidation can complete,
+    /// before the last write lands, leaving those entries in the index. The
+    /// rebuild route therefore runs the rebuild in a task of its own, so a
+    /// client disconnect does not drop it (review of the follow-up wave,
+    /// m1). The window that remains is the end of the process: the runtime
+    /// drops that task when it stops, after the shutdown grace period. It is
+    /// the same window Settle's index writes have (P3-3).
     pub async fn rebuild_index_run(
         &self,
         run: &PipelineRunRecord,

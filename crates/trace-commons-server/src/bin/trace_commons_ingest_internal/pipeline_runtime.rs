@@ -345,12 +345,33 @@ pub(crate) async fn pipeline_readiness_handler(
 /// label-only: no run, submission, or command id. It needs no migration:
 /// the event, its action, and its metadata shape are `main`'s, as the
 /// pipeline's invalidation requeue route already uses them.
+///
+/// The rebuild and its audit row run in a task of their own, which this
+/// handler awaits (review of the follow-up wave, m1). A client that
+/// disconnects drops this handler's future, but not that task: each run's
+/// writes still finish under the run and submission locks its transaction
+/// holds, and the audit row is still appended. Only the end of the process
+/// (the runtime drops every task when it stops, after the shutdown grace
+/// period) can still stop a run between its writes and its commit; see
+/// `PipelineService::rebuild_index_run`.
 pub(crate) async fn pipeline_index_rebuild_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<PipelineIndexRebuildReport>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
+    require_pipeline_service(state.as_ref())?;
+    tokio::spawn(rebuild_index_and_audit(state, tenant))
+        .await
+        .map_err(|_| internal_error("pipeline_index_rebuild_task_failed"))?
+}
+
+/// `pipeline_index_rebuild_handler`'s rebuild and audit row, for the
+/// authenticated `tenant`, as one task.
+async fn rebuild_index_and_audit(
+    state: Arc<AppState>,
+    tenant: TenantAuth,
+) -> ApiResult<Json<PipelineIndexRebuildReport>> {
     let pipeline_service = require_pipeline_service(state.as_ref())?;
     let writer = pipeline_service.index_writer();
     let report = pipeline_service
