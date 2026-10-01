@@ -22856,8 +22856,155 @@ async fn identical_receipts_earn_one_novelty_utility_award_when_interleaved() {
     assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
 }
 
+/// Zaki review 3, Z3-M1: makes two Scores overlap for certain. While
+/// `armed`, the first scorer call waits (on its blocking-pool thread) until
+/// two Scores have read their approved bytes -- the read a Score makes
+/// before it takes the tenant's Score lock -- or a bound passes.
+#[derive(Default)]
+struct ScoreBarrier {
+    armed: AtomicBool,
+    entered: AtomicUsize,
+    waited: AtomicBool,
+}
+
+impl ScoreBarrier {
+    fn wait_for_the_second_score(&self) {
+        if !self.armed.load(Ordering::SeqCst) || self.waited.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.entered.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+/// The reference scorer, under a `ScoreBarrier`.
+struct BarrierScorer {
+    inner: ReferencePerplexityScorer,
+    barrier: Arc<ScoreBarrier>,
+}
+
+impl trace_commons_gate_api::PerplexityScorer for BarrierScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.barrier.wait_for_the_second_score();
+        trace_commons_gate_api::PerplexityScorer::score(&self.inner, plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<trace_commons_gate_api::ChunkPerplexity> {
+        self.barrier.wait_for_the_second_score();
+        trace_commons_gate_api::PerplexityScorer::score_chunk(&self.inner, chunk)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for BarrierScorer {
+    fn dependency_identity(&self) -> &str {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::dependency_identity(&self.inner)
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::content_descriptor(&self.inner)
+    }
+}
+
+/// A store that counts, while its `ScoreBarrier` is armed, the reads of
+/// contribution-envelope objects: in a Score round, each Score's read of its
+/// approved bytes.
+struct BarrierStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    barrier: Arc<ScoreBarrier>,
+}
+
+impl TraceArtifactStore for BarrierStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        if self.barrier.armed.load(Ordering::SeqCst)
+            && expected_artifact_kind == TraceArtifactKind::ContributionEnvelope
+        {
+            self.barrier.entered.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
 /// Finding 12 with two workers: two services over one database and one
-/// index process the two identical receipts at the same time.
+/// index process the two identical receipts at the same time. Zaki review 3,
+/// Z3-M1: the two Scores overlap for certain -- the first worker's scorer
+/// call waits until the second worker has entered its Score
+/// (`ScoreBarrier`) -- so without the tenant's Score lock both would score
+/// against an empty unapplied set and both would earn.
 #[tokio::test]
 async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
     let Some(backend) = runtime_backend(4).await else {
@@ -22865,29 +23012,71 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
     };
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
+    let barrier = Arc::new(ScoreBarrier::default());
+    let config = near_duplicate_config();
     let worker = || {
-        compatibility_test_service_on(
-            backend.clone(),
-            artifact_store(&dir),
-            near_duplicate_config(),
-            None,
-            allow_all_authority(),
-            issuing_checks(),
-            index.clone(),
+        let scorer = Arc::new(BarrierScorer {
+            inner: ReferencePerplexityScorer::new(),
+            barrier: barrier.clone(),
+        });
+        let embedder = Arc::new(ReferenceEmbedder::new());
+        let package =
+            MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+                .expect("build compatibility bundle package");
+        let trace_credit = RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        );
+        let registry =
+            SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+                .expect("build settlement adapter registry");
+        let caps = PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::from([(
+                InstrumentId::trace_credit().as_str().to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            )]),
+        };
+        Arc::new(
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                Arc::new(BarrierStore {
+                    inner: artifact_store(&dir),
+                    barrier: barrier.clone(),
+                }),
+                package,
+                index.clone(),
+                index.clone(),
+                registry,
+                caps,
+            )
+            .with_scorer(scorer)
+            .with_embedder(embedder)
+            .with_authority(allow_all_authority())
+            .with_privacy(default_privacy_boundary())
+            .with_novelty_utility_checks(issuing_checks())
+            .build()
+            .expect("build pipeline service"),
         )
     };
-    let (one, two) = (worker().await, worker().await);
+    let (one, two) = (worker(), worker());
     let (tenant, first, second) = identical_receipts().await;
     let principal = "principal_sha256:compat-near-duplicate";
+    one.register_default_bundle(&tenant).await.unwrap();
     receive_envelope(&one, &tenant, principal, &first).await;
     receive_envelope(&two, &tenant, principal, &second).await;
     for phase in ["Review", "Score", "Settle"] {
+        barrier.armed.store(phase == "Score", Ordering::SeqCst);
         let (a, b) = tokio::join!(one.process_one(&tenant), two.process_one(&tenant));
         assert!(
             a.unwrap().is_some() && b.unwrap().is_some(),
             "both workers ran a {phase}"
         );
     }
+    assert!(
+        barrier.waited.load(Ordering::SeqCst) && barrier.entered.load(Ordering::SeqCst) >= 2,
+        "the first Score waited while the second entered its Score"
+    );
     process_until_idle(&one, &tenant).await;
     assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
 }
