@@ -305,14 +305,20 @@ proves the package is well-formed and correctly signed.
 The production path is `PipelineQualificationStore::qualify_bundle`
 (`crates/trace-commons-server/src/versioned_pipeline_qualification.rs`), a
 Rust API this repository exposes today with no admin HTTP route in front of
-it. It takes a signed package, a trust store, qualification metadata, and a
-`ProductionDependencyProfile`, and fails closed on an untrusted or tampered
+it. It takes a signed package, a trust store, qualification metadata, a
+`ProductionDependencyProfile`, and the `evaluate_promotion` decision over the
+evidence the metadata records. It fails closed on an untrusted or tampered
 package, a non-production or development package, a profile built for a
 different bundle, a configuration or dependency-digest mismatch, any
-blocked dependency, or a second call for the same bundle with different
-metadata. A successful call records one append-only row per
-`(tenant_id, bundle_id)` in `pipeline_bundle_qualifications` (migration
-V107).
+blocked dependency, a decision that does not back the metadata, or a second
+call for the same bundle with different metadata. The decision must be
+ready (`bundle_qualification_promotion_not_ready`), its evidence hash must
+be the metadata's (`bundle_qualification_evidence_mismatch`), its one code
+revision the metadata's (`bundle_qualification_code_revision_mismatch`),
+and its one package the signed package
+(`bundle_qualification_package_mismatch`). A successful call records one
+append-only row per `(tenant_id, bundle_id)` in
+`pipeline_bundle_qualifications` (migration V107).
 
 Calling `qualify_bundle` over HTTP, and using its record to activate a
 bundle for a tenant's live traffic, are PR 5 work. See

@@ -918,10 +918,21 @@ impl PipelineQualificationStore {
     /// (`bundle_qualification_configuration_mismatch`), a metadata dependency
     /// digest that does not match `dependencies`
     /// (`runtime_dependency_identity_mismatch`), any blocked dependency or
-    /// infrastructure control (`dependencies.blockers()`'s first label), or a
-    /// second call for the same bundle with different metadata
+    /// infrastructure control (`dependencies.blockers()`'s first label), a
+    /// `promotion` decision that does not back this qualification (below),
+    /// or a second call for the same bundle with different metadata
     /// (`bundle_qualification_identity_conflict`). No row is left behind by a
     /// failed call.
+    ///
+    /// `promotion` is the [`evaluate_promotion`] decision over the evidence
+    /// the metadata records (wave 2; Zaki's review of #1166, Z6): the
+    /// caller no longer supplies the evidence and revision hashes alone. It
+    /// must be ready (`bundle_qualification_promotion_not_ready`), its
+    /// evidence hash must be the metadata's
+    /// (`bundle_qualification_evidence_mismatch`), its one code revision the
+    /// metadata's (`bundle_qualification_code_revision_mismatch`), and its
+    /// one package `signed.package`
+    /// (`bundle_qualification_package_mismatch`).
     pub async fn qualify_bundle(
         &self,
         tenant_id: &str,
@@ -929,6 +940,7 @@ impl PipelineQualificationStore {
         trust: &BundlePackageTrustStore,
         metadata: &BundleQualificationMetadata,
         dependencies: &ProductionDependencyProfile,
+        promotion: &PromotionDecision,
     ) -> Result<BundleQualificationRecord, DatabaseError> {
         trust.verify(signed).map_err(DatabaseError::Constraint)?;
         validate_production_package(&signed.package).map_err(DatabaseError::Constraint)?;
@@ -959,6 +971,8 @@ impl PipelineQualificationStore {
         if !blockers.is_empty() {
             return Err(DatabaseError::Constraint(blockers[0].clone()));
         }
+        require_promotion_backs(promotion, metadata, &digests)
+            .map_err(|label| DatabaseError::Constraint(label.to_string()))?;
         self.packages
             .register_bundle(tenant_id, &signed.package)
             .await?;
@@ -1021,6 +1035,34 @@ impl PipelineQualificationStore {
         tx.commit().await?;
         Ok(record)
     }
+}
+
+/// Whether `promotion` backs a qualification recording `metadata` for the
+/// package whose digests are `digests` (see
+/// [`PipelineQualificationStore::qualify_bundle`]); `Err` names the first
+/// condition that fails.
+fn require_promotion_backs(
+    promotion: &PromotionDecision,
+    metadata: &BundleQualificationMetadata,
+    digests: &PipelinePackageDigests,
+) -> Result<(), &'static str> {
+    if !promotion.ready {
+        return Err("bundle_qualification_promotion_not_ready");
+    }
+    if promotion.evidence_hash != metadata.evidence_hash {
+        return Err("bundle_qualification_evidence_mismatch");
+    }
+    if promotion.code_revision_hash.as_deref() != Some(metadata.code_revision_hash.as_str()) {
+        return Err("bundle_qualification_code_revision_mismatch");
+    }
+    if !promotion
+        .package
+        .as_ref()
+        .is_some_and(|package| package.is(digests))
+    {
+        return Err("bundle_qualification_package_mismatch");
+    }
+    Ok(())
 }
 
 fn qualification_from_row(row: &tokio_postgres::Row) -> BundleQualificationRecord {
@@ -1694,6 +1736,92 @@ mod tests {
         }
         let distinct = hashes.iter().collect::<BTreeSet<_>>();
         assert_eq!(distinct.len(), hashes.len(), "{hashes:?}");
+    }
+
+    /// Wave 2 (Zaki's review of #1166, Z6): a qualification records only
+    /// what a ready promotion decision backs -- the decision's evidence hash
+    /// and its one code revision are the metadata's, and its one package is
+    /// the package being qualified. Each condition is refused by its own
+    /// label.
+    #[test]
+    fn qualification_requires_a_ready_promotion_for_its_metadata_and_package() {
+        let now = Utc::now();
+        let mut evidence = passing_evidence(now);
+        for item in evidence.iter_mut().step_by(3) {
+            name_package(&mut item.check, "candidate");
+        }
+        let ready = evaluate_promotion(&evidence, now).unwrap();
+        assert!(ready.ready);
+        let candidate = PipelinePackageDigests {
+            package_hash: sha256_prefixed(b"candidate-package"),
+            configuration_digest: sha256_prefixed(b"candidate-configuration"),
+            dependency_digest: sha256_prefixed(b"candidate-dependency"),
+        };
+        let metadata = BundleQualificationMetadata {
+            corpus_digest: sha256_prefixed(b"corpus"),
+            input_digest: sha256_prefixed(b"input"),
+            configuration_digest: candidate.configuration_digest.clone(),
+            code_revision_hash: sha256_prefixed(b"code-revision"),
+            runtime_dependency_digest: sha256_prefixed(b"runtime"),
+            evidence_hash: ready.evidence_hash.clone(),
+        };
+        assert_eq!(
+            require_promotion_backs(&ready, &metadata, &candidate),
+            Ok(())
+        );
+
+        let not_ready = evaluate_promotion(&evidence[1..], now).unwrap();
+        let mut not_ready_metadata = metadata.clone();
+        not_ready_metadata.evidence_hash = not_ready.evidence_hash.clone();
+        let mut other_evidence = metadata.clone();
+        other_evidence.evidence_hash = sha256_prefixed(b"other-evidence");
+        let mut other_revision = metadata.clone();
+        other_revision.code_revision_hash = sha256_prefixed(b"other-revision");
+        let other_package = PipelinePackageDigests {
+            package_hash: sha256_prefixed(b"other-package"),
+            configuration_digest: candidate.configuration_digest.clone(),
+            dependency_digest: candidate.dependency_digest.clone(),
+        };
+        let unnamed = evaluate_promotion(&passing_evidence(now), now).unwrap();
+        let mut unnamed_metadata = metadata.clone();
+        unnamed_metadata.evidence_hash = unnamed.evidence_hash.clone();
+        for (promotion, metadata, digests, label) in [
+            (
+                &not_ready,
+                &not_ready_metadata,
+                &candidate,
+                "bundle_qualification_promotion_not_ready",
+            ),
+            (
+                &ready,
+                &other_evidence,
+                &candidate,
+                "bundle_qualification_evidence_mismatch",
+            ),
+            (
+                &ready,
+                &other_revision,
+                &candidate,
+                "bundle_qualification_code_revision_mismatch",
+            ),
+            (
+                &ready,
+                &metadata,
+                &other_package,
+                "bundle_qualification_package_mismatch",
+            ),
+            (
+                &unnamed,
+                &unnamed_metadata,
+                &candidate,
+                "bundle_qualification_package_mismatch",
+            ),
+        ] {
+            assert_eq!(
+                require_promotion_backs(promotion, metadata, digests),
+                Err(label)
+            );
+        }
     }
 
     #[test]
