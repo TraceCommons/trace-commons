@@ -8928,6 +8928,12 @@ async fn attempt_artifact_rows(
 /// each object absent and drops both rows. The withdrawal queued no
 /// deletion for these objects: no object ref names a `staged` row's object
 /// (controller ruling R2-1).
+///
+/// Since PR 3 deletes a phase attempt's objects on every refused commit,
+/// a refusal leaves the sweep only these rows, so the required check
+/// `pipeline_orphan_sweep` is emitted by
+/// `a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes`, the
+/// case where the objects are still stored.
 #[tokio::test]
 async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
     let Some(backend) = runtime_backend(4).await else {
@@ -9063,6 +9069,157 @@ async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
         "both staged rows are gone; the committed approved row is untouched"
     );
     assert_absent("after the sweep");
+}
+
+/// The staged rows of `run_id`'s attempt artifacts, as `(artifact,
+/// object_key, ciphertext_sha256)`, ordered by artifact.
+async fn staged_attempt_objects(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Vec<(String, String, String)> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT artifact, object_key, ciphertext_sha256 FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND state = 'staged'
+              ORDER BY artifact",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    rows.into_iter()
+        .map(|row| {
+            (
+                row.get("artifact"),
+                row.get("object_key"),
+                row.get("ciphertext_sha256"),
+            )
+        })
+        .collect()
+}
+
+/// The required check `pipeline_orphan_sweep`: a Score attempt that stored
+/// its objects and then stopped before its commit or any refusal -- an
+/// injected crash at `AfterScoreArtifactStorage`, where a process that dies
+/// leaves them. Since PR 3 deletes a phase attempt's objects on every
+/// refused commit, this is the case only the sweep owns: each object is
+/// still stored, no object ref names it, and its row stays `staged`. The
+/// sweep leaves them alone before `cleanup_after`; once it has passed, it
+/// deletes each object and its row, and never touches Review's committed
+/// row or object. The run is unharmed: once the crashed attempt's lease
+/// expires, a new claim commits Score under its own lease.
+#[tokio::test]
+async fn a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterScoreArtifactStorage),
+    )
+    .await;
+    let tenant = format!("score-crashed-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let reviewed = run_past_review(&service, &tenant).await;
+    let crashed = service.process_run(&tenant, reviewed.run_id).await;
+    assert_eq!(
+        crashed
+            .expect_err("the injected crash must propagate as an error")
+            .to_string(),
+        INJECTED_PIPELINE_CRASH
+    );
+
+    let score_objects = staged_attempt_objects(&backend, &tenant, reviewed.run_id).await;
+    assert!(
+        score_objects
+            .iter()
+            .any(|(artifact, ..)| artifact == "index-command"),
+        "the crashed attempt staged its index command"
+    );
+    let rows_before = attempt_artifact_rows(&backend, &tenant, reviewed.run_id).await;
+    assert!(
+        rows_before.contains(&("approved".to_string(), "committed".to_string())),
+        "Review's approved row is committed"
+    );
+    assert_eq!(
+        rows_before.len(),
+        1 + score_objects.len(),
+        "every Score row is staged; the crash committed none"
+    );
+    let assert_present = |expected: bool, when: &str| {
+        for (artifact, object_key, ciphertext_sha256) in &score_objects {
+            assert_eq!(
+                artifacts
+                    .artifact_present_by_object_key(
+                        tenant_ref.as_str(),
+                        TraceArtifactKind::VectorPayload,
+                        object_key,
+                        ciphertext_sha256,
+                    )
+                    .unwrap(),
+                Some(expected),
+                "{artifact} presence {when}"
+            );
+        }
+    };
+    assert_present(true, "after the crash: nothing deleted it");
+
+    // Before cleanup_after: the sweep removes nothing.
+    let removed_before = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(removed_before, 0, "no staged row is due yet");
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, reviewed.run_id).await,
+        rows_before,
+        "the sweep left every row untouched"
+    );
+    assert_present(true, "before cleanup_after");
+
+    // Move cleanup_after into the past (`backdate_attempt_artifacts`).
+    backdate_attempt_artifacts(&tenant, reviewed.run_id, None).await;
+
+    let removed_after = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(
+        removed_after,
+        score_objects.len(),
+        "every due staged row is removed with its object"
+    );
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, reviewed.run_id).await,
+        vec![("approved".to_string(), "committed".to_string())],
+        "the staged rows are gone; the committed approved row is untouched"
+    );
+    assert_present(false, "after the sweep deleted it");
+    assert!(
+        service.load_approved_bytes(&reviewed).await.is_ok(),
+        "Review's approved object is still readable"
+    );
+
+    // The crashed attempt's lease expires; a new claim runs Score again and
+    // commits its own objects, which no later sweep touches.
+    expire_lease(&backend, &tenant, reviewed.run_id).await;
+    let scored = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the resumed Score attempt runs");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    let rows_after = attempt_artifact_rows(&backend, &tenant, reviewed.run_id).await;
+    assert!(
+        rows_after.iter().all(|(_, state)| state == "committed"),
+        "the resumed attempt committed every row it staged"
+    );
+    assert_eq!(
+        service.sweep_attempt_artifacts(&tenant, 10).await.unwrap(),
+        0,
+        "a committed row is never swept"
+    );
 
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_orphan_sweep",

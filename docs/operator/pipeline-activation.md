@@ -879,12 +879,17 @@ deleting which row is a fixed split (controller ruling R2-1):
   (see "Withdrawal follow-ups and index invalidation" above), and `main`'s
   revocation-propagation worker deletes it. This sweep never touches a
   `committed` row.
-- A phase attempt whose commit is refused because the submission stopped
-  being operable deletes the objects it wrote itself, best effort (Review
-  its approved object, Score its index command and neighbour set). Its
-  `staged` row stays either way; this sweep later finds the object already
-  absent and drops the row with no delete, or deletes an object that
-  refusal path failed to clean up.
+- A phase attempt whose commit is refused, for any reason (an inoperable
+  submission, a stale lease, a missing settlement adapter), deletes the
+  objects it wrote itself, best effort (Review its approved object, Score
+  its index command and neighbour set), and so does a Score attempt whose
+  second write fails after its first. Its `staged` row stays either way;
+  this sweep later finds the object already absent and drops the row with
+  no delete, or deletes an object that path failed to clean up. The
+  objects only this sweep deletes are those of an attempt that stopped
+  after writing and before any commit or refusal -- a crashed process --
+  and those kept when the connection was lost during the commit, which
+  may have landed, and did not.
 
 Score's withdrawal rule follows from the same split: withdrawing a
 submission whose run already committed Score deletes the index command and

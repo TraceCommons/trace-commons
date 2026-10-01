@@ -202,7 +202,7 @@ REQUIRED_DATABASE_CHECKS = (
     _runtime("pipeline_receipt_replay_exact", "receipt_replay_and_conflict_are_exact"),
     _runtime("pipeline_payout_recovery", "payout_crash_between_submit_and_confirm_submits_once"),
     _runtime("pipeline_index_rebuild", "index_rebuild_uses_sealed_commands_without_new_credit_or_outcomes"),
-    _runtime("pipeline_orphan_sweep", "a_refused_score_commit_leaves_staged_rows_the_sweep_removes"),
+    _runtime("pipeline_orphan_sweep", "a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes"),
     _runtime("pipeline_bundle_qualification", "qualification_inspects_the_objects_the_constructor_receives"),
     DatabaseCheck(
         "pipeline_http_restart_recovery",

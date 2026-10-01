@@ -7682,11 +7682,16 @@ impl PipelineService {
     /// invalidates the ref and queues its payload deletion in the same
     /// transaction as the tombstone, and `main`'s revocation-propagation
     /// worker deletes it. This sweep never touches a `committed` row. A
-    /// phase attempt whose commit is refused as inoperable deletes the
+    /// phase attempt whose commit is refused, for any reason, deletes the
     /// objects it wrote itself, best effort (Review its approved object,
-    /// Score its index command and neighbour set); its `staged` rows stay,
-    /// and this sweep later finds each object absent and drops the row, or
-    /// deletes an object that refusal path failed to delete.
+    /// Score its index command and neighbour set; PR 3), and so does a Score
+    /// attempt whose second write fails after its first; their `staged`
+    /// rows stay, and this sweep later finds each object absent and drops
+    /// the row, or deletes an object that path failed to delete. The
+    /// objects only this sweep deletes are those of an attempt that stopped
+    /// after writing and before any commit or refusal (a crashed process),
+    /// and those a lost connection kept because the commit may have landed
+    /// when it did not.
     ///
     /// One tenant transaction, `FOR UPDATE SKIP LOCKED`, up to `limit`
     /// rows. For each row, a store that confirms the object absent
