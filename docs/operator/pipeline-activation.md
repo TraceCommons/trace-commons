@@ -336,12 +336,18 @@ not the trace's fault:
   that call from the first one.
 - `artifact_store_unavailable` (Review and Score): an object-store call of
   the run failed -- Review's source read or approved write, or Score's
-  approved read or object writes. A check of what the store returned (a
-  decode or hash mismatch) is still charged. The store's errors carry no
-  type, so an integrity failure the store itself reports waits here too,
-  retried at most once an hour; look for a run that stays on this label.
-  Settle's read of the stored index command is still charged
-  (`index_command_invalid`).
+  approved read, its object keys' derivation, or its object writes. A check
+  of what the store returned (a decode or hash mismatch) is still charged.
+  The store's errors carry no type, so an integrity failure the store itself
+  reports waits here too, retried at most once an hour; look for a run that
+  stays on this label. Settle's read of the stored index command is still
+  charged (`index_command_invalid`).
+- `serialized_json_object_key_unavailable` and
+  `pipeline_attempt_object_key_mismatch` (compatibility Score): the same
+  rule, under the store's own label -- a store that cannot derive an object
+  key, or one that prepares an object under a key other than the one it
+  derived (see "The attempt artifact sweep" below). The store, not the
+  trace, is at fault, so neither is charged.
 
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
@@ -990,10 +996,10 @@ is not. Those rows are staged with no hash:
   store that cannot, and only the first, and a key mismatch, stop a Score:
   - `serialized_json_object_key_unavailable`: the store cannot derive a
     key. A compatibility Score stops before it scores, and its run waits in
-    retry under this label without being charged, as for any other
-    deployment gap (ruling FR3). So does a Score whose store prepares an
-    object under a key other than the one it derived
-    (`pipeline_attempt_object_key_mismatch`); it publishes nothing.
+    retry under this label without being charged, as for any other failed
+    store call (`artifact_store_unavailable`, ruling FR3). So does a Score
+    whose store prepares an object under a key other than the one it
+    derived (`pipeline_attempt_object_key_mismatch`); it publishes nothing.
   - `artifact_delete_at_object_key_unavailable`: the store cannot delete at
     a key. A compatibility Score still runs and publishes.
   - `remote_trace_artifact_delete_at_key_unavailable`: the remote provider

@@ -27161,6 +27161,8 @@ enum ObjectKeyGap {
     Unavailable,
     /// A key other than the one `prepare_serialized_json` then writes under.
     Other,
+    /// A derivation that fails as a store outage does.
+    Outage,
 }
 
 /// A store that delegates every call to `inner` except the key derivation,
@@ -27258,6 +27260,7 @@ impl TraceArtifactStore for ObjectKeyGapStore {
     ) -> anyhow::Result<String> {
         match self.gap {
             ObjectKeyGap::Unavailable => anyhow::bail!("serialized_json_object_key_unavailable"),
+            ObjectKeyGap::Outage => anyhow::bail!("object store unavailable"),
             ObjectKeyGap::Other => self.inner.serialized_json_object_key(
                 tenant_storage_ref,
                 artifact_kind,
@@ -27286,7 +27289,10 @@ impl TraceArtifactStore for ObjectKeyGapStore {
 /// from the key it then prepares (`pipeline_attempt_object_key_mismatch`),
 /// is an operator's deployment gap, not the trace's fault. The run waits in
 /// retry under that label without being charged, and no Score object is
-/// written.
+/// written. Wave 2 (PR 3's c8d65fcb): both are the one rule for a failed
+/// store call, so a derivation that fails as an outage does is the same
+/// uncharged `artifact_store_unavailable` (it was a charged
+/// `pipeline_operational_error` before).
 #[tokio::test]
 async fn a_store_without_a_usable_object_key_suspends_the_score_uncharged() {
     let Some(backend) = runtime_backend(4).await else {
@@ -27298,6 +27304,10 @@ async fn a_store_without_a_usable_object_key_suspends_the_score_uncharged() {
             "serialized_json_object_key_unavailable",
         ),
         (ObjectKeyGap::Other, "pipeline_attempt_object_key_mismatch"),
+        (
+            ObjectKeyGap::Outage,
+            PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+        ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let artifacts = artifact_store(&dir);

@@ -323,15 +323,22 @@ const PIPELINE_BLOCKING_CALL_FAILED_LABEL: &str = "blocking_call_failed";
 /// The artifact store cannot derive an object key before the content
 /// exists (`TraceArtifactStore::serialized_json_object_key`'s default
 /// refusal), which a compatibility Score needs before its tenant lock
-/// (rebase 10, option D). A deployment gap: the uncharged suspension of
-/// ruling FR3 (rebase 10 review, M2).
+/// (rebase 10, option D). A failed store call like any other
+/// (`artifact_store_call`), so the uncharged suspension of ruling FR3
+/// (rebase 10 review, M2); it keeps its own label, since it names a store
+/// that lacks the capability rather than one that is down.
 const PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL: &str = "serialized_json_object_key_unavailable";
 /// The key the store prepared a compatibility Score's object under differs
 /// from the key it derived, and the attempt staged, before the tenant lock;
 /// publishing it would leave an object no row names, so nothing is
-/// published. A deployment gap, suspended uncharged like
-/// `PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL` (rebase 10 review, M2).
+/// published. The store's own inconsistency, not a check of the content it
+/// returned, so it is suspended uncharged as a failed store call is
+/// (`artifact_store_call`; rebase 10 review, M2).
 const PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL: &str = "pipeline_attempt_object_key_mismatch";
+/// Store refusals `artifact_store_call` reports under their own label
+/// rather than `artifact_store_unavailable`: each names a capability the
+/// store lacks, which an operator fixes by configuration, not by waiting.
+const ARTIFACT_STORE_CAPABILITY_LABELS: &[&str] = &[PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL];
 
 /// Runs `call`, a synchronous dependency call (an object store or an index:
 /// file or network I/O), on the blocking pool, so it never parks a runtime
@@ -347,31 +354,48 @@ where
         .map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))?
 }
 
-/// Runs `call`, an object-store call of the run path (Review's source read
-/// and approved write, Score's approved read and object writes), on the
-/// blocking pool, and reports the store's own
+/// Runs `call`, an object-store call of the run path (Review's source read,
+/// and its approved object's prepare and publish; Score's approved read,
+/// its object keys' derivation before the tenant lock, and each object's
+/// prepare and publish), on the blocking pool, and reports the store's own
 /// error as the uncharged suspension `artifact_store_unavailable`
 /// (multi-lens review L2-2, ruling FR3): a store call that fails is an
 /// outage, not the trace's fault. `TraceArtifactStore` errors are untyped,
 /// so an integrity failure the store itself reports is suspended the same
 /// way; it stays visible by its label and retries at most once an hour.
-/// The caller's own checks of what the store returned (a decode, a hash or
-/// a revision mismatch) stay charged, and a lost blocking task keeps
-/// `blocking_call_failed`.
+/// A refusal in `ARTIFACT_STORE_CAPABILITY_LABELS` is suspended the same
+/// way under its own label.
+///
+/// This is the pipeline's one rule for its object store (wave 2, merging
+/// PR 3's c8d65fcb with PR 4's 6dace131): a failure of the store itself --
+/// a failed call, a capability it lacks, or a key it does not keep
+/// (`PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL`, raised by the caller as
+/// the same transient `PolicyError`) -- is never charged to the trace. The
+/// caller's own checks of the content the store returned (a decode, a hash
+/// or a revision mismatch) stay charged, and a lost blocking task keeps
+/// `blocking_call_failed`. The attempt sweep has no run to charge: a store
+/// call of the sweep that fails keeps its row for the next pass
+/// (`PipelineService::sweep_attempt_artifacts`).
 async fn artifact_store_call<T, F>(call: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    on_blocking_pool(move || {
-        call().map_err(|_| {
-            anyhow::Error::from(
-                PolicyError::transient(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL)
-                    .expect("static label"),
-            )
-        })
-    })
-    .await
+    on_blocking_pool(move || call().map_err(|error| artifact_store_failure(&error).into())).await
+}
+
+/// The uncharged suspension `artifact_store_call` reports for a store
+/// call's `error`: the store's own refusal when it is one of
+/// `ARTIFACT_STORE_CAPABILITY_LABELS`, else `artifact_store_unavailable`.
+/// Nothing else of the store's message reaches the run.
+fn artifact_store_failure(error: &anyhow::Error) -> PolicyError {
+    let message = error.to_string();
+    let label = ARTIFACT_STORE_CAPABILITY_LABELS
+        .iter()
+        .copied()
+        .find(|label| *label == message)
+        .unwrap_or(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL);
+    PolicyError::transient(label).expect("static label")
 }
 
 /// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
@@ -8700,16 +8724,14 @@ impl PipelineService {
                 // Ruling FR3: a settlement adapter the service does not hold
                 // is a deployment gap, not the trace's fault -- the same
                 // uncharged suspension as a missing bound dependency. So is
-                // a missing per-instrument cap, and so is an artifact store
-                // that cannot derive a compatibility Score's object key
-                // ahead of its content or prepares the object under another
-                // key (rebase 10 review, M2): the operator's store, never
-                // the contributor's trace.
+                // a missing per-instrument cap. (An artifact store that
+                // cannot derive a compatibility Score's object key, or
+                // prepares the object under another key, is a failed store
+                // call: the typed transient `PolicyError` above, from
+                // `artifact_store_call`.)
                 if let Some(gap) = [
                     PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
                     PIPELINE_SETTLEMENT_CAP_MISSING_LABEL,
-                    PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL,
-                    PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL,
                 ]
                 .into_iter()
                 .find(|gap| *gap == label)
@@ -9265,9 +9287,11 @@ impl PipelineService {
     /// the store, before any content exists, and stages a row with that key
     /// and no hash (`PgPipelineStore::stage_unhashed_attempt_artifacts`). A
     /// store that cannot derive a key refuses
-    /// (`serialized_json_object_key_unavailable`): the Score stops before it
-    /// scores, and the run waits in retry without being charged, a
-    /// deployment gap under ruling FR3 (rebase 10 review, M2).
+    /// (`serialized_json_object_key_unavailable`), and one whose derivation
+    /// fails otherwise reports `artifact_store_unavailable`: the Score stops
+    /// before it scores, and the run waits in retry without being charged,
+    /// as any failed store call does (`artifact_store_call`, ruling FR3;
+    /// rebase 10 review, M2).
     async fn stage_score_artifacts_before_lock(
         &self,
         run: &PipelineRunRecord,
@@ -9277,9 +9301,10 @@ impl PipelineService {
         let run_id = run.run_id;
         // The derivation is a synchronous store call, so it runs on the
         // blocking pool, as every other object-store call of a phase does
-        // (PR 3, e2873401, N-6).
+        // (PR 3, e2873401, N-6), and its failure is the uncharged
+        // suspension of every failed store call (PR 3, c8d65fcb).
         let store = self.artifact_store.clone();
-        let object_keys = on_blocking_pool(move || {
+        let object_keys = artifact_store_call(move || {
             [
                 PipelineAttemptArtifact::IndexCommand,
                 PipelineAttemptArtifact::ScoreNeighbors,
@@ -9416,16 +9441,22 @@ impl PipelineService {
                     // Rebase 10, option D: the row was staged before the
                     // tenant lock, under the key the store derived then. A
                     // prepared key that differs would publish an object no
-                    // row names, so it fails closed before the publish. Past
-                    // `publish_deadline` the attempt's lease is certainly
-                    // gone and the sweep may soon remove its rows, so it
-                    // publishes nothing and stops as a stale lease.
+                    // row names, so it fails closed before the publish, as
+                    // the uncharged suspension of a failed store call
+                    // (`artifact_store_call`). Past `publish_deadline` the
+                    // attempt's lease is certainly gone and the sweep may
+                    // soon remove its rows, so it publishes nothing and stops
+                    // as a stale lease.
                     Some(prestaged) => {
-                        anyhow::ensure!(
-                            prestaged.object_key(artifact)
-                                == Some(prepared.receipt().object_key.as_str()),
-                            PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL
-                        );
+                        if prestaged.object_key(artifact)
+                            != Some(prepared.receipt().object_key.as_str())
+                        {
+                            return Err(PolicyError::transient(
+                                PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL,
+                            )
+                            .expect("static label")
+                            .into());
+                        }
                         if Utc::now() >= prestaged.publish_deadline {
                             return Err(stale_lease_error().into());
                         }
@@ -12256,6 +12287,43 @@ mod tests {
         let wrapped = anyhow::anyhow!("artifact_delete_at_object_key_unavailable")
             .context("deleting tenant-a's object at a key");
         assert_eq!(store_refusal_label(&wrapped), None);
+    }
+
+    /// Wave 2 (PR 3's c8d65fcb with PR 4's 6dace131): every failed store
+    /// call of the run path is one transient `PolicyError`, the uncharged
+    /// suspension. A capability the store lacks keeps its own label; any
+    /// other failure, a safe-looking label included, is
+    /// `artifact_store_unavailable`, and no other store text reaches the run.
+    #[test]
+    fn a_failed_store_call_is_one_uncharged_suspension() {
+        for (message, label) in [
+            (
+                PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL,
+                PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL,
+            ),
+            (
+                "object store unavailable",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+            (
+                "artifact_delete_at_object_key_unavailable",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+            (
+                "failed to write gs://bucket/tenants/abc/object",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+        ] {
+            let failure = artifact_store_failure(&anyhow::anyhow!(message.to_string()));
+            assert!(failure.is_transient(), "{message}");
+            assert_eq!(failure.label(), label, "{message}");
+        }
+        let wrapped = anyhow::anyhow!(PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL)
+            .context("deriving tenant-a's object key");
+        assert_eq!(
+            artifact_store_failure(&wrapped).label(),
+            PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL
+        );
     }
 
     /// Zaki review 1, item 1: `main`'s revocation-propagation worker checks a
