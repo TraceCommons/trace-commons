@@ -416,65 +416,36 @@ jobs:
             echo "::error::versioned_pipeline_runtime_pg never provisioned its runtime role"
             exit 1
           fi
+      # Each of the three steps below runs one named test in `<database>_pilot`,
+      # a database each test process drops and creates beside the one its URL
+      # names, so neither the xact_commit guard at the end of this job nor a
+      # commit floor can prove the test ran (the harness setup alone commits
+      # more than some of the tests do). A test name that matches nothing
+      # passes with "0 passed", so each step requires its own "1 passed" line,
+      # as the upgrade step requires its count.
       - name: versioned pipeline real HTTP
-        run: cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart 2>&1 | tee pipeline-real-http.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-real-http.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
       - name: versioned pipeline compatibility through HTTP
-        run: cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export 2>&1 | tee pipeline-compat.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-compat.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_compat
           TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_compat
       - name: versioned pipeline parity with legacy
-        run: cargo test -p trace-commons-server --bin trace-commons-ingest legacy_and_pipeline_tenants_match_under_equivalent_configuration
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest legacy_and_pipeline_tenants_match_under_equivalent_configuration 2>&1 | tee pipeline-parity.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-parity.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
           TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_parity
-      # The harness's setup alone -- the `<database>_pilot` database created
-      # and migrated the way the pilot's was, the runtime login provisioned --
-      # commits about 550 transactions, so a fixed floor cannot tell a step
-      # that ran its test from one whose test name matched nothing. This step
-      # runs that setup by itself, in a database of its own, and its commits
-      # are the baseline the guard below measures each step against.
-      - name: versioned pipeline HTTP harness baseline
-        run: |
-          set -euo pipefail
-          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace admission_test_pipeline_baseline
-          cargo test -p trace-commons-server --bin trace-commons-ingest the_pipeline_http_harness_sets_up_its_database
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_baseline
-          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_baseline
-      # The three steps above run in `<database>_pilot`, a database each test
-      # process drops and creates beside the one its URL names, so the
-      # xact_commit guard at the end of this job cannot see them. A test name
-      # that matches nothing passes with "0 passed"; only commits beyond the
-      # harness baseline are evidence that a step ran its test (each of the
-      # three commits at least 150 more). Each step has a database of its own,
-      # so one step's activity cannot stand in for another's.
-      - name: Refuse a pipeline HTTP run that executed nothing
-        run: |
-          set -euo pipefail
-          commits() {
-            PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
-              -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$1';"
-          }
-          baseline=$(commits admission_test_pipeline_baseline_pilot)
-          echo "the harness setup alone committed ${baseline:-0} transactions"
-          if [ "${baseline:-0}" -lt 5 ]; then
-            echo "::error::the pipeline HTTP harness baseline did not run"
-            exit 1
-          fi
-          floor=$(( ${baseline:-0} + 50 ))
-          fail=0
-          for db in admission_test_pipeline_http_pilot admission_test_pipeline_compat_pilot admission_test_pipeline_parity_pilot; do
-            n=$(commits "$db")
-            echo "$db committed ${n:-0} transactions (floor $floor)"
-            if [ "${n:-0}" -lt "$floor" ]; then
-              echo "::error::$db shows no activity beyond its harness setup; its pipeline HTTP test did not run"
-              fail=1
-            fi
-          done
-          exit $fail
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
