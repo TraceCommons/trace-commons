@@ -3941,6 +3941,12 @@ impl AppState {
             )? as u64,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
+        if let Some(service) = pipeline_service.as_ref() {
+            pipeline_runtime::validate_pipeline_privacy_filter_requirement(
+                require_privacy_filter,
+                service,
+            )?;
+        }
         validate_pipeline_drain_tenants(&pipeline_drain_tenant_ids, pipeline_service.is_some())?;
         let pipeline_product = pipeline_service
             .as_ref()

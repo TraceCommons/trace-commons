@@ -11100,6 +11100,70 @@ async fn pipeline_runtime_refuses_a_compatibility_bundle_without_the_credit_issu
     assemble(true, &with_issuer).expect("with the issuer it starts");
 }
 
+/// Zaki review 1, round 2, finding 21: under
+/// `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER`, ingest refuses a pipeline runtime
+/// whose privacy boundary does not classify prose PII, judged by what the
+/// boundary does (`classifies_prose_pii`), not by its qualification: a
+/// boundary that reports itself production-qualified but runs no classifier
+/// (`QualifiedTestPrivacy`) is refused, and so is a runtime with no boundary;
+/// the classifier-backed boundary is accepted. Without the flag nothing is
+/// required.
+#[tokio::test]
+async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() {
+    use super::pipeline_runtime::validate_pipeline_privacy_filter_requirement;
+    use trace_commons_protocol::trace_contribution::{NoopPrivacyFilterAdapter, PiiClassifyPolicy};
+    use trace_commons_server::versioned_pipeline_authority::ClassifierRedactorPipelinePrivacyBoundary;
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let qualified_without_a_classifier = qualified_pipeline_service(
+        backend.clone(),
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        true,
+        None,
+    )
+    .unwrap();
+    assert!(pipeline_runtime_is_production_qualified(
+        &qualified_without_a_classifier
+    ));
+    assert_eq!(
+        validate_pipeline_privacy_filter_requirement(true, &qualified_without_a_classifier)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_privacy_filter_required"
+    );
+    let without_a_boundary = qualified_pipeline_service(
+        backend.clone(),
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(validate_pipeline_privacy_filter_requirement(true, &without_a_boundary).is_err());
+    validate_pipeline_privacy_filter_requirement(false, &qualified_without_a_classifier)
+        .expect("nothing is required without the flag");
+
+    let classifier =
+        minimal_pipeline_service_builder(backend, test_artifact_store(dir.path()), None)
+            .unwrap()
+            .with_privacy(Arc::new(
+                ClassifierRedactorPipelinePrivacyBoundary::new(
+                    Arc::new(NoopPrivacyFilterAdapter),
+                    PiiClassifyPolicy::default(),
+                    "classifier_test",
+                )
+                .unwrap(),
+            ))
+            .build()
+            .unwrap();
+    validate_pipeline_privacy_filter_requirement(true, &classifier)
+        .expect("a classifier-backed boundary meets the requirement");
+}
+
 /// Builds an unqualified pipeline service (`minimal_pipeline_service`)
 /// through the `IngestPipelineRuntimeAssembler` seam, passing the configured
 /// object store name through so the M11 store-name check in

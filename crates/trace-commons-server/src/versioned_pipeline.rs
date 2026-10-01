@@ -5567,6 +5567,15 @@ impl PipelineService {
             .map(|(_, config)| config.controls)
     }
 
+    /// Whether this service's privacy boundary runs a prose-PII classifier
+    /// (`PipelinePrivacyBoundary::classifies_prose_pii`); `false` with no
+    /// boundary.
+    pub fn privacy_classifies_prose_pii(&self) -> bool {
+        self.privacy
+            .as_ref()
+            .is_some_and(|privacy| privacy.classifies_prose_pii())
+    }
+
     /// Whether the default bundle is the compatibility bundle.
     pub fn binds_compatibility_bundle(&self) -> bool {
         crate::versioned_pipeline_bundle::package_compatibility_config(&self.default_package)

@@ -210,7 +210,12 @@ content. Score and exports read that content only.
 The authority provider and the privacy boundary are dependencies like the
 scorer and the index. An unqualified one refuses startup with
 `pipeline_runtime_dependencies_not_production_qualified` whenever tenants
-are routed (the section above).
+are routed or drained (the section above). With
+`TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` set, ingest also refuses to start a
+runtime whose privacy boundary does not run a prose-PII classifier, or that
+has none (`pipeline_privacy_filter_required`), as `main` refuses to start
+with no filter backend. This is judged by what the boundary does, not by
+whether it reports itself qualified.
 
 ## Quarantined runs and human review
 

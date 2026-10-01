@@ -220,6 +220,23 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     Ok(Some(service))
 }
 
+/// Refuses, with `pipeline_privacy_filter_required`, a pipeline runtime
+/// whose privacy boundary does not classify prose PII while `main` requires
+/// prose-PII filtering (`TRACE_COMMONS_REQUIRE_PRIVACY_FILTER`), as `main`
+/// refuses to start with no filter backend. Judged by what the boundary does
+/// (`PipelinePrivacyBoundary::classifies_prose_pii`), not by whether it
+/// reports itself production-qualified (Zaki review 1, round 2, finding 21).
+pub(crate) fn validate_pipeline_privacy_filter_requirement(
+    require_privacy_filter: bool,
+    service: &PipelineService,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !require_privacy_filter || service.privacy_classifies_prose_pii(),
+        "pipeline_privacy_filter_required"
+    );
+    Ok(())
+}
+
 /// Whether every dependency an injected pipeline runtime holds is
 /// production-qualified.
 ///

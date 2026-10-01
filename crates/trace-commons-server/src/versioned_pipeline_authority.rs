@@ -80,6 +80,14 @@ pub trait PipelinePrivacyBoundary: Send + Sync {
     fn production_qualified(&self) -> bool {
         false
     }
+    /// Whether `rescrub` runs a prose-PII classifier over the envelope, the
+    /// filtering `main`'s `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` demands. It
+    /// states what the boundary does, apart from its qualification: ingest
+    /// refuses a runtime whose boundary does not, while that flag is set
+    /// (Zaki review 1, round 2, finding 21).
+    fn classifies_prose_pii(&self) -> bool {
+        false
+    }
 }
 
 pub struct DeterministicPipelinePrivacyBoundary;
@@ -155,6 +163,12 @@ impl PipelinePrivacyBoundary for ClassifierRedactorPipelinePrivacyBoundary {
     }
 
     fn is_production_compatible(&self) -> bool {
+        true
+    }
+
+    /// Every `rescrub` runs the classifier this boundary was built with
+    /// (`rescrub_envelope_prose_pii_with`).
+    fn classifies_prose_pii(&self) -> bool {
         true
     }
 }
