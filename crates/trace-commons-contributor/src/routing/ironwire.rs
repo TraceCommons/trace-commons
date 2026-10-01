@@ -231,6 +231,18 @@ impl IronWireLedger {
         &self.token
     }
 
+    /// A ledger that has completed one refresh holding exactly `rows`.
+    ///
+    /// Test-only: nothing shipped may hold rows the proxy did not serve.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_rows_for_test(rows: Vec<RoutedExchange>) -> Self {
+        let ledger = Self::new(1, String::new());
+        *ledger.snapshot.write().expect("snapshot lock") = rows;
+        *ledger.last_refresh_at.write().expect("refresh lock") = Some(Utc::now());
+        ledger
+    }
+
     /// The port this ledger was built with.
     ///
     /// Test-only for the same reason as `token_for_test`: nothing shipped

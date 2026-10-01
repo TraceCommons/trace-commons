@@ -177,13 +177,11 @@ impl AccountProvisioner for NearAiLogin {
 }
 
 /// Whether `tenant_id` names a legacy invite identity: not in either NEAR
-/// namespace. The server's own rule, applied here only to decide whether to
-/// offer the move; the server decides whether it may happen.
+/// namespace, in any ASCII case. The server's own rule, from the one shared
+/// protocol helper, applied here only to decide whether to offer the move;
+/// the server decides whether it may happen.
 pub fn is_legacy_tenant(tenant_id: &str) -> bool {
-    !tenant_id.is_empty()
-        && !trace_commons_protocol::admission::is_anchored_tenant(tenant_id)
-        && !tenant_id.starts_with("near-")
-        && !tenant_id.starts_with("nearai-")
+    !tenant_id.is_empty() && !trace_commons_protocol::admission::uses_anchor_namespace(tenant_id)
 }
 
 /// Whether `cfg` can be offered the move at all: a legacy tenant, enrolled

@@ -2579,6 +2579,8 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         return line;
     }
     match label {
+        crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
+        | crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL => "Waiting for review; not sent",
         queue::REASON_DISMISSED => "Skipped; not sent",
         queue::REASON_EXPIRED => "Expired without a decision; not sent",
         queue::REASON_CHANGED => "Session changed; review it again before sending",
@@ -2735,6 +2737,8 @@ mod tests {
     fn queue_outcomes_cover_producer_labels_without_guessing_unknown_send_state() {
         use crate::daemon::{health, preview, queue};
         for label in [
+            crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL,
             queue::REASON_DISMISSED,
             queue::REASON_CHANGED,
             preview::REASON_INPUTS_CHANGED,

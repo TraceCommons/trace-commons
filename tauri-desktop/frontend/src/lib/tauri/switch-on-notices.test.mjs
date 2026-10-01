@@ -29,6 +29,13 @@ test("each rewording keeps the wire element, to hand back to the core", () => {
   assert.deepEqual(parsed.wire, rewording);
 });
 
+test("the Automatic upgrade marker reaches shared notice copy unchanged", () => {
+  const upgrade = { ...rewording, scrub_check_defaulted: true };
+  const [parsed] = parseArmingRewordings([upgrade]);
+  assert.equal(parsed.id, upgrade.id);
+  assert.deepEqual(parsed.wire, upgrade);
+});
+
 // A malformed list read as empty would reword a folder in silence.
 test("a malformed rewording list is refused, not read as empty", () => {
   assert.throws(() => parseArmingRewordings("none"));

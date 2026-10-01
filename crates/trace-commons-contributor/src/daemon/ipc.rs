@@ -340,9 +340,14 @@ pub const METHODS: &[&str] = &[
     "inference_connection_select",
     "inference_connection_install",
     "inference_connection_disconnect",
+    "inference_calls",
+    "tool_destinations",
     "list_audit",
     "list_history",
     "list_pending",
+    "list_kept",
+    "keep",
+    "undo_keep",
     "list_projects",
     "project_automatic_copy",
     "pause",
@@ -352,6 +357,7 @@ pub const METHODS: &[&str] = &[
     "preview_request",
     "witness_preview_request",
     "preview_turns",
+    "preview_unsure_spans",
     "preview_visible",
     "probe_routed_tools",
     "probe_routing",
@@ -730,7 +736,7 @@ impl DaemonShared {
         // finished or undone before the policy is read and before any pass,
         // so nothing ever sees a half-switched identity.
         super::legacy_migration::recover(&store)?;
-        let policy = ProjectPolicy::load(&store)?;
+        let mut policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|error| {
             let mut settings = DaemonSettings::load(&store)?;
@@ -747,6 +753,24 @@ impl DaemonShared {
             settings.cloud_storage_unavailable = true;
             Ok::<_, anyhow::Error>(settings)
         })?;
+        if settings.scrub_check_defaulted_on_upgrade
+            && store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)?
+                .is_none()
+        {
+            // Save provenance before marking the policy migration done; a
+            // restart must not mistake a legacy settings-less install for fresh.
+            settings.save(&store)?;
+        }
+        if policy.record_scrub_check_upgrade(
+            settings.scrub_check_defaulted_on_upgrade
+                && settings.scrub_check == super::settings::ScrubCheck::Automatic,
+            Utc::now(),
+        ) {
+            // Fail startup if the notice cannot be persisted: changed
+            // unattended behavior must not silently precede its notice.
+            policy.save(&store)?;
+        }
         // Built here from the declaration this settings file carries at
         // startup. A later edit does not wait for a restart:
         // `set_settings` rebuilds the instance in place.
@@ -1223,6 +1247,31 @@ impl DaemonShared {
         })
     }
 
+    /// The label `private_inference_state.state` carries right now.
+    ///
+    /// For `inference_map`, which must draw the same answer `status` gives.
+    pub(crate) fn private_inference_label(&self) -> &'static str {
+        let state = self
+            .private_inference_state
+            .lock()
+            .expect("private inference state lock")
+            .clone();
+        let destination = self
+            .routing_ledger()
+            .and_then(|ledger| ledger.nearai_authenticated());
+        state.label_for(destination)
+    }
+
+    /// Hold `ledger` as the routing ledger, for tests.
+    #[cfg(test)]
+    pub(crate) fn install_routing_ledger_for_test(
+        &self,
+        ledger: crate::routing::ironwire::IronWireLedger,
+    ) {
+        let mut held = self.routing.write().expect("routing lock");
+        held.ledger = Some(Arc::new(ledger));
+    }
+
     /// The port a tool's config would be pointed at, or `None`.
     ///
     /// Two sources, in this order, and the order is the point:
@@ -1677,6 +1726,7 @@ impl DaemonShared {
                     ),
                     "was": notice.was,
                     "now": notice.now,
+                    "scrub_check_defaulted": notice.scrub_check_defaulted,
                 })
             })
             .collect();
@@ -2145,6 +2195,16 @@ pub fn entry_value(
     if let Some(reason) = e.attestation_reason.as_deref() {
         value["attestation_reason"] = serde_json::Value::from(reason);
     }
+    // THE FLOW 2 SCRUB STATE: `scrub`, `marks`, `second_look`.
+    //
+    // `scrub` is `not-yet-scrubbed` until a preview of this entry has run,
+    // and `marks` is ABSENT until then -- never `0`, which would read as
+    // "nothing matched" for a session the scrubber has not read.
+    // `second_look` holds the fixed reasons from
+    // `second_look::second_look_reasons`, the one predicate every surface
+    // shares; `trimmed-to-fit` is known from discovery and can appear before
+    // any preview.
+    super::second_look::insert_fields(&mut value, e.scrub(), e.subagents_dropped);
     value
 }
 
@@ -2300,6 +2360,10 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("witness_preview_request", "witness-review-requires-async"),
     ("preview_body", "preview-body-requires-async"),
     ("preview_turns", "preview-turns-requires-async"),
+    (
+        "preview_unsure_spans",
+        "preview-unsure-spans-requires-async",
+    ),
     ("quiesce", "quiesce-requires-async"),
     ("probe_routing", "probe-routing-requires-async"),
     ("probe_routed_tools", "probe-routed-tools-requires-async"),
@@ -2377,7 +2441,12 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "status" => Response::ok(req.id, shared.status_value()),
         "certificate_detail" => handle_certificate_detail(shared, req),
         "route_disclosure" => handle_route_disclosure(shared, req),
+        "tool_destinations" => super::inference_map::handle_destinations(shared, req),
+        "inference_calls" => super::inference_map::handle_calls(shared, req),
         "list_pending" => handle_list_pending(shared, req),
+        "list_kept" => handle_list_kept(shared, req),
+        "keep" => handle_keep(shared, req),
+        "undo_keep" => handle_undo_keep(shared, req),
         "list_projects" => handle_list_projects(shared, req),
         "project_automatic_copy" => handle_project_automatic_copy(shared, req),
         // The one project worth offering to arm right now, or nothing.
@@ -2524,12 +2593,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "cancel" => handle_cancel(shared, req),
         "list_audit" => handle_list_audit(shared, req),
-        // A count of `reason_label` across every entry currently on the
-        // queue, whatever its state -- no state filter is applied, it is
-        // simply whichever entries currently carry a label (in practice
-        // that's dismissed, refused, expired, and superseded entries, since
-        // nothing else sets one). These labels are already computed by the
-        // queue and uploader; this is the first surface that rolls them up.
+        // Resolved outcomes only. Pending review holds and approved/uploading
+        // entries are still waiting, and must not appear in the shells'
+        // "Sessions no longer waiting" group.
         //
         // Deliberately NOT named `eligibility_reasons`: every source of a
         // `reason_label` applies to an entry that already exists in the
@@ -2545,6 +2611,12 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             let mut counts: std::collections::BTreeMap<&str, u64> =
                 std::collections::BTreeMap::new();
             for e in queue.all() {
+                if matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                ) {
+                    continue;
+                }
                 if let Some(label) = e.reason_label.as_deref() {
                     *counts.entry(label).or_insert(0) += 1;
                 }
@@ -2767,13 +2839,106 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // config file, and holding the queue across that would put a file read
     // in front of every other queue caller.
     let admission_evidence = shared.admission_evidence();
+    // K5: an optional `project_id`, for Customize's past-session picker,
+    // which lists one folder's waiting sessions at a time. Matched by the id
+    // `entry_value` publishes, and refused rather than answered with an empty
+    // list when the daemon does not know the project, so a stale id cannot
+    // read as "nothing waiting". Absent is every project, as before.
+    let project_filter = match req.params.get("project_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) => {
+            let policy = shared.policy.lock().expect("policy lock");
+            let queue = shared.queue.lock().expect("queue lock");
+            let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+            match project_key_for_id(id, &known) {
+                Some(key) => Some(key),
+                None => {
+                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+                }
+            }
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid"),
+    };
     let queue = shared.queue.lock().expect("queue lock");
     let entries: Vec<serde_json::Value> = queue
         .pending()
         .iter()
+        .filter(|e| project_filter.as_deref().is_none_or(|k| e.project_key == k))
         .map(|e| entry_value(e, admission_evidence))
         .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
+}
+
+/// K5: every session kept on this Mac, in the `list_pending` entry shape,
+/// so a shell can show them and offer the undo. See `queue::REASON_KEPT`.
+fn handle_list_kept(shared: &DaemonShared, req: &Request) -> Response {
+    let admission_evidence = shared.admission_evidence();
+    let queue = shared.queue.lock().expect("queue lock");
+    let entries: Vec<serde_json::Value> = queue
+        .kept()
+        .iter()
+        .map(|e| entry_value(e, admission_evidence))
+        .collect();
+    Response::ok(req.id, serde_json::json!({ "kept": entries }))
+}
+
+/// K5: "Keep on this Mac" (open decision #4 in #1118), the reversible
+/// sibling of `dismiss`. The entry must be `pending`; see `Queue::keep` and
+/// `queue::REASON_KEPT` for exactly what a kept session is.
+fn handle_keep(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match entry_id_param(req) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    // A kept entry is never previewed while kept, as for `dismiss`.
+    shared.previews.cancel(id);
+    let mut queue = shared.queue.lock().expect("queue lock");
+    if let Err(e) = queue.keep(id) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if queue.save(&shared.store).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+    }
+    // The pin went with the keep, so the stored envelope goes too.
+    let _ = super::approved_envelope::sweep(&shared.store, &queue.pinned_entry_ids());
+    drop(queue);
+    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, serde_json::json!({ "kept": true }))
+}
+
+/// K5: undo a keep. The entry returns to `pending`, waiting for a person.
+fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match entry_id_param(req) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let max_entries = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .max_queue_entries;
+    // Lock order is policy before queue, as everywhere else.
+    let policy = shared.policy.lock().expect("policy lock");
+    let mut queue = shared.queue.lock().expect("queue lock");
+    // A session in a folder now set to Never is not brought back as a
+    // waiting card: the folder rule says not to offer it. The keep stays,
+    // and the undo can be asked for again once the rule changes.
+    if queue
+        .get(id)
+        .is_some_and(|e| e.is_kept() && policy.resolve(&e.project_key) == ProjectMode::Ignore)
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, "project-ignored");
+    }
+    drop(policy);
+    if let Err(e) = queue.undo_keep(id, Utc::now(), max_entries) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if queue.save(&shared.store).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+    }
+    drop(queue);
+    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, serde_json::json!({ "kept": false }))
 }
 
 // Every project the daemon knows about -- configured *and* merely
@@ -2955,6 +3120,10 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                         super::automatic_gate::Disclosure::PatternsOnly => "patterns_only",
                     },
                 );
+                // K5: whether the arming left the backlog waiting
+                // (`set_project_mode` with `from_now: true`). Armed rows
+                // only, like the disclosure.
+                row["from_now"] = serde_json::Value::Bool(policy.is_armed_from_now(&key));
             }
             row
         })
@@ -3310,6 +3479,29 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         Some(Ok(m)) => m,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
     };
+    // K5: arming is **from now** by default. `auto_upload` arms the project
+    // for sessions that appear from here on, and what is already on disk
+    // waits for the contributor -- the spec's rule that automatic
+    // contribution arms nothing already on disk, applied to every shell at
+    // once. See `policy::ArmedFromNow`. Only an explicit
+    // `include_backlog: true` sends the backlog too, which is what
+    // `auto_upload` meant before. Only a boolean is accepted, and only with
+    // `auto_upload`: a backlog means nothing for ask-first or Never, and
+    // silently ignoring it there would let a shell believe it had set a rule
+    // it had not.
+    let include_backlog = match req.params.get("include_backlog") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "include-backlog-invalid"),
+    };
+    if include_backlog && mode != ProjectMode::AutoUpload {
+        return Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            "include-backlog-requires-auto-upload",
+        );
+    }
+    let from_now = mode == ProjectMode::AutoUpload && !include_backlog;
     // A `label` param is accepted on the wire for compatibility with
     // older clients and then IGNORED. It used to be stored verbatim
     // and echoed back by `list_projects` and written into
@@ -3409,7 +3601,10 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
                 at: Utc::now(),
                 action: "armed-auto-upload".to_string(),
                 project_label: Some(audit_label),
-                detail: None,
+                // The same action either way, so every shell's audit
+                // sentence still reads right; the detail label says the
+                // backlog was not included.
+                detail: from_now.then(|| "from-now".to_string()),
             },
         ) {
             return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
@@ -3417,9 +3612,26 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         policy = shared.policy.lock().expect("policy lock");
     }
 
-    if let Err(e) = policy.set_mode(&key, mode, Utc::now()) {
+    let now = Utc::now();
+    // A re-arm from now over an arming from now keeps the record it had:
+    // the hold covers what was on disk at the FIRST arming, and a shell
+    // re-sending the same setting must neither release that backlog nor
+    // start holding sessions that arrived since.
+    let prior_arming = policy.armed_from_now.get(&key).cloned();
+    let rearm_from_now = from_now && prior_arming.is_some();
+    if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
+    // Under the same policy lock as the mode, so no pass can see the project
+    // armed without the arming's hold.
+    if from_now {
+        match prior_arming {
+            Some(prior) => policy.restore_arming_from_now(&key, prior),
+            None => policy.arm_from_now(&key, now),
+        }
+    }
+    // Whatever this change left no arming able to hold.
+    policy.prune_arming_record();
     if let Some(claim) = arming_claim {
         policy.record_arming_claim(&key, claim);
     }
@@ -3495,6 +3707,15 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             ProjectMode::NotifyOnly => {
                 queue.return_unattended_to_waiting_for_project(&key, Utc::now())
             }
+            // Arming from now over an earlier plain arming: whatever that
+            // arming approved unattended and has not sent yet was on disk
+            // now, so it is backlog, and it goes back to waiting for the
+            // contributor exactly as turning automatic off would put it. Not
+            // over an arming from now: what that approved arrived after it,
+            // and is not backlog.
+            ProjectMode::AutoUpload if from_now && !rearm_from_now => {
+                queue.return_unattended_to_waiting_for_project(&key, Utc::now())
+            }
             ProjectMode::AutoUpload => 0,
         };
         let restored = if mode == ProjectMode::Ignore {
@@ -3517,7 +3738,12 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     shared.publish_if_decisions_owed_changed(decisions_owed_before);
     Response::ok(
         req.id,
-        serde_json::json!({ "ok": true, "purged": purged, "retracted": retracted }),
+        serde_json::json!({
+            "ok": true,
+            "purged": purged,
+            "retracted": retracted,
+            "from_now": from_now,
+        }),
     )
 }
 
@@ -3683,6 +3909,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     // Routing separately retains its warm reader when its endpoint is unchanged.
     let private_inference_before = settings.private_inference;
     let capture_before = settings.token_capture_enabled;
+    let scrub_check_before = settings.scrub_check;
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
     // settings override) uses, so there is one definition of "a
@@ -3728,8 +3955,29 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // the save so a declaration that takes effect is always
             // one that survives a restart too.
             shared.rebuild_effective_routing(&settings);
+            let manual = super::settings::ScrubCheck::Manual;
+            let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             drop(settings);
+            // The switch to the Manual Scrub check (K4 of #1118) returns
+            // every unsent approval made on the contributor's behalf to
+            // waiting at once, rather than leaving it reading approved until
+            // the uploader reaches and holds it. Mirrors turning a project's
+            // automatic contributing off. The count rides on the reply.
+            if switched_to_manual {
+                let returned = {
+                    let mut queue = shared.queue.lock().expect("queue lock");
+                    let returned = queue.return_unattended_to_waiting();
+                    if returned > 0 {
+                        let _ = queue.save(&shared.store);
+                    }
+                    returned
+                };
+                if returned > 0 {
+                    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                }
+                value["scrub_check_returned_to_waiting"] = serde_json::Value::from(returned);
+            }
             add_admission_setting(shared, &mut value);
             Response::ok(req.id, value)
         }
@@ -3810,6 +4058,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "preview_body" => handle_preview_body(shared, req).await,
         "quiesce" => handle_quiesce(shared, req).await,
         "preview_turns" => handle_preview_turns(shared, req).await,
+        "preview_unsure_spans" => handle_preview_unsure_spans(shared, req).await,
         "search_original" => handle_search_original(shared, req).await,
         "probe_routing" => handle_probe_routing(req).await,
         "probe_routed_tools" => handle_probe_routed_tools(req).await,
@@ -4787,8 +5036,14 @@ async fn handle_witness_preview_request_inner(
         id,
         &review.summary.envelope_digest,
         review.artifact.attested_inference().cloned(),
-    ) || queue.save(&shared.store).is_err()
-    {
+    ) || {
+        queue.record_scrub(
+            id,
+            &review.summary.envelope_digest,
+            review.summary.scrub_counts,
+        );
+        queue.save(&shared.store).is_err()
+    } {
         *queue = previous_queue;
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
     }
@@ -4805,8 +5060,14 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     if entry.holds_witness_certificate() {
         return match open_preview(shared, id).await {
             Ok((summary, _)) => {
+                let scrub = super::second_look::Scrub::Scrubbed(summary.scrub_counts);
+                let dropped = summary.subagents_dropped;
                 let mut value =
                     serde_json::to_value(summary).expect("preview summary serialization");
+                super::second_look::insert_fields(&mut value, scrub, dropped);
+                // Re-read: the build above recorded its counts on the pinned
+                // entry, and the entry this response describes should say so.
+                let entry = entry_by_id(shared, req, id).unwrap_or(entry);
                 value["entry"] = entry_value(&entry, shared.admission_evidence());
                 Response::ok(req.id, value)
             }
@@ -4880,6 +5141,20 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
 pub(crate) fn preview_card_value(
     summary: &super::preview::PreviewCardSummary,
 ) -> serde_json::Value {
+    let mut value = preview_card_fields(summary);
+    // The same scrub fields `entry_value` carries, describing THIS build: a
+    // card is a scrub, so it is always `scrubbed`. A card pins nothing, so
+    // nothing here is recorded on the queue entry -- see
+    // `QueueEntry::scrub`.
+    super::second_look::insert_fields(
+        &mut value,
+        super::second_look::Scrub::Scrubbed(summary.scrub_counts),
+        summary.subagents_dropped,
+    );
+    value
+}
+
+fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_json::Value {
     serde_json::json!({
         "would_send_bytes": summary.would_send_bytes,
         "raw_session_bytes": summary.raw_session_bytes,
@@ -5057,7 +5332,7 @@ async fn build_and_pin_preview(
         if transcript.session_hash != entry.session_hash {
             return Err((ERR_UNAVAILABLE, "witness-review-stale"));
         }
-        return super::preview::summarize_witnessed_preview(
+        let built = super::preview::summarize_witnessed_preview(
             &artifact,
             cfg.ok_or(unavailable)?,
             near_ai,
@@ -5065,7 +5340,17 @@ async fn build_and_pin_preview(
             session_ref.size_bytes,
             attested_bodies,
         )
-        .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"));
+        .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"))?;
+        // The stored artifact this summary was rebuilt from is the one the
+        // entry is pinned to (checked above), so its counts describe the
+        // bytes an approval would send.
+        record_scrub(
+            shared,
+            entry_id,
+            &built.0.envelope_digest,
+            built.0.scrub_counts,
+        );
+        return Ok(built);
     }
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
         &shared.store,
@@ -5094,6 +5379,28 @@ async fn build_and_pin_preview(
         pin_previewed_envelope(shared, entry_id, &summary, &envelope);
     }
     Ok((summary, body, envelope))
+}
+
+/// Record what the scrubber found in the envelope `entry_id` is pinned to,
+/// so `list_pending` can say "Scrubbed · 7 marks" -- or "worth a second
+/// look" -- without re-running the pipeline. See `QueueEntry::scrub` and
+/// `second_look`.
+///
+/// Only for the pinned bytes: `Queue::record_scrub` refuses a digest the
+/// entry is not pinned to, so a card, an unenrolled build, or a pin that
+/// failed to write records nothing. Counts only. Best effort, like
+/// `pin_previewed_envelope`: a queue that cannot be saved keeps the record in
+/// memory, and a lost record reads as not yet scrubbed, the safe direction.
+pub(crate) fn record_scrub(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    envelope_digest: &str,
+    counts: super::second_look::ScrubCounts,
+) {
+    let mut queue = shared.queue.lock().expect("queue lock");
+    if queue.record_scrub(entry_id, envelope_digest, counts) {
+        let _ = queue.save(&shared.store);
+    }
 }
 
 /// Full preview -- summary *and* redacted body -- for one queue entry, for a
@@ -5424,6 +5731,7 @@ async fn handle_preview_turns(shared: &DaemonShared, req: &Request) -> Response 
             "envelope_digest": envelope_digest,
             "turn_count": turns.len(),
             "turns": turns,
+            "leaves_this_mac": leaves_this_mac_value(shared, id, &envelope, turns.len()),
         }),
     )
 }
@@ -5457,8 +5765,151 @@ pub async fn open_preview_turns(
         "envelope_digest": envelope_digest,
         "turn_count": turns.len(),
         "turns": turns,
+        "leaves_this_mac": leaves_this_mac_value(shared, entry_id, &envelope, turns.len()),
     }))
     .map_err(|_| "turns-serialize-failed")
+}
+
+/// The review sheet's "Leaves this Mac" object: the envelope metadata that
+/// leaves with the conversation, as fixed labels read off the envelope
+/// itself (`consent_copy::leaves_this_mac_fields`), the size and turn count
+/// the line quotes, and the finished DRAFT line. Labels and counts only: no
+/// field VALUE rides along -- not the tool name, not the model, not the
+/// fingerprint.
+///
+/// `would_send_bytes` is `null` in the (unreachable) case that the
+/// envelope cannot be measured, and `line` is then absent: a line quoting a
+/// size nobody measured would be a claim the daemon cannot back.
+fn leaves_this_mac_value(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+    turn_count: usize,
+) -> serde_json::Value {
+    let fields = crate::consent_copy::leaves_this_mac_fields(envelope);
+    let size = crate::envelope::envelope_size(envelope).ok();
+    // The folder's own names, from the entry: the basename of the project
+    // root, of the unfolded path, and of the directory the session ran in.
+    // Only absolute paths are scrubbed, so a relative path in the
+    // conversation can still name the folder, and the line must say so
+    // rather than promise it never leaves.
+    let folders: Vec<String> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue
+            .get(entry_id)
+            .map(|e| {
+                [
+                    Some(e.project_key.as_str()),
+                    e.project_path.as_deref(),
+                    e.session_cwd.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.rsplit(['/', '\\']).find(|seg| !seg.is_empty()))
+                .map(str::to_string)
+                .collect()
+            })
+            .unwrap_or_default()
+    };
+    let folder_refs: Vec<&str> = folders.iter().map(String::as_str).collect();
+    let (in_metadata, in_conversation) =
+        crate::consent_copy::folder_named_in(envelope, &folder_refs);
+    let mut value = serde_json::json!({
+        "fields": fields,
+        "would_send_bytes": size,
+        "turn_count": turn_count,
+        "folder_named_in_conversation": in_conversation,
+        "folder_named_in_metadata": in_metadata,
+    });
+    if let Some(bytes) = size {
+        value["line"] = serde_json::Value::from(crate::consent_copy::leaves_this_mac_line(
+            bytes,
+            turn_count,
+            &fields,
+            (in_metadata, in_conversation),
+        ));
+    }
+    value
+}
+
+/// Spans of the redacted preview body that look like personal data the
+/// scrubber did not mark -- an email the email pass did not redact, a phone
+/// number, a credential-shaped string -- so the review sheet can put "looks
+/// like an email. Not matched. Your call." under that line.
+///
+/// # What crosses
+///
+/// Byte offsets into the body and a fixed label from
+/// `unsure_spans::UNSURE_LABELS`. **Never the text**: the shell already
+/// holds the body from `preview_body` and renders the span from it. The body
+/// is trace content under the preview content boundary; this response is
+/// not, in the same way `preview_turns` is not, and it is served under the
+/// same rules -- only for an entry the caller already holds
+/// (`unknown-entry-id` otherwise), and never logged, audited or notified.
+///
+/// # Anchoring
+///
+/// `body_digest` is **required** on every call, exactly as for
+/// `preview_turns`: the offsets index one specific string, and against any
+/// other they are not stale but wrong. A mismatch is
+/// [`ERR_PREVIEW_BODY_CHANGED`]; the caller re-reads the body from
+/// `offset: 0` and asks again. The body and the spans are resolved through
+/// `resolve_preview_envelope`, the same path as `preview_body` and
+/// `preview_turns`, so the three can never come from two builds.
+///
+/// # Fail-closed
+///
+/// A body the detector cannot index exactly -- or any span that does not
+/// re-verify against the bytes it points at -- refuses the whole response
+/// with `unsure_spans::REASON_UNSURE_INDEX_FAILED`. A partial list is only
+/// ever returned flagged: `span_count` is the total, `spans` holds at most
+/// `unsure_spans::MAX_UNSURE_SPANS` of them, and `spans_truncated` says
+/// whether it was cut.
+async fn handle_preview_unsure_spans(shared: &DaemonShared, req: &Request) -> Response {
+    let id = try_response!(entry_id_param(req));
+    let expected_digest = match req.params.get("body_digest") {
+        None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_BODY_DIGEST_REQUIRED),
+        Some(v) => match v.as_str() {
+            Some(s) => s.to_string(),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "body-digest-invalid"),
+        },
+    };
+    match open_preview_unsure_spans(shared, id, &expected_digest).await {
+        Ok(value) => Response::ok(req.id, value),
+        Err((code, label)) => Response::err(req.id, code, label),
+    }
+}
+
+/// The unsure-span index for one entry, for a caller holding `shared`
+/// directly (a future C ABI export) as well as for the socket method, so
+/// the two cannot describe the same entry differently. Anchored by the
+/// caller's `body_digest` exactly as `open_preview_turns` is. Errors are
+/// `(code, fixed label)`, never content.
+pub async fn open_preview_unsure_spans(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    expected_body_digest: &str,
+) -> Result<serde_json::Value, (&'static str, &'static str)> {
+    let (envelope, envelope_digest, _enrolled) = resolve_preview_envelope(shared, entry_id).await?;
+    let body =
+        super::preview::body_of(&envelope).map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
+    let body_digest = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+    if expected_body_digest != body_digest {
+        return Err((ERR_UNAVAILABLE, ERR_PREVIEW_BODY_CHANGED));
+    }
+    let mut spans =
+        super::unsure_spans::unsure_spans_in(&body).map_err(|label| (ERR_UNAVAILABLE, label))?;
+    let span_count = spans.len();
+    let truncated = span_count > super::unsure_spans::MAX_UNSURE_SPANS;
+    spans.truncate(super::unsure_spans::MAX_UNSURE_SPANS);
+    Ok(serde_json::json!({
+        "entry_id": entry_id,
+        "body_digest": body_digest,
+        "envelope_digest": envelope_digest,
+        "span_count": span_count,
+        "spans": spans,
+        "spans_truncated": truncated,
+    }))
 }
 
 /// The redacted body for one entry, plus its envelope digest and whether the
@@ -5564,6 +6015,9 @@ fn pin_previewed_envelope(
         return;
     }
     if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None) {
+        // The counts go down with the pin they describe; see
+        // `QueueEntry::scrub`.
+        queue.record_scrub(entry_id, &summary.envelope_digest, summary.scrub_counts);
         // A failed queue write leaves the pin in memory and the bytes on
         // disk -- consistent with each other, and the next queue save
         // persists it. Nothing is removed here: the bytes are what the
@@ -7286,26 +7740,14 @@ mod tests {
                 serde_json::json!({"project_key": work_api, "mode": "notify_only"}),
             ),
         );
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: work_api.clone(),
-                        project_label: "api".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                project_key: work_api.clone(),
+                project_label: "api".to_string(),
+                ..queue_entry_fixture()
+            },
+        );
 
         // A colliding project shows up via a policy edit -- no tick runs.
         let r = handle_request(
@@ -7376,26 +7818,7 @@ mod tests {
         // audit; approving one entry at a time is the default, always-was
         // path and does not need a new log entry per click.
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
         let r = handle_request_async(
             &s,
             &req(
@@ -7411,31 +7834,17 @@ mod tests {
     #[tokio::test]
     async fn an_approval_carries_its_verdict_to_the_entry() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        // Already pinned, so `handle_approve` does not try to
-                        // build a real preview for a path that does not
-                        // exist -- this test is about the verdict, not the
-                        // envelope pipeline.
-                        previewed_envelope_digest: Some("sha256:preview".to_string()),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                // Already pinned, so `handle_approve` does not try to
+                // build a real preview for a path that does not
+                // exist -- this test is about the verdict, not the
+                // envelope pipeline.
+                previewed_envelope_digest: Some("sha256:preview".to_string()),
+                ..queue_entry_fixture()
+            },
+        );
 
         let r = handle_request_async(
             &s,
@@ -7505,26 +7914,7 @@ mod tests {
     #[tokio::test]
     async fn an_unrecognised_verdict_is_refused_and_approves_nothing() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
 
         let r = handle_request_async(
             &s,
@@ -7901,6 +8291,47 @@ mod tests {
         assert!(one.get("excluded_held").is_none(), "{one}");
     }
 
+    /// The Scrub check's hold (K4 of #1118) is left out of a group approve
+    /// like the others: "Submit all" is not a second look at one session.
+    #[tokio::test]
+    async fn a_group_approve_leaves_a_session_held_for_a_second_look() {
+        let s = shared();
+        let key = "/tmp/secondlookproj";
+        let open = seed_entry_with_eligibility(&s, key, None);
+        let held = seed_entry_with_eligibility(&s, key, None);
+        s.queue.lock().unwrap().set_state(
+            held,
+            super::super::queue::QueueState::Pending,
+            Some(super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED.to_string()),
+        );
+
+        let result = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({ "project_id": project_id_for(key) }),
+            ),
+        )
+        .await
+        .result
+        .expect("approve answers");
+
+        assert_eq!(result["excluded_held"], 1, "{result}");
+        let selected = result["skipped"].as_array().expect("a skipped list");
+        assert!(
+            selected
+                .iter()
+                .all(|e| e["entry_id"] != serde_json::json!(held)),
+            "the held session was not selected: {result}"
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|e| e["entry_id"] == serde_json::json!(open)),
+            "the other session was: {result}"
+        );
+    }
+
     /// Arming over the socket records the terms it was granted under, so a
     /// later widening can be compared against what was actually agreed
     /// rather than against a baseline taken afterwards.
@@ -8213,6 +8644,89 @@ mod tests {
         assert_eq!(
             status["automatic_contribution_held"],
             serde_json::json!({ "held_sessions": 0, "reasons": [], "projects": [] })
+        );
+    }
+
+    #[test]
+    fn automatic_default_upgrade_notice_survives_save_restart_and_acknowledgement() {
+        let s = enrolled_shared();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/upgrade", ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&s.store).unwrap();
+        }
+        let mut old = serde_json::to_value(DaemonSettings::default()).unwrap();
+        old.as_object_mut().unwrap().remove("scrub_check");
+        s.store
+            .write_daemon_file(
+                crate::config::DAEMON_SETTINGS_FILE,
+                old.to_string().as_bytes(),
+            )
+            .unwrap();
+        // A preference write before the daemon starts must not erase provenance.
+        DaemonSettings::load(&s.store)
+            .unwrap()
+            .save(&s.store)
+            .unwrap();
+        let upgraded = DaemonShared::load(s.store.clone()).unwrap();
+        let notices = upgraded.status_value()["arming_rewordings"].clone();
+        assert_eq!(notices.as_array().unwrap().len(), 1);
+        assert_eq!(notices[0]["scrub_check_defaulted"], true);
+        assert!(!notices.to_string().contains("/tmp/upgrade"));
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(restarted.status_value()["arming_rewordings"], notices);
+        let response = handle_request(
+            &restarted,
+            &req(
+                "acknowledge_arming_rewordings",
+                serde_json::json!({"ids": [notices[0]["id"]]}),
+            ),
+        );
+        assert!(response.error.is_none());
+        let acknowledged = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            acknowledged.status_value()["arming_rewordings"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn startup_announces_an_old_armed_install_without_a_settings_file() {
+        let s = shared();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_none()
+        );
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/legacy", ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&s.store).unwrap();
+        }
+        let upgraded = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            upgraded.status_value()["arming_rewordings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            DaemonSettings::load(&s.store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            restarted.status_value()["arming_rewordings"],
+            upgraded.status_value()["arming_rewordings"]
         );
     }
 
@@ -9333,26 +9847,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_approval_is_rolled_back_when_its_audit_entry_cannot_be_written() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
         break_the_audit_log(&s.store);
 
         let r = handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
@@ -9584,13 +10079,18 @@ mod tests {
         // against today's cap reports pressure, or blocked entries, that no
         // upload is actually facing yet. Once it is due it counts again.
         let s = shared();
-        let now = Utc::now();
+        // Stay within one UTC day: near midnight, +31 minutes correctly
+        // resets the real daily cap and used to make this test fail.
+        let now = "2026-09-30T12:00:00Z"
+            .parse::<chrono::DateTime<Utc>>()
+            .unwrap();
         {
             let mut state = s.state.lock().unwrap();
             state.day_bucket = Some(now.format("%Y-%m-%d").to_string());
             state.uploads_today = 50;
         }
         let mut waiting = approved_entry(1_024);
+        waiting.discovered_at = now;
         waiting.reason_label = Some(crate::submit::REASON_TRANSIENT_REDACTION.into());
         waiting.retry_after = Some(now + chrono::Duration::minutes(30));
         {
@@ -11738,6 +12238,98 @@ mod tests {
         assert!(!reloaded.private_inference);
     }
 
+    /// Reviewed on #1139: switching to the Manual Scrub check returns every
+    /// unsent approval made on the contributor's behalf to waiting at once,
+    /// rather than leaving it reading approved until the uploader holds it.
+    /// A person's own approval stands. Mirrors
+    /// `turning_automatic_off_returns_its_unsent_approvals_to_waiting`.
+    #[test]
+    fn switching_to_manual_returns_unsent_unattended_approvals_to_waiting() {
+        let s = shared();
+        let key = "/tmp/manualproj";
+        let unattended = seed_entry_with_eligibility(&s, key, None);
+        let theirs = seed_entry_with_eligibility(&s, key, None);
+        {
+            let mut q = s.queue.lock().unwrap();
+            assert!(q.approve_unattended(unattended, &[], None));
+            assert!(q.approve(theirs, &[], None, None, None, None));
+        }
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        );
+        let result = r.result.expect("set_settings answers");
+        assert_eq!(result["scrub_check_returned_to_waiting"], 1, "{result}");
+
+        let q = s.queue.lock().unwrap();
+        let back = q.get(unattended).unwrap();
+        assert_eq!(back.state, super::super::queue::QueueState::Pending);
+        assert!(!back.approved_unattended);
+        assert_eq!(
+            back.reason_label.as_deref(),
+            Some(super::super::second_look::REASON_SCRUB_CHECK_MANUAL)
+        );
+        assert_eq!(
+            q.get(theirs).unwrap().state,
+            super::super::queue::QueueState::Approved,
+            "the contributor's own approval stands"
+        );
+        drop(q);
+
+        // Setting Manual again moves nothing and reports nothing.
+        let again = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        )
+        .result
+        .expect("set_settings answers");
+        assert!(
+            again.get("scrub_check_returned_to_waiting").is_none(),
+            "{again}"
+        );
+    }
+
+    /// The Scrub check (K4 of #1118) is readable, settable, persisted, and
+    /// refuses anything but its two values over the socket too.
+    #[test]
+    fn the_scrub_check_round_trips_over_the_socket_and_persists() {
+        let s = shared();
+        let before = handle_request(&s, &req("get_settings", serde_json::json!({})))
+            .result
+            .expect("get_settings answers");
+        assert_eq!(
+            before["scrub_check"], "automatic",
+            "the default, reported as the string"
+        );
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            r.result.expect("set_settings answers")["scrub_check"],
+            "manual"
+        );
+        let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
+        assert_eq!(
+            reloaded.scrub_check,
+            super::super::settings::ScrubCheck::Manual,
+            "a restart keeps it"
+        );
+
+        let bad = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "off"})),
+        );
+        assert!(bad.error.is_some(), "an unknown mode is refused");
+        let after = handle_request(&s, &req("get_settings", serde_json::json!({})))
+            .result
+            .expect("get_settings answers");
+        assert_eq!(after["scrub_check"], "manual", "and changes nothing");
+    }
+
     /// Ask 127.0.0.1:`port` for IronWire's health endpoint using nothing
     /// but the standard library.
     ///
@@ -11953,6 +12545,26 @@ mod tests {
             s.settings.lock().unwrap().max_uploads_per_day,
             super::super::settings::DaemonSettings::default().max_uploads_per_day
         );
+    }
+
+    fn queue_entry_fixture() -> super::super::queue::QueueEntry {
+        super::super::queue::QueueEntry {
+            entry_id: Uuid::new_v4(),
+            session_hash: "sha256:seed".to_string(),
+            source: "claude-code".to_string(),
+            project_key: "/tmp/p".to_string(),
+            project_label: "p".to_string(),
+            path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+            size_bytes: 1,
+            discovered_at: Utc::now(),
+            ..Default::default()
+        }
+    }
+
+    fn seed_queue_entry(s: &DaemonShared, entry: super::super::queue::QueueEntry) -> Uuid {
+        let id = entry.entry_id;
+        s.queue.lock().unwrap().upsert(entry, 500).unwrap();
+        id
     }
 
     fn seed_entry_in_state(s: &DaemonShared, state: QueueState) -> Uuid {
@@ -12250,6 +12862,27 @@ mod tests {
     }
 
     #[test]
+    fn queue_outcome_counts_excludes_sessions_still_waiting_for_review() {
+        for label in [
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            super::super::second_look::REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let s = shared();
+            let id = seed_entry_in_state(&s, QueueState::Pending);
+            s.queue
+                .lock()
+                .unwrap()
+                .set_state(id, QueueState::Pending, Some(label.into()));
+            let r = handle_request(&s, &req("queue_outcome_counts", serde_json::json!({})));
+            assert_eq!(
+                r.result.unwrap()["reasons"],
+                serde_json::json!({}),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn consent_options_is_reachable_over_the_dispatcher() {
         let s = shared();
         let r = handle_request(&s, &req("consent_options", serde_json::json!({})));
@@ -12293,27 +12926,13 @@ mod tests {
     #[tokio::test]
     async fn quiesce_times_out_rather_than_forcing_its_way_past_an_upload() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        state: QueueState::Uploading,
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                state: QueueState::Uploading,
+                ..queue_entry_fixture()
+            },
+        );
         let r =
             handle_request_async(&s, &req("quiesce", serde_json::json!({"timeout_secs": 1}))).await;
         let err = r.error.expect("an in-flight upload must not be abandoned");
@@ -12327,27 +12946,13 @@ mod tests {
     #[tokio::test]
     async fn quiesce_completes_once_the_in_flight_upload_finishes() {
         let s = std::sync::Arc::new(shared());
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        state: QueueState::Uploading,
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                state: QueueState::Uploading,
+                ..queue_entry_fixture()
+            },
+        );
         let finisher = std::sync::Arc::clone(&s);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -12449,7 +13054,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 35);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 36);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -12878,8 +13483,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 50, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 42, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 55, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

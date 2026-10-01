@@ -387,6 +387,11 @@ and a project name is not an informed one. This content is bounded:
   history record, notification text, or a receipt. Not truncated, not
   summarized, not hashed-with-a-sample. Nothing copies it into any of those.
 
+`preview_unsure_spans` is outside the exemption for the same reason as
+`preview_turns` below: it carries fixed labels and byte offsets into the body
+the caller already holds, never the text at those offsets, and is served
+under the same `unknown-entry-id` rule.
+
 `preview_turns` is **not** part of the exemption and does not need to be: it
 carries event-type labels, tool names the envelope already records as
 metadata, and byte offsets, never redacted text. It is still served only for
@@ -465,12 +470,13 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | — | `pending[]` of queue entries | |
+| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
-| `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
+| `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
+| `preview_unsure_spans` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `span_count`, `spans[]`, `spans_truncated` | byte ranges **into the body `preview_body` returns** that look like personal data the scrubber did not mark, each with a fixed label; offsets and labels only, never the text. See "`preview_unsure_spans`" below |
 | `prepare_admission_session` | `entry_id`, `backend`, `confirmed: true` | `status: "ready_for_next_inference"`, `expires_at`, `view` | consent-gated challenge registration for the next inference; no funding or routing changes |
 | `native_wallet_flow` | `action: open/check/start/wait/cancel`; `flow_id` after open; `ingest_url` for check/start; `account_id` for start | shared wallet view (see below) | owns capability checks, origin validation, polling cadence and cancellation; no new C ABI |
 | `near_account_capabilities` | `ingest_url` | validated `ready`, issuer, audience and witness settings; on `ready: false` a `reason` of `address_refused`, `unreachable` or `unsupported` | checks allowlisted HTTPS service; no signup or funding. With `TRACE_COMMONS_ALLOWED_HOSTS` unset the allowlist is derived from `ingest_url` plus the issuer and witness hosts that origin publishes |
@@ -488,11 +494,14 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
 | `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
+| `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
+| `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
+| `list_kept` | — | `kept[]` of queue entries | every kept entry, in the `list_pending` shape, so a shell can show them and offer the undo |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>`, `retracted: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended` and `approved_verdict` | see "History provenance (K7)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
@@ -516,7 +525,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -686,14 +695,20 @@ It stays until a shell calls `acknowledge_arming_rewordings` with its `id`
 sets the project's mode, which answers it. A void takes it with it. The
 rewording itself is audited as `arming-reworded` with the project label.
 
-Today no rewording is recorded: every shell's arming offer says "will be
+For claim narrowings, every shell's arming offer currently says "will be
 scrubbed" whatever R1's disclosure is, so the words in force have not
-changed. It fires when the arming offer becomes disclosure-dependent
+changed. That notice fires when the arming offer becomes disclosure-dependent
 (`arming_wording::project_arming_claim`), or when a folder's disclosure drops
 to patterns-only. The words are
 `consent_copy::arming_reworded_notice_for_wire` (`tc_arming_reworded_notice`);
 its `ask_first_action` button is `set_project_mode` with the element's
 `project_id` and `notify_only`.
+
+The Automatic-default upgrade also uses this persisted notice channel.
+An element with `scrub_check_defaulted: true` announces the new review holds;
+its `was` and `now` claims are unchanged. The shared formatter selects the
+upgrade wording, including the existing Ask me first action. An upgrade and
+a claim-narrowing notice can coexist and are acknowledged by their own ids.
 
 #### `automatic_contribution_held`
 
@@ -996,6 +1011,69 @@ preview a local file; that requirement was incidental and is gone.
 are real in both cases; an unenrolled preview understates nothing about
 redaction except what an external filter would additionally have removed.
 
+### The scrub state and `second_look`
+
+The Flow 2 design shows each pending session with its scrub state
+("Scrubbed · 7 marks") and marks some "worth a second look": sessions the
+scrubber was unsure about, which wait for a person. The daemon decides that
+once, in `daemon::second_look::second_look_reasons`, and publishes the answer
+in additive fields on every queue entry (`list_pending`, `snapshot`, the
+`entry` inside a `preview` response) and on every preview summary
+(`preview`, `preview_request`'s `ready` summary, the `preview_ready` event):
+
+| Field | Presence | Meaning |
+|---|---|---|
+| `scrub` | always | `scrubbed` or `not-yet-scrubbed` (see below). A summary is always `scrubbed`: it describes its own build. |
+| `marks` | **only when `scrubbed`** | how many values the scrubber took out: the sum of `redactions` over labels that removed something. A `residual_secret_at:*` survivor is not a mark. |
+| `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
+| `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
+| `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
+
+The reasons:
+
+- **`nothing-matched`**: `content_marks` is `0`. The scrubber took out no
+  personal detail -- only file paths, or nothing at all. Path removals are
+  deliberately left out of this test: nearly every real session carries
+  absolute paths, so counting them would make the reason almost never fire,
+  and a session whose only marks were paths has had nothing personal found
+  in it.
+- **`looks-unsure`**: the unsure-span detector found at least one span (an
+  email, phone number or key shape the scrubber did not mark), or could not
+  index the body at all, which counts as unsure.
+- **`trimmed-to-fit`**: `subagents_dropped > 0`; part of the conversation is
+  not in what would be sent.
+
+**Not yet scrubbed is not zero marks.** On a queue entry, `scrub` is
+`scrubbed` only while the entry is pinned to an envelope **and** the counts
+were taken from that exact envelope: they are stored beside its digest, and
+only the pinning build (`preview_body`, `preview_turns`,
+`preview_unsure_spans`, `approve`, a witnessed review) writes them. A card
+(`preview`, `preview_request`) pins nothing and so records nothing, and an
+unenrolled build is never pinned. When the pin is released, replaced or
+revoked -- a re-enrolment, a privacy-filter change, an approval revoked and
+re-offered, a stale pin released after three days -- the entry reads as
+`not-yet-scrubbed` again, with nothing to clear by hand. Before then `marks`,
+`content_marks` and `unsure_spans` are **absent** -- never `0`, never `null`
+-- and `second_look` never contains `nothing-matched` or `looks-unsure`. A
+shell must not render an unscrubbed session as "0 marks" or as clean; test
+for the key. `trimmed-to-fit` can appear before any preview, because the
+trim is decided at discovery.
+
+**An empty `second_look` is an all-clear only when `scrub` is `scrubbed`.**
+For a `not-yet-scrubbed` entry it means no reason is known yet. A caller that
+would move a session on its own (the Scrub check's Automatic mode) must pin
+and count it first.
+
+Recording the counts publishes no event: the next `list_pending` or
+`snapshot` carries them.
+
+The Automatic Scrub check's hold (see `scrub_check` under `set_settings`)
+counts the envelope it is about to send in exactly this way, and pins that
+envelope with its counts when it holds the session, so a held entry reads
+`scrubbed` with the reasons that held it.
+
+Neither state is a colour: a shell renders the reason.
+
 ### Explicit witnessed review
 
 The daemon exposes `witness_preview_request` through authenticated local IPC.
@@ -1078,7 +1156,10 @@ with an object whose `state` is one of:
 | `too_large` | `raw_session_bytes`, `limit_bytes` | refused by admission control; nothing was parsed |
 | `failed` | `code`, `label` | the pipeline refused; same fixed labels `preview` uses |
 
-`summary` carries exactly the fields `preview` returns -- `would_send_bytes`,
+`summary` also carries `scrub`, `marks`, `content_marks`, `unsure_spans`
+and `second_look`, describing that build (see "The scrub state and
+`second_look`" above). Beyond those, it carries exactly the fields
+`preview` returns -- `would_send_bytes`,
 `raw_session_bytes`, `event_count`, `opening_prompt`, `redactions`,
 `pii_labels_present`, `consent_scopes`, `residual_risk`, `envelope_digest`,
 `input_fingerprint`, `enrolled` -- with one deliberate omission: it does
@@ -1153,6 +1234,84 @@ path, size, and mtime, the entry's whole-group size, and a fingerprint of
 the local configuration. Any of those changing rebuilds. The cache lives in
 the daemon process and does not survive a daemon restart.
 
+### `keep`: Keep on this Mac
+
+Open decision #4 in #1118 asked whether the review sheet's "Keep on this Mac"
+is a permanent dismissal or leaves the session pending. `keep` is the
+reversible answer, built beside `dismiss`, which is unchanged.
+
+A kept session, exactly:
+
+- **Stays on this Mac, and is not sent.** The entry moves `pending` to
+  `refused` with `reason_label: "kept-on-this-mac"`. An entry the watcher
+  approved **unattended** can be kept too: the keep revokes that approval in
+  the same step, so a keep pressed while the folder's rule re-approves the
+  card does not lose the race. A person's own approval is `cancel`led first.
+  Nothing uploads a
+  `refused` entry, and `approve` -- by `entry_id`, `project_id` or `all` --
+  acts only on `pending`, so an `approve` naming a kept entry sends nothing
+  and answers `not-pending` until the keep is undone. Any preview pin goes with the keep; an
+  undo previews afresh.
+- **Is not owed.** It is out of `list_pending`, so out of the Ask-me list and
+  out of `status.queue_depth` (the badge), and out of every group `approve`.
+- **Stays kept across passes.** Like a dismissal it is a decision about the
+  **conversation**, answered from the session's path: while it is kept the
+  watcher skips that session -- no new `pending` card, no re-read -- however
+  much it grows.
+- **Is never sent unattended**, including after its folder is armed, plainly
+  or from now: arming applies only to sessions without a ruling, and the path
+  skip sits ahead of it.
+- **Never expires.** Expiry applies to `pending` entries only, and nothing
+  compacts `refused` (only `superseded` is compacted), so a kept session is
+  not silently lost to the 14-day clock or to compaction.
+- **Is undoable**, with `undo_keep`. The entry returns to `pending` with
+  `reason_label: "returned-from-keep"`, dated now, so the expiry clock
+  restarts from the undo rather than from when it was first offered. It then
+  **waits for a person**: the watcher does not approve it on anyone's behalf,
+  in an armed folder included. A person's `approve` -- single or group --
+  sends it and clears the label; `keep` or `dismiss` rules on it again. If
+  the session grew while it was kept, the next pass re-offers the grown
+  content as a fresh `pending` entry that carries the same label, and waits
+  in the same way.
+- **Cannot clear a hold.** An entry held for a person when it was kept --
+  a witness risk review, a token-distribution review, any reason that keeps
+  a session out of unattended and group approval -- comes back from the undo
+  with that same label, not `returned-from-keep`. The label is remembered on
+  the entry while it is kept. Its preview pin is not: the undone entry is
+  reviewed afresh.
+- **Comes back only where it can be offered.** `undo_keep` is refused with
+  `queue-full` when the queue is at its cap, like any new offer, and with
+  `project-ignored` when the session's folder is now Never; either way the
+  session stays kept, and the undo can be asked for again.
+
+**Expiry after an undo, and of the backlog.** A `returned-from-keep` entry,
+and a backlog entry an arming from now leaves waiting, are ordinary waiting
+cards: they expire on the normal 14-day clock, which for the first starts at
+the undo and for the second is the clock the card already had (an unattended
+approval returned by an arming is re-dated to the arming). They are not
+exempt, on purpose. The cap counts waiting cards, so exempting a whole disk's
+history would fill the queue for good and stop new sessions being offered;
+and a card the contributor has not decided in 14 days is the case expiry
+exists for, in an Ask-me folder or not. An expired entry is not re-offered
+while its file is unchanged, as for every expired card. A contributor who
+wants a session kept past that uses `keep`, which never expires.
+
+What it is not:
+
+- **Not a dismissal.** `keep` never writes `dismissed-by-contributor`, and
+  `undo_keep` refuses a dismissed entry with `not-kept`. There is still no
+  un-dismiss.
+- **Not a withdrawal.** It acts on sessions not yet sent. A session already
+  uploaded is taken back with `withdraw`.
+- **Not kept across logout.** Logout clears the queue, keeps included, as it
+  clears dismissals.
+
+`queue_outcome_counts` counts kept sessions under `kept-on-this-mac`.
+`list_kept` returns them in the entry shape `list_pending` uses. `keep`
+cancels any scheduled preview for the entry, as `dismiss` does. Neither
+method writes an audit row, as `dismiss` does not: they are decisions about
+one session, not autonomy changes.
+
 ### `set_project_mode` and the ignore purge
 
 Setting a project to `ignore` also clears whatever it has waiting. Two
@@ -1209,6 +1368,82 @@ queue cap.
 
 A client MUST NOT present the purge as irreversible, and MUST NOT rely on
 the entries reappearing within any particular time.
+
+### Arming from now
+
+**Arming is from now by default.** `set_project_mode` with
+`mode: "auto_upload"` arms a folder for **new** sessions; what is already on
+disk waits for the contributor, who sends it by picking it in the
+past-session picker. That applies the Flow 1 grant's rule ("it arms nothing
+already on disk", `grant_automatic` below) to every folder a contributor arms,
+whatever shell arms it. Only `include_backlog: true` sends the backlog too:
+
+- **A session already on disk when the folder was armed -- queued as
+  `pending` or not yet seen -- is never approved unattended in it**, whichever
+  project it reads as later. It stays `pending`, waiting for the contributor.
+- A session that first appears **after** the arming is approved unattended,
+  as in any armed folder, through the same settle window and gate.
+- What is on disk is recorded **per source** by the next full watcher pass,
+  before any session is visited, and only for an arming made before that pass
+  listed the disk. Until a source is recorded for the arming, nothing from it
+  is approved unattended in the folder, so a harness connected or re-rooted
+  after the arming has its history recorded before it can send anything. A
+  session created between the arming and that pass waits too: fail closed.
+  A source whose listing cannot be read -- its root, or any directory under
+  it, unreadable for a reason other than not existing -- reports a failed
+  discovery rather than an empty one, so it stays unrecorded for that pass
+  and holds everything. The automatic grant's recording follows the same
+  rule.
+- **Defence in depth for content at a new path.** The record is by path, so a
+  conversation older than the arming that turns up in a new file -- a resume
+  into a fresh file, a restore, a sync -- is also held when its first event,
+  or its file's birth time, is earlier than the arming. Where the filesystem
+  reports no birth time and the session no first-event time, the path record
+  alone applies.
+- **A re-arm keeps the hold.** `auto_upload` without `include_backlog` over a
+  folder already armed from now keeps the record of the first arming: the
+  backlog still waits, and a session that arrived in between is still new.
+- Arming from now over an arming **with** the backlog returns what that
+  arming approved unattended and has not sent yet to `pending`, counted in
+  `retracted`. It was on disk, so it is backlog. An `approved` entry a
+  **person** approved is untouched, as for every mode change.
+- The send path re-checks too: an unattended approval that comes back from
+  `uploading` to `approved`, whose session must wait for a person -- on disk
+  when its folder was armed from now, or on disk at the automatic grant in a
+  folder the grant armed -- returns to `pending` rather than being sent.
+- The arming writes the `armed-auto-upload` audit row with
+  `detail: "from-now"`; an arming with the backlog writes it with no detail.
+  Labels only, as every audit row. The result's `from_now` says which it was.
+- `list_projects` reports `from_now: true` on an armed row armed from now and
+  `from_now: false` on any other armed row; the key is absent on rows that
+  are not armed, like `automatic_disclosure`.
+- Setting the folder to ask-first or Never ends the from-now record, and
+  `include_backlog: true` replaces it: the backlog is then approved
+  unattended. Recorded paths no arming can still hold are pruned.
+
+**Folders armed before this default are left as they are.** A folder armed
+with the old meaning has no from-now record, so it keeps sending what it
+did; nothing is migrated. Setting its mode again -- `auto_upload` included --
+applies the rule in force at that call.
+
+`include_backlog` is a boolean. Any other type is refused with
+`include-backlog-invalid`, and `include_backlog: true` with a mode other than
+`auto_upload` with `include-backlog-requires-auto-upload`: a backlog means
+nothing for ask-first or Never, and ignoring it would let a shell believe it
+had set a rule it had not. Both are `bad_params`, and a refusal records and
+changes nothing. The CLI's `daemon project --mode auto` arms from now and
+says the backlog waits; `--include-backlog` sends it.
+
+#### The past-session picker
+
+"Past sessions, by folder" needs no new consent. It lists `pending` entries
+grouped by `project_id` -- `list_pending` with a `project_id` returns one
+folder's -- and each session the contributor ticks is an ordinary per-entry
+`approve`, which is a person's decision and goes through the approval hold
+like any other. A folder armed from now leaves exactly those entries waiting,
+so the picker and the rule compose: the rule covers what comes next, the
+picker what is already there. Unticked sessions stay `pending`; "Keep on this
+Mac" (`keep`) takes one out of the list without deciding it for good.
 
 ### `preview_body`
 
@@ -1380,6 +1615,130 @@ so `turn_count` always equals `turns.length`. A client that wants a
 `144 more turns` footer computes it from `turn_count` and what it chose to
 render, not from anything the daemon left out.
 
+#### `leaves_this_mac`
+
+`preview_turns` also returns the review sheet's "Leaves this Mac" line, so no
+shell writes its own claim about what the envelope carries:
+
+```json
+"leaves_this_mac": {
+  "fields": ["conversation", "tool", "tool-version", "timing", "outcome",
+             "uses", "redaction-summary", "session-id", "trace-ids",
+             "contributor-id", "tenant", "revocation-handle",
+             "folder-fingerprint", "replay", "scores", "format-version"],
+  "would_send_bytes": 19456,
+  "turn_count": 12,
+  "folder_named_in_conversation": false,
+  "folder_named_in_metadata": false,
+  "line": "19 KB · 12 turns · tool, tool version, timing, outcome, …. The metadata never carries the path or the folder name."
+}
+```
+
+`fields` is derived by **walking every key of the serialized envelope** that
+would be sent (`consent_copy::leaves_this_mac_fields`) and naming it, so it
+is complete by construction. The set is closed and listed in this order:
+`conversation`, `tool`, `tool-version`, `model`, `timing`,
+`usage-and-cost` (per-event token counts and cost), `routing` (routing
+rows), `outcome`, `correction`, `uses`, `redaction-summary`
+(`privacy.redaction_counts` and the rest of the privacy block),
+`session-id` (`conversation_id`, the tool's own session id, and
+`source_session`), `trace-ids`, `contributor-id`, `tenant`
+(`contributor.tenant_scope_ref`), `credit-account`, `revocation-handle`,
+`folder-fingerprint` (`cwd_hash`), `replay`, `scores`, `format-version`, and
+`other`. A label appears only when the envelope carries a non-null key for
+it. A key this build has no name for is reported as `other` -- over-described,
+never dropped -- and a test fails the build on any such key. Labels, never
+values.
+
+`would_send_bytes` is the envelope's size, `preview`'s figure; `turn_count`
+equals the method's own. `line` is the finished sentence (**DRAFT, NEEDS
+APPROVAL**), absent only if the envelope could not be measured.
+
+**What the line promises about the folder is only what is true.** Only
+absolute paths are scrubbed out of the conversation, so a relative path
+(`../myproj/src/main.rs`) or a sentence can still name the folder. The daemon
+looks for the folder's own names (the basenames of the project root, the
+unfolded path and the session's working directory) as standalone,
+case-insensitive words, separately in the conversation (`events`) and in
+everything else, and reports both as booleans:
+
+- the line always says "The metadata never carries the path or the folder
+  name." -- unless `folder_named_in_metadata` is true, when it says "The
+  folder's name appears in what would be sent." instead;
+- when `folder_named_in_conversation` is true it adds "The conversation
+  itself names the folder."
+
+The list does **not** say "project label", which the design's mock does: the
+envelope has carried no project name, in the clear or hashed, since #207.
+
+### `preview_unsure_spans`
+
+Where the redacted body holds something that looks like personal data the
+scrubber did not mark, so the review sheet can put "looks like an email. Not
+matched. Your call." under that line. **Offsets and labels, never the
+text**: the shell already holds the body from `preview_body` and renders the
+span from it.
+
+Request:
+
+```json
+{ "entry_id": "…", "body_digest": "sha256:…" }
+```
+
+Response:
+
+```json
+{
+  "entry_id": "…",
+  "body_digest": "sha256:…",
+  "envelope_digest": "sha256:…",
+  "span_count": 1,
+  "spans": [
+    { "label": "looks-like-email", "byte_offset": 1408, "byte_len": 11 }
+  ],
+  "spans_truncated": false
+}
+```
+
+`label` is one of `looks-like-email` (an address, or a bracket-obfuscated one
+such as `name [at] example [dot] com`), `looks-like-phone` (international
+`+44 20 7946 0958`, or North American `(415) 555-0100` / `415-555-0100`) and
+`looks-like-key` (a well-known credential prefix such as `sk-`, `ghp_`,
+`AKIA`). The set is closed. `byte_offset` and `byte_len` are a half-open
+range of **UTF-8 byte** offsets into the body, on character boundaries,
+sorted and never overlapping.
+
+**Conservative.** Only the contents of JSON strings are scanned, and a span
+never crosses a JSON escape (`\n`, `\"`, `é`), so an offset can never
+point into the middle of one. A redaction placeholder
+(`<PRIVATE_EMAIL_1>`, `[REDACTED]`) never matches, so an email the scrubber
+took yields no hint. A bare run of digits is never a phone. A hint is a
+pointer for a person, not a second scrubber: nothing is redacted and nothing
+waits because of one.
+
+**`body_digest` is required, on every call,** on exactly `preview_turns`'
+rule: omitted is `bad_params` / `body-digest-required`, a non-string is
+`bad_params` / `body-digest-invalid`, and one that does not match the body
+the daemon resolved is `unavailable` / `preview-body-changed` -- re-read the
+body from `offset: 0` and ask again. The body is resolved through the same
+path as `preview_body` and `preview_turns`, with the same refusals
+(`unknown-entry-id`, `approved-envelope-unavailable`).
+
+**Fail-closed.** A body the detector cannot index exactly, or any span that
+does not re-verify against the bytes it points at, refuses the whole
+response with `unavailable` / `preview-unsure-index-failed`. `spans` holds at
+most 2000 entries; `span_count` is always the total, and `spans_truncated`
+is `true` when the list was cut. A shell must not present a cut list as the
+whole one.
+
+`preview_unsure_spans` is answered on the async dispatcher only; the
+synchronous entry point refuses it with `preview-unsure-spans-requires-async`.
+
+The C ABI's `tc_preview_unsure_spans_json(handle, entry_id, body_digest,
+err)` returns the same object, from the same function, under the same
+anchoring and refusals, and like `tc_preview_turns_json` refuses an attached
+handle with `preview-requires-embedded`.
+
 ### `list_projects`
 
 ```json
@@ -1453,6 +1812,12 @@ Every project the daemon knows about, in two kinds:
 - **discovered** (`configured: false`, `added_at: null`) means the daemon has
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
+
+An armed row also carries `from_now`: `true` when it was armed from now,
+the `set_project_mode` default, so its backlog waits for the contributor,
+and `false` when it was armed with `include_backlog: true` or before that
+default existed. Absent on rows that are not armed. See
+"Arming from now" above.
 
 #### `is_unresolved_bucket`
 
@@ -1608,6 +1973,10 @@ reason no unattended approval can satisfy:
   `approve` uploads exactly those bytes. Like any pinned `Pending` preview,
   the pin is released after the preview age limit, and opening it then runs
   the witness again.
+- `second-look-review-required`: a session approved on the contributor's
+  behalf that the Automatic Scrub check held because the envelope built for
+  it is worth a second look -- nothing matched, it looks unsure, or it was
+  trimmed to fit. See `scrub_check` under `set_settings`.
 
 A group control is by definition not a review of one
 session, so held entries are left out for every contributor, invited or not,
@@ -2004,8 +2373,10 @@ or a count of them.
 { "reasons": { "dismissed-by-contributor": 2, "expired-without-decision": 1 } }
 ```
 
-A count, by `reason_label`, across every entry currently on the queue in any
-state. This method is **not** named `eligibility_reasons`, and does not
+A count, by `reason_label`, across resolved entries currently on the queue.
+Pending, approved, and uploading entries are excluded: sessions held for
+review are still waiting, not terminal outcomes. This method is **not**
+named `eligibility_reasons`, and does not
 explain sessions that were never offered at all. Every `reason_label` this
 method can report belongs to an entry that already exists in the queue (in
 practice: dismissed, refused, expired, and superseded entries). It cannot
@@ -2350,6 +2721,167 @@ was written. Only the **first** backup of a file is kept -- it is the only copy
 holding the file as it was before any of our edits -- so this is `null` on a
 second edit to the same file, and on a file that did not exist before.
 
+### The map and the Inference tab
+
+K8 of #1118, the client half. `tool_destinations` feeds the map and
+`inference_calls` feeds the Inference tab's routing table. Both are
+synchronous and local. They read state this daemon already holds -- the
+harness list, the private-inference state, the route `route_disclosure`
+reports, the source settings, the project policy and the local routing
+ledger -- and make no network call and read no body.
+
+Every value on the wire is a fixed label, a count, a time or a ledger row id,
+with one exception: `model` is free text (see below). No prompt, response,
+body reference, body digest, provider exchange identifier, session id, token
+or URL crosses the socket, and nothing here is logged.
+
+#### `tool_destinations`
+
+```json
+{
+  "private_ai": "running",
+  "sessions_route": "witness",
+  "folders": { "armed": 1, "ask_first": 3, "ignored": 0 },
+  "tools": [
+    {
+      "tool": "claude-code",
+      "name": "Claude Code",
+      "sessions": { "watch": "watched", "to": ["commons", "witness"] },
+      "model_calls": { "to": "near_ai", "basis": "observed" }
+    }
+  ]
+}
+```
+
+No parameters. One row per session source this build has (`claude-code`,
+`codex`, `gemini-cli`, `cline`, `opencode`).
+
+`sessions.watch` is `watched` when an adapter is actually built for the tool
+(an undeclared Claude Code or Codex still falls back to its conventional
+folder, and reads `watched`), `off` when the contributor said they do not use
+it, and `not_watched` otherwise. `sessions.to` is empty unless the tool is
+watched, and then it is what `sessions_route` sends: `["commons", "witness"]`
+on `witness`, `["commons"]` on `local`, and nothing on `witness_refusing`,
+`not_enrolled` or `settings_unreadable`. `sessions_route` is the same value
+`route_disclosure.route` carries, so the map cannot draw a witness disclosure
+does not name; the witness a connected inference offer installs
+(`inference_connection_install`) reaches the map through it. `folders` counts
+the per-repository rules (`auto_upload`, `notify_only`, `ignore`). They are
+per repository across tools, so they say *when* a session goes, not *where*.
+
+`model_calls.to` and `basis`:
+
+| `to` | `basis` | when |
+|---|---|---|
+| `near_ai` | `observed` | connected to this daemon's port, `private_ai` is `running`, and every labelled call in the window in the tool's protocol family was routed |
+| `near_ai` | `configured` | as above, but the window has no labelled call in the family to confirm it. **A shell must not draw this as confirmed** |
+| vendor | `answered_elsewhere` | connected, and the proxy answers with the tool's own credentials (`running_answered_elsewhere`) |
+| vendor | `tool_default` | the tool's config names no local proxy |
+| `unknown` | `unknown` | connected while any labelled call in the family went `outside`, or while the proxy is in any other state; or wired to a local proxy that is not this daemon's |
+
+`running` says NEAR AI reports a credential, not that a given family is
+answered there -- the proxy can hold other backends -- which is why it is
+confirmed against the ledger's own labels rather than trusted on its own.
+
+The vendor is a fixed label: `anthropic` (Claude Code), `openai` (Codex),
+`google` (Gemini CLI), and `unknown` for Cline and OpenCode, which talk to
+many providers. It is the tool's **default**, not a reading of its config: a
+tool whose own config names another gateway is still drawn at its default.
+Which tool has a fixed default is now read from K2's `source_default_family`
+and confirmed against `source::vendor_label` (#1130), rather than kept in a
+separate local table. The word on the wire stays the family's own lowercase
+spelling above, not `vendor_label`'s returned word (`Anthropic`, `OpenAI`,
+`Google`), which is capitalized for the "answers at" display and is a
+different surface from this one. `private_ai` is the
+`private_inference_state.state` label `status` carries.
+
+#### `inference_calls`
+
+```json
+{
+  "readable": true,
+  "window_hours": 24,
+  "calls": [
+    {
+      "id": 412,
+      "at": "2026-09-28T18:04:11+00:00",
+      "tool": "codex",
+      "family": "openai",
+      "model": "Qwen/Qwen3.6-27B-FP8",
+      "route": "routed",
+      "cost": { "known": true, "priced_micros": 12300 },
+      "proof": "gateway_only"
+    }
+  ],
+  "next_cursor": "1790000000000:411"
+}
+```
+
+Newest first. `limit` is 1 to 200 (default 50); out of range or not an
+integer is `bad_params` / `limit-invalid`, refused rather than capped so a
+caller paging by the size it asked for never skips rows. `cursor` is the
+previous page's `next_cursor`, passed back unread; anything else is
+`bad_params` / `cursor-invalid`. `next_cursor` is `null` on the last page.
+The order is `(started_at, id)`, which is total; rows from a proxy too old to
+expose an `id` are not listed.
+
+`readable: false` means no ledger has answered, which is not evidence of no
+calls and must not be drawn as an empty table. The window is the ledger's
+own 24 hours.
+
+- `tool` is named only when exactly one tool connected **now** speaks the
+  call's protocol family (the rule `harness_list` applies to `answering`);
+  otherwise `unknown`. It is approximate: a row from before a connection
+  changed can carry the wrong name. `family` is `anthropic`, `openai` or
+  `unknown`.
+- `model` is **free text, not a fixed label**: the served model as recorded,
+  else the requested one, passed through when it is at most 128 characters of
+  `[A-Za-z0-9._:/@-]` and names no URL; else `unknown`. It comes from a proxy
+  the contributor can patch.
+- `cost.priced_micros` is the ledger's price in millionths of a dollar. It is
+  **priced, not billed** -- work a plan already paid for is priced at the
+  meter -- and must not be drawn as money spent. `known: false` is not zero.
+
+`proof` is IronWire's own label for the row (`RoutedExchange.proof`),
+passed through unchanged -- the stored verdict of IronWire's receipt check,
+never re-derived here -- or `unrecorded`:
+
+| `proof` | Means |
+|---|---|
+| `verified` | proof: a model receipt over this call's digests, signed by a key a verified, measurement-pinned TDX quote binds |
+| `gateway_only` | a valid receipt, but the gateway's; it names the relay, not the model. Not proof |
+| `unattested` | a valid model receipt whose key nothing tied to a verified quote. Not proof |
+| `pending` | a NEAR AI call not checked yet, or receipt checks are off |
+| `unavailable` | no receipt to be had or checked |
+| `failed` | a receipt that does not check out -- possibly tampering |
+| `outside` | not a NEAR AI backend: an outside call, never checked |
+| `unrecorded` | IronWire recorded no label: an older proxy, a row that predates proof tracking, or a label this build does not know. Not `outside`, not `pending` |
+
+Only `verified` is proof. The labels are deliberately not collapsed: a shell
+that wants fewer buckets maps them itself, and must keep `failed` distinct.
+
+`route` is taken from that label and nothing else: `outside` for `outside`,
+`routed` (through NEAR AI) for any other label, and `unknown` for
+`unrecorded`. It is never taken from the backend id, which is whatever the
+contributor named it.
+
+#### What the ledger does not record (Z4)
+
+The table the design draws is work x model x calls x cost with a proof per
+routed answer. These are not in the local ledger, and nothing here invents
+them:
+
+- **kind of work** -- no field records it; there is no classifier;
+- **tool** -- the ledger records a facade, so a call is attributable only
+  when one connected tool speaks that family;
+- **billed cost** -- the ledger prices every call; only the day's metered
+  total (`harness_list.spend`) is billed spend;
+- **outside calls that bypass the proxy** -- a tool not connected to Private
+  AI never reaches the ledger, so it is not in this list at all;
+  interception (Stop / Send anyway) needs the proxy in the path;
+- **the smart router's choice** -- nothing records which model a router
+  picked or why.
+
 ### `set_settings`
 
 Takes a JSON object whose top-level keys must come from
@@ -2358,7 +2890,7 @@ Takes a JSON object whose top-level keys must come from
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
 `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
-`private_inference_offer_seen`, `max_uploads_per_day`,
+`private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
 `max_bytes_per_day` --
 a key this method does
 not recognize is
@@ -3134,6 +3666,105 @@ with it false. That default is what makes an offer appear on the first start
 after an upgrade as well as on a fresh install: an installed build's
 settings file has no such key, so the first build that knows the key reads
 it as unanswered and asks once.
+
+#### `scrub_check`
+
+The Settings row "Scrub check" (K4 of #1118). `set_settings` takes a string,
+`"automatic"` or `"manual"`; anything else, including another case, a boolean
+or `null`, is `bad_params` / `settings-invalid-value` and changes nothing.
+`get_settings` always reports the key as one of the two strings, never
+`null`: `"automatic"` until the contributor chooses otherwise. It is persisted
+with the other settings and read at
+each watcher pass and each upload, so a change reaches a running daemon
+without a restart.
+
+It decides what happens to a session in a folder set to share automatically
+(`auto_upload`), and only there. A person's own `approve` is never held by it:
+they are the second look.
+
+An existing settings file with an absent/null choice records
+`scrub_check_defaulted_on_upgrade: true`, retained through unrelated saves.
+An older armed policy with no settings file also records that provenance;
+a new-format policy distinguishes fresh installs from those upgrades.
+At startup, already-armed folders receive a one-time persisted notice in
+`arming_rewordings` with `scrub_check_defaulted: true`. All shells render it
+through the shared notice formatter and acknowledge its exact id. Fresh
+installs and explicit Manual choices receive no upgrade notice. A saved
+policy migration marker prevents replay after acknowledgement or later arming.
+
+| Value | Armed folders |
+|---|---|
+| `automatic` (**the default**) | send on their own, **except** a session that is worth a second look (`second_look` would be `nothing-matched`, `looks-unsure` or `trimmed-to-fit` for the envelope about to be sent, see "The scrub state and `second_look`"). That one is held for a person under `second-look-review-required` and never moves on its own. |
+| `manual` | nothing is sent without a person. The watcher approves nothing on anyone's behalf, and an approval made before the switch is held under `scrub-check-manual` when the uploader reaches it. |
+
+**Where the Automatic hold happens.** The watcher approves an armed session
+without building anything, so at that point nobody has counted its marks: it
+is `not-yet-scrubbed`, and treating that as fine would be wrong. So the hold
+is decided by the uploader, on the envelope it has just built for the send,
+after every refusal and before anything reaches the commons -- the same point
+as the witness's residual-risk hold. It is counted exactly as a pinning
+preview counts (`ScrubCounts::of` over the redaction map and
+`preview::body_of`), so the count is exact and never "not yet scrubbed"; a
+body the unsure-span detector cannot read counts as `looks-unsure`. On the
+local-redaction path nothing has left the machine
+when a session is held. With a witness configured, the witness has already
+seen the session (as with `witness-risk-review-required`): the hold stops the
+upload to the commons, not the send to the enclave.
+
+A session newly held for a person receives a full review window from its
+first hold (`review_started_at`); its original discovery time is preserved.
+Repeated holds and restarts do not extend that window. On witness routes,
+the first hold has already incurred witness/claim work; approving it may
+repeat that work before upload.
+
+**What a hold leaves on the entry.** The entry goes back to `Pending` with
+`reason_label` `second-look-review-required`, and the envelope the hold was
+decided on is **pinned** to it: saved through the same
+`approved_envelope::save` a preview pins with, with its digest as the entry's
+pin and the counts recorded beside that digest. So `list_pending` and
+`snapshot` show `scrub: "scrubbed"`, `marks`, `content_marks`,
+`unsure_spans` and the `second_look` reasons that held it, and the person's
+review is of exactly those bytes; their `approve` sends them. The pin is kept
+and released like any pinned `Pending` preview: swept when the entry
+resolves, released after the preview age limit (the entry then reads
+`not-yet-scrubbed` and the next review builds again). Two cases pin nothing
+and leave the entry reading `not-yet-scrubbed` while still holding it: a
+witnessed envelope, whose certified bytes are pinned only through a witnessed
+review, and a save that fails. The daemon logs the second-look labels the
+hold was decided on (labels only).
+`second-look-review-required` is one of the reasons a session is held for a
+person (see the group `approve` section): the watcher does not approve it
+again, and a group `approve` leaves it out and counts it in `excluded_held`.
+A person's `approve` of that one entry sends it.
+
+`scrub-check-manual` is deliberately **not** such a reason. While Manual is
+set the watcher approves nothing anyway, and once Automatic is set again, an
+armed folder's waiting sessions going through the Automatic check -- its hold
+included -- is what the contributor asked for.
+
+**Switching to Manual.** A `set_settings` call that changes `scrub_check` to
+`"manual"` returns every unsent approval made on the contributor's behalf
+(`Approved`, approved unattended) to `Pending` under `scrub-check-manual` at
+once, instead of leaving it reading approved until the uploader reaches it.
+A person's own approvals, and anything already uploading, are untouched. The
+reply then carries `scrub_check_returned_to_waiting`, the count moved
+(possibly `0`), and a `queue_changed` event follows when it is non-zero. The
+key is **absent** on any call that did not switch to Manual, including one
+that sets Manual when it was already Manual.
+
+**The default is `automatic`** (decided on #1139). A fresh install holds a
+session worth a second look in an armed folder without anyone choosing
+anything. An upgraded install does too: a settings file written before this
+key existed, or one holding the `null` an earlier build wrote for "never
+chosen", loads as `automatic`, so on upgrade an armed folder starts holding
+the sessions where nothing matched, something looks unsure, or it was trimmed
+to fit. An explicit `"manual"` is kept across restarts and upgrades; only an
+unset value becomes `automatic`. `null` cannot be set: it is not a mode, and
+a caller that means the default sends `"automatic"`. A shell renders the choice with
+`consent_copy::SCRUB_CHECK_*` (DRAFT, NEEDS APPROVAL), whose Automatic
+sentence says the check only counts what was removed and does not check that
+the scrubbing was right: it is not a model or quality check (the
+connect-and-forget design's R1).
 
 `max_uploads_per_day` and `max_bytes_per_day` each take a positive integer,
 validated against a fixed ceiling (1,000 uploads; 5 GiB) rather than
@@ -4177,6 +4808,10 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 - `expired` means the entry aged out after the TTL (14 days) without a decision. The clock
   is **suspended** while the daemon is unhealthy, so an outage does not
   silently discard traces.
+- A session kept on this Mac is `refused` with `reason_label:
+  "kept-on-this-mac"`. It never expires, and `undo_keep` returns it to
+  `pending`; see "`keep`: Keep on this Mac" above. It is the only `refused`
+  entry a contributor can undo.
 - `superseded` means the session changed after it was offered. The daemon re-hashes
   before uploading; on a mismatch it sends nothing and creates a fresh
   `pending` entry for the new content. An approval covers content, not a
