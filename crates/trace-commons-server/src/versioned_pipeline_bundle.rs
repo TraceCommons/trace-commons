@@ -771,24 +771,26 @@ impl MinimalPolicyBundle {
     }
 }
 
-/// The compatibility configuration `package` binds, when its four policies
-/// are the compatibility bundle's; `None` for any other bundle, or when the
-/// configuration does not decode (construction refuses that package).
-pub fn package_compatibility_config(package: &BundlePackage) -> Option<CompatibilityBundleConfig> {
-    let implementation_ids = [
+/// Whether `package`'s four policies are the compatibility bundle's.
+fn is_compatibility_family(package: &BundlePackage) -> bool {
+    [
         package.manifest.admission.implementation_id.as_str(),
         package.manifest.review.implementation_id.as_str(),
         package.manifest.score.implementation_id.as_str(),
         package.manifest.settle.implementation_id.as_str(),
-    ];
-    if implementation_ids
-        != [
-            COMPATIBILITY_ADMISSION_IMPLEMENTATION,
-            COMPATIBILITY_REVIEW_IMPLEMENTATION,
-            COMPATIBILITY_SCORE_IMPLEMENTATION,
-            COMPATIBILITY_SETTLE_IMPLEMENTATION,
-        ]
-    {
+    ] == [
+        COMPATIBILITY_ADMISSION_IMPLEMENTATION,
+        COMPATIBILITY_REVIEW_IMPLEMENTATION,
+        COMPATIBILITY_SCORE_IMPLEMENTATION,
+        COMPATIBILITY_SETTLE_IMPLEMENTATION,
+    ]
+}
+
+/// The compatibility configuration `package` binds, when its four policies
+/// are the compatibility bundle's; `None` for any other bundle, or when the
+/// configuration does not decode (construction refuses that package).
+pub fn package_compatibility_config(package: &BundlePackage) -> Option<CompatibilityBundleConfig> {
+    if !is_compatibility_family(package) {
         return None;
     }
     let config_bytes = package
@@ -800,12 +802,18 @@ pub fn package_compatibility_config(package: &BundlePackage) -> Option<Compatibi
 /// Whether `package`'s own configuration may be qualified for production:
 /// a compatibility package's configuration must be qualifiable
 /// (`CompatibilityBundleConfig::is_qualifiable`); a package of another
-/// family carries no such configuration. Both the per-bundle qualification
+/// family carries no such configuration. A compatibility package whose
+/// configuration is missing or does not decode is not qualifiable: it fails
+/// closed (wave 2, fix round 1; review M1), since construction refuses it
+/// too. Both the per-bundle qualification
 /// (`PipelineService::bundle_qualification`, which startup reads) and
 /// `PipelineQualificationStore::qualify_bundle` read it from the package
 /// itself.
 pub fn package_configuration_is_qualifiable(package: &BundlePackage) -> bool {
-    package_compatibility_config(package).is_none_or(|config| config.is_qualifiable())
+    if !is_compatibility_family(package) {
+        return true;
+    }
+    package_compatibility_config(package).is_some_and(|config| config.is_qualifiable())
 }
 
 /// Requires that `package`'s Score policy ref names `descriptor` by content
@@ -1085,6 +1093,52 @@ mod tests {
         assert_eq!(content.bytes(), bytes.as_slice());
         assert_eq!(content.worker_identity(), "minimal_review_passthrough");
         assert!(!output.result().evidence.content_changed);
+    }
+
+    /// Wave 2, fix round 1 (review M1): the configuration term fails closed
+    /// for a compatibility package. A production-compatible configuration
+    /// is qualifiable; the local reference (all floors zero) is not; nor is
+    /// a compatibility package whose configuration artifact is missing or
+    /// does not decode. A package of another family carries no such
+    /// configuration and stays qualifiable.
+    #[test]
+    fn the_configuration_term_fails_closed_for_a_compatibility_package() {
+        let scorer = ReferencePerplexityScorer::new();
+        let embedder = ReferenceEmbedder::new();
+        let reference = CompatibilityBundleConfig::local_reference();
+        let production = CompatibilityBundleConfig::production_compatible(
+            reference.scorer_model_id.clone(),
+            reference.projection_id.clone(),
+            reference.index_id.clone(),
+            2_000_000,
+            0,
+            500_000,
+            reference.embed_insert_novelty_micros,
+        )
+        .expect("a production-compatible configuration validates");
+        let qualifiable =
+            MinimalPolicyBundle::compatibility_package(&production, &scorer, &embedder).unwrap();
+        assert!(package_configuration_is_qualifiable(&qualifiable));
+        let local =
+            MinimalPolicyBundle::compatibility_package(&reference, &scorer, &embedder).unwrap();
+        assert!(!package_configuration_is_qualifiable(&local));
+
+        let config_hash = qualifiable.manifest.score.configuration_hash.clone();
+        let mut missing = qualifiable.clone();
+        missing.artifacts.remove(&config_hash);
+        let mut undecodable = qualifiable.clone();
+        undecodable
+            .artifacts
+            .insert(config_hash, br#"{"unknown_field":1}"#.to_vec());
+        for package in [&missing, &undecodable] {
+            assert_eq!(package_compatibility_config(package), None);
+            assert!(!package_configuration_is_qualifiable(package));
+        }
+
+        let minimal = MinimalPolicyBundle::minimal_package(&config(false), &scorer, &embedder)
+            .expect("build minimal bundle package");
+        assert_eq!(package_compatibility_config(&minimal), None);
+        assert!(package_configuration_is_qualifiable(&minimal));
     }
 
     #[test]
