@@ -136,6 +136,10 @@ pub const PIPELINE_ATTEMPTS_EXHAUSTED_LABEL: &str = "attempts_exhausted";
 pub const PIPELINE_BUNDLE_MISSING_LABEL: &str = "bundle_package_missing";
 pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
+/// Safe label of an object-store call in the run path that failed (an
+/// outage, not a decode or hash mismatch): the uncharged suspension of
+/// ruling FR3 (multi-lens review L2-2).
+pub const PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL: &str = "artifact_store_unavailable";
 pub const PIPELINE_INDEX_CONFLICT_LABEL: &str = "index_key_conflict";
 pub const PIPELINE_CREDIT_HELD_LABEL: &str = "credit_held";
 pub const PIPELINE_CREDIT_CAP_LABEL: &str = "credit_cap_exceeded";
@@ -341,6 +345,33 @@ where
     tokio::task::spawn_blocking(call)
         .await
         .map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))?
+}
+
+/// Runs `call`, an object-store call of the run path (Review's source read
+/// and approved write, Score's approved read and object writes), on the
+/// blocking pool, and reports the store's own
+/// error as the uncharged suspension `artifact_store_unavailable`
+/// (multi-lens review L2-2, ruling FR3): a store call that fails is an
+/// outage, not the trace's fault. `TraceArtifactStore` errors are untyped,
+/// so an integrity failure the store itself reports is suspended the same
+/// way; it stays visible by its label and retries at most once an hour.
+/// The caller's own checks of what the store returned (a decode, a hash or
+/// a revision mismatch) stay charged, and a lost blocking task keeps
+/// `blocking_call_failed`.
+async fn artifact_store_call<T, F>(call: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    on_blocking_pool(move || {
+        call().map_err(|_| {
+            anyhow::Error::from(
+                PolicyError::transient(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL)
+                    .expect("static label"),
+            )
+        })
+    })
+    .await
 }
 
 /// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
@@ -1678,6 +1709,12 @@ impl PgPipelineStore {
     /// `approved_*` columns stay NULL, satisfying
     /// `pipeline_runs_approved_content_shape`.
     ///
+    /// An approval also resets `attempt_count` to 0: each phase has the
+    /// run's whole `max_attempts` budget (multi-lens review L2-1, owner
+    /// decision of 2026-10-01), so a Review that commits on its last
+    /// attempt leaves Score a claimable run rather than a `pending` one no
+    /// claim can select. A terminal commit keeps its count.
+    ///
     /// The submission-operability
     /// guard that gated the source read at the start of Review
     /// (`load_object_bytes`) was checked in an earlier, already-committed
@@ -1827,6 +1864,7 @@ impl PgPipelineStore {
             .query_one(
                 "UPDATE pipeline_runs
                  SET next_phase = $3, state = $4,
+                     attempt_count = CASE WHEN $3 = 'none' THEN attempt_count ELSE 0 END,
                      approved_revision_id = $5,
                      approved_object_ref_id = $6,
                      approved_content_hash = $7,
@@ -2337,6 +2375,9 @@ impl PgPipelineStore {
     /// transaction (`submission_guard_on_tx`, after the run row's lock) and
     /// refuses the whole commit with `PIPELINE_SUBMISSION_INOPERABLE_LABEL`:
     /// no outcome, no settlement rows, no run update.
+    ///
+    /// The commit resets `attempt_count` to 0, so Settle has the run's whole
+    /// `max_attempts` budget (multi-lens review L2-1; see `commit_review`).
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_score(
         &self,
@@ -2462,7 +2503,7 @@ impl PgPipelineStore {
         let row = tx
             .query_one(
                 "UPDATE pipeline_runs
-                 SET next_phase = 'settle', state = 'pending',
+                 SET next_phase = 'settle', state = 'pending', attempt_count = 0,
                      index_command_ref = $3, index_command_hash = $4,
                      score_neighbor_ref = $5, score_neighbor_hash = $6,
                      lease_token = NULL, lease_expires_at = NULL,
@@ -2548,6 +2589,9 @@ impl PgPipelineStore {
     /// applied), its membership is not `excluded`, no invalidation of its
     /// revision is queued, and its submission is operable (the predicate of
     /// `submission_guard_on_tx`: not withdrawn, revoked, purged or expired).
+    /// A run no claim can select (not `leased`, its attempts spent) is left
+    /// out: it would never apply its command, so it must not take a later
+    /// near-duplicate's award (multi-lens review L2-1's backstop).
     /// Each row is `(stored ref, command hash, revision id)`, by `run_id`.
     /// `idx_pipeline_runs_work` leads with `(tenant_id, state)`, so the read
     /// covers the tenant's runs in flight, not its history.
@@ -2564,6 +2608,7 @@ impl PgPipelineStore {
                      ON s.tenant_id = r.tenant_id AND s.submission_id = r.submission_id
                   WHERE r.tenant_id = $1 AND r.run_id <> $2
                     AND r.state IN ('pending', 'leased', 'retry')
+                    AND (r.state = 'leased' OR r.attempt_count < r.max_attempts)
                     AND r.next_phase = 'settle'
                     AND r.index_command_ref IS NOT NULL
                     AND r.index_command_hash IS NOT NULL
@@ -8207,7 +8252,7 @@ impl PipelineService {
         // deleted under it, and runs on the blocking pool (N-6).
         let store = self.artifact_store.clone();
         let ciphertext_sha256 = ciphertext_sha256.to_string();
-        let wrapper = on_blocking_pool(move || {
+        let wrapper = artifact_store_call(move || {
             store.read_json_by_object_key(
                 tenant_storage_ref.as_str(),
                 TraceArtifactKind::ContributionEnvelope,
@@ -8250,10 +8295,10 @@ impl PipelineService {
     /// outcome stored, per decision P1 (the byte wrapper) and the runtime
     /// plan's ruling A7. `evidence` is the same Score outcome's own
     /// evidence; `None` when Score proposed no command
-    /// (`embedding_artifact_hash` absent). Any failure -- a missing or
-    /// malformed reference, a decode failure, or a mismatch against the
-    /// evidence or the run's own recorded hash/revision -- is the safe
-    /// label `index_command_invalid`.
+    /// (`embedding_artifact_hash` absent). Any failure -- a failed store
+    /// read, a missing or malformed reference, a decode failure, or a
+    /// mismatch against the evidence or the run's own recorded hash/revision
+    /// -- is the safe label `index_command_invalid`.
     pub async fn load_index_command(
         &self,
         run: &PipelineRunRecord,
@@ -8283,8 +8328,8 @@ impl PipelineService {
 
     /// Reads the index command a run committed at Score from its stored ref
     /// (`object_key#ciphertext_sha256`) and checks that it hashes to
-    /// `command_hash` and names `revision_id`. Any failure is the safe label
-    /// `index_command_invalid`.
+    /// `command_hash` and names `revision_id`. Any failure, the store read's
+    /// included, is the safe label `index_command_invalid`.
     async fn read_index_command(
         &self,
         tenant_id: &str,
@@ -8299,6 +8344,11 @@ impl PipelineService {
         let store = self.artifact_store.clone();
         let (object_key, ciphertext_sha256) =
             (object_key.to_string(), ciphertext_sha256.to_string());
+        // Not `artifact_store_call`: a stored command that cannot be read
+        // stays the charged `index_command_invalid` (multi-lens review L2-2,
+        // held for a ruling). A Settle run suspended on it for good would keep
+        // its command in every compatibility Score's unapplied set, which
+        // fails each of them closed (`index_unavailable`).
         let wrapper = on_blocking_pool(move || {
             store.read_json_by_object_key(
                 tenant.as_str(),
@@ -9010,7 +9060,7 @@ impl PipelineService {
                         // object-store calls run on the blocking pool (N-6).
                         let store = self.artifact_store.clone();
                         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
-                        let prepared = on_blocking_pool(move || {
+                        let prepared = artifact_store_call(move || {
                             store.prepare_serialized_json(
                                 tenant.as_str(),
                                 TraceArtifactKind::ContributionEnvelope,
@@ -9030,7 +9080,7 @@ impl PipelineService {
                             .await?;
                         let store = self.artifact_store.clone();
                         let receipt =
-                            on_blocking_pool(move || store.publish_serialized_json(&prepared))
+                            artifact_store_call(move || store.publish_serialized_json(&prepared))
                                 .await?;
                         self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
                         written_receipt = Some(receipt.clone());
@@ -9353,7 +9403,7 @@ impl PipelineService {
                 let prepare_tenant = tenant.clone();
                 let object_id =
                     pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token);
-                let prepared = on_blocking_pool(move || {
+                let prepared = artifact_store_call(move || {
                     store.prepare_serialized_json(
                         prepare_tenant.as_str(),
                         TraceArtifactKind::VectorPayload,
@@ -9393,7 +9443,7 @@ impl PipelineService {
                     }
                 }
                 let store = self.artifact_store.clone();
-                on_blocking_pool(move || store.publish_serialized_json(&prepared)).await
+                artifact_store_call(move || store.publish_serialized_json(&prepared)).await
             }
             .await;
             let receipt = match put {

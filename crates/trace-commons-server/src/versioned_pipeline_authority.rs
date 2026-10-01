@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use trace_commons_protocol::trace_contribution::PrivacyFilterAdapter;
+use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, PrivacyFilterBackendTag};
 use trace_commons_protocol::trace_contribution::{
     ResidualRiskCondition, TraceContributionEnvelope, rescrub_trace_envelope,
 };
@@ -96,20 +96,27 @@ impl PipelinePrivacyBoundary for DeterministicPipelinePrivacyBoundary {
 /// The production privacy boundary: `main`'s deterministic rescrub, then the
 /// prose-PII classifier the assembly builds it with, whose findings join the
 /// residual-risk basis. It is the boundary `main`'s
-/// `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` asks for, so it reports itself
-/// production-qualified; the classifier adapter the assembly passes is the
-/// production one.
+/// `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` asks for when its adapter is a
+/// real classifier backend: `backend` is the adapter's
+/// `PrivacyFilterBackendTag`, as `main`'s `privacy_filter_adapter_from_env`
+/// pairs them.
 pub struct ClassifierRedactorPipelinePrivacyBoundary {
     adapter: Arc<dyn PrivacyFilterAdapter>,
+    backend: PrivacyFilterBackendTag,
     policy: trace_commons_protocol::trace_contribution::PiiClassifyPolicy,
 }
 
 impl ClassifierRedactorPipelinePrivacyBoundary {
     pub fn new(
         adapter: Arc<dyn PrivacyFilterAdapter>,
+        backend: PrivacyFilterBackendTag,
         policy: trace_commons_protocol::trace_contribution::PiiClassifyPolicy,
     ) -> Self {
-        Self { adapter, policy }
+        Self {
+            adapter,
+            backend,
+            policy,
+        }
     }
 }
 
@@ -136,14 +143,18 @@ impl PipelinePrivacyBoundary for ClassifierRedactorPipelinePrivacyBoundary {
         Ok(basis)
     }
 
+    /// Qualified only over a real classifier backend (Zaki review 3, Z3-1):
+    /// over the no-op adapter, the `None` backend's, it filters nothing.
     fn production_qualified(&self) -> bool {
-        true
+        self.classifies_prose_pii()
     }
 
     /// Every `rescrub` runs the classifier this boundary was built with
-    /// (`rescrub_envelope_prose_pii_with`).
+    /// (`rescrub_envelope_prose_pii_with`), which classifies prose PII only
+    /// when the backend is a real one: the `None` backend's adapter
+    /// (`NoopPrivacyFilterAdapter`) finds nothing.
     fn classifies_prose_pii(&self) -> bool {
-        true
+        !matches!(self.backend, PrivacyFilterBackendTag::None)
     }
 }
 
@@ -218,20 +229,29 @@ mod tests {
     fn boundary() -> ClassifierRedactorPipelinePrivacyBoundary {
         ClassifierRedactorPipelinePrivacyBoundary::new(
             Arc::new(PersonClassifier),
+            PrivacyFilterBackendTag::Sidecar,
             PiiClassifyPolicy::AllEvents,
         )
     }
 
-    /// Zaki review 1, round 2, simplification: `production_qualified` is the
-    /// one answer a boundary gives. The classifier-backed boundary, the
-    /// production one, reports itself qualified (it used to say it was
-    /// production compatible while reporting itself unqualified), and the
-    /// deterministic test boundary reports itself unqualified.
+    /// `production_qualified` is the one answer a boundary gives (Zaki
+    /// review 1, round 2, simplification), and Zaki review 3, Z3-1: the
+    /// classifier-backed boundary is qualified, and classifies prose PII,
+    /// only over a real classifier backend. Over the no-op adapter (the
+    /// `None` backend's, `NoopPrivacyFilterAdapter`) it is neither, like the
+    /// deterministic test boundary.
     #[test]
     fn each_privacy_boundary_reports_what_it_is() {
         let classifier = boundary();
         assert!(classifier.production_qualified());
         assert!(classifier.classifies_prose_pii());
+        let noop = ClassifierRedactorPipelinePrivacyBoundary::new(
+            Arc::new(trace_commons_protocol::trace_contribution::NoopPrivacyFilterAdapter),
+            PrivacyFilterBackendTag::None,
+            PiiClassifyPolicy::AllEvents,
+        );
+        assert!(!noop.production_qualified());
+        assert!(!noop.classifies_prose_pii());
         assert!(!DeterministicPipelinePrivacyBoundary.production_qualified());
         assert!(!DeterministicPipelinePrivacyBoundary.classifies_prose_pii());
     }
@@ -293,6 +313,7 @@ mod tests {
         }
         let boundary = ClassifierRedactorPipelinePrivacyBoundary::new(
             Arc::new(FailingClassifier),
+            PrivacyFilterBackendTag::Sidecar,
             PiiClassifyPolicy::AllEvents,
         );
         let mut envelope = envelope_with_text("ordinary text").await;

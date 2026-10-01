@@ -196,6 +196,12 @@ token-only fence in `record_lease_expired`), so it changes nothing -- that
 attempt is silently lost, not recorded as `lease_expired` and not otherwise
 un-charged.
 
+`max_attempts` (5) is a budget per phase, not per run. Each claim charges
+one attempt; the Review commit that approves a run, and the Score commit,
+reset `attempt_count` to 0. So Review, Score and Settle each get the whole
+budget, and a phase that commits on its last attempt leaves the next phase
+claimable.
+
 While a phase runs, a background task renews its lease: every
 `max(lease / 3, 100ms)`, it extends the live claim's lease, stopping as soon
 as the phase ends, the lease is lost (reclaimed by someone else, or already
@@ -264,7 +270,11 @@ are routed or drained (the section above). With
 runtime whose privacy boundary does not run a prose-PII classifier, or that
 has none (`pipeline_privacy_filter_required`), as `main` refuses to start
 with no filter backend. This is judged by what the boundary does, not by
-whether it reports itself qualified.
+whether it reports itself qualified. The classifier-backed boundary
+(`ClassifierRedactorPipelinePrivacyBoundary`) is built with its adapter's
+backend tag, as `main` pairs them (`TRACE_PRIVACY_FILTER_BACKEND`). Over the
+no-op adapter, which is the `none` backend's, it neither classifies prose
+PII nor counts as qualified, so both refusals apply to it.
 
 ## Quarantined runs and human review
 
@@ -324,6 +334,14 @@ not the trace's fault:
   adapter call returned before the failure, the next attempt calls the
   adapter again with the same operation reference. The adapter must answer
   that call from the first one.
+- `artifact_store_unavailable` (Review and Score): an object-store call of
+  the run failed -- Review's source read or approved write, or Score's
+  approved read or object writes. A check of what the store returned (a
+  decode or hash mismatch) is still charged. The store's errors carry no
+  type, so an integrity failure the store itself reports waits here too,
+  retried at most once an hour; look for a run that stays on this label.
+  Settle's read of the stored index command is still charged
+  (`index_command_invalid`).
 
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.

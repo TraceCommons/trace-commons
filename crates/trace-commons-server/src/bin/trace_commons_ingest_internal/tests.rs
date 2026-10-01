@@ -10879,6 +10879,40 @@ fn qualified_pipeline_service(
     extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
     extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
 ) -> anyhow::Result<Arc<PipelineService>> {
+    qualified_pipeline_service_with_privacy(
+        backend,
+        artifact_store,
+        object_store_name,
+        include_authority,
+        include_privacy.then(|| {
+            Arc::new(QualifiedTestPrivacy)
+                as Arc<
+                    dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary,
+                >
+        }),
+        payout,
+        extra_scorer,
+        extra_settlement_adapter,
+    )
+}
+
+/// `qualified_pipeline_service`, with `privacy` as its privacy boundary.
+#[allow(clippy::too_many_arguments)]
+fn qualified_pipeline_service_with_privacy(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+    include_authority: bool,
+    privacy: Option<
+        Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>,
+    >,
+    payout: Option<(
+        Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
+        trace_commons_server::versioned_pipeline::PipelinePayoutConfig,
+    )>,
+    extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
+    extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
+) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
     use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
@@ -10935,8 +10969,8 @@ fn qualified_pipeline_service(
     if include_authority {
         builder = builder.with_authority(Arc::new(QualifiedTestAuthority));
     }
-    if include_privacy {
-        builder = builder.with_privacy(Arc::new(QualifiedTestPrivacy));
+    if let Some(privacy) = privacy {
+        builder = builder.with_privacy(privacy);
     }
     if let Some((adapter, config)) = payout {
         builder = builder.with_payout(adapter, config);
@@ -11232,12 +11266,17 @@ async fn pipeline_runtime_refuses_a_compatibility_bundle_without_the_credit_issu
 /// boundary does (`classifies_prose_pii`), not by its qualification: a
 /// boundary that reports itself production-qualified but runs no classifier
 /// (`QualifiedTestPrivacy`) is refused, and so is a runtime with no boundary;
-/// the classifier-backed boundary is accepted. Without the flag nothing is
-/// required.
+/// the classifier-backed boundary over a classifier backend is accepted.
+/// Without the flag nothing is required. Zaki review 3, Z3-1: the
+/// classifier-backed boundary over the no-op adapter (the `None` backend's)
+/// is refused too, and it does not qualify the runtime, so the
+/// qualification gate refuses it without `allow_test_dependencies`.
 #[tokio::test]
 async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() {
     use super::pipeline_runtime::validate_pipeline_privacy_filter_requirement;
-    use trace_commons_protocol::trace_contribution::{NoopPrivacyFilterAdapter, PiiClassifyPolicy};
+    use trace_commons_protocol::trace_contribution::{
+        NoopPrivacyFilterAdapter, PiiClassifyPolicy, PrivacyFilterBackendTag,
+    };
     use trace_commons_server::versioned_pipeline_authority::ClassifierRedactorPipelinePrivacyBoundary;
 
     let dir = tempfile::tempdir().unwrap();
@@ -11277,17 +11316,51 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
     validate_pipeline_privacy_filter_requirement(false, &qualified_without_a_classifier)
         .expect("nothing is required without the flag");
 
-    let classifier =
-        minimal_pipeline_service_builder(backend, test_artifact_store(dir.path()), None)
-            .unwrap()
-            .with_privacy(Arc::new(ClassifierRedactorPipelinePrivacyBoundary::new(
-                Arc::new(NoopPrivacyFilterAdapter),
-                PiiClassifyPolicy::default(),
-            )))
-            .build()
-            .unwrap();
+    let noop = qualified_pipeline_service_with_privacy(
+        backend.clone(),
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        Some(Arc::new(ClassifierRedactorPipelinePrivacyBoundary::new(
+            Arc::new(NoopPrivacyFilterAdapter),
+            PrivacyFilterBackendTag::None,
+            PiiClassifyPolicy::default(),
+        ))),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        validate_pipeline_privacy_filter_requirement(true, &noop)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_privacy_filter_required",
+        "a boundary over the no-op adapter classifies nothing"
+    );
+    assert!(
+        !pipeline_runtime_is_production_qualified(&noop),
+        "a boundary over the no-op adapter does not qualify the runtime"
+    );
+
+    let classifier = qualified_pipeline_service_with_privacy(
+        backend,
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        Some(Arc::new(ClassifierRedactorPipelinePrivacyBoundary::new(
+            Arc::new(NoopPrivacyFilterAdapter),
+            PrivacyFilterBackendTag::Sidecar,
+            PiiClassifyPolicy::default(),
+        ))),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     validate_pipeline_privacy_filter_requirement(true, &classifier)
-        .expect("a classifier-backed boundary meets the requirement");
+        .expect("a boundary over a classifier backend meets the requirement");
+    assert!(pipeline_runtime_is_production_qualified(&classifier));
 }
 
 /// Builds an unqualified pipeline service (`minimal_pipeline_service`)
