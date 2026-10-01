@@ -9119,21 +9119,29 @@ impl PipelineService {
     ) -> anyhow::Result<PrestagedScoreArtifacts> {
         let lease_token = required_lease_token(run)?;
         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
-        let object_keys = [
-            PipelineAttemptArtifact::IndexCommand,
-            PipelineAttemptArtifact::ScoreNeighbors,
-        ]
-        .into_iter()
-        .map(|artifact| {
-            self.artifact_store
-                .serialized_json_object_key(
-                    tenant.as_str(),
-                    artifact.store_kind(),
-                    &pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token),
-                )
-                .map(|object_key| (artifact, object_key))
+        let run_id = run.run_id;
+        // The derivation is a synchronous store call, so it runs on the
+        // blocking pool, as every other object-store call of a phase does
+        // (PR 3, e2873401, N-6).
+        let store = self.artifact_store.clone();
+        let object_keys = on_blocking_pool(move || {
+            [
+                PipelineAttemptArtifact::IndexCommand,
+                PipelineAttemptArtifact::ScoreNeighbors,
+            ]
+            .into_iter()
+            .map(|artifact| {
+                store
+                    .serialized_json_object_key(
+                        tenant.as_str(),
+                        artifact.store_kind(),
+                        &pipeline_attempt_object_id(artifact.as_str(), run_id, lease_token),
+                    )
+                    .map(|object_key| (artifact, object_key))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .await?;
         let publish_deadline = self.attempt_artifact_lease_bound(Phase::Score);
         let cleanup_after = publish_deadline + PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN;
         self.store
