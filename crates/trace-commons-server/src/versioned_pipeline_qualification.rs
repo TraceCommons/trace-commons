@@ -42,6 +42,7 @@ pub const PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL: &str = "bundle_development_depen
 pub const QUALIFICATION_EVIDENCE_STALE_LABEL: &str = "qualification_evidence_stale";
 pub const QUALIFICATION_EVIDENCE_MISSING_LABEL: &str = "qualification_evidence_missing";
 pub const QUALIFICATION_EVIDENCE_FAILED_LABEL: &str = "qualification_evidence_failed";
+pub const QUALIFICATION_EVIDENCE_INVALID_LABEL: &str = "qualification_evidence_invalid";
 
 pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
     "pipeline_storage_upgrade_rls",
@@ -365,6 +366,13 @@ pub struct PromotionDecision {
 /// `<label>:<check_id>`: missing, failed (or blocked), stale evidence, and
 /// each safe blocker a result carries, including a passing one. Binding the
 /// evidence to one code revision and the candidate package is PR 5's work.
+///
+/// Malformed input is an error, not a blocker: a check id outside
+/// [`PROMOTION_REQUIRED_CHECKS`] is `qualification_evidence_invalid`, a
+/// result that fails [`PipelineCheckResult::validate`] (schema, run id,
+/// revision, evidence and digest hashes, safe-blocker labels) or carries no
+/// maximum age is `qualification_evidence_invalid:<check_id>`, and a second
+/// result for one check is `qualification_evidence_duplicate`.
 pub fn evaluate_promotion(
     evidence: &[DrillEvidence],
     now: DateTime<Utc>,
@@ -372,16 +380,12 @@ pub fn evaluate_promotion(
     let mut by_id = BTreeMap::new();
     for item in evidence {
         let check_id = item.check.check_id.as_str();
-        if !PROMOTION_REQUIRED_CHECKS.contains(&check_id)
-            || !is_sha256(&item.check.evidence_hash)
-            || item.maximum_age_seconds == 0
-            || item
-                .check
-                .safe_blockers
-                .iter()
-                .any(|label| !is_safe_label(label))
-        {
-            return Err("qualification_evidence_invalid".to_string());
+        // An unknown id is not a label this function may echo.
+        if !PROMOTION_REQUIRED_CHECKS.contains(&check_id) {
+            return Err(QUALIFICATION_EVIDENCE_INVALID_LABEL.to_string());
+        }
+        if item.check.validate().is_err() || item.maximum_age_seconds == 0 {
+            return Err(format!("{QUALIFICATION_EVIDENCE_INVALID_LABEL}:{check_id}"));
         }
         if by_id.insert(check_id, item).is_some() {
             return Err("qualification_evidence_duplicate".to_string());
@@ -407,7 +411,7 @@ pub fn evaluate_promotion(
                 .map(|label| format!("{label}:{check_id}")),
         );
         let maximum_age = i64::try_from(item.maximum_age_seconds)
-            .map_err(|_| "qualification_evidence_invalid".to_string())?;
+            .map_err(|_| QUALIFICATION_EVIDENCE_INVALID_LABEL.to_string())?;
         if item.check.observed_at > now
             || now - item.check.observed_at > Duration::seconds(maximum_age)
         {
@@ -431,7 +435,7 @@ pub fn evaluate_promotion(
         "checks": checks,
     });
     let evidence_digest =
-        evidence_hash(&canonical).map_err(|_| "qualification_evidence_invalid".to_string())?;
+        evidence_hash(&canonical).map_err(|_| QUALIFICATION_EVIDENCE_INVALID_LABEL.to_string())?;
     Ok(PromotionDecision {
         ready: blockers.is_empty(),
         evaluated_at: now,
@@ -1421,6 +1425,80 @@ mod tests {
             evaluate_promotion(&unknown, now),
             Err("qualification_evidence_invalid".to_string())
         );
+    }
+
+    /// Zaki's review of #1166, Major 1: a probe with every required id, each
+    /// from its own run and revision, one with the schema `bogus_schema`, one
+    /// with the revision `not-a-hash`, and one with a run id that is not a
+    /// label, returned `ready` with no blocker. Each malformed result is now
+    /// refused by its check id, one per evaluation in input order, until none
+    /// is left.
+    #[test]
+    fn promotion_refuses_each_result_that_fails_validation_by_check_id() {
+        let now = Utc::now();
+        let mut probe = PROMOTION_REQUIRED_CHECKS
+            .iter()
+            .enumerate()
+            .map(|(index, check_id)| {
+                let mut check = sample_check(check_id, PipelineCheckStatus::Pass, now);
+                check.run_id = format!("q{index:08x}");
+                check.code_revision_hash = sha256_prefixed(format!("revision-{index}").as_bytes());
+                DrillEvidence {
+                    check,
+                    maximum_age_seconds: 3_600,
+                }
+            })
+            .collect::<Vec<_>>();
+        let well_formed = probe.clone();
+        probe[2].check.schema = "bogus_schema".to_string();
+        probe[7].check.code_revision_hash = "not-a-hash".to_string();
+        probe[11].check.run_id = "Not A Label".to_string();
+
+        let mut named = Vec::new();
+        for index in [2, 7, 11] {
+            let check_id = probe[index].check.check_id.clone();
+            assert_eq!(
+                evaluate_promotion(&probe, now),
+                Err(format!("{QUALIFICATION_EVIDENCE_INVALID_LABEL}:{check_id}")),
+                "the first malformed result left is refused by its id"
+            );
+            named.push(check_id);
+            probe[index] = well_formed[index].clone();
+        }
+        assert_eq!(
+            named,
+            [
+                PROMOTION_REQUIRED_CHECKS[2],
+                PROMOTION_REQUIRED_CHECKS[7],
+                PROMOTION_REQUIRED_CHECKS[11]
+            ]
+        );
+
+        // The control: with the three repaired, the same probe evaluates, so
+        // each refusal above came from its malformed field. Binding every
+        // result to one run, one revision, and the candidate package is
+        // PR 5's (the doc comment), so the distinct runs and revisions here
+        // do not block it yet.
+        assert!(
+            evaluate_promotion(&probe, now)
+                .expect("a well-formed probe evaluates")
+                .ready
+        );
+
+        // The rest of `validate()` and the age bound are refused the same way.
+        let mut bad_digest = probe.clone();
+        bad_digest[4].check.package_hash = Some("sha256:short".to_string());
+        let mut ageless = probe.clone();
+        ageless[5].maximum_age_seconds = 0;
+        for (refused, index) in [(bad_digest, 4), (ageless, 5)] {
+            assert_eq!(
+                evaluate_promotion(&refused, now),
+                Err(format!(
+                    "{QUALIFICATION_EVIDENCE_INVALID_LABEL}:{}",
+                    PROMOTION_REQUIRED_CHECKS[index]
+                ))
+            );
+        }
     }
 
     #[test]
