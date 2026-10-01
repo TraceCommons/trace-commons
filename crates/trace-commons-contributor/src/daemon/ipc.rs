@@ -3622,62 +3622,70 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // start holding sessions that arrived since.
     let prior_arming = policy.armed_from_now.get(&key).cloned();
     let rearm_from_now = from_now && prior_arming.is_some();
+    // `set_mode` refuses only what `check_mode` refused above, and before
+    // touching anything, so this return leaves memory as it was.
     if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
-    // Under the same policy lock as the mode, so no pass can see the project
-    // armed without the arming's hold.
-    if from_now {
-        match prior_arming {
-            Some(prior) => policy.restore_arming_from_now(&key, prior),
-            None => policy.arm_from_now(&key, now),
+    // From here on, memory has changed, and every exit -- success or a
+    // failed write -- goes through the one publish point after this block.
+    // A failed write keeps the in-memory truth (see below), so the shells
+    // must hear about it exactly as they would on success, or the badge and
+    // the queue view go stale until something else happens to refresh them.
+    let mut queue_touched = false;
+    let outcome: Result<(usize, usize), &'static str> = 'apply: {
+        // Under the same policy lock as the mode, so no pass can see the
+        // project armed without the arming's hold.
+        if from_now {
+            match prior_arming {
+                Some(prior) => policy.restore_arming_from_now(&key, prior),
+                None => policy.arm_from_now(&key, now),
+            }
         }
-    }
-    // Whatever this change left no arming able to hold.
-    policy.prune_arming_record();
-    if let Some(claim) = arming_claim {
-        policy.record_arming_claim(&key, claim);
-    }
-    if let Some(terms) = arming_terms {
-        policy.record_grant_terms(&key, terms);
-    }
-    if let Err(_e) = policy.save(&shared.store) {
-        return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
-    }
-    // A newly-configured project can turn a previously-unique queue
-    // label into a collision (or vice versa) immediately -- e.g.
-    // configuring the client's "api" the moment after "api" was
-    // queued bare from the contributor's own repo. Relabel now
-    // rather than leaving the queue to lag until the next poll,
-    // which would leave two same-basename projects briefly
-    // indistinguishable in the one place uploads are approved from.
-    // Ignoring a project clears what it already has waiting. Doing
-    // it here rather than in the UI means Settings, onboarding and
-    // the CLI all get it: before this, ignoring from Settings left
-    // the contributor staring at the cards they had just declined.
-    //
-    // Pending entries, plus approvals the watcher made unattended.
-    // See `refuse_pending_for_project` and `retract_unattended_for_project`.
-    //
-    // Leaving `Ignore` undoes exactly that, and only that: see
-    // `clear_project_ignored`, which is what makes the
-    // confirmation's "You can undo this in Settings" true for a
-    // *finished* session -- the ordinary case, and the one the
-    // ignore was aimed at. It is the same arm because the two are
-    // one setting, and every route that can set it (Settings,
-    // onboarding, the CLI, the Waiting screen) must get both halves.
-    //
-    // The policy is already saved at this point, so a `queue.save`
-    // failure below leaves disk disagreeing with memory: the project
-    // is durably `Ignore` while its entries are still durably
-    // `Pending`, and a restart brings the cleared cards back. The
-    // error is reported and the daemon keeps the in-memory truth, so
-    // the contributor sees the right thing until then. Ordering the
-    // two writes the other way does not help -- the relabel below
-    // reads the *new* policy, so the queue cannot be written first --
-    // and a real fix wants both files under one atomic write, which
-    // the store does not offer.
-    let (queue_changed, purged, retracted) = {
+        // Whatever this change left no arming able to hold.
+        policy.prune_arming_record();
+        if let Some(claim) = arming_claim {
+            policy.record_arming_claim(&key, claim);
+        }
+        if let Some(terms) = arming_terms {
+            policy.record_grant_terms(&key, terms);
+        }
+        if let Err(_e) = policy.save(&shared.store) {
+            break 'apply Err("policy-write-failed");
+        }
+        // A newly-configured project can turn a previously-unique queue
+        // label into a collision (or vice versa) immediately -- e.g.
+        // configuring the client's "api" the moment after "api" was
+        // queued bare from the contributor's own repo. Relabel now
+        // rather than leaving the queue to lag until the next poll,
+        // which would leave two same-basename projects briefly
+        // indistinguishable in the one place uploads are approved from.
+        // Ignoring a project clears what it already has waiting. Doing
+        // it here rather than in the UI means Settings, onboarding and
+        // the CLI all get it: before this, ignoring from Settings left
+        // the contributor staring at the cards they had just declined.
+        //
+        // Pending entries, plus approvals the watcher made unattended.
+        // See `refuse_pending_for_project` and `retract_unattended_for_project`.
+        //
+        // Leaving `Ignore` undoes exactly that, and only that: see
+        // `clear_project_ignored`, which is what makes the
+        // confirmation's "You can undo this in Settings" true for a
+        // *finished* session -- the ordinary case, and the one the
+        // ignore was aimed at. It is the same arm because the two are
+        // one setting, and every route that can set it (Settings,
+        // onboarding, the CLI, the Waiting screen) must get both halves.
+        //
+        // The policy is already saved at this point, so a `queue.save`
+        // failure below leaves disk disagreeing with memory: the project
+        // is durably `Ignore` while its entries are still durably
+        // `Pending`, and a restart brings the cleared cards back. The
+        // error is reported and the daemon keeps the in-memory truth, so
+        // the contributor sees the right thing until then. Ordering the
+        // two writes the other way does not help -- the relabel below
+        // reads the *new* policy, so the queue cannot be written first --
+        // and a real fix wants both files under one atomic write, which
+        // the store does not offer.
         let mut queue = shared.queue.lock().expect("queue lock");
         let purged = if mode == ProjectMode::Ignore {
             // Both halves. `refuse_pending_for_project` covers entries
@@ -3727,27 +3735,33 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             queue.clear_project_ignored(&key)
         };
         let relabelled = relabel_queue_entries(&policy, &mut queue);
-        if relabelled || purged > 0 || retracted > 0 || restored > 0 {
+        queue_touched = relabelled || purged > 0 || retracted > 0 || restored > 0;
+        if queue_touched {
             if let Err(_e) = queue.save(&shared.store) {
-                return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+                break 'apply Err("queue-write-failed");
             }
         }
-        (relabelled || restored > 0, purged, retracted)
+        Ok((purged, retracted))
     };
+    // The one publish point, with neither lock held: the queue lock went
+    // with the block, and the compare below takes both.
     drop(policy);
-    if queue_changed || purged > 0 || retracted > 0 {
+    if queue_touched {
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
     shared.publish_if_decisions_owed_changed(decisions_owed_before);
-    Response::ok(
-        req.id,
-        serde_json::json!({
-            "ok": true,
-            "purged": purged,
-            "retracted": retracted,
-            "from_now": from_now,
-        }),
-    )
+    match outcome {
+        Ok((purged, retracted)) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "ok": true,
+                "purged": purged,
+                "retracted": retracted,
+                "from_now": from_now,
+            }),
+        ),
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+    }
 }
 
 fn handle_pause(shared: &DaemonShared, req: &Request) -> Response {
@@ -9330,6 +9344,101 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             assert_ne!(event.event, EVENT_STATUS_CHANGED);
         }
+    }
+
+    /// Make a daemon state file unwritable by putting a directory where it
+    /// goes, the way the `settings-write-failed` tests do.
+    fn block_daemon_file(s: &DaemonShared, name: &str) {
+        let path = s.store.daemon_path(name);
+        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir_all(&path).unwrap();
+    }
+
+    fn drain_event_names(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<String> {
+        let mut names = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            names.push(event.event);
+        }
+        names
+    }
+
+    /// #1132 / #1163 review: a `policy.save` failure returns after `set_mode`
+    /// has already changed the in-memory policy, and the daemon keeps that
+    /// in-memory truth. If the change moved the badge, `status_changed` must
+    /// still say so, or every shell keeps drawing the old count.
+    #[test]
+    fn a_policy_write_failure_still_publishes_the_badge_change_it_made() {
+        let key = "/tmp/k6-policy-write-failed";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        block_daemon_file(&s, crate::config::DAEMON_PROJECTS_FILE);
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload", "include_backlog": true }),
+            ),
+        );
+        let err = r
+            .error
+            .expect("an unwritable policy file must fail the call");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "policy-write-failed");
+        assert_eq!(
+            s.decisions_owed_value(),
+            0,
+            "the in-memory policy is kept, so the badge has moved"
+        );
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "the badge moved in memory; status_changed must say so: {events:?}"
+        );
+    }
+
+    /// #1132 / #1163 review: a `queue.save` failure returns after the queue
+    /// was purged in memory, and the daemon keeps that in-memory truth. The
+    /// shells must hear `queue_changed` (the cards went away) and
+    /// `status_changed` (the badge moved), exactly as on success.
+    #[test]
+    fn a_queue_write_failure_still_publishes_the_queue_and_badge_changes_it_made() {
+        let key = "/tmp/k6-queue-write-failed";
+        let s = enrolled_shared();
+        let entry = seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        block_daemon_file(&s, crate::config::DAEMON_QUEUE_FILE);
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "ignore" }),
+            ),
+        );
+        let err = r
+            .error
+            .expect("an unwritable queue file must fail the call");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "queue-write-failed");
+        assert_ne!(
+            s.queue.lock().unwrap().get(entry).map(|e| e.state),
+            Some(QueueState::Pending),
+            "the in-memory purge is kept"
+        );
+        assert_eq!(s.decisions_owed_value(), 0);
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_QUEUE_CHANGED),
+            "the queue changed in memory; queue_changed must say so: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "the badge moved in memory; status_changed must say so: {events:?}"
+        );
     }
 
     /// K7's upsell: "27 scrubbed sessions are sitting on this Mac under
