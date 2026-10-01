@@ -46,6 +46,7 @@ export function SettingsPage({
   onTurnOnAutomaticContributing,
   profile,
   privateAi,
+  compute,
 }: {
   /** Opens the Flow 1 grant screens again (K10). */
   onTurnOnAutomaticContributing?: () => void;
@@ -53,6 +54,11 @@ export function SettingsPage({
   profile?: ReactNode;
   /** The Private AI section's content (it has its own screen). */
   privateAi?: ReactNode;
+  /**
+   * The Compute section's content. Drawn whatever the settings snapshot's
+   * state, so compute consent can always be paused or withdrawn.
+   */
+  compute?: ReactNode;
 } = {}) {
   const settings = useSettings();
   const core = useCoreStatus();
@@ -246,6 +252,12 @@ export function SettingsPage({
             error={audit.error}
             onRefresh={audit.refresh}
           />
+        </>
+      )}
+      {compute && (
+        <>
+          <SectionRule id="compute">{sectionTitle.compute}</SectionRule>
+          {compute}
         </>
       )}
     </div>

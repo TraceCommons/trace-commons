@@ -11,4 +11,5 @@ export const settingsSections = [
   { id: "witness", label: "Redaction witness" },
   { id: "projects", label: "Projects" },
   { id: "log", label: "Changes on this machine" },
+  { id: "compute", label: "Compute" },
 ] as const;
