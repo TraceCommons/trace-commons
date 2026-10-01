@@ -54,11 +54,6 @@ pub const COMPATIBILITY_ADMISSION_IMPLEMENTATION: &str = "trace_commons.admissio
 pub const COMPATIBILITY_REVIEW_IMPLEMENTATION: &str = "trace_commons.review.compatibility.v1";
 pub const COMPATIBILITY_SCORE_IMPLEMENTATION: &str = "trace_commons.score.compatibility.v1";
 pub const COMPATIBILITY_SETTLE_IMPLEMENTATION: &str = "trace_commons.settle.compatibility.v1";
-/// Safe label for a scorer, embedder, or index dependency call that failed.
-/// The Score policy itself reports a more specific label per dependency
-/// (`scorer_unavailable`, `embedder_unavailable`, `index_unavailable`); this
-/// stays for callers that only need one generic dependency-failure label.
-pub const PIPELINE_SCORE_DEPENDENCY_LABEL: &str = "score_dependency_failed";
 pub const COMPATIBILITY_SCORE_RULE: &str = "compatibility_quality_novelty_v1";
 pub const COMPATIBILITY_SETTLE_RULE: &str = "compatibility_membership_from_score_v1";
 pub const COMPATIBILITY_EXCLUDE_REASON: &str = "compatibility_not_eligible";

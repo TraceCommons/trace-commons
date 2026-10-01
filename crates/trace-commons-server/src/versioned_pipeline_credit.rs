@@ -407,13 +407,6 @@ pub fn pipeline_settlement_batch_id(tenant_id: &str, source_list_hash: &str) -> 
     )
 }
 
-pub fn pipeline_near_outbox_id(tenant_id: &str, settlement_batch_id: Uuid) -> Uuid {
-    Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!("tracecommons:pipeline-near:{tenant_id}:{settlement_batch_id}").as_bytes(),
-    )
-}
-
 pub fn pipeline_near_outbox_line_id(
     tenant_id: &str,
     settlement_batch_id: Uuid,
@@ -441,13 +434,6 @@ pub fn source_list_hash(event_ids: &[Uuid]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()))
-}
-
-pub fn settlement_batch_ref_hash(settlement_batch_id: Uuid, source_list_hash: &str) -> String {
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(format!("{settlement_batch_id}\n{source_list_hash}").as_bytes())
-    )
 }
 
 pub fn microcredits_to_settled_i64(amount: Microcredits) -> anyhow::Result<i64> {

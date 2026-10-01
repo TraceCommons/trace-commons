@@ -20,7 +20,6 @@ CREATE TABLE pipeline_export_snapshots (
     source_list_hash TEXT NOT NULL CHECK (
         source_list_hash ~ '^sha256:[0-9a-f]{64}$'
     ),
-    item_count INTEGER NOT NULL CHECK (item_count >= 0 AND item_count <= 500),
     state TEXT NOT NULL DEFAULT 'ready' CHECK (
         state IN ('ready', 'complete', 'invalidated')
     ),
@@ -142,7 +141,6 @@ BEGIN
        OR NEW.purpose_hash IS DISTINCT FROM OLD.purpose_hash
        OR NEW.selection_policy_id IS DISTINCT FROM OLD.selection_policy_id
        OR NEW.source_list_hash IS DISTINCT FROM OLD.source_list_hash
-       OR NEW.item_count IS DISTINCT FROM OLD.item_count
        OR NEW.created_at IS DISTINCT FROM OLD.created_at
     THEN
         RAISE EXCEPTION 'pipeline export snapshot identity is immutable';

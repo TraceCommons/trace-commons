@@ -12950,8 +12950,8 @@ async fn insert_export_snapshot_and_item(
     tx.execute(
         "INSERT INTO pipeline_export_snapshots (
             tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
-            allowed_use, purpose_hash, selection_policy_id, source_list_hash, item_count
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         &[
             &tenant,
             &snapshot_id,
@@ -12961,7 +12961,6 @@ async fn insert_export_snapshot_and_item(
             &format!("sha256:{}", "e".repeat(64)),
             &"policy-test-v1",
             &format!("sha256:{}", "f".repeat(64)),
-            &1_i32,
         ],
     )
     .await
@@ -16239,10 +16238,10 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
     tx.execute(
         "INSERT INTO pipeline_export_snapshots (
             tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
-            allowed_use, purpose_hash, selection_policy_id, source_list_hash, item_count,
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash,
             state, export_manifest_id, completed_at
          ) VALUES ($1,$2,$3,'exporter_sha256:test','model_training',$4,'pipeline_export_v1',
-                   $5,1,$6,$7,$8)",
+                   $5,$6,$7,$8)",
         &[
             &run.tenant_id,
             &snapshot_id,
