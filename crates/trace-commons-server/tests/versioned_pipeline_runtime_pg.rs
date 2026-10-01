@@ -23001,7 +23001,7 @@ impl TraceArtifactStore for OutageArtifactStore {
 /// `artifact_store_unavailable`, at each of the run path's store calls:
 /// Review's source read and approved write, and Score's approved read and
 /// object write. The run then completes once the store is back. (Settle's
-/// read of the stored index command stays charged, held for a ruling;
+/// read of the stored index command stays charged, ruling RB-35;
 /// `stored_command_binding_failures_fail_closed` covers it.)
 #[tokio::test]
 async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
