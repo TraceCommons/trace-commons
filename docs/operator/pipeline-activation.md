@@ -912,8 +912,12 @@ deleting which row is a fixed split (controller ruling R2-1):
   plus one hour of margin for the commit to land -- the same bound a live
   lease renewal is capped at, so an attempt that is still legitimately
   renewing its lease never has its own object swept out from under it. A
-  delete failure logs `pipeline_attempt_sweep_delete_failed` and keeps the
-  row for the next pass.
+  delete failure logs `pipeline_attempt_sweep_delete_failed` (with the
+  store's own refusal label beside it, `store_label`, when the store gave
+  one) and keeps the row for the next pass. A kept row keeps its place:
+  the 32 rows a pass takes are the tenant's oldest due rows, so once 32
+  kept rows are due, every pass takes the same 32 and the tenant's sweep
+  reaches no later row, hashed rows included, until the cause is fixed.
 - A `committed` row's object is an object ref of the submission, recorded
   by the same phase commit that committed the row. Deleting it belongs to
   the withdrawal, not this sweep: a withdrawal invalidates the object ref
@@ -981,8 +985,11 @@ is not. Those rows are staged with no hash:
 
   The sweep is affected in each case: for a due row with no hash, the store
   refuses with that label, and the sweep keeps the row and logs
-  `pipeline_attempt_sweep_delete_failed` on each pass until the store is
-  fixed. For the last two labels, that is the only effect.
+  `pipeline_attempt_sweep_delete_failed`, with that label as `store_label`,
+  on each pass until the store is fixed. Rows the sweep keeps hold their
+  tenant's queue, so the tenant's sweep stalls once 32 such rows are due:
+  it deletes no later row of that tenant, hashed rows included, until the
+  store is fixed. For the last two labels, a Score itself is not affected.
 
 Score's withdrawal rule follows from the same split: withdrawing a
 submission whose run already committed Score deletes the index command and

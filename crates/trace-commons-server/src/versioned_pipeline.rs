@@ -7957,8 +7957,12 @@ impl PipelineService {
     /// (rebase 10 review, M1); a row whose key differs is kept, with its
     /// object, and logs `pipeline_attempt_sweep_key_mismatch`. A delete
     /// failure (or a presence check or key derivation that itself errors)
-    /// logs `pipeline_attempt_sweep_delete_failed` and keeps the row for the
-    /// next pass; otherwise the row is deleted. Every store call runs on the
+    /// logs `pipeline_attempt_sweep_delete_failed`, with the store's own
+    /// refusal when that is a label (`store_refusal_label`), and keeps the
+    /// row for the next pass; otherwise the row is deleted. A kept row keeps
+    /// its `cleanup_after`, so it stays among the first `limit` due rows:
+    /// once `limit` rows of a tenant are kept on every pass, the tenant's
+    /// sweep reaches no later row until the store is fixed. Every store call runs on the
     /// blocking pool.
     /// The run's own `pipeline_runs` row, and its committed objects, are
     /// never touched here. Returns how many rows it removed.
@@ -8034,13 +8038,17 @@ impl PipelineService {
                                 &key,
                             ) {
                                 Ok(_) => AttemptSweepRow::Remove,
-                                Err(_) => {
-                                    AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED)
-                                }
+                                Err(error) => AttemptSweepRow::Keep(
+                                    PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                                    store_refusal_label(&error),
+                                ),
                             }
                         }
-                        Ok(_) => AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH),
-                        Err(_) => AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED),
+                        Ok(_) => AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH, None),
+                        Err(error) => AttemptSweepRow::Keep(
+                            PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                            store_refusal_label(&error),
+                        ),
                     },
                     Some(ciphertext_sha256) => {
                         let present = store.artifact_present_by_object_key(
@@ -8061,7 +8069,7 @@ impl PipelineService {
                         // row for the next pass rather than mistaking
                         // "unknown" for "gone".
                         let deleted = match present {
-                            Ok(Some(false)) => true,
+                            Ok(Some(false)) => Ok(()),
                             Ok(Some(true)) | Ok(None) => {
                                 let receipt = EncryptedTraceArtifactReceipt {
                                     tenant_storage_ref: tenant.as_str().to_string(),
@@ -8070,21 +8078,26 @@ impl PipelineService {
                                     ciphertext_sha256,
                                     encrypted_at: Utc::now(),
                                 };
-                                store.delete_artifact(tenant.as_str(), &receipt).is_ok()
+                                store.delete_artifact(tenant.as_str(), &receipt).map(|_| ())
                             }
-                            Err(_) => false,
+                            Err(error) => Err(error),
                         };
-                        if deleted {
-                            AttemptSweepRow::Remove
-                        } else {
-                            AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED)
+                        match deleted {
+                            Ok(()) => AttemptSweepRow::Remove,
+                            Err(error) => AttemptSweepRow::Keep(
+                                PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                                store_refusal_label(&error),
+                            ),
                         }
                     }
                 })
             })
             .await
-            .unwrap_or(AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED));
-            if let AttemptSweepRow::Keep(label) = outcome {
+            .unwrap_or(AttemptSweepRow::Keep(
+                PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                None,
+            ));
+            if let AttemptSweepRow::Keep(label, store_label) = outcome {
                 if label == PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH {
                     tracing::warn!(
                         label,
@@ -8094,6 +8107,7 @@ impl PipelineService {
                 } else {
                     tracing::warn!(
                         label,
+                        store_label = store_label.as_deref(),
                         "a pipeline attempt object could not be deleted; its row is kept \
                          for the next pass"
                     );
@@ -11949,8 +11963,20 @@ const PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH: &str = "pipeline_attempt_sweep_key_mi
 enum AttemptSweepRow {
     /// The object is gone; the row is deleted.
     Remove,
-    /// The row stays, and the sweep logs this label.
-    Keep(&'static str),
+    /// The row stays, and the sweep logs this label, with the store's own
+    /// refusal label when it gave one.
+    Keep(&'static str, Option<String>),
+}
+
+/// The store's own refusal, when its text is a label (`^[a-z0-9_]{1,64}$`):
+/// the sweep logs it beside `pipeline_attempt_sweep_delete_failed`, so an
+/// operator can tell `artifact_delete_at_object_key_unavailable`,
+/// `remote_trace_artifact_delete_at_key_unavailable`, and a store's other
+/// refusals apart (review of the follow-up wave, m2). Any other error text
+/// is left out: operational output is label-only.
+fn store_refusal_label(error: &anyhow::Error) -> Option<String> {
+    let text = error.to_string();
+    crate::versioned_pipeline_qualification::is_safe_label(&text).then_some(text)
 }
 
 /// The attempt rows a compatibility Score staged before it took its
@@ -12148,6 +12174,38 @@ pub fn is_pipeline_artifact_wrapper(wrapper: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sweep_logs_a_store_refusal_only_when_it_is_a_label() {
+        assert_eq!(
+            store_refusal_label(&anyhow::anyhow!(
+                "artifact_delete_at_object_key_unavailable"
+            )),
+            Some("artifact_delete_at_object_key_unavailable".to_string())
+        );
+        assert_eq!(
+            store_refusal_label(&anyhow::anyhow!(
+                "remote_trace_artifact_delete_at_key_unavailable"
+            )),
+            Some("remote_trace_artifact_delete_at_key_unavailable".to_string())
+        );
+        for unsafe_text in [
+            "failed to delete gs://bucket/tenants/abc/object",
+            "Permission denied (os error 13)",
+            "",
+            &"a".repeat(65),
+        ] {
+            assert_eq!(
+                store_refusal_label(&anyhow::anyhow!(unsafe_text.to_string())),
+                None,
+                "{unsafe_text}"
+            );
+        }
+        // A wrapped refusal's outer text is what is tested, never its cause.
+        let wrapped = anyhow::anyhow!("artifact_delete_at_object_key_unavailable")
+            .context("deleting tenant-a's object at a key");
+        assert_eq!(store_refusal_label(&wrapped), None);
+    }
 
     /// Zaki review 1, item 1: `main`'s revocation-propagation worker checks a
     /// `worker_intermediate` object as a pipeline object only when its ref
