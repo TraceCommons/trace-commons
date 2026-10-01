@@ -251,15 +251,16 @@ pub(crate) fn validate_pipeline_privacy_filter_requirement(
 /// fail closed the same way, whenever tenants are routed; an invalid or
 /// unresolvable default package (`bundle_package_invalid`,
 /// `bundle_dependency_missing`) fails closed the same as an unqualified one.
-/// A compatibility bundle's configuration must also be qualifiable
-/// (`PipelineDependencyQualification::bundle`, Zaki review 1, round 2,
-/// finding 11), so the all-zero local reference never binds for real
-/// tenants.
+/// A compatibility bundle's configuration must also be qualifiable (Zaki
+/// review 1, round 2, finding 11), so the all-zero local reference never
+/// binds for real tenants: that is the bundle qualification's own
+/// configuration term (`PipelineBundleQualification::configuration_qualifiable`,
+/// `bundle_configuration_not_qualifiable`), the same one `qualify_bundle`
+/// sees, so startup reads no separate flag for it.
 pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService) -> bool {
     service
         .bundle_qualification(service.default_package())
         .is_ok_and(|qualification| qualification.is_production_qualified())
-        && service.dependency_qualification().bundle
 }
 
 /// Label-only readiness body. `reason` is present only when `status` is

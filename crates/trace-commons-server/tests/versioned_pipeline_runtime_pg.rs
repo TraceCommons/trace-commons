@@ -26574,6 +26574,117 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
     );
 }
 
+/// `package` with its compatibility configuration's three floors set to
+/// zero: production-looking (so `validate_production_package` accepts it)
+/// and correctly hashed, but a configuration `CompatibilityBundleConfig`
+/// refuses (`compatibility_zero_floor`), so not qualifiable. Built by hand,
+/// since `compatibility_package` validates its configuration first.
+fn zero_floor_production_package(package: &BundlePackage) -> BundlePackage {
+    let mut config = production_compatible_config();
+    config.perplexity_floor_micros = 0;
+    config.tail_fraction_floor_micros = 0;
+    config.novelty_floor_micros = 0;
+    assert!(config.validate().is_err() && !config.is_qualifiable());
+    let config_bytes = serde_json::to_vec(&config).unwrap();
+    let config_hash = dependency_content_hash(&config_bytes);
+    let mut zero = package.clone();
+    zero.artifacts
+        .remove(&zero.manifest.score.configuration_hash)
+        .expect("the package stores its configuration");
+    zero.artifacts.insert(config_hash.clone(), config_bytes);
+    for policy in [
+        &mut zero.manifest.admission,
+        &mut zero.manifest.review,
+        &mut zero.manifest.score,
+        &mut zero.manifest.settle,
+    ] {
+        policy.configuration_hash = config_hash.clone();
+    }
+    zero.bundle_id = zero.manifest.bundle_id().unwrap();
+    zero.validate()
+        .expect("the zero-floor package is well-formed");
+    zero
+}
+
+/// Wave 2 (rebase 9 review, M2): bundle qualification has a configuration
+/// term. A signed, production-looking compatibility package whose
+/// configuration fails validation (all three floors zero) is not
+/// qualifiable: its bundle qualification reports
+/// `bundle_configuration_not_qualifiable` with every dependency qualified,
+/// and `qualify_bundle` refuses it with that label and records nothing.
+/// (Startup reads the same term; the ingest test
+/// `a_non_qualifiable_compatibility_configuration_fails_the_qualification_gate`
+/// covers it.)
+#[tokio::test]
+async fn qualify_bundle_refuses_a_package_whose_configuration_is_not_qualifiable() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, package) = qualified_production_service(backend.clone(), &dir).await;
+    let zero = zero_floor_production_package(&package);
+    assert_eq!(
+        service
+            .bundle_qualification(&package)
+            .expect("the production package resolves")
+            .blockers(),
+        Vec::<&str>::new()
+    );
+    let qualification = service
+        .bundle_qualification(&zero)
+        .expect("the zero-floor package resolves against the same dependencies");
+    assert!(!qualification.configuration_qualifiable);
+    assert_eq!(
+        qualification.blockers(),
+        vec![PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL]
+    );
+
+    let profile =
+        ProductionDependencyProfile::for_bundle(&service, &zero, all_production_infrastructure())
+            .expect("the zero-floor package resolves");
+    assert_eq!(
+        profile.blockers(),
+        vec![PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string()]
+    );
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+    let signed = sign_bundle_package(zero.clone(), "qualification-release-key", pkcs8.as_ref())
+        .expect("package signs");
+    let trust = BundlePackageTrustStore::new([trusted_key_for_pkcs8(
+        "qualification-release-key",
+        pkcs8.as_ref(),
+    )
+    .expect("trusted key builds")])
+    .unwrap();
+    let promotion = promotion_from_check_results(&zero, &sha256_prefixed(b"code-revision"), None);
+    assert!(promotion.ready);
+    let metadata = BundleQualificationMetadata {
+        corpus_digest: sha256_prefixed(b"corpus"),
+        input_digest: sha256_prefixed(b"input"),
+        configuration_digest: package_digests(&zero)
+            .expect("package digests compute")
+            .configuration_digest,
+        code_revision_hash: sha256_prefixed(b"code-revision"),
+        runtime_dependency_digest: profile
+            .runtime_identity_digest()
+            .expect("runtime identity digest computes"),
+        evidence_hash: promotion.evidence_hash.clone(),
+    };
+    let tenant = format!("qualify-bundle-configuration-{}", uuid::Uuid::new_v4());
+    let error = PipelineQualificationStore::new(backend.clone())
+        .qualify_bundle(&tenant, &signed, &trust, &metadata, &profile, &promotion)
+        .await
+        .expect_err("a package whose configuration is not qualifiable is refused");
+    assert!(
+        matches!(error, DatabaseError::Constraint(ref label) if label == PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
+        0
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Task 8: index rebuild from authoritative commands
 // (`PipelineService::rebuild_index_from_authoritative_commands`,

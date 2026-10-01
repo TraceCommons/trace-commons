@@ -310,7 +310,10 @@ it. It takes a signed package, a trust store, qualification metadata, a
 evidence the metadata records. It fails closed on an untrusted or tampered
 package, a non-production or development package, a profile built for a
 different bundle, a configuration or dependency-digest mismatch, any
-blocked dependency, a decision that does not back the metadata, or a second
+blocked dependency (a compatibility configuration that is not qualifiable,
+such as all three floors zero, blocks as
+`bundle_configuration_not_qualifiable`), a decision that does not back the
+metadata, or a second
 call for the same bundle with different metadata. The decision must be
 ready (`bundle_qualification_promotion_not_ready`), its evidence hash must
 be the metadata's (`bundle_qualification_evidence_mismatch`), its one code

@@ -136,6 +136,10 @@ pub const PIPELINE_ATTEMPTS_EXHAUSTED_LABEL: &str = "attempts_exhausted";
 pub const PIPELINE_BUNDLE_MISSING_LABEL: &str = "bundle_package_missing";
 pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
+/// A bundle whose own configuration is not qualifiable
+/// (`PipelineBundleQualification::configuration_qualifiable`).
+pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
+    "bundle_configuration_not_qualifiable";
 /// Safe label of an object-store call in the run path that failed (an
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
@@ -5975,9 +5979,11 @@ pub struct SubmissionGuard {
 /// runs). `payout` is the same for the NEAR payout adapter: true only when
 /// the service holds one and it is `production_qualified()`.
 ///
-/// Startup no longer reads this field-by-field check, except `bundle`: see
+/// Startup no longer reads this field-by-field check: see
 /// [`PipelineService::bundle_qualification`], which scopes qualification to
-/// the one bundle a runtime actually starts (decision P4-D7). The
+/// the one bundle a runtime actually starts (decision P4-D7), and whose
+/// `configuration_qualifiable` term replaced startup's read of `bundle`
+/// (wave 2). The
 /// `NoveltyUtility` production-gate check in `novelty_utility_withheld_reason`
 /// still reads this method directly -- that check is about every dependency
 /// the service could ever route a compatibility receipt to, not one bundle.
@@ -6020,7 +6026,12 @@ pub struct PipelineDependencyCheck {
 /// which is `None` while payout is disabled and otherwise `Some` of the held
 /// NEAR adapter's own qualification, for every package: payout pays the
 /// complete runs of every bundle, so it is service-wide like the index
-/// writer (final review M5).
+/// writer (final review M5). `configuration_qualifiable` is the package's
+/// own configuration term: a compatibility package whose configuration is
+/// not qualifiable (`CompatibilityBundleConfig::is_qualifiable`: the local
+/// reference's all-zero floors, say) is never production-qualified, so
+/// neither startup nor `qualify_bundle` accepts it (wave 2; rebase 9
+/// review, M2). A package of another family carries no such configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PipelineBundleQualification {
     pub bundle_id: String,
@@ -6032,6 +6043,7 @@ pub struct PipelineBundleQualification {
     pub authority: bool,
     pub privacy: bool,
     pub payout: Option<bool>,
+    pub configuration_qualifiable: bool,
     pub dependency_digest: String,
 }
 
@@ -6065,6 +6077,9 @@ impl PipelineBundleQualification {
         }
         if self.payout == Some(false) {
             blockers.push("runtime_payout_not_production");
+        }
+        if !self.configuration_qualifiable {
+            blockers.push(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL);
         }
         blockers
     }
@@ -7136,6 +7151,9 @@ impl PipelineService {
                 .as_ref()
                 .is_some_and(|privacy| privacy.production_qualified()),
             payout,
+            configuration_qualifiable:
+                crate::versioned_pipeline_bundle::package_compatibility_config(package)
+                    .is_none_or(|config| config.is_qualifiable()),
             dependency_digest: digests.dependency_digest,
         })
     }

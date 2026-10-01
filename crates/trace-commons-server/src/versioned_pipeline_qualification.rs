@@ -1876,6 +1876,7 @@ mod tests {
             authority: true,
             privacy: true,
             payout: None,
+            configuration_qualifiable: true,
             dependency_digest: sha256_prefixed(b"dependency-digest"),
         };
         let profile = ProductionDependencyProfile::new(
