@@ -60,8 +60,8 @@ public enum DaemonDataError: Error, Equatable, Sendable, CustomStringConvertible
     /// healthy one, from this.
     case unreachable
     /// The method has no implementation on this daemon yet. Thrown by the
-    /// real client for the provisional network methods (Zaki's C3) and for
-    /// the few local ones the real client (K1) still has to route.
+    /// real client for the provisional network methods (Zaki's C3), and for
+    /// `preview_unsure_spans` when it was built without the export.
     case notAvailableYet(method: String)
     /// The daemon answered with an IPC error. `code` and `message` are the
     /// fixed labels the contract defines, safe to show.

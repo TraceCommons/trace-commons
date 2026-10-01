@@ -1,0 +1,150 @@
+import Foundation
+import TCBridge
+import TCShellCore
+import XCTest
+
+/// `TCDaemon` as both transports, by forwarding. The app target declares
+/// the conformances on `TCDaemon` itself (`DaemonCalling.swift`); declaring
+/// them again here would be a second conformance in the one test bundle
+/// `swift test` links, so this forwards to the same two methods instead.
+private final class Pipe: DaemonTransport, DaemonPreviewIndexTransport, @unchecked Sendable {
+    let daemon: TCDaemon
+    init(_ daemon: TCDaemon) { self.daemon = daemon }
+    func call(_ method: String, params paramsJSON: String) -> String {
+        daemon.call(method, params: paramsJSON)
+    }
+    func previewUnsureSpans(entryID: String, bodyDigest: String) -> String {
+        daemon.previewUnsureSpans(entryID: entryID, bodyDigest: bodyDigest)
+    }
+}
+
+/// Carries the daemon into the teardown block. `TCDaemon` is safe to use
+/// from any thread (its own doc), and shutdown is idempotent.
+private struct Owned: @unchecked Sendable {
+    let daemon: TCDaemon
+    init(_ daemon: TCDaemon) { self.daemon = daemon }
+}
+
+private func live(_ daemon: TCDaemon) -> LiveDaemonClient {
+    let pipe = Pipe(daemon)
+    return LiveDaemonClient(transport: pipe, previewIndex: pipe)
+}
+
+/// K1 of #1173: `LiveDaemonClient` against the real dylib and a real daemon
+/// on a throwaway state directory. The unit tests prove what the client
+/// sends and how it reads canned frames; this proves the daemon on this
+/// branch answers those requests in shapes the contract decodes.
+final class LiveDaemonClientIntegrationTests: XCTestCase {
+    /// Both session roots declared off, so the daemon starts without ever
+    /// reading a real ~/.claude or ~/.codex tree.
+    private let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
+
+    private func startDaemon() throws -> TCDaemon {
+        // Short enough for the daemon's Unix socket path on macOS.
+        let directory = URL(fileURLWithPath: "/private/tmp/tc-k1-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let daemon = try TCDaemon(configDir: directory.path, settingsJSON: settings)
+        let owned = Owned(daemon)
+        addTeardownBlock {
+            _ = owned.daemon.shutdown()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        return daemon
+    }
+
+    func testStatusQueueProjectsHarnessesAndSettingsDecodeFromTheRealDaemon() async throws {
+        let daemon = try startDaemon()
+        let client = live(daemon)
+
+        let status = try await client.status()
+        XCTAssertEqual(status.queueDepth, 0)
+        // A fresh store owes nothing, and says so; it is not left unknown.
+        XCTAssertEqual(status.decisionsOwed, 0)
+
+        let pending = try await client.listPending(projectId: nil)
+        XCTAssertEqual(pending, [])
+        let kept = try await client.listKept()
+        XCTAssertEqual(kept, [])
+
+        let projects = try await client.listProjects()
+        XCTAssertEqual(projects.projects, [])
+
+        _ = try await client.harnessList()
+
+        let settings = try await client.settings()
+        XCTAssertNotNil(settings.scrubCheckMode)
+    }
+
+    func testASettingsWriteRoundTripsThroughTheRealDaemon() async throws {
+        let daemon = try startDaemon()
+        let client = live(daemon)
+        let updated = try await client.setScrubCheck(.manual)
+        XCTAssertEqual(updated.scrubCheckMode, .manual)
+        let reread = try await client.settings()
+        XCTAssertEqual(reread.scrubCheckMode, .manual)
+    }
+
+    func testAnUnknownProjectIsTheDaemonsRefusalNotUnreachable() async throws {
+        let client = live(try startDaemon())
+        do {
+            _ = try await client.listPending(projectId: "proj_does_not_exist")
+            XCTFail("an unknown project answered")
+        } catch DaemonDataError.daemon(_, let message) {
+            XCTAssertEqual(message, "project-id-unrecognized")
+        }
+    }
+
+    /// The export answers, framed like `tc_call`: a bad entry id is the
+    /// daemon's refusal, which proves the call reached the ABI rather than
+    /// being refused on the way.
+    func testUnsureSpansReachTheExport() async throws {
+        let daemon = try startDaemon()
+        let client = live(daemon)
+        do {
+            _ = try await client.previewUnsureSpans(entryId: "not-a-uuid", bodyDigest: "sha256:00")
+            XCTFail("a bad entry id answered")
+        } catch DaemonDataError.daemon(_, let message) {
+            XCTAssertEqual(message, "entry-id-invalid")
+        }
+    }
+
+    func testAStoppedDaemonIsUnreachable() async throws {
+        let daemon = try startDaemon()
+        let client = live(daemon)
+        _ = daemon.shutdown()
+        for call in [
+            { _ = try await client.status() },
+            { _ = try await client.listProjects() },
+            { _ = try await client.previewUnsureSpans(entryId: "e", bodyDigest: "d") },
+        ] as [() async throws -> Void] {
+            do {
+                try await call()
+                XCTFail("a stopped daemon answered")
+            } catch {
+                XCTAssertEqual(error as? DaemonDataError, .unreachable)
+            }
+        }
+    }
+
+    /// The stream the app feeds from its one `tc_subscribe` callback: opens
+    /// with a snapshot of the real queue, then carries the daemon's frames.
+    func testEventsOpenWithASnapshotAndCarryRealFrames() async throws {
+        let daemon = try startDaemon()
+        let client = live(daemon)
+        let subscription = try XCTUnwrap(daemon.subscribe { client.deliver(eventJSON: $0) })
+        defer { daemon.unsubscribe(subscription) }
+
+        var iterator = client.events().makeAsyncIterator()
+        guard case .snapshot(let pending, let status)? = await iterator.next() else {
+            return XCTFail("first event is not a snapshot")
+        }
+        XCTAssertEqual(pending, [])
+        XCTAssertEqual(status?.decisionsOwed, 0)
+
+        // `pause` moves status and nothing else; the daemon says so.
+        _ = daemon.call("pause", params: "{}")
+        let next = await iterator.next()
+        XCTAssertEqual(next, .statusChanged)
+        client.finishEvents()
+    }
+}

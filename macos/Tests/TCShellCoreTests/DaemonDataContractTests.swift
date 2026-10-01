@@ -295,11 +295,15 @@ final class DaemonDataContractTests: XCTestCase {
     }
 
     func testLiveEventsDeliverParsedFrames() async {
+        // "{}" is not a frame, so the opening snapshot cannot be built and
+        // the stream opens with a resync instead; frames follow it.
         let client = LiveDaemonClient(transport: FakeTransport(response: "{}"))
         let stream = client.events()
         client.deliver(eventJSON: #"{"event":"status_changed","data":{}}"#)
         client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"at":"2026-09-30T09:00:00Z","tool":"codex","family":"openai","model":"m","route":"routed","proof":"pending"}}"#)
         var iterator = stream.makeAsyncIterator()
+        let opening = await iterator.next()
+        XCTAssertEqual(opening, .resyncRequired)
         let first = await iterator.next()
         XCTAssertEqual(first, .statusChanged)
         guard case .inferenceCallAdded(let call)? = await iterator.next() else {
@@ -316,14 +320,22 @@ private final class FakeTransport: DaemonTransport, @unchecked Sendable {
     }
 
     let response: String
-    private(set) var calls: [Call] = []
+    private let lock = NSLock()
+    private var recorded: [Call] = []
+    var calls: [Call] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
 
     init(response: String) {
         self.response = response
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        calls.append(Call(method: method, params: paramsJSON))
+        lock.lock()
+        recorded.append(Call(method: method, params: paramsJSON))
+        lock.unlock()
         return response
     }
 }

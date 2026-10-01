@@ -1,4 +1,5 @@
 import Foundation
+import TCBridge
 import TCShellCore
 
 /// The one place a screen's `DaemonDataClient` is chosen (C1 of #1173).
@@ -8,9 +9,12 @@ import TCShellCore
 /// `DaemonDataWiring.sample(.normalDay)` to `DaemonDataWiring.live(daemon)`;
 /// no screen code changes.
 enum DaemonDataWiring {
-    /// The real client, over the same `tc_call` path `DaemonClient` uses.
-    static func live(_ daemon: any DaemonCalling) -> any DaemonDataClient {
-        LiveDaemonClient(transport: daemon)
+    /// The real client, over the same `tc_call` path `DaemonClient` uses,
+    /// with the unsure-span export for `previewUnsureSpans`. Returned as the
+    /// concrete type because its owner (`AppModel`) also feeds it events and
+    /// ends them at teardown; screens still receive `any DaemonDataClient`.
+    static func live(_ daemon: TCDaemon) -> LiveDaemonClient {
+        LiveDaemonClient(transport: daemon, previewIndex: daemon)
     }
 
     #if DEBUG

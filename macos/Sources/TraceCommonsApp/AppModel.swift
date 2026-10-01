@@ -827,6 +827,13 @@ final class AppModel: ObservableObject {
     private var client: DaemonClient?
     var skillLearningClient: DaemonClient? { client }
     private var subscription: TCSubscription?
+    /// The C1 data contract's live client (K1 of #1173), for screens that
+    /// read through `DaemonDataClient`. Created with the daemon and fed by
+    /// the same `tc_subscribe` callback as `handle(event:)`, so there is
+    /// one subscription and both sides see the same frames. `nil` while no
+    /// daemon is running.
+    private var liveData: LiveDaemonClient?
+    var daemonData: (any DaemonDataClient)? { liveData }
     private var undoTask: Task<Void, Never>?
 
     /// Client-side bookkeeping for the daemon's bounded preview scheduler --
@@ -1033,6 +1040,7 @@ final class AppModel: ObservableObject {
             case .success(let daemon):
                 self.daemon = daemon
                 self.client = DaemonClient(daemon: daemon)
+                self.liveData = DaemonDataWiring.live(daemon)
                 self.startup = .running
                 self.subscribe()
                 self.refreshAll()
@@ -1048,7 +1056,11 @@ final class AppModel: ObservableObject {
 
     private func subscribe() {
         guard let daemon else { return }
+        // Captured, not read through `self`: the callback runs on a Rust
+        // thread, and `deliver` is lock-guarded and never calls back in.
+        let liveData = self.liveData
         subscription = daemon.subscribe { [weak self] json in
+            liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
             let event = DaemonEventParser.parse(json)
@@ -1157,6 +1169,10 @@ final class AppModel: ObservableObject {
         self.subscription = nil
         self.daemon = nil
         self.client = nil
+        // Screens' `for await` loops end here rather than waiting on a
+        // subscription that is about to be cancelled.
+        self.liveData?.finishEvents()
+        self.liveData = nil
         guard let daemon else { return }
         if case .leaked(let reason) = daemon.shutdown(unsubscribing: subscription) {
             // A fixed label, no path or token, per this repo's logging rule.
