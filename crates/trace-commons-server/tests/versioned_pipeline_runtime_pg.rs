@@ -22838,3 +22838,251 @@ async fn compatibility_score_never_holds_two_pooled_connections() {
         .expect("a compatibility Score never waits for a second connection");
     assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
 }
+
+/// Zaki review 1, round 2, N-6: a store whose every call made on a Tokio
+/// runtime worker fails, so a pipeline object-store call that was not moved
+/// to the blocking pool shows as a failed phase.
+struct BlockingPoolOnlyArtifactStore {
+    inner: Arc<dyn TraceArtifactStore>,
+}
+
+impl BlockingPoolOnlyArtifactStore {
+    fn refuse_runtime_workers() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "object store called on a runtime worker"
+        );
+        Ok(())
+    }
+}
+
+impl TraceArtifactStore for BlockingPoolOnlyArtifactStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        Self::refuse_runtime_workers()?;
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::refuse_runtime_workers()?;
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::refuse_runtime_workers()?;
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        Self::refuse_runtime_workers()?;
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::refuse_runtime_workers()?;
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::refuse_runtime_workers()?;
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        Self::refuse_runtime_workers()?;
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// The reference scorer, failing every call made on a runtime worker (N-6).
+struct BlockingPoolOnlyScorer(ReferencePerplexityScorer);
+
+impl trace_commons_gate_api::PerplexityScorer for BlockingPoolOnlyScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "scorer called on a runtime worker"
+        );
+        trace_commons_gate_api::PerplexityScorer::score(&self.0, plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<trace_commons_gate_api::ChunkPerplexity> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "scorer called on a runtime worker"
+        );
+        trace_commons_gate_api::PerplexityScorer::score_chunk(&self.0, chunk)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for BlockingPoolOnlyScorer {
+    fn dependency_identity(&self) -> &str {
+        "blocking_pool_only_scorer_test_only"
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"blocking-pool-only-scorer-test-only.v1".to_vec()
+    }
+}
+
+/// The reference embedder, failing every call made on a runtime worker.
+struct BlockingPoolOnlyEmbedder(ReferenceEmbedder);
+
+impl Embedder for BlockingPoolOnlyEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "embedder called on a runtime worker"
+        );
+        self.0.embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for BlockingPoolOnlyEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "blocking_pool_only_embedder_test_only"
+    }
+    fn model_id(&self) -> &str {
+        self.0.model_id()
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"blocking-pool-only-embedder-test-only.v1".to_vec()
+    }
+}
+
+/// Zaki review 1, round 2, N-6: the pipeline calls none of its synchronous
+/// dependencies on a Tokio runtime worker, on any phase or follow-up: the
+/// scorer, the embedder and the index reader in Score, the index writes in
+/// Settle and in the invalidation pass, and every object-store call (the
+/// receipt, Review's approved object, Score's objects and their reads,
+/// Settle's read of the index command). Each double fails a call made on a
+/// worker, so a call left on one fails its phase. A compatibility run
+/// completes with its index write applied and its credit written, and its
+/// withdrawal's invalidation removes the revision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    index.refuse_calls_on_runtime_workers();
+    let scorer = Arc::new(BlockingPoolOnlyScorer(ReferencePerplexityScorer::new()));
+    let embedder = Arc::new(BlockingPoolOnlyEmbedder(ReferenceEmbedder::new()));
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(BlockingPoolOnlyArtifactStore {
+        inner: artifact_store(&dir),
+    });
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .build()
+    .expect("build pipeline service");
+    let tenant = format!("compat-blocking-pool-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-blocking-pool";
+    let envelope = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, &tenant, principal, &envelope).await;
+    process_until_idle(&service, &tenant).await;
+    let run = service
+        .store()
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert_eq!(run.index_write_state, "complete");
+    assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        1
+    );
+
+    service
+        .withdraw_submission(&tenant, envelope.submission_id, principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    service
+        .process_index_invalidations(&tenant, 8)
+        .await
+        .expect("the invalidation pass runs");
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        0,
+        "the invalidation pass removed the revision off the runtime workers"
+    );
+}

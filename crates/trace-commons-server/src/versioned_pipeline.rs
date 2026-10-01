@@ -255,6 +255,24 @@ const PIPELINE_RECEIPT_OBJECT_MISMATCH_LABEL: &str = "receipt_object_mismatch";
 /// returned. Fails closed rather than treating a lost result as success or
 /// as an ordinary store error.
 const PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL: &str = "receipt_object_task_failed";
+/// The blocking thread a phase's synchronous dependency call (an object
+/// store, the index) was moved onto panicked or was cancelled before it
+/// returned (Zaki review 1, round 2, N-6). Fails closed.
+const PIPELINE_BLOCKING_CALL_FAILED_LABEL: &str = "blocking_call_failed";
+
+/// Runs `call`, a synchronous dependency call (an object store or an index:
+/// file or network I/O), on the blocking pool, so it never parks a runtime
+/// worker thread (Zaki review 1, round 2, N-6). A caller may hold a
+/// transaction across it: the await does not block the worker.
+async fn on_blocking_pool<T, F>(call: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(call)
+        .await
+        .map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))?
+}
 
 /// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
 /// `COALESCE` makes a `failed` leg with no label unresolved, as in Rust: a
@@ -6232,11 +6250,16 @@ impl PipelineService {
         let Some(index_id) = self.committed_index_id(tenant_id, claim.run_id).await? else {
             return Ok(self.store.fail_index_invalidation(claim).await?);
         };
-        let result = self.index_writer.invalidate_revision(
-            &pipeline_tenant_storage_ref(tenant_id),
-            &index_id,
-            claim.registry_revision_id,
-        );
+        // A synchronous index call, on the blocking pool (N-6). A task that
+        // did not return is an outage: the invalidation is retried.
+        let writer = self.index_writer.clone();
+        let tenant = pipeline_tenant_storage_ref(tenant_id);
+        let revision_id = claim.registry_revision_id;
+        let result = tokio::task::spawn_blocking(move || {
+            writer.invalidate_revision(&tenant, &index_id, revision_id)
+        })
+        .await
+        .unwrap_or(Err(IndexWriteError::Uncertain));
         Ok(match result {
             Ok(_) => self.store.complete_index_invalidation(claim).await?,
             Err(IndexWriteError::Failed | IndexWriteError::Uncertain) => {
@@ -7161,10 +7184,13 @@ impl PipelineService {
                 ciphertext_sha256: row.get("ciphertext_sha256"),
                 encrypted_at: row.get("staged_at"),
             };
-            if self
-                .artifact_store
-                .delete_artifact(tenant_storage_ref.as_str(), &receipt)
-                .is_err()
+            let store = self.artifact_store.clone();
+            let delete_tenant_storage_ref = tenant_storage_ref.clone();
+            if on_blocking_pool(move || {
+                store.delete_artifact(delete_tenant_storage_ref.as_str(), &receipt)
+            })
+            .await
+            .is_err()
             {
                 tracing::warn!(
                     label = "pipeline_receipt_sweep_delete_failed",
@@ -7249,12 +7275,19 @@ impl PipelineService {
             .strip_prefix("sha256:")
             .ok_or_else(|| anyhow::anyhow!("object artifact hash is malformed"))?;
         let tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id);
-        let wrapper = self.artifact_store.read_json_by_object_key(
-            tenant_storage_ref.as_str(),
-            TraceArtifactKind::ContributionEnvelope,
-            &object_key,
-            ciphertext_sha256,
-        )?;
+        // The read keeps the rows locked `FOR SHARE`, so the object cannot be
+        // deleted under it, and runs on the blocking pool (N-6).
+        let store = self.artifact_store.clone();
+        let ciphertext_sha256 = ciphertext_sha256.to_string();
+        let wrapper = on_blocking_pool(move || {
+            store.read_json_by_object_key(
+                tenant_storage_ref.as_str(),
+                TraceArtifactKind::ContributionEnvelope,
+                &object_key,
+                &ciphertext_sha256,
+            )
+        })
+        .await?;
         tx.commit().await?;
         decode_pipeline_artifact_bytes(&wrapper)
     }
@@ -7308,7 +7341,9 @@ impl PipelineService {
         ) else {
             anyhow::bail!("index_command_invalid");
         };
-        let command = self.read_index_command(&run.tenant_id, stored, run_hash, revision_id)?;
+        let command = self
+            .read_index_command(&run.tenant_id, stored, run_hash, revision_id)
+            .await?;
         anyhow::ensure!(
             run_hash == expected_hash
                 && Some(command.index_id()) == evidence.index_id.as_deref()
@@ -7322,7 +7357,7 @@ impl PipelineService {
     /// (`object_key#ciphertext_sha256`) and checks that it hashes to
     /// `command_hash` and names `revision_id`. Any failure is the safe label
     /// `index_command_invalid`.
-    fn read_index_command(
+    async fn read_index_command(
         &self,
         tenant_id: &str,
         stored_ref: &str,
@@ -7333,15 +7368,19 @@ impl PipelineService {
             .rsplit_once('#')
             .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
         let tenant = pipeline_tenant_storage_ref(tenant_id);
-        let wrapper = self
-            .artifact_store
-            .read_json_by_object_key(
+        let store = self.artifact_store.clone();
+        let (object_key, ciphertext_sha256) =
+            (object_key.to_string(), ciphertext_sha256.to_string());
+        let wrapper = on_blocking_pool(move || {
+            store.read_json_by_object_key(
                 tenant.as_str(),
                 TraceArtifactKind::VectorPayload,
-                object_key,
-                ciphertext_sha256,
+                &object_key,
+                &ciphertext_sha256,
             )
-            .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
         let bytes = decode_pipeline_artifact_bytes(&wrapper)
             .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
         let command = serde_json::from_slice::<SealedIndexCommand>(&bytes)
@@ -7863,12 +7902,17 @@ impl PipelineService {
                             required_lease_token(run)?,
                         );
                         let wrapper = encode_pipeline_artifact_bytes(content.bytes())?;
-                        let receipt = self.artifact_store.put_serialized_json(
-                            pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
-                            TraceArtifactKind::ContributionEnvelope,
-                            &object_id,
-                            &wrapper,
-                        )?;
+                        let store = self.artifact_store.clone();
+                        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+                        let receipt = on_blocking_pool(move || {
+                            store.put_serialized_json(
+                                tenant.as_str(),
+                                TraceArtifactKind::ContributionEnvelope,
+                                &object_id,
+                                &wrapper,
+                            )
+                        })
+                        .await?;
                         self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
                         written_receipt = Some(receipt.clone());
                         Some(ApprovedRevision {
@@ -7910,7 +7954,8 @@ impl PipelineService {
                                 &run.tenant_id,
                                 written_receipt.iter(),
                                 "review_approved_object_delete_failed",
-                            );
+                            )
+                            .await;
                         }
                         // The store's `Display` prefixes every `Constraint`
                         // error ("Constraint violation: ..."), which would not
@@ -8005,6 +8050,7 @@ impl PipelineService {
         {
             commands.push(
                 self.read_index_command(&run.tenant_id, &stored_ref, &command_hash, revision)
+                    .await
                     .map_err(|_| {
                         PolicyError::transient(PIPELINE_INDEX_UNAVAILABLE_LABEL)
                             .expect("static label")
@@ -8092,14 +8138,23 @@ impl PipelineService {
         .into_iter()
         .flatten()
         {
-            let put = encode_pipeline_artifact_bytes(bytes).and_then(|wrapper| {
-                self.artifact_store.put_serialized_json(
-                    tenant.as_str(),
-                    TraceArtifactKind::VectorPayload,
-                    &pipeline_attempt_object_id(artifact, run.run_id, lease_token),
-                    &wrapper,
-                )
-            });
+            let put = match encode_pipeline_artifact_bytes(bytes) {
+                Ok(wrapper) => {
+                    let store = self.artifact_store.clone();
+                    let tenant = tenant.clone();
+                    let object_id = pipeline_attempt_object_id(artifact, run.run_id, lease_token);
+                    on_blocking_pool(move || {
+                        store.put_serialized_json(
+                            tenant.as_str(),
+                            TraceArtifactKind::VectorPayload,
+                            &object_id,
+                            &wrapper,
+                        )
+                    })
+                    .await
+                }
+                Err(error) => Err(error),
+            };
             let receipt = match put {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -8107,7 +8162,8 @@ impl PipelineService {
                         &run.tenant_id,
                         written.iter().map(|(.., receipt)| receipt),
                         "score_object_delete_failed",
-                    );
+                    )
+                    .await;
                     return Err(error);
                 }
             };
@@ -8180,7 +8236,8 @@ impl PipelineService {
                         &run.tenant_id,
                         written.iter().map(|(.., receipt)| receipt),
                         "score_object_delete_failed",
-                    );
+                    )
+                    .await;
                 }
                 // The store's Display prefixes every Constraint error
                 // ("Constraint violation: ..."), which would not match
@@ -8204,7 +8261,7 @@ impl PipelineService {
     /// Deletes objects a phase attempt wrote that no committed row names,
     /// best effort: a failed delete is logged under `label` alone and never
     /// masks the error that led here.
-    fn delete_attempt_objects<'a>(
+    async fn delete_attempt_objects<'a>(
         &self,
         tenant_id: &str,
         receipts: impl Iterator<Item = &'a EncryptedTraceArtifactReceipt>,
@@ -8212,9 +8269,11 @@ impl PipelineService {
     ) {
         let tenant = pipeline_tenant_storage_ref(tenant_id);
         for receipt in receipts {
-            if self
-                .artifact_store
-                .delete_artifact(tenant.as_str(), receipt)
+            let store = self.artifact_store.clone();
+            let tenant = tenant.clone();
+            let receipt = receipt.clone();
+            if on_blocking_pool(move || store.delete_artifact(tenant.as_str(), &receipt))
+                .await
                 .is_err()
             {
                 tracing::warn!(
@@ -8422,35 +8481,48 @@ impl PipelineService {
                 let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
                 // Each entry is written under its own key: the command pairs
                 // them, so one entry is never stored under another's key.
-                for (key, entry) in command.keyed_entries(&tenant) {
-                    match self
-                        .index_writer
-                        .upsert(&key, &entry.embedding, &entry.content_hash)
-                    {
-                        Ok(_) => {}
-                        Err(IndexWriteError::Uncertain) | Err(IndexWriteError::Failed) => {
-                            // An index outage is a
-                            // dependency failure, like Score's own
-                            // `index_unavailable` -- an uncharged
-                            // suspension, which the Settle code records
-                            // itself rather than returning an `Err`. Ruling
-                            // S5: the transaction (rolled back, `pending`
-                            // stays) and its pooled client go before the
-                            // store call, which checks out its own.
-                            drop(tx);
-                            drop(client);
-                            return Ok(self
-                                .store
-                                .mark_transient_retry(&run, PIPELINE_INDEX_UNAVAILABLE_LABEL)
-                                .await?);
-                        }
-                        Err(IndexWriteError::ContentConflict) => {
-                            // Ruling S5, as above.
-                            drop(tx);
-                            drop(client);
-                            self.store.mark_index_write_state(&run, "failed").await?;
-                            return Err(anyhow::anyhow!(PIPELINE_INDEX_CONFLICT_LABEL));
-                        }
+                // The writes are synchronous index calls, so they run on the
+                // blocking pool while this transaction keeps the run and
+                // submission rows locked (N-6); a task that did not return
+                // may have written part of the command, as an `Uncertain`
+                // answer may.
+                let writer = self.index_writer.clone();
+                let entries = command
+                    .keyed_entries(&tenant)
+                    .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
+                    .collect::<Vec<_>>();
+                let written = tokio::task::spawn_blocking(move || {
+                    for (key, embedding, content_hash) in &entries {
+                        writer.upsert(key, embedding, content_hash)?;
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap_or(Err(IndexWriteError::Uncertain));
+                match written {
+                    Ok(()) => {}
+                    Err(IndexWriteError::Uncertain) | Err(IndexWriteError::Failed) => {
+                        // An index outage is a
+                        // dependency failure, like Score's own
+                        // `index_unavailable` -- an uncharged
+                        // suspension, which the Settle code records
+                        // itself rather than returning an `Err`. Ruling
+                        // S5: the transaction (rolled back, `pending`
+                        // stays) and its pooled client go before the
+                        // store call, which checks out its own.
+                        drop(tx);
+                        drop(client);
+                        return Ok(self
+                            .store
+                            .mark_transient_retry(&run, PIPELINE_INDEX_UNAVAILABLE_LABEL)
+                            .await?);
+                    }
+                    Err(IndexWriteError::ContentConflict) => {
+                        // Ruling S5, as above.
+                        drop(tx);
+                        drop(client);
+                        self.store.mark_index_write_state(&run, "failed").await?;
+                        return Err(anyhow::anyhow!(PIPELINE_INDEX_CONFLICT_LABEL));
                     }
                 }
                 // A crash here drops the transaction, so `pending` stays; the

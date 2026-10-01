@@ -132,6 +132,12 @@ shared. Score, in particular, runs the injected scorer and embedder inside
 the lease -- a chunked NEAR AI perplexity scorer or a CPU-bound embedder can
 exceed a short lease on the pilot.
 
+The scorer, the embedder, the index, and the object store are synchronous,
+so the worker calls them on the blocking thread pool, never on a runtime
+worker thread that ingest's HTTP routes share: Score's whole evaluation,
+Settle's index writes (with the run and submission rows still locked), the
+invalidation pass, and every object read, write, and delete of a phase.
+
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` -- whole seconds, default 300
   (5 minutes).
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE` -- whole seconds, default 1800
