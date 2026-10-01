@@ -120,8 +120,11 @@ directory, resumes a pending run to the same settlement legs and Trace
 Credit ledger event the original run reached, with the index's entry set
 and the pending-run set unchanged and no duplicate effect. Before the
 resume, the restored database keeps every trace table's RLS (enabled,
-forced, and the tenant policy's predicate), the runtime login's full
-privilege set, every tenant's rows, and every tenant's audit chain.
+forced, and the tenant policy's predicate), every RLS policy the dumped
+database had and no other, the runtime login's full privilege set, every
+tenant's rows, and every tenant's audit chain. The policy comparison is
+against the dumped database: a policy that was already too wide before the
+dump is not detected here.
 
 **What it does not prove.** The artifact "restore" is a local filesystem
 copy (`shutil.copytree`), never a restore from a remote object store; the

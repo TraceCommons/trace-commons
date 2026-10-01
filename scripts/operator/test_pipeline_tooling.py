@@ -1851,6 +1851,8 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "completed_settlement_count": 1,
                     "completed_credit_event_count": 1,
                     "rls_table_count": 96,
+                    "rls_policy_set_hash": _fake_hash("policies"),
+                    "rls_policy_count": 150,
                     "runtime_privilege_set_hash": _fake_hash("privileges"),
                     "runtime_privilege_count": 500,
                     "tenant_fingerprint": _fake_hash("tenants"),
@@ -1870,6 +1872,8 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "pending_runs_resumed": 1,
                     "duplicate_effects": 0,
                     "rls_tables_checked": seed["rls_table_count"],
+                    "rls_policy_set_hash": seed["rls_policy_set_hash"],
+                    "rls_policy_count": seed["rls_policy_count"],
                     "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
                     "tenant_fingerprint": seed["tenant_fingerprint"],
                     "tenant_count": seed["tenant_count"],
@@ -1997,7 +2001,8 @@ class RestoreDrillTests(_RestoreDrillCase):
         self.assertIn("duplicate_effects=0", lines[0])
         self.assertEqual(
             lines[1],
-            f"PipelineRestoreChecks: rls_tables=96 runtime_privileges={_fake_hash('privileges')} "
+            f"PipelineRestoreChecks: rls_tables=96 rls_policies={_fake_hash('policies')} rls_policy_count=150 "
+            f"runtime_privileges={_fake_hash('privileges')} "
             f"runtime_privilege_count=500 tenants=2 tenant_fingerprint={_fake_hash('tenants')} "
             "audit_events_verified=2",
         )
@@ -2051,6 +2056,12 @@ class RestoreDrillTests(_RestoreDrillCase):
             # Zaki's review of #1166, Major 2: the new checks' evidence must
             # be the seed's too.
             ({"evidence": {"rls_tables_checked": 95}}, "restore_evidence_mismatch"),
+            # Review of this wave, I1: the whole policy set, not only the
+            # named tenant policy.
+            ({"evidence": {"rls_policy_set_hash": _fake_hash("other")}}, "restore_evidence_mismatch"),
+            ({"evidence": {"rls_policy_count": 151}}, "restore_evidence_mismatch"),
+            ({"fingerprint": {"rls_policy_count": 0}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"rls_policy_set_hash": "sha256:short"}}, "restore_fingerprint_invalid"),
             ({"evidence": {"runtime_privilege_set_hash": _fake_hash("other")}}, "restore_evidence_mismatch"),
             ({"evidence": {"tenant_fingerprint": _fake_hash("other")}}, "restore_evidence_mismatch"),
             ({"evidence": {"tenant_count": 1}}, "restore_evidence_mismatch"),

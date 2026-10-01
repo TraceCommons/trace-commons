@@ -95,6 +95,33 @@ const RESTORE_TOKEN: &str = "token-a";
 const SECOND_TENANT: &str = "tenant-b";
 const SECOND_TOKEN: &str = "token-b";
 
+/// Every row-level security policy in the `public` schema, one line each,
+/// sorted: its table, name, command, permissive or restrictive, its roles'
+/// names sorted (`PUBLIC` for oid 0), and its `USING` and `WITH CHECK`
+/// expressions as `pg_get_expr` reads them back. The named tenant policy's
+/// predicate is not the whole isolation: PostgreSQL ORs permissive
+/// policies, so a policy added beside it (`USING (true)`), or one whose
+/// roles widen to `PUBLIC`, opens the table too (review of this wave, I1).
+const RLS_POLICY_SET_SQL: &str = r"
+    WITH entries AS (
+        SELECT concat_ws('|',
+                   c.relname::TEXT,
+                   pol.polname::TEXT,
+                   pol.polcmd::TEXT,
+                   CASE WHEN pol.polpermissive THEN 'permissive' ELSE 'restrictive' END,
+                   (SELECT string_agg(role_name, ',' ORDER BY role_name)
+                      FROM (SELECT CASE WHEN r = 0 THEN 'PUBLIC' ELSE r::regrole::TEXT END
+                                   AS role_name
+                              FROM unnest(pol.polroles) AS r) AS roles),
+                   COALESCE(pg_get_expr(pol.polqual, pol.polrelid), ''),
+                   COALESCE(pg_get_expr(pol.polwithcheck, pol.polrelid), '')) AS entry
+          FROM pg_policy pol
+          JOIN pg_class c ON c.oid = pol.polrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+    )
+    SELECT COALESCE(string_agg(entry, E'\n' ORDER BY entry), ''), COUNT(*) FROM entries";
+
 /// Every privilege the current login holds in the `public` schema, one line
 /// each, sorted: each privilege type on each table, view, and foreign table;
 /// each column privilege no table-level grant already gives; each sequence
@@ -268,6 +295,8 @@ struct RestoreFingerprint {
     completed_credit_event_count: usize,
     /// `TRACE_COMMONS_RLS_TABLES`'s length, all isolated in the seed.
     rls_table_count: usize,
+    rls_policy_set_hash: String,
+    rls_policy_count: usize,
     runtime_privilege_set_hash: String,
     runtime_privilege_count: usize,
     tenant_fingerprint: String,
@@ -286,12 +315,14 @@ impl RestoreFingerprint {
             &fingerprint.pending_run_id_hash,
             &fingerprint.runtime_privilege_set_hash,
             &fingerprint.tenant_fingerprint,
+            &fingerprint.rls_policy_set_hash,
         ];
         if fingerprint.schema != RESTORE_FINGERPRINT_SCHEMA
             || !hashes.into_iter().all(|hash| is_sha256_label(hash))
             || fingerprint.completed_settlement_count == 0
             || fingerprint.completed_credit_event_count == 0
             || fingerprint.rls_table_count == 0
+            || fingerprint.rls_policy_count == 0
             || fingerprint.runtime_privilege_count == 0
             || fingerprint.tenant_count < 2
             || fingerprint.audit_event_count == 0
@@ -724,14 +755,27 @@ async fn pipeline_table_security(backend: &Arc<PgBackend>) -> Vec<(String, bool,
 /// The runtime login's privilege set (`RUNTIME_PRIVILEGES_SQL`), hashed, and
 /// how many privileges it holds.
 async fn runtime_privileges(runtime: &Arc<PgBackend>) -> (String, usize) {
-    let row = runtime
+    hashed_catalog_lines(runtime, RUNTIME_PRIVILEGES_SQL, "restore_privileges").await
+}
+
+/// The policy set (`RLS_POLICY_SET_SQL`), hashed, and how many policies it
+/// holds. The catalog is readable by any login; the runtime login reads it.
+async fn rls_policy_set(runtime: &Arc<PgBackend>) -> (String, usize) {
+    hashed_catalog_lines(runtime, RLS_POLICY_SET_SQL, "restore_rls_policy_set").await
+}
+
+/// Runs `sql` (one text of sorted lines and their count) on `backend` and
+/// returns the text's hash and the count; failures panic with
+/// `<label>_connection_failed` or `<label>_query_failed`.
+async fn hashed_catalog_lines(backend: &Arc<PgBackend>, sql: &str, label: &str) -> (String, usize) {
+    let row = backend
         .trace_pool_for_test()
         .get()
         .await
-        .expect("restore_privileges_connection_failed")
-        .query_one(RUNTIME_PRIVILEGES_SQL, &[])
+        .unwrap_or_else(|_| panic!("{label}_connection_failed"))
+        .query_one(sql, &[])
         .await
-        .expect("restore_privileges_query_failed");
+        .unwrap_or_else(|_| panic!("{label}_query_failed"));
     let text: String = row.get(0);
     let count = usize::try_from(row.get::<_, i64>(1)).expect("a count is not negative");
     (sha256_bytes(text.as_bytes()), count)
@@ -1093,6 +1137,7 @@ async fn pipeline_restore_seed() {
     // login's privileges, every tenant's rows, and every tenant's audit
     // chain, each of the two tenants with at least one audited event.
     let rls_table_count = require_trace_tables_isolated(&runtime, "restore_seed").await;
+    let (rls_policy_set_hash, rls_policy_count) = rls_policy_set(&runtime).await;
     let (runtime_privilege_set_hash, runtime_privilege_count) = runtime_privileges(&runtime).await;
     let tenants = tenant_fingerprint(&owner).await;
     assert!(
@@ -1120,6 +1165,8 @@ async fn pipeline_restore_seed() {
         completed_settlement_count: completed.settlement_count,
         completed_credit_event_count: completed.credit_events,
         rls_table_count,
+        rls_policy_set_hash,
+        rls_policy_count,
         runtime_privilege_set_hash,
         runtime_privilege_count,
         tenant_fingerprint: tenants.hash,
@@ -1173,6 +1220,14 @@ async fn pipeline_restore_resume() {
     assert_eq!(
         rls_tables_checked, seed.rls_table_count,
         "restore_rls_table_count_changed"
+    );
+    // Every policy, not only the named one: an added permissive policy, or
+    // one whose roles widened, opens a table the check above calls isolated.
+    let (rls_policy_set_hash, rls_policy_count) = rls_policy_set(&runtime).await;
+    assert!(
+        rls_policy_set_hash == seed.rls_policy_set_hash
+            && rls_policy_count == seed.rls_policy_count,
+        "restore_rls_policy_set_changed"
     );
     // Every privilege of every type, not only SELECT.
     let (runtime_privilege_set_hash, runtime_privilege_count) = runtime_privileges(&runtime).await;
@@ -1371,6 +1426,8 @@ async fn pipeline_restore_resume() {
             "pending_runs_resumed": pending_runs_resumed,
             "duplicate_effects": duplicate_effects,
             "rls_tables_checked": rls_tables_checked,
+            "rls_policy_set_hash": rls_policy_set_hash,
+            "rls_policy_count": rls_policy_count,
             "runtime_privilege_set_hash": runtime_privilege_set_hash,
             "tenant_fingerprint": tenants.hash,
             "tenant_count": tenants.tenants.len(),
@@ -1463,6 +1520,8 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         completed_settlement_count: 1,
         completed_credit_event_count: 1,
         rls_table_count: TRACE_COMMONS_RLS_TABLES.len(),
+        rls_policy_set_hash: hash("policies"),
+        rls_policy_count: 1,
         runtime_privilege_set_hash: hash("privileges"),
         runtime_privilege_count: 1,
         tenant_fingerprint: hash("tenants"),
@@ -1505,6 +1564,7 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
     );
     for count in [
         "rls_table_count",
+        "rls_policy_count",
         "runtime_privilege_count",
         "audit_event_count",
     ] {
@@ -1513,7 +1573,11 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
             Err("restore_fingerprint_invalid")
         );
     }
-    for hash_field in ["runtime_privilege_set_hash", "tenant_fingerprint"] {
+    for hash_field in [
+        "runtime_privilege_set_hash",
+        "tenant_fingerprint",
+        "rls_policy_set_hash",
+    ] {
         assert_eq!(
             edited(&|value| value[hash_field] = "not-a-hash".into()),
             Err("restore_fingerprint_invalid")

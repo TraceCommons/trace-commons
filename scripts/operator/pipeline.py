@@ -73,17 +73,20 @@ _RESTORE_FINGERPRINT_HASHES = (
     "pending_run_id_hash",
     "runtime_privilege_set_hash",
     "tenant_fingerprint",
+    "rls_policy_set_hash",
 )
 # The seed's counts: its adapter requests, the completed run's settlement
 # legs and Trace Credit ledger events (the resume requires the pending run
-# to reach the same two), the trace tables it found isolated, the runtime
-# login's privileges, the tenants with rows (at least two), and the audit
-# events `main`'s verifier accepted.
+# to reach the same two), the trace tables it found isolated, the RLS
+# policies in the schema, the runtime login's privileges, the tenants with
+# rows (at least two), and the hashed audit events `main`'s verifier
+# accepted.
 _RESTORE_FINGERPRINT_COUNTS = (
     "adapter_request_count",
     "completed_settlement_count",
     "completed_credit_event_count",
     "rls_table_count",
+    "rls_policy_count",
     "runtime_privilege_count",
     "tenant_count",
     "audit_event_count",
@@ -523,8 +526,8 @@ def require_same_artifact_bytes(source, destination):
 
 
 def _read_restore_fingerprint(path):
-    """The seed's fingerprint file: exactly its schema, six hashes, and
-    seven positive counts, two tenants or more among them."""
+    """The seed's fingerprint file: exactly its schema, seven hashes, and
+    eight positive counts, two tenants or more among them."""
     value = _read_json(path, "restore_fingerprint_invalid")
     require(
         isinstance(value, dict)
@@ -621,6 +624,8 @@ def run_restore_drill(run, environment):
             "pending_runs_resumed": 1,
             "duplicate_effects": 0,
             "rls_tables_checked": seed["rls_table_count"],
+            "rls_policy_set_hash": seed["rls_policy_set_hash"],
+            "rls_policy_count": seed["rls_policy_count"],
             "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
             "tenant_fingerprint": seed["tenant_fingerprint"],
             "tenant_count": seed["tenant_count"],
@@ -645,6 +650,7 @@ def restore_drill(args, run):
     )
     print(
         f"PipelineRestoreChecks: rls_tables={seed['rls_table_count']} "
+        f"rls_policies={seed['rls_policy_set_hash']} rls_policy_count={seed['rls_policy_count']} "
         f"runtime_privileges={seed['runtime_privilege_set_hash']} "
         f"runtime_privilege_count={seed['runtime_privilege_count']} "
         f"tenants={seed['tenant_count']} tenant_fingerprint={seed['tenant_fingerprint']} "
