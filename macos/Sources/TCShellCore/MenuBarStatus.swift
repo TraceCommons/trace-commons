@@ -30,17 +30,18 @@ public enum MenuBarStatus {
     /// number stops meaning "this many" and starts meaning "a lot".
     public static let badgeCap = 99
 
-    /// The badge's text, or nil when there is nothing to decide.
-    public static func badgeText(decisionsOwed: Int) -> String? {
-        guard decisionsOwed > 0 else { return nil }
+    /// The badge's text, or nil when zero or an unavailable count must not
+    /// produce a number. `state` distinguishes those cases.
+    public static func badgeText(decisionsOwed: Int?) -> String? {
+        guard let decisionsOwed, decisionsOwed > 0 else { return nil }
         return decisionsOwed > badgeCap ? "\(badgeCap)+" : "\(decisionsOwed)"
     }
 
     /// Precedence: count, then unhealthy, then paused, then idle. A paused
     /// watcher with three decisions waiting shows the three; the pause is
     /// stated in the menu, and the mark dims either way.
-    public static func state(decisionsOwed: Int, unhealthy: Bool, paused: Bool, available: Bool = true) -> MenuBarState {
-        guard available else { return .attention }
+    public static func state(decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool = true) -> MenuBarState {
+        guard available, decisionsOwed != nil else { return .attention }
         if let text = badgeText(decisionsOwed: decisionsOwed) { return .count(text, paused: paused) }
         if unhealthy { return .attention }
         if paused { return .paused }
@@ -49,8 +50,11 @@ public enum MenuBarStatus {
 }
 
 public extension MenuBarStatus {
-    static func accessibilityLabel(decisionsOwed: Int, unhealthy: Bool, paused: Bool, available: Bool = true) -> String {
+    static func accessibilityLabel(decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool = true) -> String {
         guard available else { return "Trace Commons. Watcher unavailable. Needs attention." }
+        guard let decisionsOwed else {
+            return "Trace Commons. Decision count unavailable." + (paused ? " Paused." : "")
+        }
         let detail: String
         if decisionsOwed > 0 {
             detail = "\(decisionsOwed) \(decisionsOwed == 1 ? "session" : "sessions") waiting for your decision."

@@ -5,6 +5,15 @@ import XCTest
 /// The status item's precedence and its badge text are the only two things
 /// about it that can be checked without drawing it, so they are checked.
 final class MenuBarStatusTests: XCTestCase {
+    func testAnUnavailableCountShowsAttentionWithoutClaimingZero() {
+        XCTAssertNil(MenuBarStatus.badgeText(decisionsOwed: nil))
+        XCTAssertEqual(MenuBarStatus.state(decisionsOwed: nil, unhealthy: false, paused: false), .attention)
+        let label = MenuBarStatus.accessibilityLabel(decisionsOwed: nil, unhealthy: false, paused: true)
+        XCTAssertTrue(label.contains("Decision count unavailable"))
+        XCTAssertFalse(label.contains("Nothing waiting"))
+        XCTAssertTrue(label.hasSuffix("Paused."))
+    }
+
     func testNoDecisionsMeansNoBadge() {
         XCTAssertNil(MenuBarStatus.badgeText(decisionsOwed: 0))
         XCTAssertNil(MenuBarStatus.badgeText(decisionsOwed: -1))

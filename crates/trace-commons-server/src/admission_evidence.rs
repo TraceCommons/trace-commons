@@ -113,7 +113,7 @@ impl AdmissionProviderTrust {
         // who wrote `ACCEPTED_MODELS=` meant to write something.
         let optional = |suffix: &str| {
             std::env::var(format!("{prefix}_{suffix}"))
-                .map(&split)
+                .map(split)
                 .unwrap_or_default()
         };
         Self::new(
