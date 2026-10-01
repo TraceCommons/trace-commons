@@ -2975,8 +2975,23 @@ fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
 // which every shell does to it, because the raw label is a slug no
 // contributor should read. Clients MUST NOT recognise this row by
 // label.
+/// Per-project session bookkeeping from the cwd cache: how many sessions,
+/// when the latest was last written, and which tools produced them.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ProjectSessionsSeen {
+    count: usize,
+    last_modified_at: Option<chrono::DateTime<Utc>>,
+    /// Session count per tool (K11), e.g. `claude-code` or an imported
+    /// conversation's declared source like `antigravity`. Absent for an
+    /// entry written before `CwdCacheEntry::tool` existed -- it is never
+    /// backfilled, since the tool that discovered a session cannot be
+    /// recovered from where it ran -- so this map can undercount `count`
+    /// and must never be asserted to sum to it.
+    tools: std::collections::BTreeMap<String, usize>,
+}
+
 /// Sessions the watcher has observed per project key, with the latest one's
-/// modification time, from the cwd cache.
+/// modification time and a per-tool breakdown (K11), from the cwd cache.
 ///
 /// The project key is read from each entry, where the watcher recorded it at
 /// insert, so this canonicalizes nothing under the state lock. An entry
@@ -2989,7 +3004,7 @@ fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
 /// not when it started.
 fn sessions_seen_per_project(
     shared: &DaemonShared,
-) -> std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> {
+) -> std::collections::BTreeMap<String, ProjectSessionsSeen> {
     let unresolved: Vec<(String, Option<String>)> = {
         let state = shared.state.lock().expect("state lock");
         state
@@ -3012,15 +3027,21 @@ fn sessions_seen_per_project(
         }
     }
     let state = shared.state.lock().expect("state lock");
-    let mut seen: std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> =
+    let mut seen: std::collections::BTreeMap<String, ProjectSessionsSeen> =
         std::collections::BTreeMap::new();
     for cached in state.cwd_cache.values() {
         let Some(key) = cached.project_key.clone() else {
             continue;
         };
-        let slot = seen.entry(key).or_insert((0, cached.modified_at));
-        slot.0 += 1;
-        slot.1 = slot.1.max(cached.modified_at);
+        let slot = seen.entry(key).or_default();
+        slot.count += 1;
+        slot.last_modified_at = Some(match slot.last_modified_at {
+            Some(current) => current.max(cached.modified_at),
+            None => cached.modified_at,
+        });
+        if let Some(tool) = cached.tool.clone() {
+            *slot.tools.entry(tool).or_insert(0) += 1;
+        }
     }
     seen
 }
@@ -3074,11 +3095,32 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         let key = row["project_id"]
             .as_str()
             .and_then(|id| project_key_for_id(id, &known));
-        let (session_count, last_session_at) = key
-            .and_then(|k| seen.get(&k).copied())
-            .map_or((0, None), |(n, at)| (n, Some(at)));
+        let project_seen = key.and_then(|k| seen.get(&k));
+        let session_count = project_seen.map_or(0, |s| s.count);
+        let last_session_at = project_seen.and_then(|s| s.last_modified_at);
         row["session_count"] = serde_json::Value::from(session_count);
         row["last_session_at"] = serde_json::json!(last_session_at);
+        // K11: which tool each of this project's sessions came from, with a
+        // count per tool -- read off the same cwd cache `session_count`
+        // already comes from, so this costs no extra pass over the
+        // filesystem. Always an array, empty rather than absent when
+        // nothing is known yet, so a client never has to test for the key.
+        row["tools"] = serde_json::json!(
+            project_seen
+                .map(|s| s.tools.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(source, session_count)| serde_json::json!({
+                    "source": source,
+                    "session_count": session_count,
+                    // The same fixed vendor word `tc_discover_sources` and
+                    // `harness_list` draw `answers_at` from (K13 extends the
+                    // table with Antigravity's), so this cannot name a
+                    // vendor differently from either surface.
+                    "answers_at": crate::source::source_answers_at(&source),
+                }))
+                .collect::<Vec<_>>()
+        );
         row["pending_count"] = serde_json::Value::from(counts.0);
         if let Some(contributable) = counts.1 {
             row["contributable_count"] = serde_json::Value::from(contributable);
@@ -9476,6 +9518,84 @@ mod tests {
             .result
             .unwrap();
         assert_eq!(result["unpurposed_traces"], 1, "{result}");
+    }
+
+    /// K11: a project's `list_projects` row names the tools that produced
+    /// its sessions, with a count per tool -- from the same cwd cache
+    /// `session_count` already reads, so no extra scan.
+    ///
+    /// Also K13: an imported Antigravity conversation and a Gemini CLI
+    /// session in the same project are reported as two distinct tool rows,
+    /// not folded into one, even though both answer at the same vendor.
+    #[test]
+    fn list_projects_breaks_sessions_down_by_tool() {
+        let s = shared();
+        let project_key = "/tmp/multi-tool-proj";
+        seed_entry(&s, project_key);
+
+        let insert = |path: &str, tool: &str| {
+            s.state.lock().unwrap().cwd_cache.insert(
+                path.to_string(),
+                super::super::state::CwdCacheEntry {
+                    size_bytes: 10,
+                    modified_at: Utc::now(),
+                    cwd: Some(project_key.to_string()),
+                    project_key: Some(project_key.to_string()),
+                    tool: Some(tool.to_string()),
+                },
+            );
+        };
+        insert("/tmp/claude-a.jsonl", "claude-code");
+        insert("/tmp/claude-b.jsonl", "claude-code");
+        insert("/tmp/gemini-a.json", "gemini-cli");
+        insert("/staged/antigravity-a.json", "antigravity");
+        // An entry with no recorded tool (written before K11, or never
+        // re-touched since) must not crash the rollup and must not be
+        // counted under any tool.
+        s.state.lock().unwrap().cwd_cache.insert(
+            "/tmp/legacy.jsonl".to_string(),
+            super::super::state::CwdCacheEntry {
+                size_bytes: 10,
+                modified_at: Utc::now(),
+                cwd: Some(project_key.to_string()),
+                project_key: Some(project_key.to_string()),
+                tool: None,
+            },
+        );
+
+        let rows = projects_of(&s);
+        let row = rows
+            .into_iter()
+            .find(|r| r["project_id"] == serde_json::json!(project_id_for(project_key)))
+            .expect("the project is listed");
+
+        assert_eq!(row["session_count"], 5, "{row}");
+        let tools = row["tools"].as_array().expect("tools is an array");
+        let tool_count = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t["source"] == name)
+                .unwrap_or_else(|| panic!("no {name} row in {tools:?}"))["session_count"]
+                .clone()
+        };
+        assert_eq!(tool_count("claude-code"), serde_json::json!(2));
+        assert_eq!(tool_count("gemini-cli"), serde_json::json!(1));
+        assert_eq!(tool_count("antigravity"), serde_json::json!(1));
+        assert_eq!(
+            tools.len(),
+            3,
+            "the legacy entry with no tool must not mint a fourth row: {tools:?}"
+        );
+
+        let answers_at =
+            |name: &str| tools.iter().find(|t| t["source"] == name).unwrap()["answers_at"].clone();
+        assert_eq!(answers_at("claude-code"), serde_json::json!("Anthropic"));
+        assert_eq!(answers_at("gemini-cli"), serde_json::json!("Google"));
+        assert_eq!(
+            answers_at("antigravity"),
+            serde_json::json!("Google"),
+            "Antigravity must name its own vendor rather than falling through to null"
+        );
     }
 
     /// Seed one pending queue entry for `project_key`, the way a poll that

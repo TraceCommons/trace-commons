@@ -47,6 +47,23 @@ pub struct CwdCacheEntry {
     /// first time it is needed.
     #[serde(default)]
     pub project_key: Option<String>,
+    /// Which tool this session reads as having come from (K11), recorded
+    /// when the entry is written: `SessionRef::declared_source` when the
+    /// source that discovered it named one (an imported Antigravity
+    /// conversation, say), otherwise the adapter's own name. The same
+    /// preference order `QueueEntry::agent_label` already uses for a
+    /// contributor-facing name -- see `source::mod::SessionRef`'s doc on
+    /// `declared_source`.
+    ///
+    /// `#[serde(default)]` so a state file written before this field
+    /// existed still loads, and `None` is never backfilled retroactively:
+    /// unlike `project_key`, which is re-derivable from `cwd`, the tool that
+    /// discovered a session is not recoverable from where it ran. An entry
+    /// whose size and mtime have not changed since before this field existed
+    /// keeps reporting `None` until the file changes again and the cache
+    /// entry is rewritten.
+    #[serde(default)]
+    pub tool: Option<String>,
 }
 
 /// What `save` last actually wrote, and where: the store directory it was
@@ -465,5 +482,50 @@ mod tests {
     fn state_defaults_when_the_file_is_absent() {
         let (_d, store) = temp_store();
         assert_eq!(DaemonState::load(&store).unwrap(), DaemonState::new());
+    }
+
+    /// K11: a `cwd_cache` entry written before `tool` existed still loads,
+    /// and reads as `None` rather than refusing to parse.
+    ///
+    /// Hand-written JSON rather than round-tripped through `save`, because a
+    /// round trip through the current struct would always include the field
+    /// and could never prove the old shape still decodes.
+    #[test]
+    fn a_cwd_cache_entry_written_before_tool_existed_still_loads() {
+        let (_d, store) = temp_store();
+        let body = serde_json::json!({
+            "schema_version": DAEMON_STATE_SCHEMA,
+            "cwd_cache": {
+                "/tmp/old-session.jsonl": {
+                    "size_bytes": 10,
+                    "modified_at": "2026-08-08T10:00:00Z",
+                    "cwd": "/Users/testuser/code/proj",
+                    "project_key": "/Users/testuser/code/proj"
+                }
+            },
+            "prior_uploads": {},
+            "last_observation": {},
+            "last_digest_at": null,
+            "day_bucket": null,
+            "uploads_today": 0,
+            "bytes_today": 0
+        });
+        std::fs::write(
+            store.daemon_path(DAEMON_STATE_FILE),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = DaemonState::load(&store).unwrap();
+        let entry = loaded.cwd_cache.get("/tmp/old-session.jsonl").unwrap();
+        assert_eq!(
+            entry.tool, None,
+            "an entry with no `tool` key must not refuse to parse"
+        );
+        assert_eq!(
+            entry.project_key.as_deref(),
+            Some("/Users/testuser/code/proj"),
+            "the field that did exist must still decode"
+        );
     }
 }

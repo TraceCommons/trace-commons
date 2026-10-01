@@ -1762,7 +1762,11 @@ handle with `preview-requires-embedded`.
       "session_count": 22,
       "last_session_at": "2026-09-12T11:18:00Z",
       "pending_count": 7,
-      "contributable_count": 3
+      "contributable_count": 3,
+      "tools": [
+        { "source": "claude-code", "session_count": 20, "answers_at": "Anthropic" },
+        { "source": "antigravity", "session_count": 2, "answers_at": "Google" }
+      ]
     }
   ]
 }
@@ -1777,6 +1781,43 @@ written, not when it started -- or `null` when none has been observed. Both
 come from the daemon's per-session record of each session's project, recorded
 when the watcher resolves it, so answering reads and canonicalizes nothing. A tool's own totals are in `tc_discover_sources` (`session_count`,
 `most_recent`).
+
+#### `tools` (K11)
+
+Which tool (or tools) this project's sessions came from, each with its own
+`session_count` within this project -- the design's first-run screen says
+"Repos found in Claude Code sessions"; this is what lets a later screen say
+the same thing about any project, for any tool, once more than one has
+contributed to it.
+
+Each row names a `source`: an adapter name (`claude-code`, `codex`,
+`gemini-cli`, `cline`, `opencode`) for a session the daemon watched directly,
+or the declared source a trajectory file names for one that was staged
+(`trajectory`'s own imports carry their vendor's name, e.g. `antigravity` for
+an imported Antigravity conversation -- see "Antigravity" under `harness_list`
+below). This is the same preference a queue entry's own display already
+applies: what a session declares about itself over the adapter that happens
+to store it, so an imported conversation is never attributed to `trajectory`.
+
+`answers_at` is the same fixed vendor word `tc_discover_sources` and
+`harness_list` read `answers_at` from, so a project's tool breakdown cannot
+name a vendor differently than either surface does for the same tool.
+`null` for a tool this build has no fixed default for (Cline, OpenCode) or
+does not recognise.
+
+Always an array, empty rather than absent when nothing is known yet -- a
+client tests its length rather than testing for the key, the way `tools`
+being empty and `session_count` being `0` already agree with each other.
+
+**This can undercount `session_count`.** The per-tool breakdown is read from
+the same per-session record `session_count` already comes from, but the tool
+a session came from was not recorded before this field existed, and a cache
+entry whose file has not changed since is never rewritten just to backfill
+it. A project can therefore show `"session_count": 22` with its `tools[]`
+entries summing to fewer than 22 on a daemon upgraded from an older state
+file, until those sessions' files change again. Never read `tools[]` as a
+second, more detailed `session_count` -- read `session_count` for the total
+and `tools[]` for what it can say about the sessions it has re-seen since.
 
 `pending_count` is how many `Pending` entries this project holds.
 `contributable_count` is how many of those a group-level `approve` would act

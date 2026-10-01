@@ -1680,6 +1680,15 @@ fn resolve_cwd(
         .or_else(|| source.load(session_ref).ok().and_then(|t| t.cwd));
     // Resolved before the lock: it canonicalizes the path on disk.
     let project_key = project_for(cwd.as_deref()).0;
+    // K11: which tool this session reads as. Prefer what the session itself
+    // declared over the adapter that stores it -- the same preference
+    // `QueueEntry::agent_label` and `commands::session_row` already apply,
+    // so an imported Antigravity conversation is counted as "antigravity"
+    // here too, not as the `trajectory` adapter that happens to read it.
+    let tool = session_ref
+        .declared_source
+        .clone()
+        .unwrap_or_else(|| session_ref.source.to_string());
     let mut state = shared.state.lock().expect("state lock");
     state.cwd_cache.insert(
         key,
@@ -1688,6 +1697,7 @@ fn resolve_cwd(
             modified_at: obs.modified_at,
             cwd: cwd.clone(),
             project_key: Some(project_key),
+            tool: Some(tool),
         },
     );
     cwd
@@ -3550,6 +3560,26 @@ mod tests {
         f.write_session("beta", "22222222-2222-2222-2222-222222222222", 0);
         let report = f.settle(at("2030-01-01T00:00:00Z")).await;
         assert_eq!(report.queued, 2, "{report:?}");
+    }
+
+    /// K11: the watcher records which tool a session came from in the cwd
+    /// cache entry it writes, not just the cwd and project key.
+    #[tokio::test]
+    async fn resolve_cwd_records_the_adapter_that_discovered_the_session() {
+        let f = WatcherFixture::new();
+        let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let state = f.shared.state.lock().unwrap();
+        let entry = state
+            .cwd_cache
+            .get(path.to_str().unwrap())
+            .expect("the session's cwd cache entry must exist after a settled pass");
+        assert_eq!(
+            entry.tool.as_deref(),
+            Some(crate::source::SOURCE_CLAUDE_CODE),
+            "a Claude Code session must record its own adapter as the tool"
+        );
     }
 
     #[tokio::test]
