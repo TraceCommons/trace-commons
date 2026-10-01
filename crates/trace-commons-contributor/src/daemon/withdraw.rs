@@ -465,6 +465,7 @@ mod tests {
                 approved_unattended: None,
                 approved_verdict: None,
                 title: None,
+                uploaded_bytes: None,
             })
             .collect();
         HistoryCache::save(&s.store, &records).unwrap();

@@ -715,6 +715,25 @@ pub struct Receipt {
     /// `#[serde(default)]` for the same reason as `approved_unattended`.
     #[serde(default)]
     pub title: Option<String>,
+    /// The serialized size, in bytes, of the redacted envelope this receipt's
+    /// submission actually sent (K10) -- the witness's own
+    /// `envelope_bytes.len()` when a witnessed response carried the upload,
+    /// or `envelope::envelope_size` on the final, grant-stamped envelope
+    /// otherwise. Recorded once, at upload time, in `submit_loaded`: the
+    /// figure does not exist any earlier, because redaction and scope
+    /// stamping both still have to run.
+    ///
+    /// Not the raw session's size on disk (`QueueEntry::size_bytes`) and not
+    /// the estimate a preview showed before upload
+    /// (`QueueEntry::would_send_bytes`) -- this is the one number that
+    /// describes bytes that actually left the machine.
+    ///
+    /// `None` when the figure could not be measured (an unreadable envelope),
+    /// or when this receipt predates the field.
+    ///
+    /// `#[serde(default)]` for the same reason as `approved_unattended`.
+    #[serde(default)]
+    pub uploaded_bytes: Option<u64>,
 }
 
 /// The state directory's name under whichever per-user base the platform uses.
@@ -1624,6 +1643,7 @@ mod tests {
             approved_unattended: None,
             approved_verdict: None,
             title: None,
+            uploaded_bytes: None,
         };
         store.append_receipt(&r).unwrap();
         // Simulate a corrupt line.
@@ -1681,6 +1701,8 @@ mod tests {
         let loaded = store.load_receipts().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].title, None);
+        // K10: the same must hold for `uploaded_bytes`.
+        assert_eq!(loaded[0].uploaded_bytes, None);
     }
 
     #[test]

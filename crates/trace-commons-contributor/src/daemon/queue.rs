@@ -369,6 +369,26 @@ pub struct QueueEntry {
     /// fingerprint is what covers them.
     #[serde(default)]
     pub previewed_envelope_digest: Option<String>,
+    /// The serialized size, in bytes, of the redacted envelope
+    /// `previewed_envelope_digest` pins (K10), mirrored here for the same
+    /// reason as `attested_inference`: so a queue listing can say what an
+    /// upload of this entry would actually send without opening the stored
+    /// file for every row. Set only by `record_previewed_envelope`, from the
+    /// bytes being pinned, cleared wherever the pin is.
+    ///
+    /// Raw session bytes (`size_bytes`) are what is on disk before
+    /// redaction; this is what redaction leaves, which can be smaller or
+    /// larger and is the number that matters for consent.
+    ///
+    /// `None` whenever there is no pinned preview to describe -- an armed
+    /// auto-upload, an approve-all, or an entry written before this field
+    /// existed -- and also on a handful of paths that re-pin an already
+    /// -certified review without re-measuring it (see
+    /// `Uploader::upload_entry`'s witness re-affirmation), which carry the
+    /// previously recorded figure forward instead of reporting `None` for a
+    /// bound that has not actually changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub would_send_bytes: Option<u64>,
     /// The stored review's attested-inference record, mirrored here so a
     /// queue listing can say it without opening the file. Set only by
     /// `record_previewed_envelope` from the artifact being pinned, cleared
@@ -1635,6 +1655,7 @@ impl Queue {
         entry_id: Uuid,
         digest: &str,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        would_send_bytes: Option<u64>,
     ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
@@ -1647,6 +1668,11 @@ impl Queue {
         // being pinned, and a local preview (no record) pinned over an
         // earlier witnessed one must not keep the earlier answer.
         e.attested_inference = attested_inference;
+        // Same rule as `attested_inference` above, and for the same reason
+        // (K10): this describes exactly the bytes being pinned, so a caller
+        // with no fresh measurement passes `None` rather than leaving a
+        // stale figure in place that no longer describes what is pinned now.
+        e.would_send_bytes = would_send_bytes;
         true
     }
 
@@ -1766,11 +1792,12 @@ impl Queue {
         reason_label: &str,
         pin: &str,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        would_send_bytes: Option<u64>,
     ) -> bool {
         if !self.revoke_approval(entry_id, reason_label) {
             return false;
         }
-        self.record_previewed_envelope(entry_id, pin, attested_inference)
+        self.record_previewed_envelope(entry_id, pin, attested_inference, would_send_bytes)
     }
 
     /// Return every unsent approval made on the contributor's behalf to
@@ -1811,8 +1838,9 @@ impl Queue {
         entry_id: Uuid,
         reason_label: &str,
         pin: Option<(&str, super::second_look::ScrubCounts)>,
+        would_send_bytes: Option<u64>,
     ) -> bool {
-        self.hold_with_scrub_pin_at(entry_id, reason_label, pin, Utc::now())
+        self.hold_with_scrub_pin_at(entry_id, reason_label, pin, would_send_bytes, Utc::now())
     }
 
     /// The upload pass supplies its own clock, so the review deadline and
@@ -1822,13 +1850,14 @@ impl Queue {
         entry_id: Uuid,
         reason_label: &str,
         pin: Option<(&str, super::second_look::ScrubCounts)>,
+        would_send_bytes: Option<u64>,
         now: DateTime<Utc>,
     ) -> bool {
         if !self.revoke_approval_at(entry_id, reason_label, now) {
             return false;
         }
         if let Some((digest, counts)) = pin {
-            if self.record_previewed_envelope(entry_id, digest, None) {
+            if self.record_previewed_envelope(entry_id, digest, None, would_send_bytes) {
                 self.record_scrub(entry_id, digest, counts);
             }
         }
@@ -2508,6 +2537,7 @@ mod tests {
             id,
             crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
             &pin,
+            None,
             None
         ));
         let e = q.get(id).unwrap().clone();
@@ -3004,6 +3034,7 @@ mod tests {
             id,
             super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
             None,
+            None,
             now,
         ));
         assert_eq!(q.get(id).unwrap().discovered_at, discovered);
@@ -3037,12 +3068,12 @@ mod tests {
             };
             let id = e.entry_id;
             q.push_for_test(e);
-            assert!(q.hold_with_scrub_pin_at(id, reason, None, now));
+            assert!(q.hold_with_scrub_pin_at(id, reason, None, None, now));
             q.save(&store).unwrap();
             let mut loaded = Queue::load(&store).unwrap();
             assert_eq!(loaded.get(id).unwrap().review_started_at, Some(now));
             let repeated = now + Duration::days(13);
-            assert!(loaded.hold_with_scrub_pin_at(id, reason, None, repeated));
+            assert!(loaded.hold_with_scrub_pin_at(id, reason, None, None, repeated));
             assert_eq!(loaded.get(id).unwrap().review_started_at, Some(now));
             assert_eq!(loaded.expire(repeated, 14, false), 0);
             assert_eq!(
@@ -3698,7 +3729,7 @@ mod tests {
         assert!(!q.record_scrub(id, "sha256:envelope", counts));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
 
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         // A count for other bytes than the pin is refused.
         assert!(!q.record_scrub(id, "sha256:other", counts));
         assert!(q.record_scrub(id, "sha256:envelope", counts));
@@ -3706,7 +3737,7 @@ mod tests {
 
         // Re-pinned to a new build (a filter change, a re-enrolment): the
         // old count no longer describes what would be sent.
-        assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None));
+        assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None, None));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
 
         // Released: likewise.
@@ -3727,7 +3758,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
         assert!(
             q.get(id).unwrap().previewed_envelope_digest.is_some(),
@@ -3759,7 +3790,8 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
         assert_eq!(
             q.get(id).unwrap().attested_inference,
@@ -3771,7 +3803,8 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
         assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
         q.cancel(id).unwrap();
@@ -3782,9 +3815,10 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
-        assert!(q.record_previewed_envelope(id, "sha256:local", None));
+        assert!(q.record_previewed_envelope(id, "sha256:local", None, None));
         assert_eq!(q.get(id).unwrap().attested_inference, None);
     }
 
@@ -3797,7 +3831,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.release_preview_pin(id));
         assert_eq!(q.get(id).unwrap().previewed_envelope_digest, None);
         assert!(!q.pinned_entry_ids().contains(&id));
@@ -3812,7 +3846,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.approve(id, &[], None, None, None, None));
         assert!(!q.release_preview_pin(id));
         assert!(q.get(id).unwrap().previewed_envelope_digest.is_some());

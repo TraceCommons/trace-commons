@@ -117,6 +117,16 @@ old behaviour, because no application has shipped against `v1` yet. See
   `title` uses, but through the deterministic redaction pass alone rather
   than a full preview build. See ["`title`"](#title) and
   ["A session's title on history rows (K9)"](#a-sessions-title-on-history-rows-k9).
+- **K10 (sizes in history, and the would-send size).** Two additive fields,
+  so the History graph can weigh contributions by bytes and not only by
+  count. `list_history` rows now carry `uploaded_bytes`: the serialized size
+  of the redacted envelope a submission actually sent, recorded once at
+  upload time. Every queue entry (`list_pending`, the `snapshot` event) now
+  also carries `would_send_bytes`: the serialized size of the redacted
+  envelope a preview pinned for that entry, present only once a preview has
+  run. Neither is the raw session size on disk (`size_bytes`), which was the
+  only figure either surface could report before this. See
+  ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -478,7 +488,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
+| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -510,7 +520,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, and `title` | see "History provenance (K7)" and "A session's title on history rows (K9)" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `title`, and `uploaded_bytes` | see "History provenance (K7)", "A session's title on history rows (K9)" and "Sizes in history, and the would-send size (K10)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -993,7 +1003,9 @@ session is next loaded (it grows, or is re-offered).
 
 Every entry also carries `title` (K9) -- unlike the fields above, redacted
 *content*, not metadata, so it is documented on its own: see
-["`title`"](#title).
+["`title`"](#title). It also carries `would_send_bytes` (K10), the pinned
+preview's measured size, documented in
+["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
 
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are
@@ -3897,6 +3909,60 @@ queued at all (a direct CLI submission, which carries no queue entry to
 take a title from). `#[serde(default)]` on the wire, like
 `approved_unattended` and `approved_verdict` above, so an older cached row
 still loads.
+
+### Sizes in history, and the would-send size (K10)
+
+Before this, a history row carried no bytes at all -- only the server's
+status, credit and explanation prose -- so the History graph could count
+sessions but not weigh them, and nothing on a queue entry said how large an
+upload would actually be once redaction ran. `size_bytes` on a queue entry
+is the raw session file on disk, which redaction shrinks or reshapes; it was
+never a stand-in for either figure.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "uploaded_bytes": 15320
+}
+```
+
+- **`uploaded_bytes`** -- the serialized size, in bytes, of the redacted
+  envelope this submission actually sent, or `null`. Recorded once, at
+  upload time, in `submit_loaded`: a witnessed submission reports the
+  witness's own certified `envelope_bytes.len()` -- the exact wire bytes
+  `/v1/traces` received -- and an ordinary submission reports
+  `envelope::envelope_size` on the final, grant-stamped envelope, which is
+  what the same call serializes onto the wire. Carried onto the receipt
+  (`daemon::uploader`, beside `SubmitContext::set_upload_title`) and from
+  there onto the history row, the same way `title` is (K9).
+
+Every queue entry (`list_pending`, the `snapshot` event) carries a sibling
+field:
+
+```json
+{
+  "entry_id": "…",
+  "...": "…existing fields unchanged…",
+  "size_bytes": 48210,
+  "would_send_bytes": 15320
+}
+```
+
+- **`would_send_bytes`** -- the serialized size of the redacted envelope a
+  preview pinned for this entry, or `null` when nothing is pinned: an entry
+  never previewed (an armed auto-upload, an approve-all), or one written
+  before this field existed. The same figure [`preview`](#preview)'s own
+  `would_send_bytes` reports, mirrored onto the entry at the moment a
+  preview pins it (`QueueEntry::previewed_envelope_digest`'s own sibling
+  field) so a queue list can say it without opening the stored envelope for
+  every row -- the same reason `attested_inference` is mirrored there.
+
+Both `uploaded_bytes` and `would_send_bytes` are `Option<u64>`,
+`#[serde(default)]` on the wire, so a cached row or a queue line written
+before either field existed still loads, reading `null`.
 
 ### `history_rollup`
 

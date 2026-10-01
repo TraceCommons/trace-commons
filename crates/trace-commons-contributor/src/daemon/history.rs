@@ -121,6 +121,15 @@ pub struct HistoryRecord {
     /// still parses.
     #[serde(default)]
     pub title: Option<String>,
+    /// The serialized size, in bytes, of what this submission actually sent
+    /// (K10), carried from `Receipt::uploaded_bytes`, itself set once at
+    /// upload time. `None` when the figure could not be measured, or when
+    /// this row predates the field.
+    ///
+    /// `#[serde(default)]` so a cache line written before this field existed
+    /// still parses.
+    #[serde(default)]
+    pub uploaded_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -259,6 +268,9 @@ pub fn join(
                 // The receipt's own, set once at upload time -- see
                 // `HistoryRecord::title`.
                 title: r.title.clone(),
+                // The receipt's own, set once at upload time -- see
+                // `HistoryRecord::uploaded_bytes`.
+                uploaded_bytes: r.uploaded_bytes,
                 // Carried from the cache being replaced: see this function's
                 // doc.
                 withdrawn_at: withdrawn.get(&r.submission_id).copied(),
@@ -342,6 +354,7 @@ pub fn merge_new_receipts(
             approved_unattended: r.approved_unattended,
             approved_verdict: r.approved_verdict.clone(),
             title: r.title.clone(),
+            uploaded_bytes: r.uploaded_bytes,
         });
         added = true;
     }
@@ -515,6 +528,7 @@ mod tests {
             approved_unattended,
             approved_verdict: approved_verdict.map(str::to_string),
             title: None,
+            uploaded_bytes: None,
         }
     }
 
@@ -556,6 +570,7 @@ mod tests {
             approved_unattended: None,
             approved_verdict: None,
             title: None,
+            uploaded_bytes: None,
         }
     }
 
@@ -965,6 +980,7 @@ mod tests {
             approved_unattended: None,
             approved_verdict: None,
             title: None,
+            uploaded_bytes: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("proj_"), "expected an opaque id: {json}");
@@ -1160,6 +1176,59 @@ mod tests {
         let mut records = Vec::new();
         merge_new_receipts(&mut records, &[titled], &BTreeMap::new());
         assert_eq!(records[0].title.as_deref(), Some("add a rate limiter"));
+    }
+
+    /// K10: a row written before `uploaded_bytes` existed must still parse.
+    #[test]
+    fn a_history_record_written_before_uploaded_bytes_existed_still_loads() {
+        let value = serde_json::json!({
+            "submission_id": Uuid::new_v4(),
+            "submitted_at": Utc::now(),
+            "project_id": "proj_aa",
+            "project_label": "repo",
+            "source": "claude_code",
+            "session_hash": "sha256:abc",
+            "status": "accepted",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "explanations": [],
+        });
+        let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.uploaded_bytes, None);
+    }
+
+    /// K10: a receipt's `uploaded_bytes` -- set once at upload time, from the
+    /// envelope the submission actually sent -- lands on the history row
+    /// `join` builds.
+    #[test]
+    fn join_carries_the_uploaded_bytes_from_the_receipt() {
+        let id = Uuid::new_v4();
+        let sized = Receipt {
+            uploaded_bytes: Some(4096),
+            ..receipt(id, "sha256:aa", "submitted", "2026-08-08T10:00:00Z")
+        };
+        let recs = join(
+            &[sized],
+            &[],
+            &BTreeMap::new(),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert_eq!(recs[0].uploaded_bytes, Some(4096));
+    }
+
+    /// The same, through the cheap local merge `merge_new_receipts` runs
+    /// instead of a server read-back.
+    #[test]
+    fn merge_new_receipts_carries_the_uploaded_bytes_from_the_receipt() {
+        let id = Uuid::new_v4();
+        let sized = Receipt {
+            uploaded_bytes: Some(4096),
+            ..receipt(id, "sha256:aa", "submitted", "2026-08-08T10:00:00Z")
+        };
+        let mut records = Vec::new();
+        merge_new_receipts(&mut records, &[sized], &BTreeMap::new());
+        assert_eq!(records[0].uploaded_bytes, Some(4096));
     }
 
     /// K7 review: a withdrawn row lands in the `withdrawn` bucket and in

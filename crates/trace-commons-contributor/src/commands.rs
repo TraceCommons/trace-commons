@@ -2061,6 +2061,7 @@ mod tests {
             approved_unattended: None,
             approved_verdict: None,
             title: None,
+            uploaded_bytes: None,
         };
         assert_eq!(
             submitted_marker(&src, &r, std::slice::from_ref(&receipt)),
@@ -4651,6 +4652,7 @@ mod logout_tests {
                     approved_unattended: None,
                     approved_verdict: None,
                     title: None,
+                    uploaded_bytes: None,
                 })
                 .unwrap();
         }
