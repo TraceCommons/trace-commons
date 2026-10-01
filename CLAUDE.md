@@ -131,7 +131,7 @@ churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
 reason: a cancelled job saves no cache, and merges to `main` land close
 together.
 
-Running is not the same as blocking. **Eleven** of the eighteen are required
+Running is not the same as blocking. **Eleven** of the nineteen are required
 status checks on `main`, and only those block a merge -- `README.md` lists
 them. `main` is also behind a merge queue (`main merge queue`), so the
 required checks are re-run against `main` at merge time; a PR that never

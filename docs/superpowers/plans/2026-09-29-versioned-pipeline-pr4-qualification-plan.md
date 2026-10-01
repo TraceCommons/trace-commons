@@ -1,6 +1,7 @@
 # Versioned pipeline PR 4 (qualification, restore, and CI) implementation plan
 
 > Amended 2026-10-01: main took V101 to V104 and PR 3 moved to V105 and V106, so PR 4's migrations are V107 (qualification) and V108 (attempt artifacts). The text below keeps the numbers it was written with.
+> Amended 2026-10-01: after PR 3's df1550dd, the required check pipeline_orphan_sweep is emitted by a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

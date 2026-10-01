@@ -71,7 +71,7 @@ described, and a document `main` holds carries no pipeline block.
 
 Activation replaces this list with qualified routing.
 
-The pipeline's own tables (V92 to V95, V105 and V106) grant the ingest runtime group,
+The pipeline's own tables (V92 to V95 and V105 to V108) grant the ingest runtime group,
 `trace_ingest_runtime`, exactly what the pipeline reads and writes there. The
 pipeline also reads and writes tables from V62 and earlier -- submissions,
 object refs, derived records, tombstones, withdrawals, credit holds, the
@@ -84,8 +84,8 @@ pipeline fails closed with `permission denied`. To withdraw a submission
 that belongs to a source session, both withdrawal routes also need the
 ingest login to be a member of `trace_account_admission_runtime`, as
 `main`'s withdrawal already does ([deployment.md](deployment.md), "V92 to
-V95: the pipeline tables" and "V105 and V106: review, invalidation, and export
-tables").
+V95: the pipeline tables", "V105 and V106: review, invalidation, and export
+tables", and "V107 and V108: qualification and attempt artifact tables").
 
 ## Fail-closed dependency qualification
 
@@ -896,9 +896,11 @@ submission whose run already committed Score deletes the index command and
 neighbour set through the ordinary object-ref invalidation path above, the
 same as Review's approved revision -- never through the attempt sweep. A
 run withdrawn before Score commits has nothing there yet; a run whose Score
-attempt staged an object but never committed (a crash, a lost lease, a
-refused commit) leaves that object to the attempt sweep, not to any
-withdrawal, because no object ref names it yet.
+attempt staged an object and then stopped before any commit or refusal -- a
+crashed process -- leaves that object to the attempt sweep, not to any
+withdrawal, because no object ref names it yet. A refused Score commit
+deletes its own object itself, the same as any other refusal; the sweep's
+part there is only to remove the row once it finds the object already gone.
 
 ## Submission quota at switch-over
 

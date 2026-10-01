@@ -3184,7 +3184,7 @@ async fn the_revocation_worker_deletes_every_object_of_a_withdrawn_complete_run(
     );
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
-        Some(owner.clone() as Arc<dyn Database>),
+        Some(mains_database().await),
         None,
         false,
         false,

@@ -453,8 +453,8 @@ Branch protection on `main` requires:
   | `cargo check (permissive crates, standalone)` | `builds at the declared MSRV floor` |
   | `trace-commons-ingest tests, whole bin, against PostgreSQL` | |
 
-  `.github/workflows/ci.yml` holds more jobs than this (eighteen as of
-  2026-09-30); the others run on every PR but do not block the merge. The
+  `.github/workflows/ci.yml` holds more jobs than this (nineteen as of
+  2026-10-01); the others run on every PR but do not block the merge. The
   client shells -- the macOS app, the Windows app, installer, named-pipe ACL
   and update conformance, and the Linux GTK shell -- live in
   `.github/workflows/clients.yml` since 2026-09-22. They run on every push to
