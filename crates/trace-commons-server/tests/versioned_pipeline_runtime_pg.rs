@@ -25483,10 +25483,6 @@ impl PipelineAuthorityProvider for QualifiedProductionAuthority {
         })
     }
 
-    fn dependency_identity(&self) -> &str {
-        "qualified_production_authority_test_only"
-    }
-
     fn production_qualified(&self) -> bool {
         true
     }
@@ -25503,14 +25499,6 @@ impl PipelinePrivacyBoundary for QualifiedProductionPrivacy {
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         Ok(Vec::new())
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "qualified_production_privacy_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        true
     }
 
     fn production_qualified(&self) -> bool {
