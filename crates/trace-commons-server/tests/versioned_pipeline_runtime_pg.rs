@@ -26572,6 +26572,94 @@ async fn index_rebuild_sees_an_invalidation_queued_while_it_waited_for_the_run_l
     tx.commit().await.unwrap();
 }
 
+/// PR 3 (cba958b5): a run that fails for good after its index write queues
+/// the invalidation of its revision (reason `run_failed`), and the
+/// invalidation pass removes it. A rebuild never writes that revision back:
+/// the run is neither listed nor replayed, since it is not `complete` and it
+/// has an invalidation row, and the rebuilt index holds none of its entries.
+#[tokio::test]
+async fn index_rebuild_never_rewrites_a_run_that_failed_for_good() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterIndexApply),
+    )
+    .await;
+    let tenant = format!("index-rebuild-failed-run-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET attempt_count = max_attempts - 1
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let crashed = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .expect_err("Settle crashes after its index write");
+    assert_eq!(crashed.to_string(), INJECTED_PIPELINE_CRASH);
+    expire_lease(&backend, &tenant, run.run_id).await;
+    assert!(
+        service.process_one(&tenant).await.unwrap().is_none(),
+        "the run has no attempt left"
+    );
+    let failed = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    let (queued, state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        queued
+            .iter()
+            .map(|(_, reason, ..)| reason.as_str())
+            .collect::<Vec<_>>(),
+        vec!["run_failed"],
+        "the failed run's revision is queued for removal"
+    );
+    assert_eq!(state, "pending");
+    service
+        .process_index_invalidations(&tenant, 8)
+        .await
+        .expect("the invalidation pass runs");
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    assert!(
+        service
+            .store()
+            .list_rebuildable_index_runs(&tenant)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a run that failed for good is never listed for a rebuild"
+    );
+    let report = service
+        .rebuild_index_from_authoritative_commands(&tenant, index.clone())
+        .await
+        .expect("the rebuild succeeds");
+    assert_eq!(report.command_count, 0);
+    assert_eq!(report.skipped_run_count, 0);
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "the rebuild wrote none of the failed run's entries back"
+    );
+}
+
 /// Final review M6: V108's guard trigger lets an attempt artifact row move
 /// once, from `staged` to `committed` with `committed_at` set, and refuses
 /// every other change. A committed row cannot go back to `staged`, where
