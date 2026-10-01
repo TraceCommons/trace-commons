@@ -26001,6 +26001,45 @@ async fn settle_included(
     settled
 }
 
+/// Queues an index invalidation row for `run` in `state`, as the runtime
+/// role, on `tx` when given (whose caller commits it) or on a transaction
+/// of its own. A run's invalidation state is this row's state (PR 3,
+/// 62cc2768).
+async fn queue_test_index_invalidation(
+    backend: &PgBackend,
+    tenant: &str,
+    run: &PipelineRunRecord,
+    state: &str,
+    tx: Option<&deadpool_postgres::Transaction<'_>>,
+) {
+    const INSERT: &str = "INSERT INTO pipeline_index_invalidations (
+            tenant_id, run_id, submission_id, registry_revision_id, reason_code, state,
+            completed_at
+         ) VALUES ($1, $2, $3, $4, 'rebuild_test', $5,
+                   CASE WHEN $5 = 'complete' THEN NOW() END)";
+    let revision_id = run
+        .approved_revision_id
+        .expect("an included run has an approved revision");
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 5] = [
+        &tenant,
+        &run.run_id,
+        &run.submission_id,
+        &revision_id,
+        &state,
+    ];
+    match tx {
+        Some(tx) => {
+            tx.execute(INSERT, &params).await.unwrap();
+        }
+        None => {
+            let mut client = backend.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, tenant).await;
+            tx.execute(INSERT, &params).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+    }
+}
+
 /// Task 8: a rebuild replays exactly the sealed commands Settle already
 /// committed -- the same key derivation, no new outcome, settlement row, or
 /// credit ledger row -- and the index it produces matches the live index
@@ -26158,21 +26197,12 @@ async fn index_rebuild_skips_withdrawn_and_invalidated_runs() {
 
     // A run whose index write is invalidated directly -- its submission
     // stays accepted and operable, so only the invalidation-state predicate
-    // excludes it, never the withdrawal one.
+    // excludes it, never the withdrawal one. A run's invalidation state is
+    // its `pipeline_index_invalidations` row (PR 3, 62cc2768), here one that
+    // completed.
     let (invalidated_ready, _) = run_to_settle_ready(&service, &tenant).await;
     let invalidated_settled = settle_included(&service, &tenant, &invalidated_ready).await;
-    {
-        let mut client = backend.trace_pool_for_test().get().await.unwrap();
-        let tx = tenant_tx(&mut client, &tenant).await;
-        tx.execute(
-            "UPDATE pipeline_runs SET index_invalidation_state = 'complete', updated_at = NOW()
-             WHERE tenant_id = $1 AND run_id = $2",
-            &[&tenant, &invalidated_settled.run_id],
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-    }
+    queue_test_index_invalidation(&backend, &tenant, &invalidated_settled, "complete", None).await;
 
     // An ordinary included run, kept, so the listing below is not simply
     // empty regardless of the exclusions.
@@ -26446,6 +26476,89 @@ async fn index_rebuild_holds_the_guard_and_skips_a_run_withdrawn_after_listing()
         ledger_before,
         "neither the rebuild nor a withdrawal writes a credit ledger row"
     );
+}
+
+/// PR 3 (62cc2768) keeps a run's invalidation state only in its
+/// `pipeline_index_invalidations` row, so queuing an invalidation no longer
+/// updates the run row. The rebuild's re-check (final review I1, ruling
+/// FR-1) reads that state with a snapshot taken after it holds the run's
+/// lock: an invalidation that a holder of the run lock queued, and
+/// committed while the rebuild waited for that lock, is seen, and the run is
+/// skipped. The run's submission stays operable throughout, so only the
+/// invalidation can exclude it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_rebuild_sees_an_invalidation_queued_while_it_waited_for_the_run_lock() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("index-rebuild-queued-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled = settle_included(&service, &tenant, &ready).await;
+
+    // Hold the run row, as a withdrawal does, and queue the run's
+    // invalidation under that lock, not yet committed.
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let hold = tenant_tx(&mut holder, &tenant).await;
+    hold.query_one(
+        "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+        &[&tenant, &settled.run_id],
+    )
+    .await
+    .unwrap();
+    queue_test_index_invalidation(&backend, &tenant, &settled, "pending", Some(&hold)).await;
+    let locker = run_row_locker(&backend, &tenant, settled.run_id).await;
+
+    // The listing does not wait and still sees the run rebuildable; the
+    // re-check then waits for the run lock.
+    let rebuilt = IsolatedPipelineIndex::new();
+    let rebuild = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let rebuilt = rebuilt.clone();
+        async move {
+            service
+                .rebuild_index_from_authoritative_commands(&tenant, rebuilt)
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &locker, &rebuild).await;
+    hold.commit().await.unwrap();
+    drop(holder);
+
+    let report = tokio::time::timeout(HELD_CALL_BOUND, rebuild)
+        .await
+        .expect("the rebuild finishes once the run lock is free")
+        .expect("the rebuild task did not panic")
+        .expect("the rebuild succeeds");
+    assert_eq!(report.command_count, 0, "no command is replayed");
+    assert_eq!(
+        report.skipped_run_count, 1,
+        "the run, listed before its invalidation committed, is skipped"
+    );
+    assert_eq!(
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "none of the invalidated run's entries reach the rebuilt index"
+    );
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    assert!(
+        PgPipelineStore::submission_guard_on_tx(&tx, &settled)
+            .await
+            .unwrap()
+            .operable,
+        "the submission stayed operable: only the invalidation excluded the run"
+    );
+    tx.commit().await.unwrap();
 }
 
 /// Final review M6: V108's guard trigger lets an attempt artifact row move

@@ -1095,7 +1095,7 @@ enum ReceiptCommit {
     StagingMissing,
 }
 
-/// The run-row half of index-rebuild eligibility, over `pipeline_runs p`:
+/// The run half of index-rebuild eligibility, over `pipeline_runs p`:
 /// complete, included in the index, with a completed index write that no
 /// invalidation has touched since, and a stored command reference and hash
 /// to rebuild from. `PgPipelineStore::list_rebuildable_index_runs` lists by
@@ -1103,12 +1103,20 @@ enum ReceiptCommit {
 /// under the run's lock, so the two cannot drift. The submission half is
 /// `PgPipelineStore::submission_guard_on_tx` itself, read per run under
 /// that lock (final review I1 and M8).
+///
+/// A run's invalidation state is its `pipeline_index_invalidations` row's
+/// state, `none` without a row (PR 3, 62cc2768: `pipeline_runs` keeps no
+/// copy), so "no invalidation has touched it" is "it has no row", whatever
+/// that row's state.
 macro_rules! rebuildable_index_run_predicate {
     () => {
         "p.state = 'complete'
          AND p.index_membership = 'included'
          AND p.index_write_state = 'complete'
-         AND p.index_invalidation_state = 'none'
+         AND NOT EXISTS (
+             SELECT 1 FROM pipeline_index_invalidations i
+              WHERE i.tenant_id = p.tenant_id AND i.run_id = p.run_id
+         )
          AND p.index_command_ref IS NOT NULL
          AND p.index_command_hash IS NOT NULL"
     };
@@ -4008,10 +4016,15 @@ impl PgPipelineStore {
     /// commit, and the invalidation it then queues covers them. The run row
     /// is locked `FOR SHARE`: two rebuilds of one run may overlap (their
     /// writes are idempotent), and a withdrawal's `FOR UPDATE` waits for
-    /// both. A withdrawal that committed while this statement waited for
-    /// the lock is seen: PostgreSQL re-evaluates the run predicate on the
-    /// row version the withdrawal left, and the guard reads with a snapshot
-    /// taken after its own lock is held.
+    /// both.
+    ///
+    /// Two statements, lock first, read second, as the submission guard
+    /// does: the predicate is read with a snapshot taken after the run lock
+    /// is held, so it sees an invalidation row that a holder of the run lock
+    /// committed while the lock was awaited. One locking statement would
+    /// not: the invalidation lives in its own table (PR 3, 62cc2768), and
+    /// PostgreSQL re-evaluates a locked row's predicate only when the
+    /// holder updated that row, which queuing an invalidation does not.
     pub async fn lock_rebuildable_index_run_on_tx(
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
@@ -4021,16 +4034,26 @@ impl PgPipelineStore {
         };
         let locked = tx
             .query_opt(
+                "SELECT 1 FROM pipeline_runs
+                  WHERE tenant_id = $1 AND run_id = $2
+                  FOR SHARE",
+                &[&run.tenant_id, &run.run_id],
+            )
+            .await?;
+        if locked.is_none() {
+            return Ok(false);
+        }
+        let rebuildable = tx
+            .query_opt(
                 concat!(
                     "SELECT 1 FROM pipeline_runs p
                       WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.index_command_hash = $3 AND ",
-                    rebuildable_index_run_predicate!(),
-                    " FOR SHARE"
+                    rebuildable_index_run_predicate!()
                 ),
                 &[&run.tenant_id, &run.run_id, &command_hash],
             )
             .await?;
-        if locked.is_none() {
+        if rebuildable.is_none() {
             return Ok(false);
         }
         Ok(Self::submission_guard_on_tx(tx, run).await?.operable)
