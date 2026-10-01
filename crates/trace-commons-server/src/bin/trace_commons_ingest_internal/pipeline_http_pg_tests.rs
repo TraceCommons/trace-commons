@@ -6678,3 +6678,97 @@ async fn mains_revocation_routes_queue_the_pipeline_follow_up() {
         );
     }
 }
+
+/// `main`'s #1155 completes a source-session withdrawal from actual state:
+/// an account merge can join a live version to a session the other account
+/// had withdrawn, and the merge confirm (scoped to the survivor) and the
+/// revocation-propagation worker's reconciler (the whole tenant) both run
+/// `reconcile_source_session_withdrawals` over every such version. For a
+/// version with a pipeline run, that completion also makes the pipeline's
+/// follow-up -- its revision queued for removal from the pipeline index
+/// (reason `withdrawn`), its payload deletions, its runs' work ended -- and
+/// the version then drops off the incomplete list, though the pipeline
+/// keeps part of its cleanup in its own tables. Once as the merge's scoped
+/// call, once as the worker's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawal_completion_runs_the_pipeline_follow_up_and_stops_listing_the_version() {
+    for scoped_to_the_survivor in [true, false] {
+        let Some(fixture) = withdrawal_fixture().await else {
+            return;
+        };
+        let state = &fixture.state;
+        let tenant = fixture.tenant.as_str();
+        let principal = static_token_principal_ref(&fixture.token);
+        let session = account_session_headers(state, &fixture.token).await;
+        let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+        let ext = account_ctx_ext(state, &session).await;
+        let account_id = ext.0.account_id.as_uuid();
+        let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+            .as_slice()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            fixture
+                .owner
+                .claim_trace_source_session(tenant, account_id, &digest, run.submission_id)
+                .await
+                .unwrap(),
+            StorageTraceSourceSessionStatus::Active
+        );
+        // The session is withdrawn while this version is not: what a merge
+        // leaves when the other account had withdrawn the session.
+        {
+            let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, tenant).await;
+            tx.execute(
+                "UPDATE trace_source_sessions SET withdrawn_at = NOW()
+                  WHERE tenant_id = $1 AND account_id = $2",
+                &[&tenant, &account_id],
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let db = state.db_mirror.clone().expect("main's database");
+        let incomplete = || {
+            let db = db.clone();
+            async move {
+                db.list_incomplete_source_session_withdrawals(tenant, None, &[], 100)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|version| version.submission_id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert!(incomplete().await.contains(&run.submission_id));
+        let _ = fixture.service.take_follow_ups(tenant);
+
+        let summary = reconcile_source_session_withdrawals(
+            state.as_ref(),
+            &db,
+            tenant,
+            scoped_to_the_survivor.then_some(account_id),
+            &account_audit_tenant(&ext.0),
+            100,
+            false,
+        )
+        .await
+        .expect("the completion runs");
+        assert_eq!(
+            (summary.completed, summary.failed),
+            (1, 0),
+            "scoped: {scoped_to_the_survivor}"
+        );
+        assert_eq!(
+            queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
+            (1, "pending".to_string()),
+            "the pipeline invalidation is queued (scoped: {scoped_to_the_survivor})"
+        );
+        assert!(fixture.service.take_follow_ups(tenant).index_invalidations);
+        assert!(
+            !incomplete().await.contains(&run.submission_id),
+            "the completed pipeline version is no longer listed (scoped: {scoped_to_the_survivor})"
+        );
+    }
+}

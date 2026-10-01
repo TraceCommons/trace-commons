@@ -2987,21 +2987,58 @@ impl PgPipelineStore {
 
     /// The pipeline's follow-up of `main`'s revocation of `submission_id`
     /// (`DELETE /v1/traces/{id}`, `POST /v1/traces/{id}/revoke`, `DELETE
-    /// /v1/traces`), in one tenant transaction after `main` has marked the
-    /// submission revoked (Zaki review 1, round 2, finding 5). For a
-    /// submission with a pipeline run it does what the pipeline withdrawal
-    /// does for its content (`withdraw_pipeline_content_on_tx`: tombstone,
-    /// invalidations, one payload deletion per live object) and ends its
-    /// runs' work (`end_runs_of_inoperable_submission_on_tx`, reason
-    /// `revoked`). Lock order as the withdrawal's: the run rows, then the
-    /// submission row. Returns whether an index invalidation of the
-    /// submission's runs is pending afterwards; `false`, with nothing
-    /// written, for a submission with no pipeline run.
+    /// /v1/traces`; Zaki review 1, round 2, finding 5):
+    /// `follow_up_inoperable_submission` under reason `revoked`.
     pub async fn follow_up_revocation(
         &self,
         tenant_id: &str,
         submission_id: Uuid,
         actor_principal_ref: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.follow_up_inoperable_submission(
+            tenant_id,
+            submission_id,
+            actor_principal_ref,
+            PIPELINE_REVOCATION_INVALIDATION_REASON,
+        )
+        .await
+    }
+
+    /// The pipeline's follow-up of a withdrawal `main` completes on its own
+    /// path (`main`'s #1155: the merge confirm and the revocation-propagation
+    /// worker's source-session reconciler): `follow_up_inoperable_submission`
+    /// under reason `withdrawn`, as the pipeline withdrawal queues it.
+    pub async fn follow_up_withdrawal(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.follow_up_inoperable_submission(
+            tenant_id,
+            submission_id,
+            actor_principal_ref,
+            PIPELINE_WITHDRAWAL_INVALIDATION_REASON,
+        )
+        .await
+    }
+
+    /// The pipeline's follow-up of a submission `main` made inoperable on its
+    /// own path, in one tenant transaction after `main` marked it. For a
+    /// submission with a pipeline run it does what the pipeline withdrawal
+    /// does for its content (`withdraw_pipeline_content_on_tx`: tombstone,
+    /// invalidations, one payload deletion per live object) and ends its
+    /// runs' work (`end_runs_of_inoperable_submission_on_tx`, under
+    /// `reason_code`). Lock order as the withdrawal's: the run rows, then the
+    /// submission row. Returns whether an index invalidation of the
+    /// submission's runs is pending afterwards; `false`, with nothing
+    /// written, for a submission with no pipeline run.
+    async fn follow_up_inoperable_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+        reason_code: &str,
     ) -> Result<bool, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
@@ -3039,13 +3076,7 @@ impl PgPipelineStore {
             )
             .await?;
         }
-        Self::end_runs_of_inoperable_submission_on_tx(
-            &tx,
-            tenant_id,
-            &runs,
-            PIPELINE_REVOCATION_INVALIDATION_REASON,
-        )
-        .await?;
+        Self::end_runs_of_inoperable_submission_on_tx(&tx, tenant_id, &runs, reason_code).await?;
         let run_ids = runs.iter().map(|run| run.run_id).collect::<Vec<_>>();
         let invalidation_pending: bool = tx
             .query_one(
@@ -5654,6 +5685,31 @@ impl PipelineService {
         if self
             .store
             .follow_up_revocation(tenant_id, submission_id, actor_principal_ref)
+            .await?
+        {
+            self.wake_follow_ups(
+                tenant_id,
+                PipelineFollowUps {
+                    index_invalidations: true,
+                    payouts: false,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The pipeline's follow-up of a withdrawal `main` completes on its own
+    /// path (`PgPipelineStore::follow_up_withdrawal`); a queued invalidation
+    /// wakes the worker's invalidation step.
+    pub async fn follow_up_withdrawal(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+    ) -> anyhow::Result<()> {
+        if self
+            .store
+            .follow_up_withdrawal(tenant_id, submission_id, actor_principal_ref)
             .await?
         {
             self.wake_follow_ups(

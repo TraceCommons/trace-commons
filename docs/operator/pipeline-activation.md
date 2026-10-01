@@ -409,7 +409,12 @@ submission has a pipeline run, then make the pipeline's follow-up in one
 transaction: the export snapshot invalidations and payload deletions above,
 the run's index invalidation (reason `revoked`), and the release of a run
 parked in `awaiting_review`. Settle reads the revoked status and forfeits
-every leg it has not completed.
+every leg it has not completed. `main`'s completion of a source-session
+withdrawal on its own path -- at an account merge confirm, for a version the
+merge joined to a withdrawn session, and in the revocation-propagation
+worker's reconciler -- makes the same follow-up for a version with a
+pipeline run (reason `withdrawn`), so that version leaves the reconciler's
+incomplete list once completed.
 
 The response is `main`'s withdrawal response plus two follow-up states,
 `index_invalidation` and `revocation_propagation`. Each is `not_required`,

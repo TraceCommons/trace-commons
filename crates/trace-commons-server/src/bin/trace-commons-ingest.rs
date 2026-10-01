@@ -21882,6 +21882,22 @@ async fn reconcile_source_session_withdrawals(
                 .await?
                 .context("TraceSourceSessionMappingMissing")?;
             }
+            // A version with a pipeline run gets the pipeline's follow-up
+            // too, as the pipeline withdrawal makes it: its revision queued
+            // for removal from the pipeline index, a payload deletion per
+            // live object, and its runs' work ended. It runs after the
+            // tombstone and before the bytes, and is idempotent, so a retried
+            // completion repeats nothing (Zaki review 1, round 2: #1155's
+            // consumer sweep).
+            if let Some(pipeline) = state.pipeline_service.as_ref() {
+                pipeline
+                    .follow_up_withdrawal(
+                        tenant_id,
+                        version.submission_id,
+                        &audit_tenant.principal_ref,
+                    )
+                    .await?;
+            }
             complete_trace_withdrawal(state, db, tenant_id, audit_tenant, &[version.submission_id])
                 .await
         }
