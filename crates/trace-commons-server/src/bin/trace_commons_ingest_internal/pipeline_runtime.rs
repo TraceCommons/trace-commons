@@ -350,10 +350,11 @@ pub(crate) async fn pipeline_readiness_handler(
 /// handler awaits (review of the follow-up wave, m1). A client that
 /// disconnects drops this handler's future, but not that task: each run's
 /// writes still finish under the run and submission locks its transaction
-/// holds, and the audit row is still appended. Only the end of the process
-/// (the runtime drops every task when it stops, after the shutdown grace
-/// period) can still stop a run between its writes and its commit; see
-/// `PipelineService::rebuild_index_run`.
+/// holds, and the audit row is still appended. That task is not tracked: the
+/// graceful shutdown drains open connections only, so it does not wait for a
+/// rebuild whose client has gone, and the runtime drops that task when the
+/// process exits. That exit can still stop a run between its writes and its
+/// commit; see `PipelineService::rebuild_index_run`.
 pub(crate) async fn pipeline_index_rebuild_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

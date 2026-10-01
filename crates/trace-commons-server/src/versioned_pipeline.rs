@@ -8421,9 +8421,10 @@ impl PipelineService {
     /// before the last write lands, leaving those entries in the index. The
     /// rebuild route therefore runs the rebuild in a task of its own, so a
     /// client disconnect does not drop it (review of the follow-up wave,
-    /// m1). The window that remains is the end of the process: the runtime
-    /// drops that task when it stops, after the shutdown grace period. It is
-    /// the same window Settle's index writes have (P3-3).
+    /// m1). The window that remains is the process exit: the graceful
+    /// shutdown drains open connections only and does not wait for a rebuild
+    /// whose client has gone, and the runtime drops that task when the
+    /// process exits.
     pub async fn rebuild_index_run(
         &self,
         run: &PipelineRunRecord,
