@@ -948,9 +948,14 @@ deleting which row is a fixed split (controller ruling R2-1):
   128 (four for each row it may remove). The worker keeps where the pass
   stopped, and the tenant's next pass resumes there; a pass that reaches
   the last due row makes the next one start over at the oldest. So however
-  many rows are kept, every due row is examined within a few passes, and
-  kept rows never stall a tenant's sweep. The position is held in the
-  worker's memory only: a restarted worker starts over at the oldest.
+  many rows are kept, every due row is examined within about N / 128 passes
+  for N due rows (kept rows included), and kept rows never stall a
+  tenant's sweep. The position is held in the worker's memory only: a
+  restarted worker starts over at the oldest. One pass is one database
+  transaction: it examines up to 128 rows and makes up to about 256 object
+  store calls (a presence check or key derivation, then a delete, for each
+  row), while it holds a pooled connection and the row locks of the rows it
+  has read.
 - A `committed` row's object is an object ref of the submission, recorded
   by the same phase commit that committed the row. Deleting it belongs to
   the withdrawal, not this sweep: a withdrawal invalidates the object ref

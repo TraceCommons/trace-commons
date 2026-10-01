@@ -8121,7 +8121,10 @@ impl PipelineService {
     /// artifact)`, so a row it keeps does not stop it: it goes on past kept
     /// rows to later ones, examining at most
     /// `PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times `limit` rows in
-    /// one pass (wave 2; follow-up review, m2). For each row with a hash, a store that confirms the object
+    /// one pass (wave 2; follow-up review, m2). The pass holds its pooled
+    /// connection and the locks of the rows it read across every store call
+    /// it makes, up to about two per row examined (fix round 1, review M6).
+    /// For each row with a hash, a store that confirms the object
     /// absent (`Some(false)`) needs no delete; a store that reports it
     /// present, or cannot tell (`None`), gets one. A row with no hash (a
     /// compatibility Score staged it before its tenant lock and never
