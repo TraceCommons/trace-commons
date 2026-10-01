@@ -7141,3 +7141,174 @@ async fn mains_database_replay_export_leaves_pipeline_submissions_out() {
     assert_eq!(exported, vec![serde_json::json!(legacy_id)], "{replay}");
     assert_ne!(exported, vec![serde_json::json!(run.submission_id)]);
 }
+
+/// Zaki review 1, round 2, N-2: the pipeline assessment route applies the
+/// privileged-action consent check `main`'s review decision route applies
+/// (`ensure_record_matches_privileged_action_policy_abac`): a reviewer whose
+/// claims allow no consent scope of the submission, and a reviewer of a
+/// tenant whose policy was narrowed after the receipt, each get `403`, and
+/// no assessment is recorded. The same reviewer under the receipt's policy
+/// records it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pipeline_assessment_route_applies_mains_privileged_action_consent_check() {
+    let Some(mut fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let reviewer = format!("token-review-consent-{suffix}");
+    let scoped_reviewer = format!("token-review-consent-scoped-{suffix}");
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    insert_token(
+        &mut tokens,
+        &fixture.tenant,
+        &scoped_reviewer,
+        TokenRole::Reviewer,
+    );
+    tokens
+        .get_mut(&scoped_reviewer)
+        .unwrap()
+        .allowed_consent_scopes = BTreeSet::from([ConsentScope::ModelTraining]);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    let state = fixture.state.clone();
+    let mut narrowed = state.clone();
+    Arc::make_mut(&mut narrowed).tenant_policies = Arc::new(BTreeMap::from([(
+        fixture.tenant.clone(),
+        TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::from([ConsentScope::ModelTraining]),
+            allowed_uses: BTreeSet::new(),
+        },
+    )]));
+    let principal = "principal_sha256:review-consent";
+    let claim = |state: Arc<AppState>, token: String, run_id: Uuid| async move {
+        let (status, claim) = route_request(
+            state,
+            "POST",
+            &format!("/v1/review/pipeline/runs/{run_id}/claim"),
+            auth_headers(&token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{claim}");
+        claim["lease_token"].clone()
+    };
+    let assess = |state: Arc<AppState>, token: String, run_id: Uuid, lease: serde_json::Value| async move {
+        route_request(
+            state,
+            "POST",
+            &format!("/v1/review/pipeline/runs/{run_id}/assessment"),
+            auth_headers(&token),
+            Some(serde_json::json!({
+                "lease_token": lease,
+                "recommendation": "reject",
+                "reason": "privacy_review_required",
+            })),
+        )
+        .await
+    };
+    let assessed = |run_id: Uuid| {
+        let service = fixture.service.clone();
+        let tenant = fixture.tenant.clone();
+        async move {
+            service
+                .store()
+                .load_review_assessment(&tenant, run_id)
+                .await
+                .unwrap()
+                .is_some()
+        }
+    };
+
+    let scoped_run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let lease = claim(state.clone(), scoped_reviewer.clone(), scoped_run.run_id).await;
+    let (status, refused) = assess(
+        state.clone(),
+        scoped_reviewer.clone(),
+        scoped_run.run_id,
+        lease,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error"],
+        "trace privileged action is not allowed for this tenant source"
+    );
+    assert!(!assessed(scoped_run.run_id).await);
+
+    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let lease = claim(state.clone(), reviewer.clone(), run.run_id).await;
+    let (status, refused) = assess(narrowed, reviewer.clone(), run.run_id, lease.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(!assessed(run.run_id).await);
+    let (status, recorded) = assess(state, reviewer, run.run_id, lease).await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    assert!(assessed(run.run_id).await);
+}
+
+/// N-2's sibling: `main`'s maintenance purge applies the privileged-action
+/// consent check to every purge candidate
+/// (`ensure_maintenance_purge_matches_privileged_action_policy`), and since
+/// ruling RB-30 a submission with a pipeline run is one. Under a tenant
+/// policy that allows none of its consent scopes, the purge answers `403`
+/// and purges nothing; under the receipt's policy it purges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_maintenance_purge_applies_the_consent_check_to_pipeline_submissions() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let admin_token = format!("{}-admin", fixture.token);
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let mut state = fixture.state.clone();
+    {
+        let state = Arc::make_mut(&mut state);
+        let mut tokens = (*state.tokens).clone();
+        insert_token(&mut tokens, tenant, &admin_token, TokenRole::Admin);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+    let mut narrowed = state.clone();
+    Arc::make_mut(&mut narrowed).tenant_policies = Arc::new(BTreeMap::from([(
+        tenant.to_string(),
+        TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::from([ConsentScope::ModelTraining]),
+            allowed_uses: BTreeSet::new(),
+        },
+    )]));
+    age_submission_past_expiry(&fixture.owner, tenant, run.submission_id).await;
+    let purge = |state: Arc<AppState>| {
+        let admin_token = admin_token.clone();
+        async move {
+            maintenance_handler(
+                State(state),
+                auth_headers(&admin_token),
+                Json(TraceMaintenanceRequest {
+                    purpose: Some("pipeline purge consent test".to_string()),
+                    prune_export_cache: false,
+                    purge_expired_before: Some(Utc::now()),
+                    ..test_maintenance_request()
+                }),
+            )
+            .await
+            .map(|Json(response)| response.records_marked_purged)
+        }
+    };
+    let status = || async {
+        fixture
+            .owner
+            .get_trace_submission(tenant, run.submission_id)
+            .await
+            .unwrap()
+            .expect("the submission row")
+            .status
+    };
+
+    let refused = purge(narrowed)
+        .await
+        .expect_err("the policy refuses the purge");
+    assert_eq!(refused.0, StatusCode::FORBIDDEN);
+    assert_eq!(status().await, StorageTraceCorpusStatus::Accepted);
+    assert_eq!(purge(state).await.expect("the purge runs"), 1);
+    assert_eq!(status().await, StorageTraceCorpusStatus::Purged);
+}

@@ -42468,6 +42468,41 @@ async fn pipeline_review_claim_handler(
     }))
 }
 
+/// The submission record of pipeline run `run_id`, read from the database
+/// and built as `main`'s database reads build one, for the checks `main`
+/// applies to a record. `None` when there is no such run; a run whose
+/// submission row is missing, or has no status `main` reads, answers `404`,
+/// as `main` answers a record it cannot read.
+async fn pipeline_run_submission_record(
+    state: &AppState,
+    pipeline_service: &PipelineService,
+    tenant_id: &str,
+    run_id: Uuid,
+) -> ApiResult<Option<TraceCommonsSubmissionRecord>> {
+    let Some(run) = pipeline_service
+        .store()
+        .get_run(tenant_id, run_id)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Ok(None);
+    };
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| internal_error("pipeline review requires the DB mirror"))?;
+    let not_found = || api_error(StatusCode::NOT_FOUND, "trace submission not found");
+    let stored = db
+        .get_trace_submission(tenant_id, run.submission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let record = trace_commons_record_from_storage_submission(stored)
+        .ok_or_else(not_found)?
+        .map_err(internal_error)?;
+    Ok(Some(record))
+}
+
 /// The submission a pipeline run belongs to, for the review routes' audit
 /// rows.
 async fn pipeline_run_submission_id(
@@ -42596,6 +42631,26 @@ async fn pipeline_review_assessment_handler(
         ReviewRecommendation::Approve => TraceCorpusStatus::Accepted,
         ReviewRecommendation::Reject => TraceCorpusStatus::Rejected,
     };
+    // Zaki review 1, round 2, N-2: the privileged-action consent check
+    // `main`'s review decision applies (`apply_review_decision`): the
+    // reviewer's claims and the tenant's current policy must allow a
+    // consent scope and a use of the submission, so a policy narrowed after
+    // the receipt applies too. A run that does not exist is left to
+    // `record_review_assessment`'s own answer.
+    if let Some(record) =
+        pipeline_run_submission_record(state.as_ref(), pipeline_service, &tenant.tenant_id, run_id)
+            .await?
+    {
+        let privileged_policy =
+            tenant_privileged_action_policy_for_request(state.as_ref(), &tenant, "review decision")
+                .await?;
+        ensure_record_matches_privileged_action_policy_abac(
+            &record,
+            &tenant,
+            privileged_policy.as_ref(),
+            "review decision",
+        )?;
+    }
     let assessment = pipeline_service
         .store()
         .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
@@ -46034,7 +46089,8 @@ async fn retention_dry_run_drill_handler(
         tenant.auth(),
         request.purge_expired_before,
         privileged_tenant_policy.as_ref(),
-    )?;
+    )
+    .await?;
     let response = run_retention_dry_run_drill(state.as_ref(), tenant.auth(), request)
         .await
         .map_err(maintenance_error)?;
@@ -54289,7 +54345,8 @@ async fn maintenance_handler(
         &tenant,
         body.purge_expired_before,
         privileged_tenant_policy.as_ref(),
-    )?;
+    )
+    .await?;
     let vector_tenant_policy = if body.index_vectors {
         tenant_vector_policy_for_request(state.as_ref(), &tenant).await?
     } else {
@@ -54338,7 +54395,8 @@ async fn retention_maintenance_handler(
         &tenant,
         body.purge_expired_before,
         privileged_tenant_policy.as_ref(),
-    )?;
+    )
+    .await?;
     let response = run_maintenance(
         state.as_ref(),
         &tenant,
@@ -59984,7 +60042,10 @@ fn source_matches_allowed_use_allowlist(
             .any(|allowed_use| allowlist.contains(allowed_use))
 }
 
-fn ensure_maintenance_purge_matches_privileged_action_policy(
+/// Every purge candidate, a submission with a pipeline run among them
+/// (ruling RB-30, which `run_maintenance` purges too), must pass the
+/// privileged-action consent check before the purge runs.
+async fn ensure_maintenance_purge_matches_privileged_action_policy(
     state: &AppState,
     tenant: &TenantAuth,
     purge_expired_before: Option<DateTime<Utc>>,
@@ -59994,8 +60055,12 @@ fn ensure_maintenance_purge_matches_privileged_action_policy(
         return Ok(());
     };
     let now = Utc::now();
-    let records =
+    let mut records =
         read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let pipeline_records = read_pipeline_retention_records(state, tenant, &records)
+        .await
+        .map_err(internal_error)?;
+    records.extend(pipeline_records);
     for record in records {
         ensure_retention_metadata_within_server_policy(&record).map_err(internal_error)?;
         if retention_policy_is_on_legal_hold(state, &record).map_err(internal_error)? {

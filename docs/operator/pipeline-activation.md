@@ -241,7 +241,11 @@ answers `404` when no pipeline runtime is injected:
   reviewer's `approve` or `reject` for the claim's `lease_token`, with a
   reason label. An approval must list every Admission reason it resolves in
   `resolved_quarantine_reasons`, or it is refused with `422`
-  (`quarantine reason is unresolved`). A stale claim is `409`.
+  (`quarantine reason is unresolved`). A stale claim is `409`. The route
+  applies `main`'s privileged-action consent check, as `main`'s review
+  decision does: when the reviewer's credential or the tenant's current
+  policy allows none of the submission's consent scopes or uses, it answers
+  `403` and records nothing. A policy narrowed after the receipt applies.
 
 An assessment moves the run back to `pending`, due at once, in the same
 transaction. The worker then runs Review with the assessment: an approval
@@ -728,6 +732,9 @@ same request:
   from the request or the scheduler's setting) later than its expiry date,
   and not while it is on a legal hold.
 - A dry run counts what it would change and changes nothing.
+- A purge request applies `main`'s privileged-action consent check to every
+  purge candidate, pipeline submissions included: one the tenant's policy
+  does not allow refuses the whole request with `403`.
 - The rows are marked through `main`'s own expiry and purge writes, with
   `main`'s lifecycle audit, invalidations, and retention ledger items, and
   are counted in the maintenance response as `main`'s are.
