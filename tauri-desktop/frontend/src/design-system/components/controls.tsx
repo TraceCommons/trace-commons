@@ -437,8 +437,8 @@ export function CheckRow({
         checked={checked}
         onChange={onChange}
         disabled={disabled}
-        label={typeof children === "string" ? children : "Option"}
-        describedBy={id}
+        // Named by the row's own text, JSX or not.
+        aria-labelledby={id}
       />
       <span id={id}>{children}</span>
     </div>
