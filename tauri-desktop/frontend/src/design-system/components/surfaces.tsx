@@ -12,17 +12,25 @@ type DivProps = HTMLAttributes<HTMLDivElement>;
 
 /**
  * The scene the glass sits over, and the window's padding around its panes.
- * `rim` draws the gradient window rim; the app itself uses panes as the
- * outermost containment, so the rim is for mocks only.
+ * `floating` drops the backdrop and padding so the panes are the outermost
+ * containment and float as one unit (the app's transparent window); each
+ * pane then paints the scene behind its own glass. `rim` draws the gradient
+ * window rim, for mocks that show a chrome window.
  */
 export function Window({
   rim = false,
+  floating = false,
   className,
   ...props
-}: DivProps & { rim?: boolean }) {
+}: DivProps & { rim?: boolean; floating?: boolean }) {
   return (
     <div
-      className={cx("tc-root tc-window", rim && "tc-window--rim", className)}
+      className={cx(
+        "tc-root tc-window",
+        rim && "tc-window--rim",
+        floating && "tc-window--floating",
+        className,
+      )}
       {...props}
     />
   );

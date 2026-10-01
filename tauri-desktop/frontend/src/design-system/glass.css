@@ -154,6 +154,25 @@
   color: var(--tc-text-primary);
   font: var(--tc-text-body);
 }
+/* Floating panes: no frame and no backdrop around them. The window is
+   transparent (in the app), so the panes sit at its edge with only the gap
+   between them, and each pane paints the scene behind its own glass. The
+   scene is fixed to the viewport, so it reads as one continuous scene across
+   the panes. */
+.tc-window--floating {
+  padding: 0;
+  background: none;
+}
+.tc-window--floating .tc-pane {
+  background:
+    var(--tc-pane-fill),
+    var(--tc-scene);
+  background-attachment: scroll, fixed;
+}
+.tc-window--floating .tc-map {
+  border-radius: var(--tc-radius-pane);
+}
+
 .tc-window--rim {
   border-radius: var(--tc-radius-window);
   border: var(--tc-rim-width) solid transparent;

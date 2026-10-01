@@ -54,6 +54,12 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* The Tauri window is transparent; the panes carry the scene. */
+  html.tc-native,
+  html.tc-native body {
+    background: transparent;
+  }
+
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
