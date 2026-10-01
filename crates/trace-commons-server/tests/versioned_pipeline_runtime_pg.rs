@@ -1050,105 +1050,143 @@ async fn renewal_never_shortens_a_lease() {
     assert_eq!(current.lease_expires_at, Some(original_expiry));
 }
 
-/// Wave 2 (rebase 10 review, M7): `renew_lease`'s liveness predicate reads
-/// the clock when it runs (`clock_timestamp()`), not when its transaction
-/// began (`NOW()`). Its UPDATE starts while the lease is live and waits on
-/// the run row, which another transaction has updated and holds; the lease
-/// expires during the wait; the holder commits, and PostgreSQL re-checks the
-/// UPDATE's `WHERE` against the new row version. With `NOW()` that re-check
-/// still saw the transaction's start, before the expiry, and renewed a lease
-/// that had expired; with `clock_timestamp()` the expired lease is not
-/// renewed, and its expiry is left as it was.
+/// How the other transaction in
+/// `a_lease_that_expires_while_its_renewal_waits_for_the_row_is_not_renewed`
+/// holds the run row while the renewal waits for it.
+#[derive(Clone, Copy, Debug)]
+enum RunRowHolder {
+    /// It updates the row: PostgreSQL re-checks a waiting UPDATE's `WHERE`
+    /// on the new row version.
+    Updates,
+    /// It only locks the row (`FOR UPDATE`) and changes nothing: there is no
+    /// new row version, so nothing re-checks a waiting UPDATE's `WHERE`.
+    LocksOnly,
+}
+
+/// Wave 2 (rebase 10 review, M7; fix round 1, review M4 and M5):
+/// `renew_lease` decides liveness only once it holds the run row. The
+/// renewal starts while the lease is live and waits on the run row, which
+/// another transaction holds -- by updating it, or by only locking it. The
+/// lease expires during the wait; the holder commits. Either way the
+/// expired lease is not renewed, and its expiry is left as it was. With the
+/// predicate on `NOW()` both cases renewed it; with `clock_timestamp()` in
+/// the UPDATE alone, the lock-only case still did (no re-check), which the
+/// renewal's own `FOR UPDATE` before the UPDATE closes. The probe waits
+/// until the holder's backend is among the renewal's blockers
+/// (`pg_blocking_pids`), so it cannot be satisfied by another test's
+/// session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lease_that_expires_while_its_renewal_waits_for_the_row_is_not_renewed() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
-    let store = PgPipelineStore::new(backend.clone());
-    let tenant = format!("renewal-waits-{}", uuid::Uuid::new_v4());
-    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
-    let claimed = store
-        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(2))
-        .await
-        .unwrap()
-        .unwrap();
-    let lease_token = claimed.lease_token.unwrap();
-    let expiry = claimed.lease_expires_at.unwrap();
-
-    let mut holder = owner_client().await;
-    let holder_tx = holder.transaction().await.unwrap();
-    holder_tx
-        .execute(
-            "UPDATE pipeline_runs SET updated_at = updated_at
-              WHERE tenant_id = $1 AND run_id = $2",
-            &[&tenant, &run.run_id],
-        )
-        .await
-        .unwrap();
-
-    let renewal = {
+    for holder_kind in [RunRowHolder::Updates, RunRowHolder::LocksOnly] {
         let store = PgPipelineStore::new(backend.clone());
-        let tenant = tenant.clone();
-        let run_id = run.run_id;
-        tokio::spawn(async move {
-            store
-                .renew_lease(
-                    &tenant,
-                    run_id,
-                    lease_token,
-                    chrono::Duration::seconds(10),
-                    chrono::Utc::now() + chrono::Duration::seconds(60),
-                )
-                .await
-        })
-    };
-    // Wait until the renewal's UPDATE is blocked on the row lock.
-    let observer = owner_client().await;
-    let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let waiting: i64 = observer
-            .query_one(
-                "SELECT COUNT(*) FROM pg_stat_activity
-                  WHERE wait_event_type = 'Lock'
-                    AND query LIKE '%SET lease_expires_at = GREATEST%'",
-                &[],
-            )
+        let tenant = format!("renewal-waits-{}", uuid::Uuid::new_v4());
+        let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+        let claimed = store
+            .claim_run(&tenant, run.run_id, chrono::Duration::seconds(3))
+            .await
+            .unwrap()
+            .unwrap();
+        let lease_token = claimed.lease_token.unwrap();
+        let expiry = claimed.lease_expires_at.unwrap();
+
+        let mut holder = owner_client().await;
+        let holder_tx = holder.transaction().await.unwrap();
+        let holder_pid: i32 = holder_tx
+            .query_one("SELECT pg_backend_pid()", &[])
             .await
             .unwrap()
             .get(0);
-        if waiting > 0 {
-            break;
+        match holder_kind {
+            RunRowHolder::Updates => {
+                holder_tx
+                    .execute(
+                        "UPDATE pipeline_runs SET updated_at = updated_at
+                          WHERE tenant_id = $1 AND run_id = $2",
+                        &[&tenant, &run.run_id],
+                    )
+                    .await
+                    .unwrap();
+            }
+            RunRowHolder::LocksOnly => {
+                holder_tx
+                    .query_one(
+                        "SELECT 1 FROM pipeline_runs
+                          WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+                        &[&tenant, &run.run_id],
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let renewal = {
+            let store = PgPipelineStore::new(backend.clone());
+            let tenant = tenant.clone();
+            let run_id = run.run_id;
+            tokio::spawn(async move {
+                store
+                    .renew_lease(
+                        &tenant,
+                        run_id,
+                        lease_token,
+                        chrono::Duration::seconds(10),
+                        chrono::Utc::now() + chrono::Duration::seconds(60),
+                    )
+                    .await
+            })
+        };
+        // Wait until the holder's backend blocks some session: only this
+        // renewal waits on that row.
+        let observer = owner_client().await;
+        let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let blocked: i64 = observer
+                .query_one(
+                    "SELECT COUNT(*) FROM pg_stat_activity
+                      WHERE $1 = ANY(pg_blocking_pids(pid))",
+                    &[&holder_pid],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if blocked > 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < wait_deadline,
+                "{holder_kind:?}: the renewal never waited on the run row"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(
-            std::time::Instant::now() < wait_deadline,
-            "the renewal never waited on the run row"
+            chrono::Utc::now() < expiry,
+            "{holder_kind:?}: the renewal must start waiting while the lease is still live"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!renewal.is_finished());
+
+        // Let the lease expire while the renewal waits, then release the row.
+        let past_expiry = (expiry - chrono::Utc::now()).to_std().unwrap_or_default()
+            + std::time::Duration::from_millis(300);
+        tokio::time::sleep(past_expiry).await;
+        holder_tx.commit().await.unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), renewal)
+            .await
+            .expect("the renewal returns once the row is released")
+            .expect("the renewal task did not panic")
+            .unwrap();
+        assert_eq!(
+            result, None,
+            "{holder_kind:?}: a lease that expired while its renewal waited for the row is \
+             not renewed"
+        );
+        let current = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+        assert_eq!(current.lease_expires_at, Some(expiry), "{holder_kind:?}");
+        assert_eq!(current.lease_token, Some(lease_token), "{holder_kind:?}");
     }
-    assert!(
-        chrono::Utc::now() < expiry,
-        "the renewal must start waiting while the lease is still live"
-    );
-    assert!(!renewal.is_finished());
-
-    // Let the lease expire while the renewal waits, then release the row.
-    let past_expiry = (expiry - chrono::Utc::now()).to_std().unwrap_or_default()
-        + std::time::Duration::from_millis(300);
-    tokio::time::sleep(past_expiry).await;
-    holder_tx.commit().await.unwrap();
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), renewal)
-        .await
-        .expect("the renewal returns once the row is released")
-        .expect("the renewal task did not panic")
-        .unwrap();
-    assert_eq!(
-        result, None,
-        "a lease that expired while its renewal waited for the row is not renewed"
-    );
-    let current = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
-    assert_eq!(current.lease_expires_at, Some(expiry));
-    assert_eq!(current.lease_token, Some(lease_token));
 }
 
 /// `for_phase` picks each phase's own configured lease, and Admission --

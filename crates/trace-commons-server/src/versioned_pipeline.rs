@@ -1705,12 +1705,17 @@ impl PgPipelineStore {
     /// Called only by `PipelineLeaseRenewal`'s background task, on its own
     /// connection checkout, never inside another transaction.
     ///
-    /// The liveness predicate reads `clock_timestamp()`, the time the check
-    /// runs, not `NOW()`, the transaction's start (wave 2; rebase 10 review,
-    /// M7): when the UPDATE waits on another transaction's update of the run
-    /// row, PostgreSQL re-checks the `WHERE` once that transaction commits,
-    /// and a lease that expired during the wait is then not renewed. The new
-    /// expiry still counts from `NOW()`, which can only make it earlier.
+    /// Liveness is decided only once the run row is held (wave 2; rebase 10
+    /// review, M7; fix round 1, review M4): the transaction first locks the
+    /// row (`SELECT ... FOR UPDATE`), waiting out any holder, and the UPDATE
+    /// that follows compares `lease_expires_at` with `clock_timestamp()`,
+    /// the time it runs, not `NOW()`, the transaction's start. A lease that
+    /// expired while the renewal waited is then not renewed, whether the
+    /// holder updated the row or only locked it (a lock-only holder gives
+    /// no re-check of a waiting UPDATE's `WHERE`, which is why the lock comes
+    /// first). The new expiry still counts from `NOW()`, which can only make
+    /// it earlier. Lock order: the run row only, as every lease-checked
+    /// write takes it.
     pub async fn renew_lease(
         &self,
         tenant_id: &str,
@@ -1722,6 +1727,11 @@ impl PgPipelineStore {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let extension_ms = extension.num_milliseconds();
+        tx.query_opt(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant_id, &run_id],
+        )
+        .await?;
         let row = tx
             .query_opt(
                 "UPDATE pipeline_runs
