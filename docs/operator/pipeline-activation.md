@@ -50,9 +50,15 @@ refuses to start with `pipeline_runtime_dependencies_not_production_qualified`
 (unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set).
 `GET /v1/pipeline/readiness` reports the drain list's size as
 `drain_tenant_count` (a count, no tenant ids). A retried upload from a drain
-tenant that completed admission on the pipeline path replays its pipeline
-receipt, as it did while the tenant was routed; a new upload takes the
-legacy path.
+tenant of a submission id a pipeline run owns replays its pipeline receipt,
+as it did while the tenant was routed, with or without account admission
+(a static-token tenant too); a new upload takes the legacy path. An upload
+of a submission id a pipeline run owns never reaches the legacy record: the
+same body from the recorded principal replays the receipt, a different body
+is refused with `409` (`receipt id reused with different content`), another
+principal with `409` as `main` refuses one, and a tenant on neither list, or
+a build with no pipeline runtime, answers `409`
+(`submission_owned_by_pipeline_run`).
 
 To roll a tenant back from the pipeline, move it from
 `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` to

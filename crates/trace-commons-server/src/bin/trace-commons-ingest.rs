@@ -14147,6 +14147,77 @@ fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
     )
 }
 
+/// The label a retried upload gets for a submission id that a pipeline run
+/// owns when no pipeline runtime may replay it: the tenant is on neither
+/// pipeline list, or no runtime is injected (Zaki review 1, round 2, N-3).
+const SUBMISSION_OWNED_BY_PIPELINE_RUN: &str = "submission_owned_by_pipeline_run";
+
+/// Zaki review 1, round 2, N-3: an upload of a submission id that a
+/// pipeline run owns never reaches `main`'s legacy upsert, whatever path it
+/// took (with or without account admission, static-token tenants
+/// included). With a runtime that may replay the tenant's receipts (a
+/// routed or drained tenant, `pipeline_runtime_for_replay`), the caller
+/// must be the principal the pipeline recorded, under the same ownership
+/// predicate the legacy path applies (`can_access_submission`, by principal
+/// ref); another principal is refused with `ownership_conflict`, as the
+/// legacy path refuses one. The same body then replays the pipeline
+/// receipt, and a different body is refused as the pipeline refuses it
+/// (`pipeline_content_conflict`). With no such runtime, a run found
+/// through the database (`PgPipelineStore`) refuses the upload with
+/// `SUBMISSION_OWNED_BY_PIPELINE_RUN`. `Ok(None)` when no pipeline run owns
+/// the id: the upload takes `main`'s path.
+async fn pipeline_owned_submission_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    if let Some(pipeline_service) = pipeline_runtime_for_replay(state, tenant) {
+        let idempotency_key = submission_id.to_string();
+        let Some(PipelineReplayReceipt {
+            result,
+            auth_principal_ref,
+        }) = pipeline_service
+            .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
+            .await
+            .map_err(internal_error)?
+        else {
+            return Ok(None);
+        };
+        if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
+            return Err(api_error(StatusCode::CONFLICT, ownership_conflict));
+        }
+        return match result {
+            PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
+            PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
+            // `replay_receipt` only ever builds a `Replayed` or a
+            // `ContentConflict` result (`replay_result`, over a run it
+            // found); any other variant fails closed rather than letting
+            // the upload reach the legacy upsert.
+            PipelineReceiptResult::Created(_)
+            | PipelineReceiptResult::Tombstoned
+            | PipelineReceiptResult::QuotaExceeded(_)
+            | PipelineReceiptResult::SourceSessionWithdrawn => {
+                Err(internal_error("pipeline_replay_result_unexpected"))
+            }
+        };
+    }
+    if let Some(store) = state.pipeline_store.as_ref() {
+        if store
+            .submission_has_pipeline_run(tenant.tenant_id(), submission_id)
+            .await
+            .map_err(internal_error)?
+        {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                SUBMISSION_OWNED_BY_PIPELINE_RUN,
+            ));
+        }
+    }
+    Ok(None)
+}
+
 /// Routes a receipt to the versioned pipeline instead of the legacy corpus
 /// path, for a `PipelineReceipts`-rollout tenant with an injected runtime.
 ///
@@ -14366,57 +14437,23 @@ async fn submit_trace_handler(
         // and the same ownership predicate the legacy fallback below applies
         // (`can_access_submission`, here via its principal-ref form) is
         // applied to it before either pipeline outcome is returned.
-        if let Some(pipeline_service) = pipeline_runtime_for_replay(state.as_ref(), &tenant) {
-            let idempotency_key = envelope.submission_id.to_string();
-            if let Some(PipelineReplayReceipt {
-                result,
-                auth_principal_ref,
-            }) = pipeline_service
-                .replay_receipt(tenant.tenant_id(), &idempotency_key, &raw_body)
-                .await
-                .map_err(internal_error)?
-            {
-                if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
-                    return Err(api_error(
-                        StatusCode::CONFLICT,
-                        "admission_identity_conflict",
-                    ));
-                }
-                match result {
-                    PipelineReceiptResult::Replayed(_) => {
-                        return Ok(Json(pipeline_processing_receipt()));
-                    }
-                    // Defensive, not reachable over HTTP today:
-                    // `admission::reserve`'s own completed-lookup is keyed on
-                    // the request body's hash, so a retry with different
-                    // content for a submission id that is already
-                    // `completed` never reaches this branch as a completed
-                    // retry in the first place -- `reserve` answers it
-                    // first, either refusing a new submission outright (no
-                    // evidence) or with its own identity-conflict decision
-                    // (with evidence). See the third POST in
-                    // `real_http_pipeline_receipt_replays_on_retry`.
-                    PipelineReceiptResult::ContentConflict => {
-                        return Err(pipeline_content_conflict());
-                    }
-                    // `replay_receipt` only ever builds a `Replayed` or a
-                    // `ContentConflict` result (`replay_result`, over a run
-                    // `existing_receipt_run` already found); a read-only
-                    // replay lookup neither creates a run, stages an
-                    // attempt, checks a tombstone or a source session, nor
-                    // counts a quota, so none of these variants can come
-                    // from it. Kept
-                    // only so this match stays exhaustive against the
-                    // shared `PipelineReceiptResult` enum.
-                    PipelineReceiptResult::Created(_)
-                    | PipelineReceiptResult::Tombstoned
-                    | PipelineReceiptResult::QuotaExceeded(_)
-                    | PipelineReceiptResult::SourceSessionWithdrawn => {}
-                }
-            }
-            // No run under this key: a submission that completed admission
-            // on the legacy path before this tenant was routed to the
-            // pipeline. Fall back to the legacy read below, unchanged.
+        // `pipeline_owned_submission_receipt` replays it for a routed or
+        // drained tenant; with no runtime that may replay it, a run found
+        // through the database refuses it with a label rather than reading
+        // the legacy record the pipeline never wrote. With no run under this
+        // key (a submission that completed admission on the legacy path
+        // before this tenant was routed to the pipeline), the legacy read
+        // below runs, unchanged.
+        if let Some(receipt) = pipeline_owned_submission_receipt(
+            state.as_ref(),
+            &tenant,
+            envelope.submission_id,
+            &raw_body,
+            "admission_identity_conflict",
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
         }
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)
@@ -14440,6 +14477,24 @@ async fn submit_trace_handler(
     let result = async {
         if state.account_admission.is_none() {
             validate_envelope(&envelope)?;
+        }
+
+        // Zaki review 1, round 2, N-3: a submission id a pipeline run owns
+        // never reaches the legacy record read or upsert below, on this
+        // path too (no completed admission: a static-token tenant, or an
+        // admission still in progress). It is answered as `main` answers a
+        // retry of an existing record, before the tenant policy and quota
+        // checks.
+        if let Some(receipt) = pipeline_owned_submission_receipt(
+            state.as_ref(),
+            &tenant,
+            envelope.submission_id,
+            &raw_body,
+            "submission id already belongs to another principal",
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
         }
 
         // Idempotency: same submission_id always addresses the same record.

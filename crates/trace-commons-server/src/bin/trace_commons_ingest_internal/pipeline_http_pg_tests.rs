@@ -7312,3 +7312,114 @@ async fn a_maintenance_purge_applies_the_consent_check_to_pipeline_submissions()
     assert_eq!(purge(state).await.expect("the purge runs"), 1);
     assert_eq!(status().await, StorageTraceCorpusStatus::Purged);
 }
+
+/// Zaki review 1, round 2, N-3: a retried upload of a submission id that a
+/// pipeline run owns never reaches `main`'s legacy upsert, on the path with
+/// no account admission (a static-token tenant) as well. On a drain tenant
+/// the same body from the same principal replays the pipeline receipt; a
+/// different body under the same id is refused as the pipeline refuses it,
+/// and another principal as `main` refuses it. A tenant on neither list,
+/// and a build with no pipeline runtime injected, refuse it with a label.
+/// The run is parked for review on a Medium-risk receipt, and the
+/// deployment accepts Medium risk, so a legacy upsert would accept it with
+/// no assessment: the pipeline's row stays as the receipt wrote it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retried_upload_of_a_pipeline_submission_never_reaches_mains_upsert() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    fixture
+        .service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = fixture
+        .service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    assert_eq!(created.admission_decision, "quarantine");
+    let row = || async {
+        let row = fixture
+            .owner
+            .get_trace_submission(&tenant, envelope.submission_id)
+            .await
+            .unwrap()
+            .expect("the pipeline's submission row");
+        (row.status, row.auth_principal_ref)
+    };
+    let receipt_row = row().await;
+
+    let mut drain = fixture.state.clone();
+    {
+        let drain = Arc::make_mut(&mut drain);
+        drain.accept_medium_risk_submissions = true;
+        drain.tenant_rollout_gates = TraceTenantRolloutGates::default();
+        drain.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+        drain.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+    let Json(replayed) = test_submit(drain.clone(), &fixture.token, envelope.clone())
+        .await
+        .expect("the drain tenant's retry replays");
+    assert_eq!(replayed.status, "processing");
+
+    let mut changed = envelope.clone();
+    changed.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let refused = test_submit(drain.clone(), &fixture.token, changed)
+        .await
+        .expect_err("a different body under the same id is refused");
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert_eq!(
+        refused.1.0.error,
+        "receipt id reused with different content"
+    );
+
+    let refused = test_submit(drain.clone(), &fixture.other_token, envelope.clone())
+        .await
+        .expect_err("another principal is refused");
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert_eq!(
+        refused.1.0.error,
+        "submission id already belongs to another principal"
+    );
+
+    let mut unlisted = drain.clone();
+    Arc::make_mut(&mut unlisted).pipeline_drain_tenant_ids = Arc::new(BTreeSet::new());
+    let mut runtime_less = unlisted.clone();
+    Arc::make_mut(&mut runtime_less).pipeline_service = None;
+    for (state, case) in [(unlisted, "neither list"), (runtime_less, "no runtime")] {
+        let refused = test_submit(state, &fixture.token, envelope.clone())
+            .await
+            .expect_err(case);
+        assert_eq!(refused.0, StatusCode::CONFLICT, "{case}");
+        assert_eq!(
+            refused.1.0.error, "submission_owned_by_pipeline_run",
+            "{case}"
+        );
+    }
+    assert_eq!(row().await, receipt_row, "the pipeline's row is unchanged");
+}
