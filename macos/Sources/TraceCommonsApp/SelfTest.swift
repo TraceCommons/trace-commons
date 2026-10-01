@@ -197,7 +197,7 @@ enum SelfTest {
         lines.append("status.queue_depth: \(model.status.queueDepth)")
         lines.append("status.health: \(model.status.health.lastErrorLabel ?? "none")")
         lines.append("health copy: \(model.health?.title ?? "(healthy)")")
-        lines.append("decisions owed (badge): \(model.decisionsOwed)")
+        lines.append("decisions owed (badge): \(model.decisionsOwed.map(String.init) ?? "unavailable")")
         for row in model.waitingByProject {
             lines.append("  waiting: \(row.label) count=\(row.count) bytes=\(row.bytes)")
         }

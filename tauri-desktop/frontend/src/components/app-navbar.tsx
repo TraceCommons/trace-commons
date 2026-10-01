@@ -19,13 +19,13 @@ import {
 
 type NavbarProfile = { on_roster: boolean; handle: string | null };
 type AppNavbarProps = {
-  queueCount: number;
+  decisionsOwed: number | null;
   profile: NavbarProfile | null;
   profileState: "loading" | "ready" | "error";
 };
 
 export function AppNavbar({
-  queueCount,
+  decisionsOwed,
   profile,
   profileState,
 }: AppNavbarProps) {
@@ -57,7 +57,7 @@ export function AppNavbar({
                   <NavButton
                     key={item.id}
                     item={item}
-                    count={item.id === "waiting" ? queueCount : item.count}
+                    count={item.id === "waiting" ? decisionsOwed : item.count}
                   />
                 ))}
             </SidebarMenu>
@@ -104,7 +104,7 @@ export function AppNavbar({
 
 type NavButtonProps = {
   item: (typeof navItems)[number];
-  count?: number;
+  count?: number | null;
 };
 
 function NavButton({ item, count }: NavButtonProps) {
@@ -120,7 +120,24 @@ function NavButton({ item, count }: NavButtonProps) {
         <NavIcon name={item.icon} />
         <span>{item.label}</span>
       </SidebarMenuButton>
-      {count !== undefined && <SidebarMenuBadge>{count}</SidebarMenuBadge>}
+      {count !== undefined && (
+        <SidebarMenuBadge
+          aria-label={
+            item.id === "waiting"
+              ? count === null
+                ? "Decisions owed unavailable"
+                : `${count} decisions owed`
+              : undefined
+          }
+          title={
+            item.id === "waiting" && count === null
+              ? "Decisions owed unavailable"
+              : undefined
+          }
+        >
+          {count ?? "—"}
+        </SidebarMenuBadge>
+      )}
     </SidebarMenuItem>
   );
 }
