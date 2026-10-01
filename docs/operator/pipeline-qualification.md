@@ -203,11 +203,22 @@ result per required check, it requires every result to carry the same
 every result that names a package to name the same one, all three digests
 together (`qualification_evidence_mixed_package` otherwise). Its decision
 names that revision and package, and its `evidence_hash` covers each
-result's run id, code revision, package digests and evidence hash. A
-`qualify` run's checks bind many packages (most harnesses build their own
-test bundle; the last run's 15 package-bearing results named 10), so its
-results as a whole are mixed: evidence that promotes one package has to
-come from runs of the package-bearing checks against that package.
+result's run id, code revision, package digests and evidence hash (not the
+evaluation time, so the same evidence gives the same hash). Three
+consequences:
+
+- A decision can be ready and name no package, when no result names one.
+  Only `qualify_bundle` refuses that (`bundle_qualification_package_mismatch`).
+- One result that names a package is enough to bind the decision to it;
+  results that name none do not count against it.
+- A `qualify` run's checks bind many packages: every runtime check emits
+  its own test bundle's digests (`scripts/operator/pipeline_tooling/checks.py`,
+  `_runtime`, `digests=True`), and the last run's 15 package-bearing results
+  named 10. So its results as a whole are mixed. Before promotion can use
+  them, PR 5 must choose for the mechanics checks (crash matrix, leases,
+  sweep, and the like): emit no package, or run against the candidate
+  package. Either way, evidence that promotes one package comes from checks
+  that name that package or none.
 
 ## Outputs under `.local/`
 

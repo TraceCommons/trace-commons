@@ -411,7 +411,13 @@ pub struct PromotionDecision {
 /// and each safe blocker a result carries, including a passing one. Evidence
 /// from more than one revision adds `qualification_evidence_mixed_revision`,
 /// and from more than one package `qualification_evidence_mixed_package`
-/// (a package is its three digests together).
+/// (a package is its three digests together). A result that names no
+/// package does not count: one result that names a package binds the
+/// decision to it, and a decision can be ready with no package at all when
+/// no result names one (only `qualify_bundle` refuses that). Every runtime
+/// check names its own test bundle today, so PR 5 must have the mechanics
+/// checks name no package, or run them against the candidate, before their
+/// results can promote one.
 ///
 /// `evidence_hash` covers, for each check id, the result's run id, code
 /// revision, package digests and evidence hash, with the blockers, as
