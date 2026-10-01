@@ -3622,6 +3622,16 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // start holding sessions that arrived since.
     let prior_arming = policy.armed_from_now.get(&key).cloned();
     let rearm_from_now = from_now && prior_arming.is_some();
+    // Snapshotted before any of the mutations below, so a `policy-write-failed`
+    // can restore the whole policy rather than stand with an in-memory
+    // change -- for `auto_upload`, one the audit record above already
+    // describes as having happened -- that never reaches disk. `set_mode`,
+    // the arming-from-now calls, `prune_arming_record`, and the two
+    // `record_*` calls between them touch several fields of `ProjectPolicy`
+    // at once, which is why this clones the whole struct rather than one
+    // field the way `handle_grant_automatic` and the other policy mutators
+    // above do it.
+    let previous = policy.clone();
     if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
@@ -3642,6 +3652,7 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         policy.record_grant_terms(&key, terms);
     }
     if let Err(_e) = policy.save(&shared.store) {
+        *policy = previous;
         return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
     }
     // A newly-configured project can turn a previously-unique queue
@@ -3729,6 +3740,15 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let relabelled = relabel_queue_entries(&policy, &mut queue);
         if relabelled || purged > 0 || retracted > 0 || restored > 0 {
             if let Err(_e) = queue.save(&shared.store) {
+                // Per the comment above: this in-memory change is kept, not
+                // rolled back, so it must be announced the same way the
+                // success path below announces it -- both locks released
+                // first, since `publish_if_decisions_owed_changed` retakes
+                // them.
+                drop(queue);
+                drop(policy);
+                shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                shared.publish_if_decisions_owed_changed(decisions_owed_before);
                 return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
             }
         }
@@ -9330,6 +9350,139 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             assert_ne!(event.event, EVENT_STATUS_CHANGED);
         }
+    }
+
+    /// Make the next `ProjectPolicy::save` fail: put a directory where the
+    /// policy file would be written, so the atomic-rename write this store
+    /// uses fails the same way a disk-full or permissions failure would.
+    /// Stands in for those without needing either, the same idea as
+    /// `break_the_audit_log` above and the settings-file test below.
+    fn break_the_policy_write(store: &ConfigStore) {
+        std::fs::create_dir_all(store.daemon_path(crate::config::DAEMON_PROJECTS_FILE)).unwrap();
+    }
+
+    fn break_the_queue_write(store: &ConfigStore) {
+        std::fs::create_dir_all(store.daemon_path(crate::config::DAEMON_QUEUE_FILE)).unwrap();
+    }
+
+    /// Zaki, on #1132 and again on #1163: `set_project_mode` could move
+    /// `status.decisions_owed` -- here, by arming a folder with a waiting
+    /// entry -- and then hit `policy-write-failed` after `set_mode` had
+    /// already mutated the in-memory policy, returning with no event and
+    /// leaving the badge to drift from what any shell last drew.
+    ///
+    /// The fix taken here is a rollback, not a publish: unlike
+    /// `queue-write-failed` below, nothing durable precedes this write (the
+    /// audit entry for `auto_upload` is appended before any policy mutation,
+    /// per the comment above `handle_set_project_mode`'s audit append), and
+    /// `handle_grant_automatic` and its siblings already restore the one
+    /// policy field they touch on exactly this error. A rollback here means
+    /// the badge never actually moved, so there is nothing to publish --
+    /// which this test proves by asserting both that the in-memory policy
+    /// and the badge are unchanged *and* that no event fires. Without the
+    /// fix, `set_mode` stands uncommitted: `resolve` would read back
+    /// `AutoUpload` and `decisions_owed_value` would read `0`.
+    #[test]
+    fn set_project_mode_rolls_back_the_policy_when_its_write_fails() {
+        let key = "/tmp/k-policy-write-fail";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        break_the_policy_write(&s.store);
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        let err = r
+            .error
+            .expect("an unwritable policy file must fail the call");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "policy-write-failed");
+
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::NotifyOnly,
+            "a policy change that never reached disk must not stand in memory either"
+        );
+        assert_eq!(
+            s.decisions_owed_value(),
+            1,
+            "the badge must not have moved if the change was rolled back"
+        );
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(
+                event.event, EVENT_STATUS_CHANGED,
+                "nothing changed, so nothing should be announced"
+            );
+        }
+    }
+
+    /// Zaki again, on the sibling path: `queue-write-failed` can follow a
+    /// purge or retract that already happened in memory (the policy write
+    /// above it already succeeded, per the comment above the queue block in
+    /// `handle_set_project_mode`), and the handler returned with neither
+    /// `queue_changed` nor `status_changed` published, so a shell watching
+    /// either event kept drawing the stale queue and the stale badge.
+    ///
+    /// Unlike the policy path, this one is documented in place as
+    /// deliberately not rolled back (disk would then disagree with memory
+    /// the other way, and a relabel already needs the *new* policy), so the
+    /// fix is to publish for the real in-memory change instead. Without it,
+    /// this entry would read back `Pending` and the badge would read `1`.
+    #[test]
+    fn set_project_mode_announces_the_queue_purge_when_the_queue_write_fails() {
+        let key = "/tmp/k-queue-write-fail";
+        let s = enrolled_shared();
+        let entry_id = seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        break_the_queue_write(&s.store);
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "ignore" }),
+            ),
+        );
+        let err = r
+            .error
+            .expect("an unwritable queue file must fail the call");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "queue-write-failed");
+
+        // The policy write already succeeded (it is a separate file); the
+        // project really is `Ignore` now.
+        assert_eq!(s.policy.lock().unwrap().resolve(key), ProjectMode::Ignore);
+        // The in-memory purge happened too, even though it could not be
+        // persisted: the kept-in-memory design the comment above describes.
+        assert_eq!(
+            s.queue.lock().unwrap().get(entry_id).unwrap().state,
+            QueueState::Refused,
+            "the purge ran in memory and must not be undone just because the write failed"
+        );
+        assert_eq!(
+            s.decisions_owed_value(),
+            0,
+            "an ignored project's entries are no longer a decision owed"
+        );
+
+        let mut saw_queue_changed = false;
+        let mut saw_status_changed = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_queue_changed |= event.event == EVENT_QUEUE_CHANGED;
+            saw_status_changed |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(
+            saw_queue_changed,
+            "the queue really changed in memory and must say so"
+        );
+        assert!(saw_status_changed, "the badge moved and must say so");
     }
 
     /// K7's upsell: "27 scrubbed sessions are sitting on this Mac under
