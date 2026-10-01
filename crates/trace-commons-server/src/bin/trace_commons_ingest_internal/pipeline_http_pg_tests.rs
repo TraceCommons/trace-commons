@@ -7586,3 +7586,54 @@ async fn a_pipeline_credit_event_carries_its_witness_label_and_mains_audit_event
     );
     assert_eq!(audit_rows().await.len(), 1, "a second pass appends nothing");
 }
+
+/// Zaki review 1, round 2, N-8: under `main`'s database contributor reads,
+/// a minimal-family run's Trace Credit award is reported with its points,
+/// as under file reads and in the pipeline block: the status route answers
+/// the same document in both read modes, where database reads used to
+/// describe the run from `main`'s row, whose credit is 0 (`main` keeps no
+/// ledger event of the `accepted` type).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_minimal_family_award_reads_with_its_points_under_database_reads() {
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    {
+        let state = Arc::make_mut(&mut fixture.state);
+        state.pipeline_product = Some(Arc::new(PipelineProductStore::new(fixture.runtime.clone())));
+        state.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+    }
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let status = |db_reads: bool| {
+        let mut state = fixture.state.clone();
+        Arc::make_mut(&mut state).db_contributor_reads = db_reads;
+        route_request(
+            state,
+            "POST",
+            "/v1/contributors/me/submission-status",
+            auth_headers(&fixture.token),
+            Some(serde_json::json!({ "submission_ids": [run.submission_id] })),
+        )
+    };
+    let (code, file_reads) = status(false).await;
+    assert_eq!(code, StatusCode::OK, "{file_reads}");
+    let (code, database_reads) = status(true).await;
+    assert_eq!(code, StatusCode::OK, "{database_reads}");
+    assert_eq!(
+        file_reads[0]["credit_points_pending"],
+        serde_json::json!(1.0),
+        "{file_reads}"
+    );
+    assert_eq!(
+        database_reads, file_reads,
+        "database reads report the award as file reads do"
+    );
+}

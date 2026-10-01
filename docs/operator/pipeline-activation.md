@@ -716,7 +716,9 @@ status reads `accepted`, the `NoveltyUtility` event counts as ledger credit
 gate's credit-quality figure and "Credit reflects the gate's scoring" line,
 the document shows the Score evidence's shadow credit quality with the same
 line. The pipeline block comes with it. A minimal-family run keeps its own
-document under file reads.
+document with contributor reads from files and from the database alike, so
+its Trace Credit award reads as points in both (`main` keeps no ledger event
+of the `accepted` type its leg writes).
 
 A submission only the pipeline knows (its own document) reports `status` in
 `main`'s vocabulary, so the contributor daemon's history counts and its

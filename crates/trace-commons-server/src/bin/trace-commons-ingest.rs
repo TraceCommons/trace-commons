@@ -16432,7 +16432,16 @@ async fn submission_status_handler(
         // Ruling T15-7: a compatibility run's credit figure is the shadow
         // credit quality its Score recorded, where `main` shows its gate's.
         let compatibility_decision = pipeline.and_then(compatibility_credit_decision);
-        if let Some(record) = visible_by_submission.get(&submission_id) {
+        // Zaki review 1, round 2, N-8: a minimal-family run's document is the
+        // pipeline's in both read modes. Under database reads `main`'s view
+        // also holds the run's submission row, but `main` keeps no ledger
+        // event of the `accepted` type its Trace Credit leg writes, so a
+        // document built from that row would report its award as 0, where
+        // file reads, which never hold the row, report its points.
+        let main_record = visible_by_submission
+            .get(&submission_id)
+            .filter(|_| pipeline.is_none_or(|pipeline| pipeline.compatibility.is_some()));
+        if let Some(record) = main_record {
             let mut status = submission_status_from_record(
                 record,
                 &status_credit_events,
