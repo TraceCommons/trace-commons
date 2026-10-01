@@ -1533,6 +1533,17 @@ mod tests {
             evaluate_promotion(&reversed, now).unwrap().evidence_hash
         );
 
+        // The hash names the evidence, not when it was evaluated (fix round
+        // 2): the same results, still fresh, give the same hash half an hour
+        // later, so `qualify_bundle`, evaluating at its own time, finds the
+        // hash a caller recorded earlier.
+        let later = evaluate_promotion(&evidence, now + Duration::minutes(30)).unwrap();
+        assert!(later.ready);
+        assert_eq!(
+            later.evidence_hash,
+            evaluate_promotion(&evidence, now).unwrap().evidence_hash
+        );
+
         let stale = evaluate_promotion(&evidence, now + Duration::hours(2)).unwrap();
         assert!(!stale.ready);
         assert!(
