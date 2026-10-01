@@ -652,6 +652,31 @@ pub struct PipelineReviewClaim {
     pub lease_expires_at: DateTime<Utc>,
 }
 
+/// What a reviewer's claim on a run came to (`PgPipelineStore::claim_review`;
+/// Zaki review 1, round 2, simplification): decided under the run's lock,
+/// so a caller never has to read the run back to tell the cases apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineReviewClaimOutcome {
+    /// The reviewer holds the claim.
+    Claimed(PipelineReviewClaim),
+    /// The run is not waiting for review: there is no such run, it is not
+    /// at Review, it is not `pending`, `retry` or `awaiting_review`, it is
+    /// not a quarantine, or it already has an assessment.
+    Ineligible,
+    /// The run waits for review, and another reviewer holds a live claim.
+    HeldByAnotherReviewer,
+}
+
+impl PipelineReviewClaimOutcome {
+    /// The claim, when the reviewer holds it.
+    pub fn claimed(self) -> Option<PipelineReviewClaim> {
+        match self {
+            Self::Claimed(claim) => Some(claim),
+            Self::Ineligible | Self::HeldByAnotherReviewer => None,
+        }
+    }
+}
+
 /// A worker's exclusive, time-boxed claim on one queued index invalidation
 /// (`PgPipelineStore::claim_due_index_invalidations`). The claim moves the
 /// row's `next_attempt_at` to `lease_expires_at`, so no other claim gets the
@@ -1693,23 +1718,20 @@ impl PgPipelineStore {
     /// makes the worker's `claim_run` (which re-reads state in its own
     /// `WHERE`) see the post-assessment row once it acquires the lock.
     ///
-    /// Beyond that, `Ok(None)` still covers two cases a caller cannot tell
-    /// apart from the return value alone: the run is not currently eligible
-    /// (does not exist, is not at Review, is not `pending`/`retry`/
-    /// `awaiting_review`, is not a quarantine, or already has an
-    /// assessment); or another reviewer already holds a live claim on an
-    /// otherwise-eligible run. Ingest's `pipeline_review_claim_conflict`
-    /// resolves the ambiguity by reading the run back, the same shape
-    /// `claim_review_lease_handler`'s `review_lease_claim_conflict` uses for
-    /// the legacy lease (Ruling T3-9(b): the first case maps to 404, only
-    /// the second to 409).
+    /// The outcome tells the cases apart under the run's lock: `Ineligible`
+    /// when the run is not waiting for review (it does not exist, is not at
+    /// Review, is not `pending`/`retry`/`awaiting_review`, is not a
+    /// quarantine, or already has an assessment), and
+    /// `HeldByAnotherReviewer` when another reviewer holds a live claim on
+    /// an otherwise eligible run (Ruling T3-9(b): ingest answers the first
+    /// `404` and only the second `409`).
     pub async fn claim_review(
         &self,
         tenant_id: &str,
         run_id: Uuid,
         reviewer_principal_ref: &str,
         lease_duration: Duration,
-    ) -> Result<Option<PipelineReviewClaim>, DatabaseError> {
+    ) -> Result<PipelineReviewClaimOutcome, DatabaseError> {
         if !reviewer_principal_ref.starts_with("reviewer_sha256:")
             || lease_duration <= Duration::zero()
             || lease_duration > Duration::minutes(30)
@@ -1732,7 +1754,7 @@ impl PgPipelineStore {
             .await?;
         let Some(run_row) = run_row else {
             tx.commit().await?;
-            return Ok(None);
+            return Ok(PipelineReviewClaimOutcome::Ineligible);
         };
         // Zaki review 1, round 2, finding 8: the assessment check is a
         // statement of its own, run after the run's lock is held, so it reads
@@ -1749,7 +1771,7 @@ impl PgPipelineStore {
             .get(0);
         if assessed {
             tx.commit().await?;
-            return Ok(None);
+            return Ok(PipelineReviewClaimOutcome::Ineligible);
         }
         let run_state: String = run_row.get("state");
         let submission_id: Uuid = run_row.get("submission_id");
@@ -1787,13 +1809,18 @@ impl PgPipelineStore {
             )
             .await?;
         tx.commit().await?;
-        Ok(row.map(|row| PipelineReviewClaim {
-            tenant_id: row.get("tenant_id"),
-            run_id: row.get("run_id"),
-            reviewer_principal_ref: row.get("reviewer_principal_ref"),
-            lease_token: row.get("lease_token"),
-            lease_expires_at: row.get("lease_expires_at"),
-        }))
+        // The run is eligible and locked, so a claim row the upsert did not
+        // take over is another reviewer's live claim.
+        Ok(match row {
+            Some(row) => PipelineReviewClaimOutcome::Claimed(PipelineReviewClaim {
+                tenant_id: row.get("tenant_id"),
+                run_id: row.get("run_id"),
+                reviewer_principal_ref: row.get("reviewer_principal_ref"),
+                lease_token: row.get("lease_token"),
+                lease_expires_at: row.get("lease_expires_at"),
+            }),
+            None => PipelineReviewClaimOutcome::HeldByAnotherReviewer,
+        })
     }
 
     /// Records a reviewer's Approve/Reject assessment of a quarantined run

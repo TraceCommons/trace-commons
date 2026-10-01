@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use trace_commons_gate_api::pipeline::{Phase, ReasonCode, ReviewRecommendation};
+use trace_commons_gate_api::pipeline::{ReasonCode, ReviewRecommendation};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
@@ -264,8 +264,9 @@ use trace_commons_server::versioned_pipeline::{
     PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNearPayoutControls,
     PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
     PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
-    PipelineReviewClaim, PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState,
-    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
+    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
+    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
+    is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
@@ -42535,8 +42536,22 @@ async fn pipeline_review_claim_handler(
         )
         .await
         .map_err(pipeline_review_claim_db_error)?;
-    let Some(claim) = claimed else {
-        return pipeline_review_claim_conflict(pipeline_service, &tenant.tenant_id, run_id).await;
+    let claim = match claimed {
+        PipelineReviewClaimOutcome::Claimed(claim) => claim,
+        // Ruling T3-9(b): `404` for a run that is not waiting for review,
+        // `409` only for one another reviewer holds.
+        PipelineReviewClaimOutcome::Ineligible => {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                "pipeline run is not waiting for review",
+            ));
+        }
+        PipelineReviewClaimOutcome::HeldByAnotherReviewer => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "pipeline review claim is held by another reviewer",
+            ));
+        }
     };
     // Zaki review 1, minor item M-a: the audit row `main`'s review lease
     // claim appends, hash-only and label-only.
@@ -42616,60 +42631,6 @@ async fn pipeline_run_submission_id(
         .await?
         .ok_or_else(|| anyhow::anyhow!("pipeline_run_missing"))?
         .submission_id)
-}
-
-/// `claim_review` returning `Ok(None)` covers two cases a caller cannot tell
-/// apart from that value alone: the run is not currently eligible for a
-/// claim at all (does not exist, is not at Review, is not
-/// `pending`/`retry`/`awaiting_review` -- for example a worker holds it
-/// `leased`, or it already `failed` -- is not a quarantine, or already has
-/// an assessment) -- `404`; or the run is eligible but another reviewer
-/// already holds a live claim on it -- `409` (Ruling T3-9(b)). Reads the run
-/// (and, only once it passes every eligibility check, whether it has an
-/// assessment) back to tell the two apart, mirroring `claim_review`'s own
-/// `WHERE` clause exactly so this can never call an ineligible run
-/// "held by another reviewer". The same shape
-/// `claim_review_lease_handler`'s own `review_lease_claim_conflict` uses for
-/// the legacy lease.
-async fn pipeline_review_claim_conflict(
-    pipeline_service: &PipelineService,
-    tenant_id: &str,
-    run_id: Uuid,
-) -> ApiResult<Json<PipelineReviewClaimResponse>> {
-    let not_waiting = api_error(
-        StatusCode::NOT_FOUND,
-        "pipeline run is not waiting for review",
-    );
-    let run = pipeline_service
-        .store()
-        .get_run(tenant_id, run_id)
-        .await
-        .map_err(internal_error)?;
-    let Some(run) = run else {
-        return Err(not_waiting);
-    };
-    let eligible = run.next_phase == Some(Phase::Review)
-        && matches!(
-            run.state,
-            PipelineRunState::Pending | PipelineRunState::Retry | PipelineRunState::AwaitingReview
-        )
-        && run.admission_decision == "quarantine";
-    if !eligible {
-        return Err(not_waiting);
-    }
-    let assessed = pipeline_service
-        .store()
-        .load_review_assessment(tenant_id, run_id)
-        .await
-        .map_err(internal_error)?
-        .is_some();
-    if assessed {
-        return Err(not_waiting);
-    }
-    Err(api_error(
-        StatusCode::CONFLICT,
-        "pipeline review claim is held by another reviewer",
-    ))
 }
 
 #[derive(Debug, Deserialize)]

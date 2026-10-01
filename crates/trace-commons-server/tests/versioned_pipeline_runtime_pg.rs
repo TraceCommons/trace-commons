@@ -3245,6 +3245,7 @@ async fn quarantined_run_completes_after_an_approving_assessment() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the queued run is claimable");
     assert_eq!(claim.run_id, parked.run_id);
     assert_eq!(claim.reviewer_principal_ref, reviewer);
@@ -3338,6 +3339,7 @@ async fn rejecting_assessment_ends_the_run() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the queued run is claimable");
     let reason = ReasonCode::new("reviewer_declined").unwrap();
     store
@@ -3394,6 +3396,7 @@ async fn approval_without_resolving_the_reason_is_refused() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the queued run is claimable");
     let reason = ReasonCode::new("privacy_review_required").unwrap();
     let error = store
@@ -3443,6 +3446,7 @@ async fn claim_is_exclusive_until_expiry() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the first reviewer claims the parked run");
 
     let second = store
@@ -3454,7 +3458,11 @@ async fn claim_is_exclusive_until_expiry() {
         )
         .await
         .unwrap();
-    assert!(second.is_none(), "a live claim blocks a second reviewer");
+    assert_eq!(
+        second,
+        PipelineReviewClaimOutcome::HeldByAnotherReviewer,
+        "a live claim blocks a second reviewer"
+    );
 
     expire_review_claim(&backend, &tenant, parked.run_id).await;
 
@@ -3467,6 +3475,7 @@ async fn claim_is_exclusive_until_expiry() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the second reviewer claims it once the first lease has expired");
     assert_eq!(claim_b.reviewer_principal_ref, reviewer_b);
     assert_ne!(claim_a.lease_token, claim_b.lease_token);
@@ -3501,6 +3510,7 @@ async fn assessment_after_withdrawal_is_refused() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the queued run is claimable");
 
     withdraw_submission(&backend, &tenant, parked.submission_id).await;
@@ -3657,6 +3667,7 @@ async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("a pending, quarantined, unassessed run is claimable");
 
     let leased = store
@@ -3676,8 +3687,9 @@ async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
         )
         .await
         .unwrap();
-    assert!(
-        blocked.is_none(),
+    assert_eq!(
+        blocked,
+        PipelineReviewClaimOutcome::Ineligible,
         "a run a worker holds leased is not claimable"
     );
 
@@ -3756,8 +3768,9 @@ async fn claim_refuses_a_run_that_already_failed_at_review() {
         )
         .await
         .unwrap();
-    assert!(
-        claimed.is_none(),
+    assert_eq!(
+        claimed,
+        PipelineReviewClaimOutcome::Ineligible,
         "a run that already failed at Review is never claimable for review"
     );
 }
@@ -3792,6 +3805,7 @@ async fn claim_refuses_a_run_that_already_has_an_assessment() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the parked run is claimable");
     let reason = ReasonCode::new("reviewer_declined").unwrap();
     store
@@ -3820,8 +3834,9 @@ async fn claim_refuses_a_run_that_already_has_an_assessment() {
         )
         .await
         .unwrap();
-    assert!(
-        reclaimed.is_none(),
+    assert_eq!(
+        reclaimed,
+        PipelineReviewClaimOutcome::Ineligible,
         "a run that already has an assessment is never claimable again"
     );
 }
@@ -21863,6 +21878,7 @@ async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarant
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the parked run is claimable");
     store
         .record_review_assessment(
@@ -21897,6 +21913,7 @@ async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarant
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the parked run is claimable");
     store
         .record_review_assessment(
@@ -22009,7 +22026,7 @@ async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
 
     assert_eq!(
         claim.await.unwrap().unwrap(),
-        None,
+        PipelineReviewClaimOutcome::Ineligible,
         "a claim on a run assessed while it waited is refused"
     );
     assert_eq!(

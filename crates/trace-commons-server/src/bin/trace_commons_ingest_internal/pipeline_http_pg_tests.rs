@@ -30,7 +30,7 @@ use std::sync::Arc;
 use axum::body::to_bytes;
 use axum::extract::State;
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind, Microcredits,
+    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind, Microcredits, Phase,
 };
 use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer, SettlementAdapter};
 use trace_commons_protocol::admission::{AdmissionBinding, REQUEST_METADATA_KEY, hash_hex};
@@ -41,7 +41,8 @@ use trace_commons_server::admission_evidence::AdmissionProviderTrust;
 use trace_commons_server::admission_ledger::AdmissionLimits;
 use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::versioned_pipeline::{
-    PipelineCaps, PipelineCrashPoint, PipelinePayoutConfig, PipelineServiceBuilder,
+    PipelineCaps, PipelineCrashPoint, PipelinePayoutConfig, PipelineRunState,
+    PipelineServiceBuilder,
 };
 use trace_commons_server::versioned_pipeline_authority::{
     PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
