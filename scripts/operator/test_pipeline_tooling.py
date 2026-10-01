@@ -427,6 +427,49 @@ class ResultsValidationTests(unittest.TestCase):
             results.require_current_pass_results(run, loaded, required)  # must not raise
 
 
+class ResultFileNamingTests(unittest.TestCase):
+    """Zaki's review of #1166, minor 2: results were keyed by the `check_id`
+    inside the JSON, so a second file declaring the same id replaced the
+    first without a word. Each result's file must be named for the id it
+    declares, and no id may be declared twice."""
+
+    def _run_with_result(self, tmp):
+        run = _make_run(Path(tmp))
+        _write_check_files(
+            run.results_dir, "pipeline_crash_matrix", {"a": 1},
+            run_id=run.run_id, code_revision_hash=run.code_revision_hash,
+        )
+        return run
+
+    def test_a_result_named_for_another_check_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self._run_with_result(tmp)
+            (run.results_dir / "pipeline_crash_matrix.result.json").rename(
+                run.results_dir / "pipeline_lease_renewal.result.json"
+            )
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.load_results(run)
+            self.assertEqual(str(ctx.exception), "check_result_name_mismatch")
+
+    def test_a_second_result_for_one_check_is_refused_whatever_its_name(self):
+        # Named to sort before and after the real file, so the refusal does
+        # not depend on which of the two is read first.
+        for other_name in ("pipeline_aaa.result.json", "pipeline_zzz.result.json"):
+            with self.subTest(other_name), tempfile.TemporaryDirectory() as tmp:
+                run = self._run_with_result(tmp)
+                shutil.copyfile(
+                    run.results_dir / "pipeline_crash_matrix.result.json", run.results_dir / other_name
+                )
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    results.load_results(run)
+                self.assertEqual(str(ctx.exception), "check_result_duplicate")
+
+    def test_a_result_named_for_its_own_check_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self._run_with_result(tmp)
+            self.assertEqual(set(results.load_results(run)), {"pipeline_crash_matrix"})
+
+
 class EvidenceValidatorTests(unittest.TestCase):
     def test_evidence_validator_refuses_secret_like_values(self):
         refused = (

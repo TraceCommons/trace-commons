@@ -175,18 +175,32 @@ def _read_json_file(path, label):
 def load_results(run):
     """Loads every `results/*.result.json` in `run.results_dir`, validating
     each against the Rust schema and its paired evidence file's hash.
-    Structural problems (an empty, malformed, or schema-invalid result,
-    tampered, malformed, or missing evidence) raise here, each with a label;
-    relational problems (foreign run, stale, failed, ...) are
-    `require_current_pass_results`'s job."""
+    Structural problems (an empty, malformed, or schema-invalid result, two
+    results declaring one check id, a result whose file is not named
+    `<check_id>.result.json` for the id inside it, tampered, malformed, or
+    missing evidence) raise here, each with a label; relational problems
+    (foreign run, stale, failed, ...) are `require_current_pass_results`'s
+    job.
+
+    Every result is read and its schema checked before any is keyed, so a
+    duplicate id is `check_result_duplicate` whatever the files' names and
+    order, never one result silently replacing another."""
     results = {}
     results_dir = run.results_dir
     if not results_dir.is_dir():
         return results
+    loaded = []
     for result_path in sorted(results_dir.glob("*.result.json")):
         raw = _read_json_file(result_path, "check_result_schema_invalid")
         _validate_schema(raw)
+        loaded.append((result_path, raw))
+    declared = [raw["check_id"] for _, raw in loaded]
+    require(len(set(declared)) == len(declared), "check_result_duplicate")
+    for result_path, raw in loaded:
         check_id = raw["check_id"]
+        # The emitter writes `<check_id>.result.json`; any other name is a
+        # file it did not write.
+        require(result_path.name == f"{check_id}.result.json", "check_result_name_mismatch")
 
         evidence_path = results_dir / f"{check_id}.evidence.json"
         require(evidence_path.is_file(), "check_evidence_missing")
