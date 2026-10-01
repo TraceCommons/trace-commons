@@ -2160,7 +2160,7 @@ async fn completed_run_of(
     run
 }
 
-/// `(queued invalidations for the run, its index_invalidation_state)`.
+/// `(queued invalidations for the run, its invalidation's state, `none` without one)`.
 async fn queued_index_invalidation(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
@@ -2173,7 +2173,7 @@ async fn queued_index_invalidation(
             "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations i
                       WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
                         AND i.state = 'pending' AND i.reason_code = 'withdrawn'),
-                    r.index_invalidation_state
+                    COALESCE((SELECT x.state FROM pipeline_index_invalidations x WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id), 'none')
                FROM pipeline_runs r WHERE r.tenant_id = $1 AND r.run_id = $2",
             &[&tenant_id, &run_id],
         )
@@ -3145,7 +3145,7 @@ async fn product_fixture() -> Option<ProductFixture> {
     })
 }
 
-/// `(state, attempt_count, the run's index_invalidation_state)` of the run's
+/// `(state, attempt_count, the run's invalidation state)` of the run's
 /// index invalidation.
 async fn invalidation_state(
     backend: &Arc<PgBackend>,
@@ -3156,7 +3156,7 @@ async fn invalidation_state(
     let tx = tenant_tx(&mut client, tenant_id).await;
     let row = tx
         .query_one(
-            "SELECT i.state, i.attempt_count, r.index_invalidation_state
+            "SELECT i.state, i.attempt_count, COALESCE((SELECT x.state FROM pipeline_index_invalidations x WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id), 'none')
                FROM pipeline_index_invalidations i
                JOIN pipeline_runs r ON r.tenant_id = i.tenant_id AND r.run_id = i.run_id
               WHERE i.tenant_id = $1 AND i.run_id = $2",
@@ -3200,13 +3200,6 @@ async fn the_operator_route_requeues_the_tenants_failed_invalidations() {
         "UPDATE pipeline_index_invalidations
             SET state = 'failed', attempt_count = max_attempts,
                 last_error_label = 'index_invalidation_failed'
-          WHERE tenant_id = $1 AND run_id = $2",
-        &[&tenant, &run.run_id],
-    )
-    .await
-    .unwrap();
-    tx.execute(
-        "UPDATE pipeline_runs SET index_invalidation_state = 'failed'
           WHERE tenant_id = $1 AND run_id = $2",
         &[&tenant, &run.run_id],
     )
@@ -6582,7 +6575,7 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
     );
 }
 
-/// `(pending invalidations of the run, the run's index_invalidation_state,
+/// `(pending invalidations of the run, the run's invalidation state,
 /// pending payload deletions the pipeline queued for the submission, live
 /// pipeline export snapshot items of the submission)`, for the revocation
 /// tests below.
@@ -6598,7 +6591,7 @@ async fn pipeline_revocation_follow_up(
             "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations i
                       WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
                         AND i.state = 'pending' AND i.reason_code = 'revoked'),
-                    r.index_invalidation_state,
+                    COALESCE((SELECT x.state FROM pipeline_index_invalidations x WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id), 'none'),
                     (SELECT COUNT(*) FROM trace_revocation_propagation_items p
                       WHERE p.tenant_id = r.tenant_id AND p.source_submission_id = r.submission_id
                         AND p.action = 'delete_object_payload' AND p.status = 'pending'

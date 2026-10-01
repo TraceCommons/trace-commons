@@ -2632,7 +2632,8 @@ impl PgPipelineStore {
 
     /// Queues the removal of `run`'s revision from the vector index, on the
     /// caller's transaction: one `pipeline_index_invalidations` row, due at
-    /// once, and `pipeline_runs.index_invalidation_state = 'pending'`.
+    /// once. The row's `state` is the run's invalidation state; a run with
+    /// no row has none (readers `LEFT JOIN` the queue).
     /// `reason_code` must match `^[a-z0-9_]{1,64}$` (the table's CHECK).
     ///
     /// The rule: an `index_write_state` of `pending` may be partly written.
@@ -2646,7 +2647,7 @@ impl PgPipelineStore {
     /// (`VectorIndexWriter::invalidate_revision` returns `Ok(false)`).
     ///
     /// Idempotent: a run that already has an invalidation row keeps that
-    /// row as it is, and `index_invalidation_state` moves only from `none`.
+    /// row as it is, except that a `failed` one runs again from the start.
     pub async fn enqueue_index_invalidation_on_tx(
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
@@ -2672,21 +2673,13 @@ impl PgPipelineStore {
         // Zaki review 1, item 6: queuing a revision whose invalidation
         // `failed` runs it again, from the start.
         reset_failed_index_invalidations_on_tx(tx, &run.tenant_id, Some(run.run_id)).await?;
-        tx.execute(
-            "UPDATE pipeline_runs
-                SET index_invalidation_state = 'pending', updated_at = NOW()
-              WHERE tenant_id = $1 AND run_id = $2
-                AND index_invalidation_state = 'none'",
-            &[&run.tenant_id, &run.run_id],
-        )
-        .await?;
         Ok(())
     }
 
     /// Re-enqueues every `failed` index invalidation of `tenant_id`, in one
     /// tenant transaction: each goes back to `pending`, with no attempt
-    /// charged and due at once, and its run's `index_invalidation_state`
-    /// with it, so the worker's next pass tries it again from the start.
+    /// charged and due at once, so the worker's next pass tries it again
+    /// from the start.
     /// Returns how many it re-enqueued. The operator route behind `main`'s
     /// admin credential calls this once the fault that failed them is fixed
     /// (Zaki review 1, item 6).
@@ -2768,44 +2761,21 @@ impl PgPipelineStore {
         Ok(claims)
     }
 
-    /// Locks the claimed invalidation's run row, on the caller's
-    /// transaction, before its invalidation row: the order a withdrawal
-    /// and Settle's cancelled dispatch use (the run row, then the `INSERT`
-    /// into this queue), and the order a run's deletion cascades in, so
-    /// recording a result does not deadlock with them. `false` when the run
-    /// is gone (its invalidation row went with it).
-    async fn lock_invalidation_run_on_tx(
-        tx: &Transaction<'_>,
-        claim: &PipelineIndexInvalidationClaim,
-    ) -> Result<bool, DatabaseError> {
-        Ok(tx
-            .query_opt(
-                "SELECT 1 FROM pipeline_runs
-                  WHERE tenant_id = $1 AND run_id = $2
-                  FOR NO KEY UPDATE",
-                &[&claim.tenant_id, &claim.run_id],
-            )
-            .await?
-            .is_some())
-    }
-
     /// Records that `claim`'s attempt removed the revision from the index:
-    /// the invalidation and the run's `index_invalidation_state` become
-    /// `complete`, in one transaction. The invalidation must still be
+    /// the invalidation becomes `complete`. The invalidation must still be
     /// `pending`; the claim's lease need not be current, since a removal
     /// that succeeded is a fact about the index whoever holds the row now
     /// (`invalidate_revision` is idempotent, and nothing writes the
-    /// revision again once its invalidation is queued). `None`, with
-    /// nothing written, when the invalidation is no longer `pending`.
+    /// revision again once its invalidation is queued). `false`, with
+    /// nothing written, when the invalidation is no longer `pending` (or is
+    /// gone with its run). It touches only the invalidation row, so it
+    /// takes no run lock (Zaki review 1, round 2, simplification).
     pub async fn complete_index_invalidation(
         &self,
         claim: &PipelineIndexInvalidationClaim,
-    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
-        if !Self::lock_invalidation_run_on_tx(&tx, claim).await? {
-            return Ok(None);
-        }
         let completed = tx
             .execute(
                 "UPDATE pipeline_index_invalidations
@@ -2814,21 +2784,8 @@ impl PgPipelineStore {
                 &[&claim.tenant_id, &claim.run_id],
             )
             .await?;
-        if completed == 0 {
-            return Ok(None);
-        }
-        let row = tx
-            .query_one(
-                "UPDATE pipeline_runs
-                    SET index_invalidation_state = 'complete', updated_at = NOW()
-                  WHERE tenant_id = $1 AND run_id = $2
-                  RETURNING *",
-                &[&claim.tenant_id, &claim.run_id],
-            )
-            .await?;
-        let run = pipeline_run_from_row(&row)?;
         tx.commit().await?;
-        Ok(Some(run))
+        Ok(completed > 0)
     }
 
     /// Records that the index was unavailable for `claim`'s attempt (it
@@ -2842,20 +2799,16 @@ impl PgPipelineStore {
     /// before -- the delay doubles -- until, once it is an hour old, it is
     /// retried once an hour. There is no terminal bound: an outage never
     /// ends a queued invalidation, so the revision is removed once the index
-    /// answers again (Review Focus 1). The run's `index_invalidation_state`
-    /// stays `pending`.
+    /// answers again (Review Focus 1).
     ///
-    /// Fenced as `fail_index_invalidation` is: `None`, with nothing written,
-    /// unless `claim` still holds the row.
+    /// Fenced as `fail_index_invalidation` is: `false`, with nothing
+    /// written, unless `claim` still holds the row.
     pub async fn retry_index_invalidation(
         &self,
         claim: &PipelineIndexInvalidationClaim,
-    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
-        if !Self::lock_invalidation_run_on_tx(&tx, claim).await? {
-            return Ok(None);
-        }
         let retried = tx
             .execute(
                 "UPDATE pipeline_index_invalidations
@@ -2874,18 +2827,8 @@ impl PgPipelineStore {
                 ],
             )
             .await?;
-        if retried == 0 {
-            return Ok(None);
-        }
-        let row = tx
-            .query_one(
-                "SELECT * FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
-                &[&claim.tenant_id, &claim.run_id],
-            )
-            .await?;
-        let run = pipeline_run_from_row(&row)?;
         tx.commit().await?;
-        Ok(Some(run))
+        Ok(retried > 0)
     }
 
     /// Records that `claim`'s attempt failed in a way waiting cannot heal
@@ -2894,30 +2837,26 @@ impl PgPipelineStore {
     /// attempt. With an attempt left, the invalidation stays `pending`
     /// under `index_invalidation_unavailable` and is due again after the
     /// charged-retry backoff `mark_retry` uses (50 ms, doubling with each
-    /// charged attempt, capped at 50 ms x 2^9); the run's
-    /// `index_invalidation_state` stays `pending`. The attempt that uses the
-    /// last one leaves the invalidation and the run's state `failed` under
+    /// charged attempt, capped at 50 ms x 2^9). The attempt that uses the
+    /// last one leaves the invalidation `failed` under
     /// `index_invalidation_failed`. An index outage is never recorded here
     /// (`retry_index_invalidation`).
     ///
     /// Only the current claim records a failure: the invalidation must be
     /// `pending` with `next_attempt_at` still at `claim`'s lease end. A
     /// claim whose lease passed and whose row another worker claimed, or a
-    /// claim that already recorded its result, gets `None` and writes
+    /// claim that already recorded its result, gets `false` and writes
     /// nothing.
     pub async fn fail_index_invalidation(
         &self,
         claim: &PipelineIndexInvalidationClaim,
-    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         let exponent = claim.attempt_count.min(9);
         let retry_milliseconds = DEFAULT_RETRY_MILLISECONDS.saturating_mul(1_i64 << exponent);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
-        if !Self::lock_invalidation_run_on_tx(&tx, claim).await? {
-            return Ok(None);
-        }
-        let Some(row) = tx
-            .query_opt(
+        let failed = tx
+            .execute(
                 "UPDATE pipeline_index_invalidations
                     SET attempt_count = attempt_count + 1,
                         state = CASE
@@ -2933,8 +2872,7 @@ impl PgPipelineStore {
                             ELSE NOW() + ($5::bigint * INTERVAL '1 millisecond')
                         END
                   WHERE tenant_id = $1 AND run_id = $2
-                    AND state = 'pending' AND next_attempt_at = $6
-                  RETURNING state",
+                    AND state = 'pending' AND next_attempt_at = $6",
                 &[
                     &claim.tenant_id,
                     &claim.run_id,
@@ -2944,23 +2882,9 @@ impl PgPipelineStore {
                     &claim.lease_expires_at,
                 ],
             )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let state: String = row.get("state");
-        let row = tx
-            .query_one(
-                "UPDATE pipeline_runs
-                    SET index_invalidation_state = $3, updated_at = NOW()
-                  WHERE tenant_id = $1 AND run_id = $2
-                  RETURNING *",
-                &[&claim.tenant_id, &claim.run_id, &state],
-            )
             .await?;
-        let run = pipeline_run_from_row(&row)?;
         tx.commit().await?;
-        Ok(Some(run))
+        Ok(failed > 0)
     }
 
     /// Whether the submission behind `run` is operable for Score and Settle:
@@ -3194,9 +3118,11 @@ impl PgPipelineStore {
                         AND status IN ('pending', 'in_progress', 'failed')),
                     (SELECT COUNT(*) FROM trace_revocation_propagation_items
                       WHERE tenant_id = $1 AND source_submission_id = ANY($2)),
-                    (SELECT COALESCE(array_agg(DISTINCT index_invalidation_state), '{}')
-                       FROM pipeline_runs
-                      WHERE tenant_id = $1 AND submission_id = ANY($2)),
+                    (SELECT COALESCE(array_agg(DISTINCT COALESCE(i.state, 'none')), '{}')
+                       FROM pipeline_runs r
+                       LEFT JOIN pipeline_index_invalidations i
+                         ON i.tenant_id = r.tenant_id AND i.run_id = r.run_id
+                      WHERE r.tenant_id = $1 AND r.submission_id = ANY($2)),
                     EXISTS (
                         SELECT 1
                           FROM pipeline_run_settlements settlement
@@ -5191,65 +5117,26 @@ async fn queue_payload_deletions_of_rows_on_tx(
 
 /// Moves `tenant_id`'s `failed` index invalidations -- only `run_id`'s, when
 /// given -- back to `pending`: no attempt charged, no label, due now, not
-/// complete; and each one's run `index_invalidation_state` from `failed` to
-/// `pending`. Returns how many invalidations it moved.
-///
-/// Lock order (Zaki review 1, fix round, item 3): the run rows first, by run
-/// id, then the invalidation rows, as the withdrawal, Settle's cancel and the
-/// invalidation worker take them. The enqueue path already holds its run row;
-/// taking it again is a no-op.
+/// complete. Returns how many invalidations it moved. It writes only the
+/// invalidation rows, so it takes no run lock (Zaki review 1, round 2,
+/// simplification: the run's copy of the state is gone); a caller that holds
+/// run rows, as the enqueue path does, took them before these.
 async fn reset_failed_index_invalidations_on_tx(
     tx: &Transaction<'_>,
     tenant_id: &str,
     run_id: Option<Uuid>,
 ) -> Result<u64, DatabaseError> {
-    let locked = tx
-        .query(
-            "SELECT run.run_id
-               FROM pipeline_runs run
-              WHERE run.tenant_id = $1
-                AND ($2::UUID IS NULL OR run.run_id = $2)
-                AND EXISTS (
-                    SELECT 1 FROM pipeline_index_invalidations invalidation
-                     WHERE invalidation.tenant_id = run.tenant_id
-                       AND invalidation.run_id = run.run_id
-                       AND invalidation.state = 'failed'
-                )
-              ORDER BY run.run_id
-              FOR UPDATE OF run",
-            &[&tenant_id, &run_id],
-        )
-        .await?
-        .iter()
-        .map(|row| row.get::<_, Uuid>(0))
-        .collect::<Vec<_>>();
-    if locked.is_empty() {
-        return Ok(0);
-    }
     let reset = tx
-        .query(
+        .execute(
             "UPDATE pipeline_index_invalidations
                 SET state = 'pending', attempt_count = 0, last_error_label = NULL,
                     completed_at = NULL, next_attempt_at = NOW()
-              WHERE tenant_id = $1 AND state = 'failed' AND run_id = ANY($2)
-              RETURNING run_id",
-            &[&tenant_id, &locked],
-        )
-        .await?
-        .iter()
-        .map(|row| row.get::<_, Uuid>(0))
-        .collect::<Vec<_>>();
-    if !reset.is_empty() {
-        tx.execute(
-            "UPDATE pipeline_runs
-                SET index_invalidation_state = 'pending', updated_at = NOW()
-              WHERE tenant_id = $1 AND run_id = ANY($2)
-                AND index_invalidation_state = 'failed'",
-            &[&tenant_id, &reset],
+              WHERE tenant_id = $1 AND state = 'failed'
+                AND ($2::UUID IS NULL OR run_id = $2)",
+            &[&tenant_id, &run_id],
         )
         .await?;
-    }
-    Ok(u64::try_from(reset.len()).unwrap_or(u64::MAX))
+    Ok(reset)
 }
 
 /// Whether a failed phase commit certainly committed nothing: the store
@@ -6317,11 +6204,7 @@ impl PipelineService {
             .claim_due_index_invalidations(tenant_id, limit, self.lease_config.settle())
             .await?
         {
-            if self
-                .process_claimed_index_invalidation(&claim)
-                .await?
-                .is_some()
-            {
+            if self.process_claimed_index_invalidation(&claim).await? {
                 processed += 1;
             }
         }
@@ -6340,15 +6223,14 @@ impl PipelineService {
     /// index, or a `ContentConflict`, which the `invalidate_revision`
     /// contract rules out.
     ///
-    /// Returns the run as the recorded result left it, or `None` when this
-    /// call recorded nothing: another claim recorded a result first, or took
-    /// the row over once this claim's lease had passed. Each step checks out
-    /// its own pooled connection and returns it before the next, and none is
-    /// held across the index call.
+    /// Returns whether this call recorded a result: `false` when another
+    /// claim recorded one first, or took the row over once this claim's
+    /// lease had passed. Each step checks out its own pooled connection and
+    /// returns it before the next, and none is held across the index call.
     async fn process_claimed_index_invalidation(
         &self,
         claim: &PipelineIndexInvalidationClaim,
-    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+    ) -> anyhow::Result<bool> {
         let tenant_id = claim.tenant_id.as_str();
         let Some(index_id) = self.committed_index_id(tenant_id, claim.run_id).await? else {
             return Ok(self.store.fail_index_invalidation(claim).await?);

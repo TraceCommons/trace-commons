@@ -138,8 +138,6 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             // V95
             "approved_object_ref_id",
             "approved_content_hash",
-            // V105
-            "index_invalidation_state",
         ],
     ),
     ("phase_outcomes", "SELECT", &[]),
@@ -343,7 +341,6 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
 
     for (table, column) in [
         ("pipeline_runs", "admission_reason"),
-        ("pipeline_runs", "index_invalidation_state"),
         ("pipeline_run_settlements", "payout_eligible"),
         ("pipeline_run_settlements", "credit_audited_at"),
         ("pipeline_index_invalidations", "next_attempt_at"),

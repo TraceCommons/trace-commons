@@ -1643,8 +1643,8 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../../../../migrations/V104__legacy_invite_link_device_guards.sql"),
     ),
     // V105 and V106 add human review claims and assessments, index
-    // invalidations with retry columns, pipeline_runs.index_invalidation_state,
-    // and immutable customer export snapshots. Every table forces RLS; there
+    // invalidations with retry columns, and immutable customer export
+    // snapshots. Every table forces RLS; there
     // is no cross-tenant claim function.
     (
         105,
@@ -7939,7 +7939,6 @@ mod tests {
             "reject_pipeline_review_assessment_mutation",
             "CREATE TRIGGER pipeline_review_assessments_reject_update",
             "CREATE TRIGGER pipeline_review_assessments_reject_delete",
-            "index_invalidation_state TEXT NOT NULL DEFAULT 'none'",
             "attempt_count INTEGER NOT NULL DEFAULT 0",
             "max_attempts INTEGER NOT NULL DEFAULT 5",
             "next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",

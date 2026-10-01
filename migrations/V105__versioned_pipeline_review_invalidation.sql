@@ -1,6 +1,7 @@
--- Review claims and assessments, index invalidations, the pipeline_runs
--- index-invalidation state, and the NEAR payout work index for the
--- versioned pipeline (delivery PR 3).
+-- Review claims and assessments, index invalidations, and the NEAR payout
+-- work index for the versioned pipeline (delivery PR 3). A run's
+-- invalidation state is its pipeline_index_invalidations row's state (none
+-- without a row); pipeline_runs keeps no copy of it.
 --
 -- The NEAR payout needs no grant here: it reads and writes
 -- trace_near_credit_outbox and reads trace_credit_settlement_batches, both
@@ -10,10 +11,6 @@
 --
 -- pipeline_runs.admission_reason already exists (V92,
 -- pipeline_runs_admission_reason_shape); this migration does not touch it.
-
-ALTER TABLE pipeline_runs
-    ADD COLUMN index_invalidation_state TEXT NOT NULL DEFAULT 'none'
-        CHECK (index_invalidation_state IN ('none', 'pending', 'complete', 'failed'));
 
 CREATE TABLE pipeline_review_claims (
     tenant_id TEXT NOT NULL,
@@ -221,11 +218,6 @@ END $$;
 GRANT SELECT, INSERT ON pipeline_index_invalidations TO trace_ingest_runtime;
 GRANT UPDATE (state, completed_at, attempt_count, next_attempt_at, last_error_label)
     ON pipeline_index_invalidations TO trace_ingest_runtime;
-
--- pipeline_runs: queueing an invalidation marks the run's
--- index_invalidation_state pending, and the invalidation worker marks it
--- complete or failed.
-GRANT UPDATE (index_invalidation_state) ON pipeline_runs TO trace_ingest_runtime;
 
 -- pipeline_run_settlements: the worker marks a leg's credit event audited
 -- once it appended the audit event.

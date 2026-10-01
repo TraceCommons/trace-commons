@@ -758,7 +758,7 @@ SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindi
 ### V105 and V106: review, invalidation, and export tables
 
 V105 adds the human review claims and assessments, the index invalidation
-queue, a column on `pipeline_runs`, two columns on `pipeline_run_settlements`
+queue, two columns on `pipeline_run_settlements`
 (`payout_eligible`, set when Score inserts a leg, which the runtime's
 table-wide `INSERT` from V94 covers; and `credit_audited_at`, set when
 ingest's worker has appended `main`'s `CreditMutate` audit event for the
@@ -779,7 +779,6 @@ also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
 | `pipeline_review_claims` | `SELECT, INSERT, DELETE`; `UPDATE` on `reviewer_principal_ref`, `lease_token`, `lease_expires_at`, `claimed_at` | a reviewer's claim inserts the row, or takes over an expired claim or renews its own; the assessment deletes the spent claim |
 | `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
 | `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
-| `pipeline_runs` | `UPDATE (index_invalidation_state)`, the column V105 adds | queueing an invalidation marks the run `pending`; the worker marks it `complete` or `failed` |
 | `pipeline_run_settlements` | `UPDATE (credit_audited_at)`, the column V105 adds | the worker marks a leg's credit event audited once it appended the `CreditMutate` audit event |
 | `pipeline_runs` (to `trace_gate_driver`) | `SELECT (tenant_id, submission_id)`, and a cross-tenant `SELECT` policy for that role only, as V36 gives it on `main`'s tables | `main`'s gate driver leaves every submission with a pipeline run out of its work list and backlog count; the pipeline's own Score scores it |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |

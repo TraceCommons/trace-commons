@@ -8120,7 +8120,8 @@ async fn index_dispatch_never_holds_two_pooled_connections() {
 }
 
 /// The run's `pipeline_index_invalidations` rows, as `(registry_revision_id,
-/// reason_code, state, due now)`, and its `index_invalidation_state`.
+/// reason_code, state, due now)`, and its invalidation state (`none` with no
+/// row).
 async fn index_invalidation_rows(
     backend: &PgBackend,
     tenant_id: &str,
@@ -8142,8 +8143,11 @@ async fn index_invalidation_rows(
         .collect();
     let run_state: String = tx
         .query_one(
-            "SELECT index_invalidation_state FROM pipeline_runs
-              WHERE tenant_id = $1 AND run_id = $2",
+            "SELECT COALESCE((SELECT x.state FROM pipeline_index_invalidations x
+                                WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id),
+                             'none')
+               FROM pipeline_runs r
+              WHERE r.tenant_id = $1 AND r.run_id = $2",
             &[&tenant_id, &run_id],
         )
         .await
@@ -16970,8 +16974,8 @@ fn visible_revision_entries(
     visible
 }
 
-/// A run's `pipeline_index_invalidations` row and the run's
-/// `index_invalidation_state`.
+/// A run's `pipeline_index_invalidations` row; `run_state` is that row's
+/// state, the run's invalidation state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InvalidationDetail {
     state: String,
@@ -16995,7 +16999,7 @@ async fn invalidation_detail(
         .query_one(
             "SELECT i.state, i.attempt_count, i.max_attempts, i.last_error_label,
                     i.next_attempt_at, i.completed_at IS NOT NULL,
-                    r.index_invalidation_state, i.requested_at
+                    i.state, i.requested_at
                FROM pipeline_index_invalidations i
                JOIN pipeline_runs r ON r.tenant_id = i.tenant_id AND r.run_id = i.run_id
               WHERE i.tenant_id = $1 AND i.run_id = $2",
@@ -17034,7 +17038,7 @@ async fn make_invalidation_due(tenant_id: &str, run_id: uuid::Uuid) {
 /// entries; the submission is withdrawn, which queues an invalidation; one
 /// pass of `process_index_invalidations` processes it, and after that no
 /// `nearest` query returns any entry of the revision. The invalidation and
-/// the run's `index_invalidation_state` are `complete`, and a second pass
+/// the run's invalidation state are `complete`, and a second pass
 /// finds nothing to do.
 #[tokio::test]
 async fn invalidation_removes_the_revision_after_withdrawal() {
@@ -17131,7 +17135,7 @@ async fn age_invalidation(tenant_id: &str, run_id: uuid::Uuid, hours: i32) {
 /// backoff: the invalidation's age, at least one second (the first outage)
 /// and at most one hour (the last outage, on an invalidation aged three
 /// hours), each wait ending later than the one before; the run's
-/// `index_invalidation_state` stays `pending` and every entry stays where
+/// invalidation state stays `pending` and every entry stays where
 /// it was. When the index answers again, the invalidation completes and the
 /// revision's entries are gone.
 ///
@@ -17353,7 +17357,7 @@ async fn tamper_stored_score_index_id_away(tenant_id: &str, run_id: uuid::Uuid) 
 /// no longer names the index its Settle wrote to (only corrupted stored data
 /// can do this). Each attempt is charged one attempt; each but the last
 /// leaves the invalidation `pending` under `index_invalidation_unavailable`;
-/// the last leaves it, and the run's `index_invalidation_state`, `failed`
+/// the last leaves it, and the run's invalidation state, `failed`
 /// under `index_invalidation_failed`. Nothing was removed, so the entries
 /// stay, and the failure is on record for an operator. A failed
 /// invalidation is never claimed again, even when due.
@@ -17449,20 +17453,12 @@ async fn fail_invalidation_as_owner(tenant_id: &str, run_id: uuid::Uuid) {
         )
         .await
         .expect("fail the invalidation");
-    owner
-        .execute(
-            "UPDATE pipeline_runs SET index_invalidation_state = 'failed'
-              WHERE tenant_id = $1 AND run_id = $2",
-            &[&tenant_id, &run_id],
-        )
-        .await
-        .expect("mark the run's invalidation failed");
 }
 
 /// Zaki review 1, item 6: a `failed` invalidation is not terminal. Queuing
 /// the revision's invalidation again (here, a second withdrawal) resets it
 /// to `pending`, with no attempt charged and due at once, and the run's
-/// `index_invalidation_state` with it; the next pass removes the revision.
+/// invalidation state with it; the next pass removes the revision.
 #[tokio::test]
 async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
     let Some(backend) = runtime_backend(4).await else {
@@ -17517,16 +17513,15 @@ async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
     );
 }
 
-/// Zaki review 1, fix round, item 3: the re-enqueue locks each run row
-/// before its invalidation row, the order the withdrawal, Settle's cancel
-/// and the invalidation worker all take. A transaction holds the run row (as
-/// a second withdrawal would); the re-enqueue waits for it without having
-/// touched the invalidation row, which another session can still lock at
-/// once. Taking the rows in the other order would hold the invalidation row
-/// while it waits, and a withdrawal that then reaches the invalidation row
-/// would deadlock with it.
+/// Zaki review 1, fix round, item 3, after the round 2 simplification that
+/// removed the run's copy of the invalidation state: the re-enqueue writes
+/// only invalidation rows, so it takes no run lock and cannot wait in the
+/// opposite order to a withdrawal, Settle's cancel or the invalidation
+/// worker (each takes the run row, then the invalidation row). With a
+/// transaction holding the run row (as a second withdrawal would), the
+/// re-enqueue still finishes at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn requeue_locks_the_run_row_before_the_invalidation_row() {
+async fn requeue_takes_no_run_row_lock() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -17552,48 +17547,21 @@ async fn requeue_locks_the_run_row_before_the_invalidation_row() {
         )
         .await
         .unwrap();
-    let xid: String = holder
-        .query_one(
-            "SELECT backend_xid::text FROM pg_stat_activity WHERE pid = pg_backend_pid()",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    let requeue = tokio::spawn({
-        let service = service.clone();
-        let tenant = tenant.clone();
-        async move {
-            service
-                .store()
-                .requeue_failed_index_invalidations(&tenant)
-                .await
-        }
-    });
-    wait_for_a_waiter_on(&backend, &xid, &requeue).await;
-
-    let mut probe_client = owner_client().await;
-    let probe = owner_tenant_tx(&mut probe_client, &tenant).await;
-    let invalidation_free = probe
-        .query_opt(
-            "SELECT 1 FROM pipeline_index_invalidations
-              WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE NOWAIT",
-            &[&tenant, &run.run_id],
-        )
-        .await
-        .is_ok();
-    probe.rollback().await.ok();
+    let requeued = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.store().requeue_failed_index_invalidations(&tenant),
+    )
+    .await
+    .expect("the re-enqueue does not wait for the run row")
+    .unwrap();
     holder.rollback().await.unwrap();
-    let requeued = tokio::time::timeout(HELD_CALL_BOUND, requeue)
-        .await
-        .expect("the re-enqueue finishes once the run row is free")
-        .unwrap()
-        .unwrap();
-    assert!(
-        invalidation_free,
-        "the re-enqueue held the invalidation row while it waited for the run row"
-    );
     assert_eq!(requeued, 1);
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "pending"
+    );
 }
 
 /// Zaki review 1, item 6: the operator's re-enqueue resets every `failed`
@@ -17780,14 +17748,12 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
     assert_ne!(second.lease_expires_at, first.lease_expires_at);
     let reclaimed = invalidation_detail(&backend, &tenant, run.run_id).await;
 
-    assert_eq!(
-        store.fail_index_invalidation(&first).await.unwrap(),
-        None,
+    assert!(
+        !store.fail_index_invalidation(&first).await.unwrap(),
         "the first claim no longer holds the invalidation"
     );
-    assert_eq!(
-        store.retry_index_invalidation(&first).await.unwrap(),
-        None,
+    assert!(
+        !store.retry_index_invalidation(&first).await.unwrap(),
         "nor can it record an outage"
     );
     assert_eq!(
@@ -17795,18 +17761,15 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
         reclaimed,
         "the stale failure and outage changed nothing"
     );
-    let failed = store
-        .fail_index_invalidation(&second)
-        .await
-        .unwrap()
-        .expect("the current claim records its failure");
-    assert_eq!(failed.run_id, run.run_id);
+    assert!(
+        store.fail_index_invalidation(&second).await.unwrap(),
+        "the current claim records its failure"
+    );
     let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
     assert_eq!(detail.state, "pending");
     assert_eq!(detail.attempt_count, 1);
-    assert_eq!(
-        store.fail_index_invalidation(&second).await.unwrap(),
-        None,
+    assert!(
+        !store.fail_index_invalidation(&second).await.unwrap(),
         "one claim records one result"
     );
 }

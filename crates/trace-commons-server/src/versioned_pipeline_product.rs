@@ -1373,10 +1373,13 @@ impl PipelineProductStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let Some(run) = tx
             .query_opt(
-                "SELECT run_id, submission_id, bundle_id, index_command_hash,
-                        index_write_state, index_invalidation_state
-                   FROM pipeline_runs
-                  WHERE tenant_id = $1 AND run_id = $2",
+                "SELECT r.run_id, r.submission_id, r.bundle_id, r.index_command_hash,
+                        r.index_write_state,
+                        COALESCE(i.state, 'none') AS index_invalidation_state
+                   FROM pipeline_runs r
+                   LEFT JOIN pipeline_index_invalidations i
+                     ON i.tenant_id = r.tenant_id AND i.run_id = r.run_id
+                  WHERE r.tenant_id = $1 AND r.run_id = $2",
                 &[&tenant_id, &run_id],
             )
             .await?
