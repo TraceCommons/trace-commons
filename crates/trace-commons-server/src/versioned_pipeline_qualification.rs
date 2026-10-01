@@ -8,7 +8,7 @@
 //! qualification. Detailed reports and drill output stay in operator-owned
 //! evidence storage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,6 +43,9 @@ pub const QUALIFICATION_EVIDENCE_STALE_LABEL: &str = "qualification_evidence_sta
 pub const QUALIFICATION_EVIDENCE_MISSING_LABEL: &str = "qualification_evidence_missing";
 pub const QUALIFICATION_EVIDENCE_FAILED_LABEL: &str = "qualification_evidence_failed";
 pub const QUALIFICATION_EVIDENCE_INVALID_LABEL: &str = "qualification_evidence_invalid";
+pub const QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL: &str =
+    "qualification_evidence_mixed_revision";
+pub const QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL: &str = "qualification_evidence_mixed_package";
 
 pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
     "pipeline_storage_upgrade_rls",
@@ -352,20 +355,68 @@ pub struct DrillEvidence {
     pub maximum_age_seconds: u64,
 }
 
+/// The package a check result names: its three
+/// [`PipelinePackageDigests`] values, each `None` when the result carries
+/// none.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PromotionPackage {
+    pub package_hash: Option<String>,
+    pub configuration_digest: Option<String>,
+    pub dependency_digest: Option<String>,
+}
+
+impl PromotionPackage {
+    fn of(check: &PipelineCheckResult) -> Option<Self> {
+        let package = Self {
+            package_hash: check.package_hash.clone(),
+            configuration_digest: check.configuration_digest.clone(),
+            dependency_digest: check.dependency_digest.clone(),
+        };
+        (package.package_hash.is_some()
+            || package.configuration_digest.is_some()
+            || package.dependency_digest.is_some())
+        .then_some(package)
+    }
+
+    /// Whether this is exactly `digests`, all three values present.
+    pub fn is(&self, digests: &PipelinePackageDigests) -> bool {
+        self.package_hash.as_deref() == Some(digests.package_hash.as_str())
+            && self.configuration_digest.as_deref() == Some(digests.configuration_digest.as_str())
+            && self.dependency_digest.as_deref() == Some(digests.dependency_digest.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromotionDecision {
     pub ready: bool,
     pub evaluated_at: DateTime<Utc>,
     pub evidence_hash: String,
     pub safe_blockers: Vec<String>,
+    /// The one code revision every result carries; `None` when the
+    /// evidence carries none or more than one.
+    pub code_revision_hash: Option<String>,
+    /// The one package the results that name a package name; `None` when
+    /// none names one or they name more than one.
+    pub package: Option<PromotionPackage>,
 }
 
 /// Whether `evidence` supports production promotion: exactly one current
 /// result for each of [`PROMOTION_REQUIRED_CHECKS`], each passing and
-/// carrying no safe blocker. Every blocker found is listed as
-/// `<label>:<check_id>`: missing, failed (or blocked), stale evidence, and
-/// each safe blocker a result carries, including a passing one. Binding the
-/// evidence to one code revision and the candidate package is PR 5's work.
+/// carrying no safe blocker, all from one code revision and, among the
+/// results that name a package, one package (wave 2; Zaki's review of
+/// #1166, Major 1's note for PR 5). Every per-check blocker found is listed
+/// as `<label>:<check_id>`: missing, failed (or blocked), stale evidence,
+/// and each safe blocker a result carries, including a passing one. Evidence
+/// from more than one revision adds `qualification_evidence_mixed_revision`,
+/// and from more than one package `qualification_evidence_mixed_package`
+/// (a package is its three digests together).
+///
+/// `evidence_hash` covers, for each check id, the result's run id, code
+/// revision, package digests and evidence hash, with the blockers and the
+/// evaluation time, as canonical JSON (`to_canonical_vec`). The decision
+/// names its one revision and package (`code_revision_hash`, `package`),
+/// which [`PipelineQualificationStore::qualify_bundle`] holds a
+/// qualification to.
 ///
 /// Malformed input is an error, not a blocker: a check id outside
 /// [`PROMOTION_REQUIRED_CHECKS`] is `qualification_evidence_invalid`, a
@@ -418,18 +469,39 @@ pub fn evaluate_promotion(
             blockers.push(format!("{QUALIFICATION_EVIDENCE_STALE_LABEL}:{check_id}"));
         }
     }
+    let revisions = evidence
+        .iter()
+        .map(|item| item.check.code_revision_hash.as_str())
+        .collect::<BTreeSet<_>>();
+    if revisions.len() > 1 {
+        blockers.push(QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL.to_string());
+    }
+    let packages = evidence
+        .iter()
+        .filter_map(|item| PromotionPackage::of(&item.check))
+        .collect::<BTreeSet<_>>();
+    if packages.len() > 1 {
+        blockers.push(QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string());
+    }
     blockers.sort();
     let checks = evidence
         .iter()
         .map(|item| {
             (
                 item.check.check_id.clone(),
-                item.check.evidence_hash.clone(),
+                serde_json::json!({
+                    "run_id": item.check.run_id,
+                    "code_revision_hash": item.check.code_revision_hash,
+                    "package_hash": item.check.package_hash,
+                    "configuration_digest": item.check.configuration_digest,
+                    "dependency_digest": item.check.dependency_digest,
+                    "evidence_hash": item.check.evidence_hash,
+                }),
             )
         })
         .collect::<BTreeMap<_, _>>();
     let canonical = serde_json::json!({
-        "schema": "trace_commons.pipeline_promotion.v1",
+        "schema": "trace_commons.pipeline_promotion.v2",
         "evaluated_at": now.timestamp(),
         "blockers": blockers.clone(),
         "checks": checks,
@@ -441,6 +513,12 @@ pub fn evaluate_promotion(
         evaluated_at: now,
         evidence_hash: evidence_digest,
         safe_blockers: blockers,
+        code_revision_hash: (revisions.len() == 1)
+            .then(|| revisions.first().map(|revision| revision.to_string()))
+            .flatten(),
+        package: (packages.len() == 1)
+            .then(|| packages.first().cloned())
+            .flatten(),
     })
 }
 
@@ -1475,14 +1553,14 @@ mod tests {
         );
 
         // The control: with the three repaired, the same probe evaluates, so
-        // each refusal above came from its malformed field. Binding every
-        // result to one run, one revision, and the candidate package is
-        // PR 5's (the doc comment), so the distinct runs and revisions here
-        // do not block it yet.
-        assert!(
-            evaluate_promotion(&probe, now)
-                .expect("a well-formed probe evaluates")
-                .ready
+        // each refusal above came from its malformed field. Its results come
+        // from distinct revisions, so it is not ready, and that is its only
+        // blocker (wave 2: promotion binds one revision).
+        let control = evaluate_promotion(&probe, now).expect("a well-formed probe evaluates");
+        assert!(!control.ready);
+        assert_eq!(
+            control.safe_blockers,
+            vec![QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL.to_string()]
         );
 
         // The rest of `validate()` and the age bound are refused the same way.
@@ -1499,6 +1577,123 @@ mod tests {
                 ))
             );
         }
+    }
+
+    fn passing_evidence(now: DateTime<Utc>) -> Vec<DrillEvidence> {
+        PROMOTION_REQUIRED_CHECKS
+            .iter()
+            .map(|check_id| DrillEvidence {
+                check: sample_check(check_id, PipelineCheckStatus::Pass, now),
+                maximum_age_seconds: 3_600,
+            })
+            .collect()
+    }
+
+    fn name_package(check: &mut PipelineCheckResult, name: &str) {
+        check.package_hash = Some(sha256_prefixed(format!("{name}-package").as_bytes()));
+        check.configuration_digest =
+            Some(sha256_prefixed(format!("{name}-configuration").as_bytes()));
+        check.dependency_digest = Some(sha256_prefixed(format!("{name}-dependency").as_bytes()));
+    }
+
+    /// Wave 2 (Zaki's review of #1166, Major 1's note for PR 5): every
+    /// result must come from one code revision. Evidence from two revisions
+    /// is not ready, under `qualification_evidence_mixed_revision`, and the
+    /// decision names no revision; from one, it names that revision.
+    #[test]
+    fn promotion_binds_one_code_revision() {
+        let now = Utc::now();
+        let evidence = passing_evidence(now);
+        let decision = evaluate_promotion(&evidence, now).unwrap();
+        assert!(decision.ready);
+        assert_eq!(
+            decision.code_revision_hash,
+            Some(sha256_prefixed(b"code-revision"))
+        );
+
+        let mut mixed = evidence.clone();
+        mixed[3].check.code_revision_hash = sha256_prefixed(b"another-revision");
+        let decision = evaluate_promotion(&mixed, now).unwrap();
+        assert!(!decision.ready);
+        assert_eq!(
+            decision.safe_blockers,
+            vec![QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL.to_string()]
+        );
+        assert_eq!(decision.code_revision_hash, None);
+    }
+
+    /// Wave 2: among the results that name a package, every one must name
+    /// the same package (all three digests). A result that names none does
+    /// not count. Two packages, or one that differs only in its
+    /// configuration digest, is not ready, under
+    /// `qualification_evidence_mixed_package`, and the decision names no
+    /// package; one package is named by the decision.
+    #[test]
+    fn promotion_binds_one_package() {
+        let now = Utc::now();
+        let mut evidence = passing_evidence(now);
+        for item in evidence.iter_mut().step_by(2) {
+            name_package(&mut item.check, "candidate");
+        }
+        let decision = evaluate_promotion(&evidence, now).unwrap();
+        assert!(decision.ready, "{:?}", decision.safe_blockers);
+        let package = decision.package.expect("the decision names its package");
+        assert!(package.is(&PipelinePackageDigests {
+            package_hash: sha256_prefixed(b"candidate-package"),
+            configuration_digest: sha256_prefixed(b"candidate-configuration"),
+            dependency_digest: sha256_prefixed(b"candidate-dependency"),
+        }));
+
+        let mut other_package = evidence.clone();
+        name_package(&mut other_package[1].check, "other");
+        let mut other_configuration = evidence.clone();
+        other_configuration[2].check.configuration_digest =
+            Some(sha256_prefixed(b"other-configuration"));
+        for mixed in [other_package, other_configuration] {
+            let decision = evaluate_promotion(&mixed, now).unwrap();
+            assert!(!decision.ready);
+            assert_eq!(
+                decision.safe_blockers,
+                vec![QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string()]
+            );
+            assert_eq!(decision.package, None);
+        }
+
+        let unnamed = passing_evidence(now);
+        let decision = evaluate_promotion(&unnamed, now).unwrap();
+        assert!(decision.ready);
+        assert_eq!(decision.package, None, "no result names a package");
+    }
+
+    /// Wave 2: the decision's `evidence_hash` covers each result's run id,
+    /// code revision, package digests and evidence hash, not only the
+    /// evidence hash: changing any one of them changes it.
+    #[test]
+    fn promotion_evidence_hash_covers_run_revision_package_and_evidence() {
+        let now = Utc::now();
+        let evidence = passing_evidence(now);
+        let base = evaluate_promotion(&evidence, now).unwrap().evidence_hash;
+
+        let mut run = evidence.clone();
+        run[0].check.run_id = "q9999abcd".to_string();
+        let mut revision = evidence.clone();
+        for item in &mut revision {
+            item.check.code_revision_hash = sha256_prefixed(b"another-revision");
+        }
+        let mut package = evidence.clone();
+        name_package(&mut package[0].check, "candidate");
+        let mut dependency = package.clone();
+        dependency[0].check.dependency_digest = Some(sha256_prefixed(b"other-dependency"));
+        let mut observed = evidence.clone();
+        observed[0].check.evidence_hash = sha256_prefixed(b"other-evidence");
+
+        let mut hashes = vec![base];
+        for changed in [run, revision, package, dependency, observed] {
+            let decision = evaluate_promotion(&changed, now).unwrap();
+            hashes.push(decision.evidence_hash);
+        }
+        let distinct = hashes.iter().collect::<BTreeSet<_>>();
+        assert_eq!(distinct.len(), hashes.len(), "{hashes:?}");
     }
 
     #[test]

@@ -194,6 +194,20 @@ scenario database it just ran in to show at least 5 committed transactions
 (`database_check_executed_nothing:<step>`) -- a pass count alone is not
 evidence the check reached PostgreSQL.
 
+Promotion reads results through `evaluate_promotion`
+(`crates/trace-commons-server/src/versioned_pipeline_qualification.rs`),
+which has no caller in the running service yet. Beyond one current, passing
+result per required check, it requires every result to carry the same
+`code_revision_hash` (`qualification_evidence_mixed_revision` otherwise) and
+every result that names a package to name the same one, all three digests
+together (`qualification_evidence_mixed_package` otherwise). Its decision
+names that revision and package, and its `evidence_hash` covers each
+result's run id, code revision, package digests and evidence hash. A
+`qualify` run's checks bind many packages (most harnesses build their own
+test bundle; the last run's 15 package-bearing results named 10), so its
+results as a whole are mixed: evidence that promotes one package has to
+come from runs of the package-bearing checks against that package.
+
 ## Outputs under `.local/`
 
 - `.local/pipeline-qualification-report.json` -- the latest qualification
