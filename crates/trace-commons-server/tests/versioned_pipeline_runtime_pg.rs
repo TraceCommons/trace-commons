@@ -485,10 +485,9 @@ async fn a_slow_score_completes_under_its_own_longer_configured_lease() {
 /// always gives back the attempt the claim took, so `attempt_count` never
 /// climbs toward `max_attempts` no matter how many times the phase overruns,
 /// and the run stays retryable rather than ever reaching
-/// `failed`/`attempts_exhausted`. `SlowEmbedder` sleeps
-/// once per attempt (`reset_for_next_attempt` between iterations below), so
-/// each of the 8 attempts here costs about 1.5 s of real sleep, not the
-/// fixture's chunk count times 1.5 s.
+/// `failed`/`attempts_exhausted`. `LeaseExpiringEmbedder` expires the
+/// Score lease once per attempt (`reset_for_next_attempt` between iterations
+/// below); PR 4's renewal keeps a merely slow Score's lease alive.
 #[tokio::test]
 async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts() {
     let Some(backend) = runtime_backend(4).await else {
@@ -501,7 +500,8 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
         chrono::Duration::seconds(1),
     )
     .expect("1s/1s/1s is in bounds");
-    let embedder = Arc::new(SlowEmbedder::new(std::time::Duration::from_millis(1_500)));
+    let tenant = format!("expired-score-{}", uuid::Uuid::new_v4());
+    let embedder = Arc::new(LeaseExpiringEmbedder::new(&tenant, false));
     let service = score_lease_test_service(
         backend.clone(),
         artifact_store(&dir),
@@ -510,7 +510,6 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
     )
     .await;
 
-    let tenant = format!("expired-score-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
@@ -529,6 +528,7 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
         .expect("Review completes under its own 1-second lease");
     assert_eq!(reviewed.next_phase, Some(Phase::Score));
     let attempt_count_before = reviewed.attempt_count;
+    embedder.arm(created.run_id);
 
     let expired = service
         .process_run(&tenant, created.run_id)
@@ -1077,18 +1077,16 @@ async fn a_stale_lease_found_by_the_follow_up_mark_call_is_recorded_not_charged(
         chrono::Duration::seconds(1),
     )
     .expect("1s/1s/1s is in bounds");
-    let embedder = Arc::new(SlowThenFailingEmbedder {
-        delay: std::time::Duration::from_millis(1_500),
-    });
+    let tenant = format!("case-b-lease-{}", uuid::Uuid::new_v4());
+    let embedder = Arc::new(LeaseExpiringEmbedder::new(&tenant, true));
     let service = score_lease_test_service(
         backend.clone(),
         artifact_store(&dir),
         lease_config,
-        embedder,
+        embedder.clone(),
     )
     .await;
 
-    let tenant = format!("case-b-lease-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
@@ -1107,6 +1105,7 @@ async fn a_stale_lease_found_by_the_follow_up_mark_call_is_recorded_not_charged(
         .expect("Review completes under its own 1-second lease");
     assert_eq!(reviewed.next_phase, Some(Phase::Score));
     let attempt_count_before = reviewed.attempt_count;
+    embedder.arm(created.run_id);
 
     let expired = service
         .process_run(&tenant, created.run_id)
@@ -2928,16 +2927,15 @@ impl IdentifiedEmbedder for FlakyEmbedder {
 }
 
 /// An embedder whose `embed` call blocks for a fixed wall-clock delay
-/// once per simulated attempt -- not once per chunk --
-/// before delegating to the reference embedder. `Embedder::embed` is
-/// synchronous, so `std::thread::sleep` inside it is a real elapsed delay a
-/// claimed lease's `lease_expires_at` genuinely runs past, without a real
-/// 30-second sleep (this test is scaled down) and without the
-/// total delay growing with the fixture's chunk count: only the first
-/// `embed` call since construction or since the last
-/// `reset_for_next_attempt` sleeps, so a test driving several simulated
-/// attempts controls the total delay directly rather than as a function of
-/// how many 256-byte chunks the reviewed artifact happens to produce.
+/// once -- not once per chunk -- before delegating to the reference
+/// embedder. `Embedder::embed` is synchronous, so `std::thread::sleep`
+/// inside it is a real elapsed delay a claimed lease's `lease_expires_at`
+/// genuinely runs past, without a real 30-second sleep (this test is scaled
+/// down) and without the total delay growing with the fixture's chunk
+/// count: only the first `embed` call since construction sleeps. (A test
+/// that needs each of several attempts to lose its lease uses
+/// `LeaseExpiringEmbedder`: PR 4's renewal keeps a merely slow attempt's
+/// lease alive.)
 struct SlowEmbedder {
     delay: std::time::Duration,
     slept_this_attempt: AtomicBool,
@@ -2949,13 +2947,6 @@ impl SlowEmbedder {
             delay,
             slept_this_attempt: AtomicBool::new(false),
         }
-    }
-
-    /// Test-only: call before driving the next simulated attempt so its
-    /// first chunk sleeps again. Without this, only the very first `embed`
-    /// call across every attempt this double ever serves would sleep.
-    fn reset_for_next_attempt(&self) {
-        self.slept_this_attempt.store(false, Ordering::SeqCst);
     }
 }
 
@@ -2982,38 +2973,79 @@ impl IdentifiedEmbedder for SlowEmbedder {
     }
 }
 
-/// The stale-lease-vs-charged-failure case B's embedder double: sleeps a
-/// fixed wall-clock delay and then fails, every call. `FixedScorePolicy`'s
-/// chunk loop aborts on the first
-/// `embed` error (the same reason `FlakyEmbedder` above needs no per-attempt
-/// reset), so this always sleeps exactly once per simulated attempt without
-/// needing `SlowEmbedder`'s reset bookkeeping. Used to make the *phase*
-/// raise an ordinary transient `PolicyError` -- not a lease problem -- after
-/// its lease has already gone stale, so it is the follow-up
+/// The lease-expiry tests' embedder double. On its first `embed` call of an
+/// attempt, once `run_id` is set, it expires that run's lease
+/// (`expire_the_lease_hook`); then it answers the reference embedding, or,
+/// with `fail`, an ordinary embedder outage, every call.
+///
+/// The phase used to find its lease gone because a slow embed outran a
+/// 1-second lease. PR 4 renews a running phase's lease up to four leases,
+/// and since PR 3 (e2873401) runs the embedder on the blocking pool the
+/// renewal is no longer starved by the embed, so a slow embed no longer
+/// outruns the lease. Expiring it from inside the phase loses it for good:
+/// the renewal's fenced update needs a lease that has not expired.
+///
+/// `FixedScorePolicy`'s chunk loop aborts on the first `embed` error, so
+/// with `fail` the phase raises an ordinary transient `PolicyError` -- not a
+/// lease problem -- after its lease is gone, and it is the follow-up
 /// `mark_transient_retry` call, not the phase's own commit, that discovers
-/// the lease is gone.
-struct SlowThenFailingEmbedder {
-    delay: std::time::Duration,
+/// the lease is gone (case B). Without `fail`, the phase's own commit finds
+/// it gone (case A).
+struct LeaseExpiringEmbedder {
+    tenant_id: String,
+    run_id: std::sync::OnceLock<uuid::Uuid>,
+    expired_this_attempt: AtomicBool,
+    fail: bool,
 }
 
-impl Embedder for SlowThenFailingEmbedder {
-    fn embed(&self, _plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
-        std::thread::sleep(self.delay);
-        anyhow::bail!("embedder dependency outage (test double)")
+impl LeaseExpiringEmbedder {
+    fn new(tenant_id: &str, fail: bool) -> Self {
+        Self {
+            tenant_id: tenant_id.to_string(),
+            run_id: std::sync::OnceLock::new(),
+            expired_this_attempt: AtomicBool::new(false),
+            fail,
+        }
+    }
+
+    /// Arms the double for `run_id`; set it once Review has committed, so
+    /// only Score's lease is expired.
+    fn arm(&self, run_id: uuid::Uuid) {
+        self.run_id.set(run_id).expect("armed once");
+    }
+
+    /// Call before driving the next attempt so its first `embed` call
+    /// expires that attempt's lease too.
+    fn reset_for_next_attempt(&self) {
+        self.expired_this_attempt.store(false, Ordering::SeqCst);
     }
 }
 
-impl IdentifiedEmbedder for SlowThenFailingEmbedder {
+impl Embedder for LeaseExpiringEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        if let Some(run_id) = self.run_id.get() {
+            if !self.expired_this_attempt.swap(true, Ordering::SeqCst) {
+                expire_the_lease_hook(self.tenant_id.clone(), *run_id)();
+            }
+        }
+        if self.fail {
+            anyhow::bail!("embedder dependency outage (test double)");
+        }
+        ReferenceEmbedder::new().embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for LeaseExpiringEmbedder {
     fn dependency_identity(&self) -> &str {
-        "slow_then_failing_embedder_test_only"
+        "lease_expiring_embedder_test_only"
     }
 
     fn model_id(&self) -> &str {
-        "slow-then-failing-embedder-v1"
+        "lease-expiring-embedder-v1"
     }
 
     fn content_descriptor(&self) -> Vec<u8> {
-        b"slow-then-failing-embedder-test-descriptor-v1".to_vec()
+        b"lease-expiring-embedder-test-descriptor-v1".to_vec()
     }
 }
 
@@ -3021,8 +3053,8 @@ impl IdentifiedEmbedder for SlowThenFailingEmbedder {
 /// there are no instrument awards, so Settle needs no adapter dispatch) with
 /// `embedder` and the given lease configuration. Shared by the
 /// lease-expiry tests below; the caller keeps its own `Arc` to the embedder
-/// double so it can call `reset_for_next_attempt` (for `SlowEmbedder`)
-/// between simulated attempts.
+/// double so it can arm it or call `reset_for_next_attempt` (for
+/// `LeaseExpiringEmbedder`) between simulated attempts.
 async fn score_lease_test_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
