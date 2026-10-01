@@ -156,9 +156,8 @@
 }
 /* Floating panes: no frame and no backdrop around them. The window is
    transparent (in the app), so the panes sit at its edge with only the gap
-   between them, and each pane paints the scene behind its own glass. The
-   scene is fixed to the viewport, so it reads as one continuous scene across
-   the panes. */
+   between them. With no scene behind them, each pane lays its glass over a
+   neutral dark base so it stays legible over any desktop. */
 .tc-window--floating {
   padding: 0;
   background: none;
@@ -166,11 +165,22 @@
 .tc-window--floating .tc-pane {
   background:
     var(--tc-pane-fill),
-    var(--tc-scene);
-  background-attachment: scroll, fixed;
+    var(--tc-pane-base);
 }
 .tc-window--floating .tc-map {
   border-radius: var(--tc-radius-pane);
+}
+
+/* Native glass (the app on macOS): a material view sits under every
+   [data-glass] element, so panes and modals drop their painted base and
+   their in-page blur and let it show through. */
+html.tc-native-glass .tc-window--floating .tc-pane,
+html.tc-native-glass .tc-modal {
+  background:
+    var(--tc-pane-fill),
+    var(--tc-glass-veil);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .tc-window--rim {
@@ -250,7 +260,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 28px;
+  /* The top inset clears the window's traffic lights, which sit over the
+     panes' top edge in the app's overlay title bar. */
+  padding: 52px 28px 28px;
   background: var(--tc-modal-scrim);
   -webkit-backdrop-filter: var(--tc-modal-scrim-blur);
   backdrop-filter: var(--tc-modal-scrim-blur);
@@ -266,14 +278,15 @@
   max-height: 100%;
   box-sizing: border-box;
   overflow: hidden;
-  border-radius: var(--tc-radius-window);
-  border: var(--tc-rim-width) solid transparent;
+  /* The same glass as the panes: pane fill over the neutral base, specular
+     edges instead of a rim, so the modal reads as one more pane. */
+  border-radius: var(--tc-radius-pane);
   background:
-    var(--tc-modal-fill) padding-box,
-    var(--tc-rim-window) border-box;
+    var(--tc-pane-fill),
+    var(--tc-pane-base);
   -webkit-backdrop-filter: var(--tc-blur-window);
   backdrop-filter: var(--tc-blur-window);
-  box-shadow: var(--tc-modal-shadow);
+  box-shadow: var(--tc-pane-edge), var(--tc-modal-shadow);
   color: var(--tc-text-primary);
   font: var(--tc-text-body);
 }
@@ -894,6 +907,7 @@
   transition: background var(--tc-dur-fast) var(--tc-ease);
 }
 .tc-checkbox[aria-checked="true"],
+.tc-checkbox[data-checked="true"],
 .tc-checkbox[aria-checked="mixed"] {
   background: var(--tc-checkbox-on-fill);
 }

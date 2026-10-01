@@ -36,7 +36,11 @@ export function Window({
   );
 }
 
-/** One blurred glass sheet. Panes are the only blurred layer. */
+/**
+ * One blurred glass sheet. Panes are the only blurred layer. `data-glass`
+ * marks it for the app's native glass, which sits under each marked
+ * element when the window supports it.
+ */
 export function Pane({
   padded = false,
   className,
@@ -44,6 +48,7 @@ export function Pane({
 }: DivProps & { padded?: boolean }) {
   return (
     <div
+      data-glass=""
       className={cx("tc-pane", padded && "tc-pane--padded", className)}
       {...props}
     />
@@ -158,6 +163,7 @@ export function Modal({
         aria-labelledby={titleId}
         aria-describedby={subtitle ? subtitleId : undefined}
         tabIndex={-1}
+        data-glass=""
         className={cx(
           "tc-modal flex flex-col outline-none",
           narrow && "tc-modal--narrow",

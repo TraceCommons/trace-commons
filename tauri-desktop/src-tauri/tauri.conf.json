@@ -28,7 +28,7 @@
         "hiddenTitle": true,
         "trafficLightPosition": { "x": 18, "y": 24 },
         "transparent": true,
-        "shadow": true
+        "shadow": false
       }
     ],
     "security": {

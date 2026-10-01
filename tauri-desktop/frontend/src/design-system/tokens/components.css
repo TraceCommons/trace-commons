@@ -29,11 +29,17 @@
   --tc-node-card-edge: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 16px 40px rgba(0, 0, 0, 0.45);
 
   /* Modal (settings, passkey) and its scrim */
-  --tc-modal-fill: linear-gradient(160deg, rgba(70, 80, 96, 0.78) 0%, rgba(34, 38, 48, 0.82) 50%, rgba(22, 24, 31, 0.88) 100%);
   --tc-modal-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
   --tc-modal-scrim: rgba(0, 0, 0, 0.4);
   --tc-modal-scrim-blur: blur(8px);
   --tc-modal-width: 780px;
+
+  /* Floating pane base: the neutral dark a pane's glass sits on when the
+     window is transparent and there is no scene behind it */
+  --tc-pane-base: rgba(22, 26, 34, 0.96);
+  /* Over native glass (the app on macOS) the pane keeps only a light tint
+     and a thin dark veil for text contrast; the material does the rest. */
+  --tc-glass-veil: rgba(12, 14, 20, 0.28);
 
   /* Map pane (the flow map is not glass: a dark field inside the window) */
   --tc-map-fill: radial-gradient(80% 60% at 50% 55%, #1e2a3a 0%, #131a24 100%);

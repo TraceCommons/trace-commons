@@ -17,6 +17,7 @@ pub(crate) mod witness;
 pub(crate) fn handler<R: tauri::Runtime>()
 -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        crate::glass::set_glass_regions,
         daemon::core_status,
         daemon::retry_daemon_startup,
         daemon::queue_outcome_line,
