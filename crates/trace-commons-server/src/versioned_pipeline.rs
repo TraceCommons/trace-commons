@@ -6087,12 +6087,13 @@ impl PipelineService {
             .is_some()
     }
 
-    /// The index-insert threshold of the default bundle's compatibility
-    /// configuration (`CompatibilityBundleConfig::embed_insert_novelty_micros`);
-    /// `None` when the default bundle is not the compatibility bundle.
-    pub fn compatibility_embed_insert_novelty_micros(&self) -> Option<u64> {
+    /// The default bundle's compatibility configuration, which ingest
+    /// compares with `main`'s gate configuration at assembly; `None` when the
+    /// default bundle is not the compatibility bundle.
+    pub fn compatibility_config(
+        &self,
+    ) -> Option<crate::versioned_pipeline_compat::CompatibilityBundleConfig> {
         crate::versioned_pipeline_bundle::package_compatibility_config(&self.default_package)
-            .map(|config| config.embed_insert_novelty_micros)
     }
 
     /// The NEAR credit contract an enabled payout names
@@ -6376,15 +6377,15 @@ impl PipelineService {
     /// tenant keeps when the default package changes
     /// (`activate_bundle_if_none`). Each gets the checks ingest gives the
     /// default package at assembly: its dependencies resolve (`construct`),
-    /// and a compatibility package inserts under `main`'s threshold
-    /// (`embed_insert_novelty_micros`), has the pipeline's credit issuer,
-    /// and, with `require_qualifiable`, is qualifiable. The error is the
-    /// first failure's label, the default package check's where they share
-    /// one; ingest refuses to start on it.
+    /// and a compatibility package holds `main`'s gate configuration
+    /// (`main_gate`), has the pipeline's credit issuer, and, with
+    /// `require_qualifiable`, is qualifiable. The error is the first
+    /// failure's label, the default package check's where they share one;
+    /// ingest refuses to start on it.
     pub async fn check_tenant_bundles(
         &self,
         tenant_id: &str,
-        embed_insert_novelty_micros: u64,
+        main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
         require_qualifiable: bool,
     ) -> anyhow::Result<()> {
         let bundle_ids = self
@@ -6399,7 +6400,7 @@ impl PipelineService {
                 .await
                 .map_err(|_| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?
                 .ok_or_else(|| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?;
-            self.check_runnable_package(&package, embed_insert_novelty_micros, require_qualifiable)
+            self.check_runnable_package(&package, main_gate, require_qualifiable)
                 .map_err(|label| anyhow::anyhow!(label))?;
         }
         Ok(())
@@ -6409,7 +6410,7 @@ impl PipelineService {
     fn check_runnable_package(
         &self,
         package: &BundlePackage,
-        embed_insert_novelty_micros: u64,
+        main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
         require_qualifiable: bool,
     ) -> Result<(), &'static str> {
         self.construct(package.clone()).map_err(|label| {
@@ -6422,8 +6423,8 @@ impl PipelineService {
         if let Some(config) =
             crate::versioned_pipeline_bundle::package_compatibility_config(package)
         {
-            if config.embed_insert_novelty_micros != embed_insert_novelty_micros {
-                return Err("pipeline_runtime_embed_insert_novelty_mismatch");
+            if !config.matches_main_gate(main_gate) {
+                return Err("pipeline_runtime_main_gate_config_mismatch");
             }
             if self.novelty_utility_checks.issuer_principal_ref.is_none() {
                 return Err("pipeline_credit_issuer_principal_missing");

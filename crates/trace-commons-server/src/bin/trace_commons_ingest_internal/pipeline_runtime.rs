@@ -54,13 +54,13 @@ pub struct IngestPipelineRuntimeContext {
     pub near_confirmation_interval: StdDuration,
     pub near_payout_controls: PipelineNearPayoutControls,
     pub novelty_utility_checks: PipelineNoveltyUtilityChecks,
-    /// `main`'s index-insert threshold for gate embeddings
-    /// (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`, `main`'s default
-    /// when unset). An assembly that binds the compatibility bundle passes it
-    /// as `CompatibilityBundleConfig::embed_insert_novelty_micros`, and
-    /// `assemble_ingest_pipeline_runtime` refuses one that does not (Zaki
-    /// review 1, round 2, finding 14).
-    pub embed_insert_novelty_micros: u64,
+    /// `main`'s gate configuration and `NoveltyUtility` delta, as ingest
+    /// parsed them (multi-lens review L5-4, Zaki review 3, Z3-3; the
+    /// index-insert threshold since Zaki review 1, round 2, finding 14). An
+    /// assembly that binds the compatibility bundle builds its configuration
+    /// from it (`CompatibilityBundleConfig::production_compatible`), and
+    /// `assemble_ingest_pipeline_runtime` refuses one that does not hold it.
+    pub main_gate: MainGateConfig,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -114,7 +114,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     near_confirmation_interval: StdDuration,
     near_payout_controls: PipelineNearPayoutControls,
     novelty_utility_checks: &PipelineNoveltyUtilityChecks,
-    embed_insert_novelty_micros: u64,
+    main_gate: MainGateConfig,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
@@ -142,7 +142,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         near_confirmation_interval,
         near_payout_controls,
         novelty_utility_checks: novelty_utility_checks.clone(),
-        embed_insert_novelty_micros,
+        main_gate,
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.
@@ -178,14 +178,15 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         !service.payout_enabled() || service.payout_controls() == Some(near_payout_controls),
         "pipeline_runtime_near_payout_controls_mismatch"
     );
-    // Zaki review 1, round 2, finding 14: a compatibility bundle inserts a
-    // chunk into the index under `main`'s own threshold, never one the
-    // assembly picked (the novelty floor, for one).
+    // Multi-lens review L5-4 and Zaki review 3, Z3-3 (and Zaki review 1,
+    // round 2, finding 14): a compatibility bundle holds `main`'s gate
+    // configuration -- floors, index-insert threshold, top-k, chunk knobs and
+    // the `NoveltyUtility` delta -- never values the assembly picked.
     anyhow::ensure!(
         service
-            .compatibility_embed_insert_novelty_micros()
-            .is_none_or(|threshold| threshold == embed_insert_novelty_micros),
-        "pipeline_runtime_embed_insert_novelty_mismatch"
+            .compatibility_config()
+            .is_none_or(|config| config.matches_main_gate(&main_gate)),
+        "pipeline_runtime_main_gate_config_mismatch"
     );
     // Ruling T15-12: a compatibility award applies `main`'s NoveltyUtility
     // credit checks with the configuration ingest was started with, never a
@@ -803,7 +804,7 @@ pub(crate) async fn validate_pipeline_tenant_bundles(
     service: &PipelineService,
     tenant_rollout_gates: &TraceTenantRolloutGates,
     drain_tenant_ids: &BTreeSet<String>,
-    embed_insert_novelty_micros: u64,
+    main_gate: &MainGateConfig,
     allow_test_dependencies: bool,
 ) -> anyhow::Result<()> {
     let mut tenant_ids =
@@ -811,11 +812,7 @@ pub(crate) async fn validate_pipeline_tenant_bundles(
     tenant_ids.extend(drain_tenant_ids.iter().cloned());
     for tenant_id in tenant_ids {
         service
-            .check_tenant_bundles(
-                &tenant_id,
-                embed_insert_novelty_micros,
-                !allow_test_dependencies,
-            )
+            .check_tenant_bundles(&tenant_id, main_gate, !allow_test_dependencies)
             .await?;
     }
     Ok(())

@@ -22300,11 +22300,30 @@ async fn a_novelty_utility_award_with_no_configured_issuer_is_withheld() {
     );
 }
 
+/// The `main` gate configuration `config` holds.
+fn main_gate_of(
+    config: &CompatibilityBundleConfig,
+) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(config.perplexity_floor_micros),
+        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
+        novelty_floor_micros: Some(config.novelty_floor_micros),
+        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
+        top_k: config.top_k,
+        chunk_target_tokens: config.chunk_target_tokens,
+        chunk_max_tokens: config.chunk_max_tokens,
+        chunk_cap: config.chunk_cap,
+        chunk_min_tokens: config.chunk_min_tokens,
+        novelty_utility_microcredits: config.novelty_utility_microcredits,
+    }
+}
+
 /// Multi-lens review L5-2 and Zaki review 3, Z3-2: startup checks every
 /// bundle a worker may run for a routed or drained tenant -- its active
 /// bundle, and the bundle of each run in flight -- as it checks the default
-/// package: `main`'s index-insert threshold, the pipeline's credit issuer,
-/// and (without test dependencies) a qualifiable configuration.
+/// package: `main`'s gate configuration (here its index-insert threshold),
+/// the pipeline's credit issuer, and (without test dependencies) a
+/// qualifiable configuration.
 #[tokio::test]
 async fn startup_checks_every_bundle_a_tenant_may_run() {
     let Some(backend) = runtime_backend(4).await else {
@@ -22315,7 +22334,7 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
     let old_config = near_duplicate_config();
     let mut new_config = near_duplicate_config();
     new_config.embed_insert_novelty_micros = old_config.embed_insert_novelty_micros * 2;
-    let threshold = new_config.embed_insert_novelty_micros;
+    let gate = main_gate_of(&new_config);
     let old = compatibility_test_service_on(
         backend.clone(),
         artifact_store(&dir),
@@ -22341,8 +22360,8 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
 
     old.register_default_bundle(&tenant).await.unwrap();
     assert_eq!(
-        label(new.check_tenant_bundles(&tenant, threshold, false).await),
-        "pipeline_runtime_embed_insert_novelty_mismatch",
+        label(new.check_tenant_bundles(&tenant, &gate, false).await),
+        "pipeline_runtime_main_gate_config_mismatch",
         "the tenant keeps its first active bundle when the default package changes"
     );
 
@@ -22366,8 +22385,8 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
     .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(
-        label(new.check_tenant_bundles(&tenant, threshold, false).await),
-        "pipeline_runtime_embed_insert_novelty_mismatch",
+        label(new.check_tenant_bundles(&tenant, &gate, false).await),
+        "pipeline_runtime_main_gate_config_mismatch",
         "a run in flight is still bound to the old bundle"
     );
     process_until_idle(&old, &tenant).await;
@@ -22377,11 +22396,11 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
         .unwrap()
         .unwrap();
     assert_eq!(run.state, PipelineRunState::Complete);
-    new.check_tenant_bundles(&tenant, threshold, false)
+    new.check_tenant_bundles(&tenant, &gate, false)
         .await
         .expect("only the new bundle is left to run");
     assert_eq!(
-        label(new.check_tenant_bundles(&tenant, threshold, true).await),
+        label(new.check_tenant_bundles(&tenant, &gate, true).await),
         "pipeline_runtime_dependencies_not_production_qualified",
         "the local reference configuration is not qualifiable"
     );
@@ -22397,11 +22416,7 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
     )
     .await;
     assert_eq!(
-        label(
-            no_issuer
-                .check_tenant_bundles(&tenant, threshold, false)
-                .await
-        ),
+        label(no_issuer.check_tenant_bundles(&tenant, &gate, false).await),
         "pipeline_credit_issuer_principal_missing"
     );
 }

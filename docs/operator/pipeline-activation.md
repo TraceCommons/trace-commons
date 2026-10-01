@@ -664,13 +664,20 @@ floors positive, `main`'s pilot value, is accepted. A runtime that routes or
 drains a tenant must bind a qualifiable configuration: the local reference
 configuration (all floors zero) fails the qualification gate
 (`pipeline_runtime_dependencies_not_production_qualified`) unless
-`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. Score inserts a
-chunk into the index under `main`'s own threshold,
-`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS` (50000 unless configured),
-never the novelty floor: ingest hands it to the runtime and refuses one whose
-default package, or any bundle a routed or drained tenant may run (see "Each
-tenant's bundles at startup"), holds another
-(`pipeline_runtime_embed_insert_novelty_mismatch`). When both gate
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. The configuration holds `main`'s gate configuration, as
+ingest parses it, when a pipeline runtime is assembled: the three floors
+(`TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS`,
+`TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS`,
+`TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS`; with a floor unset, no
+compatibility bundle matches), top-k (`TRACE_COMMONS_GATE_TOP_K`, 5 unless
+configured), the four chunk knobs (`TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS`,
+`..._CHUNK_MAX_TOKENS`, `..._CHUNK_CAP`, `..._CHUNK_MIN_TOKENS`), the
+index-insert threshold (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`,
+50000 unless configured; Score inserts a chunk into the index under it, never
+under the novelty floor), and the `NoveltyUtility` delta (below). Ingest hands
+them to the runtime as one value and refuses one whose default package, or
+any bundle a routed or drained tenant may run (see "Each tenant's bundles at
+startup"), holds any other (`pipeline_runtime_main_gate_config_mismatch`). When both gate
 floors pass, Score awards the `NoveltyUtility` delta to `trace_credit`, and
 Settle records it as one `NoveltyUtility` ledger event, written as `main`
 writes that event: settlement state `final`, actor role `vector_worker`, the
@@ -771,12 +778,13 @@ before it scores anything, so `main`'s gate path cannot award a second
 
 The delta is pinned in the signed bundle package
 (`novelty_utility_microcredits`, in microcredits). The pipeline does not read
-`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` at run time. For the
-pipeline to credit what the legacy path credits, the package's delta must
-equal that variable times 1,000,000 (a points delta of `2.5` is
-`2500000`). The default is `0` in both places: no award, no settlement leg,
-and no ledger event. A different delta is a different package, with its own
-bundle id, and it applies only to runs bound to that package.
+`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` at run time; at startup,
+ingest requires the package's delta to equal that variable times 1,000,000
+(a points delta of `2.5` is `2500000`), as part of the gate configuration
+above. The default is `0` in both places: no award, no settlement leg, and no
+ledger event. A different delta is a different package, with its own bundle
+id, and it applies only to runs bound to that package; to change it for a
+routed tenant, follow "Each tenant's bundles at startup".
 
 ### Each tenant's bundles at startup
 
@@ -792,7 +800,7 @@ to start on the first failure:
 |---|---|
 | The runtime holds the scorer and embedder the package names. | `pipeline_tenant_bundle_dependency_missing` |
 | The package is a policy family the runtime runs. | `pipeline_tenant_bundle_not_runnable` |
-| A compatibility package inserts under `main`'s threshold. | `pipeline_runtime_embed_insert_novelty_mismatch` |
+| A compatibility package holds `main`'s gate configuration (floors, top-k, chunk knobs, index-insert threshold, delta). | `pipeline_runtime_main_gate_config_mismatch` |
 | A compatibility package has the pipeline's issuer configured. | `pipeline_credit_issuer_principal_missing` |
 | A compatibility package is qualifiable, unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. | `pipeline_runtime_dependencies_not_production_qualified` |
 | The tenant's bundles can be read. | `pipeline_tenant_bundle_unreadable` |

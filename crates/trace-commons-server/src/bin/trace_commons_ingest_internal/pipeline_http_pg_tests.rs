@@ -342,7 +342,7 @@ fn assemble_test_pipeline_service(
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .expect("assemble the injected pipeline runtime")
     .expect("an assembler was given, so a service is returned")
@@ -4639,8 +4639,7 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
     ) -> anyhow::Result<Arc<PipelineService>> {
         let scorer = Arc::new(ReferencePerplexityScorer::new());
         let embedder = Arc::new(ReferenceEmbedder::new());
-        let mut config = CompatibilityBundleConfig::local_reference();
-        config.novelty_utility_microcredits = self.novelty_utility_microcredits;
+        let config = compatibility_test_config(self.novelty_utility_microcredits);
         let package = MinimalPolicyBundle::compatibility_package(
             &config,
             scorer.as_ref(),
@@ -4683,6 +4682,14 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
 const TEST_PIPELINE_CREDIT_ISSUER: &str =
     "principal_sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
+/// The configuration `CompatibilityTestAssembler` binds: the local reference,
+/// awarding `novelty_utility_microcredits`.
+fn compatibility_test_config(novelty_utility_microcredits: u64) -> CompatibilityBundleConfig {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = novelty_utility_microcredits;
+    config
+}
+
 /// `assemble_test_pipeline_service` for `CompatibilityTestAssembler`: the
 /// service comes out of `assemble_ingest_pipeline_runtime`, the seam ingest's
 /// real boot uses, over `configured_store`.
@@ -4719,7 +4726,7 @@ fn assemble_compatibility_pipeline_service(
             issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
             ..PipelineNoveltyUtilityChecks::default()
         },
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        main_gate_of(&compatibility_test_config(novelty_utility_microcredits)),
     )
     .expect("assemble the injected compatibility pipeline runtime")
     .expect("an assembler was given, so a service is returned")
