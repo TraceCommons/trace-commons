@@ -17871,6 +17871,7 @@ async fn one_claim_takes_the_tenants_due_invalidations_up_to_its_limit() {
         PipelineFollowUps {
             index_invalidations: true,
             payouts: false,
+            credit_audits: false,
         },
         "the withdrawals woke the invalidation step"
     );

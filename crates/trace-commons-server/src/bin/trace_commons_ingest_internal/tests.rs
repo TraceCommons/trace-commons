@@ -12073,81 +12073,110 @@ fn the_worker_runs_a_follow_up_step_when_woken_or_once_its_interval_has_passed()
     let steps = |index_invalidations: bool, payouts: bool| PipelineFollowUps {
         index_invalidations,
         payouts,
+        credit_audits: false,
+    };
+    // The credit audit step has its own clock, checked at the end; the
+    // asserts above it compare the other two steps.
+    let without_audits = |due: PipelineFollowUps| PipelineFollowUps {
+        credit_audits: false,
+        ..due
     };
     let unwoken = PipelineFollowUps::default();
     let mut cadence = PipelineFollowUpCadence::default();
 
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(0)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(0))),
         steps(true, true),
         "a tenant's first pass runs both steps"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(9)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(9))),
         steps(false, false),
         "within both intervals, nothing woken, neither runs"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(10)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(10))),
         steps(true, false),
         "the invalidation step runs every 10 seconds"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", steps(true, false), payout_interval, at(11)),
+        without_audits(cadence.due_steps("tenant-a", steps(true, false), payout_interval, at(11))),
         steps(true, false),
         "a queued invalidation wakes the invalidation step at once"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(20)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(20))),
         steps(false, false),
         "the interval counts from the woken run"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(21)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(21))),
         steps(true, false)
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", steps(false, true), payout_interval, at(22)),
+        without_audits(cadence.due_steps("tenant-a", steps(false, true), payout_interval, at(22))),
         steps(false, true),
         "a completed Trace Credit leg wakes the payout step at once"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(81)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(81))),
         steps(true, false),
         "the payout step waits out the confirmation interval from its last run"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(82)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(82))),
         steps(false, true)
     );
 
     cadence.run_again("tenant-a", PipelineFollowUpStep::Payouts);
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(83)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(83))),
         steps(false, true),
         "a full payout batch leaves the step due on the next pass"
     );
     cadence.run_again("tenant-a", PipelineFollowUpStep::IndexInvalidations);
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(84)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(84))),
         steps(true, false),
         "and so does a full invalidation batch"
     );
 
     assert_eq!(
-        cadence.due_steps("tenant-b", unwoken, payout_interval, at(84)),
+        without_audits(cadence.due_steps("tenant-b", unwoken, payout_interval, at(84))),
         steps(true, true),
         "each tenant has its own clock"
     );
     assert_eq!(
-        cadence.due_steps("tenant-c", steps(true, true), None, at(0)),
+        without_audits(cadence.due_steps("tenant-c", steps(true, true), None, at(0))),
         steps(true, false),
         "a disabled payout never runs, woken or not"
     );
     assert_eq!(
-        cadence.due_steps("tenant-c", unwoken, None, at(1_000)),
+        without_audits(cadence.due_steps("tenant-c", unwoken, None, at(1_000))),
         steps(true, false)
     );
+
+    // Zaki review 1, round 2, N-5: the credit audit step runs on a tenant's
+    // first pass, every 10 seconds, and at once when a settled Trace Credit
+    // leg woke it.
+    let audits = |woken: bool, seconds: u64, cadence: &mut PipelineFollowUpCadence| {
+        cadence
+            .due_steps(
+                "tenant-d",
+                PipelineFollowUps {
+                    credit_audits: woken,
+                    ..PipelineFollowUps::default()
+                },
+                payout_interval,
+                at(seconds),
+            )
+            .credit_audits
+    };
+    assert!(audits(false, 0, &mut cadence), "the first pass audits");
+    assert!(!audits(false, 9, &mut cadence));
+    assert!(audits(true, 9, &mut cadence), "a settled leg wakes it");
+    assert!(!audits(false, 18, &mut cadence));
+    assert!(audits(false, 19, &mut cadence), "every 10 seconds");
 }
 
 #[tokio::test]

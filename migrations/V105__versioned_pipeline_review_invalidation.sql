@@ -124,6 +124,22 @@ ALTER TABLE pipeline_run_settlements
 ALTER TABLE pipeline_run_settlements
     ADD COLUMN payout_eligible BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- When ingest appended main's CreditMutate audit event for the credit event
+-- a leg wrote to main's ledger (credit_event_id). main appends that hash-only
+-- event after each credit event it writes, through its mirrored audit log,
+-- which only ingest can append to: Settle records the credit event in its
+-- credit transaction, and ingest's worker appends the audit event and sets
+-- this column (PgPipelineStore::list_unaudited_credit_events,
+-- mark_credit_audited).
+ALTER TABLE pipeline_run_settlements
+    ADD COLUMN credit_audited_at TIMESTAMPTZ;
+
+-- The worker's audit work list: a tenant's legs whose credit event has no
+-- audit event yet.
+CREATE INDEX idx_pipeline_run_settlements_credit_audit_work
+    ON pipeline_run_settlements (tenant_id, run_id)
+    WHERE credit_event_id IS NOT NULL AND credit_audited_at IS NULL;
+
 -- The NEAR payout pass's work list (PgPipelineStore::list_payout_work_on):
 -- a tenant's batched, payout-eligible Trace Credit legs on the `near` rail
 -- whose payout is still to make or to confirm, least recently updated
@@ -210,6 +226,10 @@ GRANT UPDATE (state, completed_at, attempt_count, next_attempt_at, last_error_la
 -- index_invalidation_state pending, and the invalidation worker marks it
 -- complete or failed.
 GRANT UPDATE (index_invalidation_state) ON pipeline_runs TO trace_ingest_runtime;
+
+-- pipeline_run_settlements: the worker marks a leg's credit event audited
+-- once it appended the audit event.
+GRANT UPDATE (credit_audited_at) ON pipeline_run_settlements TO trace_ingest_runtime;
 
 -- pipeline_review_claims: a reviewer's claim inserts the row, or takes over
 -- an expired one or renews its own (INSERT ... ON CONFLICT DO UPDATE of the

@@ -2796,7 +2796,22 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
     let cadence = Arc::new(std::sync::Mutex::new(
         pipeline_runtime::PipelineFollowUpCadence::default(),
     ));
-    pipeline_runtime::drain_pipeline_tenant(service.clone(), tenant.clone(), cadence.clone()).await;
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence.clone(),
+    )
+    .await;
     service
         .withdraw_submission(&tenant, run.submission_id, &principal, None)
         .await
@@ -2806,7 +2821,7 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
         (1, "pending".to_string())
     );
 
-    pipeline_runtime::drain_pipeline_tenant(service.clone(), tenant.clone(), cadence).await;
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
 
     assert_eq!(
         index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
@@ -7422,4 +7437,152 @@ async fn a_retried_upload_of_a_pipeline_submission_never_reaches_mains_upsert() 
         );
     }
     assert_eq!(row().await, receipt_row, "the pipeline's row is unchanged");
+}
+
+/// Zaki review 1, round 2, N-5: a compatibility run's `NoveltyUtility`
+/// ledger row records the witness provenance label `main` records on a
+/// credit event (`unattested` for a submission with no witness evidence),
+/// and the worker appends `main`'s hash-only `CreditMutate` audit event for
+/// it through `main`'s mirrored audit log: the event carries the credit
+/// event's id, the pipeline's issuer in the role `main` records for its gate
+/// worker, and only the event type, the delta and hashes in its metadata.
+/// The leg is then marked audited, and a second pass appends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pipeline_credit_event_carries_its_witness_label_and_mains_audit_event() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-{suffix}");
+    let token = format!("token-compat-audit-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.pipeline_service = Some(service.clone());
+    let principal = static_token_principal_ref(&token);
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let ledger = tx
+        .query_one(
+            "SELECT credit_event_id, witness_provenance_class, reason FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    let credit_event_id: Uuid = ledger.get(0);
+    assert_eq!(
+        ledger.get::<_, Option<String>>(1).as_deref(),
+        Some("unattested")
+    );
+    let reason: String = ledger.get(2);
+
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence,
+    )
+    .await;
+    let audit_rows = || async {
+        let mut client = owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let rows = tx
+            .query(
+                "SELECT audit_event_id, action, actor_principal_ref, actor_role, metadata_json
+                   FROM trace_audit_events
+                  WHERE tenant_id = $1 AND submission_id = $2 AND action = 'credit_mutate'",
+                &[&tenant, &run.submission_id],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        rows
+    };
+    let rows = audit_rows().await;
+    assert_eq!(rows.len(), 1, "one CreditMutate audit event");
+    let row = &rows[0];
+    assert_eq!(row.get::<_, Uuid>("audit_event_id"), credit_event_id);
+    assert_eq!(
+        row.get::<_, String>("actor_principal_ref"),
+        TEST_PIPELINE_CREDIT_ISSUER
+    );
+    assert_eq!(row.get::<_, String>("actor_role"), "vector_worker");
+    let metadata: serde_json::Value = row.get("metadata_json");
+    assert_eq!(metadata["event_type"], "novelty_utility", "{metadata}");
+    assert_eq!(
+        metadata["credit_points_delta_micros"], 2_500_000,
+        "{metadata}"
+    );
+    assert_eq!(
+        metadata["reason_hash"],
+        serde_json::json!(sha256_prefixed(&reason)),
+        "{metadata}"
+    );
+    assert!(
+        !metadata.to_string().contains(&reason),
+        "the reason is recorded as a hash only: {metadata}"
+    );
+
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let audited: bool = tx
+        .query_one(
+            "SELECT credit_audited_at IS NOT NULL FROM pipeline_run_settlements
+              WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'trace_credit'",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert!(audited, "the leg is marked audited");
+    assert_eq!(
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(audit_rows().await.len(), 1, "a second pass appends nothing");
 }

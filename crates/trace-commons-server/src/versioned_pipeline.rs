@@ -46,7 +46,7 @@ use crate::trace_corpus_storage::{
     TraceCorpusStatus, TraceCorpusStore, TraceCreditAccountSettlementLineItem,
     TraceCreditEventType, TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
     TraceCreditSettlementNearStatus, TraceObjectArtifactKind, TraceObjectRefWrite,
-    TraceSubmissionWrite, safe_residual_risk_basis_labels,
+    TraceSubmissionWrite, TraceWitnessProvenanceClass, safe_residual_risk_basis_labels,
 };
 use crate::versioned_pipeline_authority::{
     PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
@@ -646,15 +646,17 @@ pub struct PipelineIndexInvalidationClaim {
 }
 
 /// The follow-up steps the worker runs for a tenant after draining its runs:
-/// the index invalidation pass (`PipelineService::process_index_invalidations`)
-/// and the payout pass (`PipelineService::process_payouts`). As
-/// `PipelineService::take_follow_ups` returns it, the steps this service
-/// queued work for since the worker last took them (Zaki review 1, round 2,
-/// item 4).
+/// the index invalidation pass (`PipelineService::process_index_invalidations`),
+/// the payout pass (`PipelineService::process_payouts`), and the credit
+/// audit step (`PgPipelineStore::list_unaudited_credit_events`; Zaki review
+/// 1, round 2, N-5). As `PipelineService::take_follow_ups` returns it, the
+/// steps this service queued work for since the worker last took them (Zaki
+/// review 1, round 2, item 4).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PipelineFollowUps {
     pub index_invalidations: bool,
     pub payouts: bool,
+    pub credit_audits: bool,
 }
 
 /// Where one follow-up of a withdrawal stands.
@@ -728,6 +730,24 @@ pub struct PipelineSettlementRecord {
     /// cleared. A failed run reconciles a dispatched external leg rather
     /// than forfeiting it.
     pub dispatched_at: Option<DateTime<Utc>>,
+}
+
+/// A credit event a Trace Credit leg wrote to `main`'s ledger with no
+/// `CreditMutate` audit event yet (`PgPipelineStore::list_unaudited_credit_events`):
+/// the ledger row's own fields, which the audit event records hash-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineCreditAuditItem {
+    pub run_id: Uuid,
+    pub instrument_id: String,
+    pub credit_event_id: Uuid,
+    pub submission_id: Uuid,
+    pub event_type: TraceCreditEventType,
+    /// The ledger's `points_delta`, as PostgreSQL prints the decimal.
+    pub points_delta: String,
+    pub reason: Option<String>,
+    pub external_ref: Option<String>,
+    pub actor_principal_ref: String,
+    pub actor_role: String,
 }
 
 /// The result of `PipelineService::settle_internal_credit`: the Trace Credit
@@ -2303,6 +2323,88 @@ impl PgPipelineStore {
                 )
             })
             .collect())
+    }
+
+    /// The credit events the tenant's Trace Credit legs wrote to `main`'s
+    /// ledger that have no `CreditMutate` audit event yet (Zaki review 1,
+    /// round 2, N-5): `main` appends that hash-only event after each credit
+    /// event it writes, through its mirrored audit log, which only ingest
+    /// can append to. Settle records a leg's `credit_event_id` in its credit
+    /// transaction, and ingest's worker appends the event and marks the leg
+    /// (`mark_credit_audited`). Oldest first, at most `limit`; the work
+    /// index holds only the legs still to audit.
+    pub async fn list_unaudited_credit_events(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PipelineCreditAuditItem>, DatabaseError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT s.run_id, s.instrument_id, l.credit_event_id, l.submission_id,
+                        l.event_type, l.points_delta::TEXT AS points_delta, l.reason,
+                        l.external_ref, l.actor_principal_ref, l.actor_role
+                   FROM pipeline_run_settlements s
+                   JOIN trace_credit_ledger l
+                     ON l.tenant_id = s.tenant_id AND l.credit_event_id = s.credit_event_id
+                  WHERE s.tenant_id = $1
+                    AND s.credit_event_id IS NOT NULL AND s.credit_audited_at IS NULL
+                  ORDER BY l.occurred_at, s.run_id
+                  LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter()
+            .map(|row| {
+                let event_type: String = row.get("event_type");
+                Ok(PipelineCreditAuditItem {
+                    run_id: row.get("run_id"),
+                    instrument_id: row.get("instrument_id"),
+                    credit_event_id: row.get("credit_event_id"),
+                    submission_id: row.get("submission_id"),
+                    event_type: serde_json::from_value(serde_json::Value::String(event_type))
+                        .map_err(|_| {
+                            DatabaseError::Serialization(
+                                "unknown pipeline credit event type".to_string(),
+                            )
+                        })?,
+                    points_delta: row.get("points_delta"),
+                    reason: row.get("reason"),
+                    external_ref: row.get("external_ref"),
+                    actor_principal_ref: row.get("actor_principal_ref"),
+                    actor_role: row.get("actor_role"),
+                })
+            })
+            .collect()
+    }
+
+    /// Marks `item`'s leg audited once its `CreditMutate` audit event is
+    /// appended. Idempotent: a leg already marked keeps its first time.
+    pub async fn mark_credit_audited(
+        &self,
+        tenant_id: &str,
+        item: &PipelineCreditAuditItem,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE pipeline_run_settlements
+                SET credit_audited_at = COALESCE(credit_audited_at, NOW())
+              WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = $3
+                AND credit_event_id = $4",
+            &[
+                &tenant_id,
+                &item.run_id,
+                &item.instrument_id,
+                &item.credit_event_id,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Persists the Settle policy's raw result before any external effect:
@@ -5868,6 +5970,7 @@ impl PipelineService {
         let woken = follow_ups.entry(tenant_id.to_string()).or_default();
         woken.index_invalidations |= wake.index_invalidations;
         woken.payouts |= wake.payouts;
+        woken.credit_audits |= wake.credit_audits;
     }
 
     /// The configuration of `main`'s `NoveltyUtility` credit checks this
@@ -5986,6 +6089,7 @@ impl PipelineService {
                 PipelineFollowUps {
                     index_invalidations: true,
                     payouts: false,
+                    credit_audits: false,
                 },
             );
         }
@@ -6011,6 +6115,7 @@ impl PipelineService {
                 PipelineFollowUps {
                     index_invalidations: true,
                     payouts: false,
+                    credit_audits: false,
                 },
             );
         }
@@ -6036,6 +6141,7 @@ impl PipelineService {
                 PipelineFollowUps {
                     index_invalidations: true,
                     payouts: false,
+                    credit_audits: false,
                 },
             );
         }
@@ -6056,6 +6162,7 @@ impl PipelineService {
                 PipelineFollowUps {
                     index_invalidations: true,
                     payouts: false,
+                    credit_audits: false,
                 },
             );
         }
@@ -8359,6 +8466,7 @@ impl PipelineService {
                     PipelineFollowUps {
                         index_invalidations: true,
                         payouts: false,
+                        credit_audits: false,
                     },
                 );
             }
@@ -8695,6 +8803,7 @@ impl PipelineService {
                                 PipelineFollowUps {
                                     index_invalidations: false,
                                     payouts: true,
+                                    credit_audits: false,
                                 },
                             );
                         }
@@ -9010,6 +9119,42 @@ impl PipelineService {
             .auth_principal_ref)
     }
 
+    /// The witness provenance label `main` records on a credit event
+    /// (`credit_witness_provenance_class`; Zaki review 1, round 2, N-5): the
+    /// submission's current verified witness evidence, `unattested` when it
+    /// has none. A credit is never refused or delayed for want of a label,
+    /// so a failed read records nothing (`None`) and logs a label only. Its
+    /// own pooled connection, which it returns before the credit
+    /// transaction takes one.
+    async fn credit_witness_provenance_class(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Option<&'static str> {
+        match TraceCorpusStore::list_current_verified_witness_evidence(
+            self.backend.as_ref(),
+            tenant_id,
+            &[submission_id],
+        )
+        .await
+        {
+            Ok(claims) => Some(
+                claims
+                    .get(&submission_id)
+                    .map(TraceWitnessProvenanceClass::from_claim)
+                    .unwrap_or(TraceWitnessProvenanceClass::Unattested)
+                    .as_str(),
+            ),
+            Err(_) => {
+                tracing::warn!(
+                    label = "pipeline_credit_witness_provenance_unavailable",
+                    "pipeline credit event witness provenance label unavailable"
+                );
+                None
+            }
+        }
+    }
+
     /// `main`'s settlement key for `principal_ref`'s credit
     /// (`settlement_group_key`: its account when it is linked to one) and,
     /// for an account key, the hold `main` records when the account has no
@@ -9177,6 +9322,9 @@ impl PipelineService {
                     .await?
             }
         };
+        let witness_provenance_class = self
+            .credit_witness_provenance_class(&run.tenant_id, run.submission_id)
+            .await;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
@@ -9276,9 +9424,10 @@ impl PipelineService {
             "INSERT INTO trace_credit_ledger (
                 tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
                 event_type, points_delta, reason, external_ref, actor_principal_ref,
-                actor_role, settlement_state, pipeline_run_id, score_outcome_id, instrument_id
+                actor_role, settlement_state, pipeline_run_id, score_outcome_id, instrument_id,
+                witness_provenance_class
              ) VALUES (
-                $1,$2,$3,$4,$5,$12,$6,$7,$8,$15,$13,$14,$9,$10,$11
+                $1,$2,$3,$4,$5,$12,$6,$7,$8,$15,$13,$14,$9,$10,$11,$16
              )
              ON CONFLICT (tenant_id, credit_event_id) DO NOTHING",
             &[
@@ -9297,6 +9446,7 @@ impl PipelineService {
                 &actor_role,
                 &settlement_state,
                 &actor_principal_ref,
+                &witness_provenance_class,
             ],
         )
         .await?;
@@ -9367,6 +9517,15 @@ impl PipelineService {
         )
         .await?;
         tx.commit().await?;
+        // The leg's credit event needs `main`'s `CreditMutate` audit event,
+        // which ingest's worker appends (Zaki review 1, round 2, N-5).
+        self.wake_follow_ups(
+            &run.tenant_id,
+            PipelineFollowUps {
+                credit_audits: true,
+                ..PipelineFollowUps::default()
+            },
+        );
         Ok(InternalCreditResult::Complete)
     }
 

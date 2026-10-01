@@ -176,6 +176,8 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             "attempt_count",
             "last_error_label",
             "updated_at",
+            // V105
+            "credit_audited_at",
         ],
     ),
     ("pipeline_admission_usage", "SELECT", &[]),
@@ -343,6 +345,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         ("pipeline_runs", "admission_reason"),
         ("pipeline_runs", "index_invalidation_state"),
         ("pipeline_run_settlements", "payout_eligible"),
+        ("pipeline_run_settlements", "credit_audited_at"),
         ("pipeline_index_invalidations", "next_attempt_at"),
     ] {
         let present: bool = admin

@@ -641,6 +641,18 @@ that issuer (`pipeline_credit_issuer_principal_missing`). That event type
 does not settle on `main`, so the pipeline never batches or pays it, and the
 contributor status reports the leg as `not_settlement_eligible`.
 
+Every credit event a Trace Credit leg writes records the witness provenance
+label `main` records (`unattested` when the submission has no verified
+witness evidence; nothing when the evidence cannot be read, as on `main`).
+The worker then appends `main`'s hash-only `CreditMutate` audit event for it
+through `main`'s audit log, at once on the replica that settled the leg and
+within 10 seconds on any other: the event's id is the credit event's, its
+actor is the issuer in the role `vector_worker` (for a minimal-family
+`accepted` event, the pipeline worker, role `system`), and its metadata
+holds the event type, the delta, and hashes of the reason and the source
+key. The leg is marked audited (`credit_audited_at`) once the event is
+appended.
+
 A credit hold on the contributor does not stop this event, as it does not on
 `main`: holds gate settlement batches and payouts only.
 
