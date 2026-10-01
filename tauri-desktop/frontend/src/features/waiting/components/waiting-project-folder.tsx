@@ -30,16 +30,13 @@ export function WaitingProjectFolder({
 }) {
   const eligibility = useEligibilityGroupCopy(entries);
   return (
-    <article className="tc-card tc-card--quiet flex items-center justify-between gap-[18px]">
+    <article className="tc-card tc-card--quiet flex min-w-0 flex-col items-stretch gap-2.5">
       <button
-        className="flex min-w-0 items-center gap-3 border-0 bg-transparent p-0 text-left text-[var(--tc-text-primary)]"
+        className="flex min-w-0 border-0 bg-transparent p-0 text-left text-[var(--tc-text-primary)]"
         type="button"
         onClick={() => onOpen(projectId)}
       >
-        <span className="tc-card tc-card--quiet grid h-[38px] w-[38px] place-items-center text-[12px] font-extrabold text-tc-on-accent">
-          {label.slice(0, 1).toUpperCase()}
-        </span>
-        <span>
+        <span className="min-w-0 break-words">
           <strong>{label}</strong>
           {path && <small>{path}</small>}
           <small>{count} waiting sessions</small>
@@ -57,7 +54,7 @@ export function WaitingProjectFolder({
           )}
         </span>
       </button>
-      <div className="flex flex-wrap items-center justify-end gap-2.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         {eligibility.data?.can_contribute === true && (
           <>
             <GlassButton
@@ -84,9 +81,7 @@ export function WaitingProjectFolder({
           onIgnore={onIgnore}
         />
         {message && (
-          <span className="mt-2 tc-caption tc-text-accent">
-            {message}
-          </span>
+          <span className="w-full tc-caption tc-text-accent">{message}</span>
         )}
       </div>
     </article>

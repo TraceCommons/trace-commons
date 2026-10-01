@@ -7,6 +7,7 @@ import {
   ButtonSecondary,
   Card,
   Checkbox,
+  CheckMark,
   CheckRow,
   Chip,
   ConsentBlock,
@@ -171,6 +172,8 @@ function ControlsDemo() {
         <Toggle label="Settings toggle" settings checked={settingsToggle} onChange={setSettingsToggle} />
         <WatchSwitch label="Watch this folder" checked={watch} onChange={setWatch} />
         <Checkbox label="Single" checked={checked} onChange={setChecked} />
+        <CheckMark checked />
+        <CheckMark checked={false} />
         <Checkbox
           label="Group"
           checked={all}
@@ -367,7 +370,7 @@ export const Library: Story = {
             </QuietCard>
           </Pane>
         </Specimen>
-        <Specimen label="Modal" spec={"--tc-modal-fill · --tc-rim-window\nscrim --tc-modal-scrim + blur 8"}>
+        <Specimen label="Modal" spec={"--tc-pane-fill over --tc-pane-base · --tc-pane-edge\nscrim --tc-modal-scrim + blur 8"}>
           <ModalDemo />
         </Specimen>
         <Specimen label="Node card (map hover/pin)" spec={"popover tier · r14 · w260"}>

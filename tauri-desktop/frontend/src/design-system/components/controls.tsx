@@ -363,6 +363,31 @@ export function WatchSwitch(props: SwitchProps) {
 }
 
 /**
+ * The checkbox's look for a state the person reads but does not change here
+ * (a folder is set, a scan is configured). Not a control: hidden from
+ * assistive tech, so the row's text must say the state.
+ */
+export function CheckMark({ checked }: { checked: boolean }) {
+  return (
+    <span className="tc-checkbox" data-checked={checked} aria-hidden="true">
+      {checked ? (
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#fff"
+          strokeWidth="3.5"
+          aria-hidden="true"
+        >
+          <path d="M5 12l5 5 9-10" />
+        </svg>
+      ) : null}
+    </span>
+  );
+}
+
+/**
  * 15px rounded checkbox: purple gradient + white check when on, dark well
  * when off. `indeterminate` is for a group checkbox whose children differ.
  * `label` names it when no surrounding <label> or `aria-labelledby` does.
