@@ -16897,7 +16897,30 @@ fn compatibility_test_builder(
     checks: PipelineNoveltyUtilityChecks,
     index: Arc<IsolatedPipelineIndex>,
 ) -> PipelineServiceBuilder {
-    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    compatibility_test_builder_with_scorer(
+        backend,
+        artifact_store,
+        config,
+        near,
+        authority,
+        checks,
+        index,
+        Arc::new(ReferencePerplexityScorer::new()),
+    )
+}
+
+/// `compatibility_test_builder` with `scorer` as the package's named scorer.
+#[allow(clippy::too_many_arguments)]
+fn compatibility_test_builder_with_scorer(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    near: Option<Arc<dyn NearPayoutAdapter>>,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+    index: Arc<IsolatedPipelineIndex>,
+    scorer: Arc<dyn IdentifiedPerplexityScorer>,
+) -> PipelineServiceBuilder {
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package =
         MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
@@ -28985,6 +29008,167 @@ async fn a_compatibility_score_waiting_past_its_lease_cap_stops_uncharged() {
         "no Score outcome is recorded"
     );
     let rows = score_attempt_rows_with_hashes(&backend, &tenant, run_id).await;
+    assert_eq!(
+        rows.iter()
+            .map(|(artifact, state, _, hash)| (artifact.as_str(), state.as_str(), hash.is_none()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("index-command", "staged", true),
+            ("score-neighbors", "staged", true),
+        ],
+        "the rows staged before the lock stay for the sweep: {rows:?}"
+    );
+    for (artifact, _, key, _) in &rows {
+        assert_eq!(
+            artifacts
+                .artifact_present_by_object_key(
+                    tenant_ref.as_str(),
+                    TraceArtifactKind::VectorPayload,
+                    key,
+                    "",
+                )
+                .unwrap(),
+            Some(false),
+            "no {artifact} object was written"
+        );
+    }
+}
+
+/// A perplexity scorer whose first `score` call after `arm` blocks for
+/// `delay` before delegating to the reference scorer: a compatibility Score
+/// slower than its lease. `PerplexityScorer::score` is synchronous, so the
+/// sleep is real elapsed time on the blocking thread the Score runs on.
+struct SlowScorer {
+    delay: std::time::Duration,
+    armed: AtomicBool,
+}
+
+impl SlowScorer {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+impl PerplexityScorer for SlowScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            std::thread::sleep(self.delay);
+        }
+        ReferencePerplexityScorer::new().score(plaintext)
+    }
+}
+
+impl IdentifiedPerplexityScorer for SlowScorer {
+    fn dependency_identity(&self) -> &str {
+        "slow_scorer_test_only"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"slow-scorer-test-descriptor-v1".to_vec()
+    }
+}
+
+/// Wave 2 (rebase 10 review, M5): the publish bound, reached with no
+/// tenant lock held. `a_compatibility_score_waiting_past_its_lease_cap_stops_uncharged`
+/// reaches it only because PR 3's post-lock lease check reads the lock
+/// transaction's start (P3-1); here nothing waits for the lock, and the
+/// scorer itself runs past four 1-second Score leases (5 s). The Score then
+/// prepares its first object, finds the publish bound passed, and publishes
+/// nothing: no object is written, the run is the uncharged `lease_expired`,
+/// and both rows staged before the lock stay `staged` with no hash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compatibility_score_slower_than_its_lease_cap_publishes_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let writes = Arc::new(AtomicUsize::new(0));
+    let hooked = {
+        let writes = writes.clone();
+        Arc::new(HookedWriteStore::new(
+            artifacts.clone(),
+            Box::new(move || {
+                writes.fetch_add(1, Ordering::SeqCst);
+            }),
+        ))
+    };
+    let scorer = Arc::new(SlowScorer {
+        delay: std::time::Duration::from_secs(5),
+        armed: AtomicBool::new(false),
+    });
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s leases are in bounds; the Score's cap is 4s");
+    let service = compatibility_test_builder_with_scorer(
+        backend.clone(),
+        hooked.clone(),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        IsolatedPipelineIndex::new(),
+        scorer.clone(),
+    )
+    .with_lease_config(lease_config)
+    .build()
+    .expect("build pipeline service");
+    let tenant = format!("compat-publish-bound-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let reviewed = compatibility_run_past_review(&service, &tenant).await;
+    let writes_after_review = writes.load(Ordering::SeqCst);
+    let prepares_after_review = hooked.prepares.load(Ordering::SeqCst);
+
+    scorer.arm();
+    let started = std::time::Instant::now();
+    let stopped = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(5),
+        "the scorer ran past the Score's lease cap"
+    );
+    assert_eq!(
+        (
+            stopped.state,
+            stopped.next_phase,
+            stopped.last_error_label.as_deref(),
+            stopped.attempt_count,
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(Phase::Score),
+            Some(PIPELINE_LEASE_EXPIRED_LABEL),
+            reviewed.attempt_count,
+        ),
+        "a Score past its publish bound stops as the uncharged lease_expired"
+    );
+    assert_eq!(
+        hooked.prepares.load(Ordering::SeqCst),
+        prepares_after_review + 1,
+        "the Score reached its first publish and prepared that object"
+    );
+    assert_eq!(
+        writes.load(Ordering::SeqCst),
+        writes_after_review,
+        "a Score past its publish bound writes no object"
+    );
+    assert!(
+        service
+            .store()
+            .list_outcomes(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|outcome| outcome.phase != Phase::Score),
+        "no Score outcome is recorded"
+    );
+    let rows = score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id).await;
     assert_eq!(
         rows.iter()
             .map(|(artifact, state, _, hash)| (artifact.as_str(), state.as_str(), hash.is_none()))
