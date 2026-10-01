@@ -965,16 +965,16 @@ impl PipelineQualificationStore {
     ///   (seven days) is refused (`bundle_qualification_evidence_age_above_ceiling`):
     ///   until PR 5 signs results, the result files, their `observed_at` and
     ///   their maximum age are the caller's input.
-    ///
-    /// The evidence is evaluated on every call, the repeat of a call that
-    /// already recorded its row included: a repeat made after its evidence
-    /// went stale is refused as `bundle_qualification_promotion_not_ready`,
-    /// not answered with the existing row (fail closed; fix round 2).
     ///   The decision must be ready (`bundle_qualification_promotion_not_ready`),
     ///   its evidence hash must be the metadata's
     ///   (`bundle_qualification_evidence_mismatch`), its one code revision the
     ///   metadata's (`bundle_qualification_code_revision_mismatch`), and its
     ///   one package `signed.package` (`bundle_qualification_package_mismatch`).
+    ///
+    /// The evidence is evaluated on every call, the repeat of a call that
+    /// already recorded its row included: a repeat made after its evidence
+    /// went stale is refused as `bundle_qualification_promotion_not_ready`,
+    /// not answered with the existing row (fail closed; fix round 2).
     pub async fn qualify_bundle(
         &self,
         tenant_id: &str,
