@@ -628,19 +628,6 @@ pub const SCRUB_CHECK_MANUAL_HELP: &str = "Every session waits for you, includin
 pub const SCRUB_CHECK_HELD: &str =
     "This session was not sent on its own. It waits until you decide.";
 
-/// **DRAFT, NEEDS APPROVAL.** The queue-outcome line
-/// (`private_inference_copy::queue_outcome_line`) for
-/// `second-look-review-required`: [`SCRUB_CHECK_HELD`] as a list fragment.
-/// Says it is still waiting and was not sent, because both are true; the
-/// particular reason is the row's own `second_look`.
-pub const SCRUB_CHECK_OUTCOME_HELD: &str = "Worth a second look; waiting for you, not sent";
-
-/// **DRAFT, NEEDS APPROVAL.** The queue-outcome line for
-/// `scrub-check-manual`: an approval made on the contributor's behalf that
-/// the Manual Scrub check returned to them.
-pub const SCRUB_CHECK_OUTCOME_MANUAL: &str =
-    "Waiting for you; the scrub check is set to Manual, not sent";
-
 /// What the fixed patterns remove and where they stop, for one disclosure.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct ScrubCopy {
@@ -3255,8 +3242,6 @@ mod tests {
             SCRUB_CHECK_MANUAL_LABEL,
             SCRUB_CHECK_MANUAL_HELP,
             SCRUB_CHECK_HELD,
-            SCRUB_CHECK_OUTCOME_HELD,
-            SCRUB_CHECK_OUTCOME_MANUAL,
         ] {
             let lower = sentence.to_lowercase();
             for claim in ["model", "quality", "verified", "certified", "safe"] {

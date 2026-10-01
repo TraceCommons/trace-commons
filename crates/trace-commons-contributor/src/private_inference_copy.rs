@@ -2579,6 +2579,8 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         return line;
     }
     match label {
+        crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
+        | crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL => "Waiting for review; not sent",
         queue::REASON_DISMISSED => "Skipped; not sent",
         queue::REASON_EXPIRED => "Expired without a decision; not sent",
         queue::REASON_CHANGED => "Session changed; review it again before sending",
@@ -2600,15 +2602,6 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         }
         crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED => {
             "The privacy scan kept failing; not sent. Approve it again to retry"
-        }
-        // The Scrub check's holds (K4 of #1118). Both are `Pending` entries
-        // still waiting on a person, so the line says so rather than
-        // reading as an ended session.
-        crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED => {
-            crate::consent_copy::SCRUB_CHECK_OUTCOME_HELD
-        }
-        crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL => {
-            crate::consent_copy::SCRUB_CHECK_OUTCOME_MANUAL
         }
         _ => "Status unavailable",
     }
@@ -2735,6 +2728,27 @@ pub use crate::daemon::private_inference::{
 mod tests {
     use super::*;
 
+    /// Reviewed on #1162: the Scrub check's two hold labels used to fall
+    /// through to "Status unavailable", so every shell listed held sessions
+    /// that are still waiting as "N -- Status unavailable". Both share the
+    /// one line #1162 merged, which says the session is waiting and was not
+    /// sent.
+    #[test]
+    fn the_scrub_check_holds_have_waiting_lines_not_status_unavailable() {
+        use crate::daemon::second_look::{
+            REASON_SCRUB_CHECK_MANUAL, REASON_SECOND_LOOK_REVIEW_REQUIRED,
+        };
+        for label in [
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let line = queue_outcome_line(label);
+            assert_eq!(line, "Waiting for review; not sent", "{label}");
+            assert!(line.contains("Waiting"), "{line}");
+            assert!(line.contains("not sent"), "{line}");
+        }
+    }
+
     /// The failure this surface exists to prevent, pinned.
     ///
     /// If the destination could not be read, or was read and is not ours, the
@@ -2767,39 +2781,6 @@ mod tests {
             assert_ne!(line, "Status unavailable", "{label}");
             assert!(!line.contains(label), "raw label: {label}");
         }
-    }
-
-    /// Reviewed on #1162: the Scrub check's two hold labels fell through to
-    /// "Status unavailable", so every shell listed held sessions that are
-    /// still waiting as "N -- Status unavailable". Each gets a line that
-    /// says it is waiting for the contributor and was not sent.
-    #[test]
-    fn the_scrub_check_holds_have_waiting_lines_not_status_unavailable() {
-        use crate::daemon::second_look::{
-            REASON_SCRUB_CHECK_MANUAL, REASON_SECOND_LOOK_REVIEW_REQUIRED,
-        };
-        for (label, expected) in [
-            (
-                REASON_SECOND_LOOK_REVIEW_REQUIRED,
-                crate::consent_copy::SCRUB_CHECK_OUTCOME_HELD,
-            ),
-            (
-                REASON_SCRUB_CHECK_MANUAL,
-                crate::consent_copy::SCRUB_CHECK_OUTCOME_MANUAL,
-            ),
-        ] {
-            let line = queue_outcome_line(label);
-            assert_eq!(line, expected, "{label}");
-            assert!(
-                line.contains("waiting") || line.contains("Waiting"),
-                "{line}"
-            );
-            assert!(line.contains("not sent"), "{line}");
-        }
-    }
-
-    #[test]
-    fn queue_outcomes_keep_unknown_labels_unclaimed() {
         for label in ["", "unknown-future-label", "admission-refused"] {
             assert_eq!(queue_outcome_line(label), "Status unavailable");
         }
