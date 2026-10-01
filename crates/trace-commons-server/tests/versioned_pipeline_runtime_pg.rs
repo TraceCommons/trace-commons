@@ -14345,8 +14345,6 @@ async fn compatibility_test_service_on(
         Some(near) => service.with_payout(
             near,
             PipelinePayoutConfig {
-                enabled: true,
-                require_confirmation_evidence: true,
                 near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
                 confirmation_interval: std::time::Duration::ZERO,
                 controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -18948,8 +18946,6 @@ async fn payout_test_service_on_contract(
         near,
         crash_point,
         PipelinePayoutConfig {
-            enabled: true,
-            require_confirmation_evidence: true,
             near_contract_id: Some(near_contract_id.to_string()),
             confirmation_interval: std::time::Duration::ZERO,
             controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -18976,14 +18972,15 @@ async fn payout_test_service_with_config(
             adapters,
             near,
             crash_point,
-            payout,
+            Some(payout),
         )
         .build()
         .expect("build pipeline service"),
     )
 }
 
-/// The builder `payout_test_service_with_config` builds.
+/// The builder `payout_test_service_with_config` builds; with no `payout`,
+/// the service has no payout at all, the one way to leave it off.
 fn payout_test_builder(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -18991,7 +18988,7 @@ fn payout_test_builder(
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     near: Arc<dyn NearPayoutAdapter>,
     crash_point: Option<PipelineCrashPoint>,
-    payout: PipelinePayoutConfig,
+    payout: Option<PipelinePayoutConfig>,
 ) -> PipelineServiceBuilder {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
@@ -19012,8 +19009,10 @@ fn payout_test_builder(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
-    .with_privacy(default_privacy_boundary())
-    .with_payout(near, payout);
+    .with_privacy(default_privacy_boundary());
+    if let Some(payout) = payout {
+        builder = builder.with_payout(near, payout);
+    }
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -19031,8 +19030,6 @@ const HTTP_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayout
 /// `PAYOUT_TEST_NEAR_CONTRACT`, polling a `submitted` payout on every pass.
 fn enabled_test_payout() -> PipelinePayoutConfig {
     PipelinePayoutConfig {
-        enabled: true,
-        require_confirmation_evidence: true,
         near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
         confirmation_interval: std::time::Duration::ZERO,
         controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -19066,7 +19063,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
         vec![near_rail_trace_credit_adapter()],
         near.clone(),
         None,
-        enabled_test_payout(),
+        Some(enabled_test_payout()),
     )
     .with_novelty_utility_checks(checks.clone())
     .build()
@@ -19081,10 +19078,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
         vec![near_rail_trace_credit_adapter()],
         near,
         None,
-        PipelinePayoutConfig {
-            enabled: false,
-            ..enabled_test_payout()
-        },
+        None,
     )
     .with_novelty_utility_checks(checks)
     .build();
@@ -19129,7 +19123,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_smoke_readiness_or_an_
             vec![near_rail_trace_credit_adapter()],
             near.clone(),
             None,
-            enabled_test_payout(),
+            Some(enabled_test_payout()),
         )
         .with_novelty_utility_checks(checks.clone())
         .build()
@@ -19144,10 +19138,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_smoke_readiness_or_an_
             vec![near_rail_trace_credit_adapter()],
             near,
             None,
-            PipelinePayoutConfig {
-                enabled: false,
-                ..enabled_test_payout()
-            },
+            None,
         )
         .with_novelty_utility_checks(checks)
         .build();
@@ -19185,10 +19176,7 @@ async fn an_enabled_payout_is_refused_when_mains_allowlists_leave_the_pipeline_o
             vec![near_rail_trace_credit_adapter()],
             Arc::new(RecordingNearAdapter::new()),
             None,
-            PipelinePayoutConfig {
-                enabled,
-                ..enabled_test_payout()
-            },
+            enabled.then(enabled_test_payout),
         )
         .with_novelty_utility_checks(checks)
         .build()
@@ -20223,8 +20211,6 @@ async fn payout_calls_name_the_configured_near_contract() {
     .with_payout(
         near,
         PipelinePayoutConfig {
-            enabled: true,
-            require_confirmation_evidence: true,
             near_contract_id: None,
             confirmation_interval: std::time::Duration::ZERO,
             controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -21124,8 +21110,6 @@ async fn a_submitted_payout_is_polled_once_per_confirmation_interval() {
         near.clone(),
         None,
         PipelinePayoutConfig {
-            enabled: true,
-            require_confirmation_evidence: true,
             near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
             confirmation_interval: std::time::Duration::from_secs(60),
             controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -21568,13 +21552,13 @@ async fn an_enabled_payout_needs_an_authenticated_adapter_when_main_requires_one
             vec![near_rail_trace_credit_adapter()],
             Arc::new(near),
             None,
-            PipelinePayoutConfig {
+            Some(PipelinePayoutConfig {
                 controls: PipelineNearPayoutControls {
                     settlement_mode: mode,
                     require_adapter_auth,
                 },
                 ..enabled_test_payout()
-            },
+            }),
         )
         .build()
     };

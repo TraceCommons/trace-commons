@@ -11548,14 +11548,11 @@ const TEST_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayout
     require_adapter_auth: false,
 };
 
-/// A payout configuration with confirmation evidence required.
+/// A payout configuration on `near_contract_id`.
 fn payout_test_config(
-    enabled: bool,
     near_contract_id: Option<&str>,
 ) -> trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
     trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
-        enabled,
-        require_confirmation_evidence: true,
         near_contract_id: near_contract_id.map(str::to_string),
         confirmation_interval: TEST_NEAR_CONFIRMATION_INTERVAL,
         controls: TEST_NEAR_PAYOUT_CONTROLS,
@@ -11581,7 +11578,7 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
             .near_contract_id
             .map(str::to_string)
             .or(context.near_contract_id);
-        let mut config = payout_test_config(true, near_contract_id.as_deref());
+        let mut config = payout_test_config(near_contract_id.as_deref());
         config.confirmation_interval = self
             .confirmation_interval
             .unwrap_or(context.near_confirmation_interval);
@@ -11871,10 +11868,7 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
             None,
             true,
             true,
-            Some((
-                adapter,
-                payout_test_config(enabled, Some(TEST_PAYOUT_NEAR_CONTRACT)),
-            )),
+            enabled.then(|| (adapter, payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT)))),
         )
         .expect("build the pipeline service")
     };

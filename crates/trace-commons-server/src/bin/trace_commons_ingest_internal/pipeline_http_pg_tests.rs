@@ -4428,8 +4428,6 @@ fn trace_credit_payout_service(
         .with_payout(
             near,
             PipelinePayoutConfig {
-                enabled: true,
-                require_confirmation_evidence: true,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 confirmation_interval: std::time::Duration::ZERO,
                 controls: TEST_NEAR_PAYOUT_CONTROLS,

@@ -5452,10 +5452,11 @@ pub struct PipelineCaps {
     pub per_instrument_atomic_units: BTreeMap<String, AtomicUnits>,
 }
 
-/// NEAR payout of settled Trace Credit (P3-D11). Disabled unless a service
-/// is built `with_payout` and `enabled`. Confirmation evidence cannot be
-/// turned off while payout is enabled (`PipelineServiceBuilder::build`
-/// refuses that combination).
+/// NEAR payout of settled Trace Credit (P3-D11). On exactly when a service
+/// is built `with_payout`: that is the one way to turn it on, and leaving it
+/// out the one way to leave it off. A payout always requires NEAR
+/// confirmation evidence before a leg reads `confirmed`; nothing turns that
+/// off.
 ///
 /// `near_contract_id` is the NEAR credit contract every payout call names
 /// (and so part of each call's idempotency key). It is the contract `main`'s
@@ -5473,8 +5474,6 @@ pub struct PipelineCaps {
 /// assembly and refuses a runtime that does not hold.
 #[derive(Debug, Clone)]
 pub struct PipelinePayoutConfig {
-    pub enabled: bool,
-    pub require_confirmation_evidence: bool,
     pub near_contract_id: Option<String>,
     pub confirmation_interval: std::time::Duration,
     pub controls: PipelineNearPayoutControls,
@@ -5777,8 +5776,8 @@ impl PipelineServiceBuilder {
 
     /// The NEAR adapter and configuration the payout pass
     /// (`PipelineService::process_payouts`) uses. A service built without
-    /// this, or with `enabled: false`, pays nothing out, and Score seeds
-    /// every leg's payout as `disabled`.
+    /// this pays nothing out, and Score seeds every leg's payout as
+    /// `disabled`.
     pub fn with_payout(
         mut self,
         adapter: Arc<dyn NearPayoutAdapter>,
@@ -5801,11 +5800,7 @@ impl PipelineServiceBuilder {
     /// own default bundle fails at construction rather than on the first
     /// receipt.
     pub fn build(self) -> anyhow::Result<PipelineService> {
-        if let Some((adapter, config)) = self.payout.as_ref().filter(|(_, config)| config.enabled) {
-            anyhow::ensure!(
-                config.require_confirmation_evidence,
-                "payout confirmation evidence cannot be disabled"
-            );
+        if let Some((adapter, config)) = self.payout.as_ref() {
             // Zaki review 1, round 2, finding 2: `main` refuses to start its
             // NEAR adapters without their credentials under
             // `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, whatever the
@@ -5993,12 +5988,9 @@ impl PipelineService {
     }
 
     /// Whether this service pays settled Trace Credit out through NEAR: it
-    /// holds a payout adapter (`with_payout`) whose configuration is
-    /// enabled.
+    /// holds a payout adapter and its configuration (`with_payout`).
     pub fn payout_enabled(&self) -> bool {
-        self.payout
-            .as_ref()
-            .is_some_and(|(_, config)| config.enabled)
+        self.payout.is_some()
     }
 
     /// How often an enabled payout polls a `submitted` payout for its
@@ -6007,7 +5999,6 @@ impl PipelineService {
     pub fn payout_confirmation_interval(&self) -> Option<std::time::Duration> {
         self.payout
             .as_ref()
-            .filter(|(_, config)| config.enabled)
             .map(|(_, config)| config.confirmation_interval)
     }
 
@@ -6049,10 +6040,7 @@ impl PipelineService {
     /// `main`'s NEAR payout controls an enabled payout applies
     /// (`PipelinePayoutConfig::controls`); `None` while payout is disabled.
     pub fn payout_controls(&self) -> Option<PipelineNearPayoutControls> {
-        self.payout
-            .as_ref()
-            .filter(|(_, config)| config.enabled)
-            .map(|(_, config)| config.controls)
+        self.payout.as_ref().map(|(_, config)| config.controls)
     }
 
     /// Whether this service's privacy boundary runs a prose-PII classifier
@@ -6084,7 +6072,6 @@ impl PipelineService {
     pub fn payout_near_contract_id(&self) -> Option<&str> {
         self.payout
             .as_ref()
-            .filter(|(_, config)| config.enabled)
             .and_then(|(_, config)| config.near_contract_id.as_deref())
     }
 
@@ -9918,7 +9905,7 @@ impl PipelineService {
     /// Only a database error ends the pass, as does an injected crash (a
     /// test's stand-in for the process dying).
     pub async fn process_payouts(&self, tenant_id: &str, limit: usize) -> anyhow::Result<usize> {
-        let Some((_, config)) = self.payout.as_ref().filter(|(_, config)| config.enabled) else {
+        let Some((_, config)) = self.payout.as_ref() else {
             return Ok(0);
         };
         // `main`'s disabled NEAR settlement mode advances nothing (Zaki
@@ -10146,9 +10133,6 @@ impl PipelineService {
         let Some((injected, config)) = self.payout.as_ref() else {
             return Ok(());
         };
-        if !config.enabled {
-            return Ok(());
-        }
         // `main`'s NEAR settlement mode picks who pays, as it picks the
         // submitter and confirmer `main`'s outbox worker drives (Zaki review
         // 1, round 2, finding 2): nobody while it is disabled, the in-process

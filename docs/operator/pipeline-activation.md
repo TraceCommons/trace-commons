@@ -487,8 +487,10 @@ withdrawal, for example) resets it in the same way.
 
 Payout is a separate step after Settle. It never changes a Settle outcome,
 and it is **disabled by default**: the injected runtime turns it on
-(`PipelinePayoutConfig.enabled`). With payout disabled, nothing is submitted
-to NEAR.
+by building the service with a payout (`PipelineServiceBuilder::with_payout`),
+and a service built without one has payout disabled; the payout
+configuration has no other switch (`main`'s settlement mode still applies,
+below). With payout disabled, nothing is submitted to NEAR.
 
 - Payout takes only a complete run's `trace_credit` legs that have the
   `near` payout rail and a settlement batch. A compatibility bundle's
