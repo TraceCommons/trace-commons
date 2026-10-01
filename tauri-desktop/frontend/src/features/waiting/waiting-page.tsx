@@ -40,17 +40,9 @@ import { useTracesWorkspace } from "./traces-workspace";
  */
 export function WaitingPage({ status }: { status: CoreStatus | null }) {
   const workspace = useTracesWorkspace();
-  const { undo, selected } = workspace;
+  const { selected } = workspace;
   return (
     <div className="tc-page">
-      <UndoBar
-        scope={undo.scope}
-        seconds={undo.seconds}
-        busy={undo.busy}
-        error={undo.error}
-        onUndo={() => void undo.undo()}
-        onDismiss={undo.dismiss}
-      />
       {selected?.kind === "session" ? (
         <SessionInspector />
       ) : selected?.kind === "folder" ? (
@@ -118,11 +110,70 @@ function Stat({ label, lines }: { label: string; lines: Array<[string, string]> 
   );
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: the summary composes the queue safeguards; each block is a presence check.
-function SummaryInspector({ status }: { status: CoreStatus | null }) {
+/**
+ * What the contributor must be able to see whenever it is live, whatever
+ * the inspector is showing: the undo window after an approve, and the
+ * core's one-time arming and Private AI offers. The Monitor mounts this at
+ * the top of the inspector for every tab, and opens the inspector when one
+ * of them appears (`useInspectorDemand`).
+ */
+export function WaitingPrompts() {
+  const { undo } = useTracesWorkspace();
+  const arming = useArmingOffer();
+  const privateInference = usePrivateInferenceOffer();
+  return (
+    <>
+      <UndoBar
+        scope={undo.scope}
+        seconds={undo.seconds}
+        busy={undo.busy}
+        error={undo.error}
+        onUndo={() => void undo.undo()}
+        onDismiss={undo.dismiss}
+      />
+      <ArmingOffer
+        offer={arming.offer}
+        busy={arming.state === "loading" || arming.state === "busy"}
+        error={arming.error}
+        onAccept={() => void arming.accept()}
+        onDecline={() => void arming.decline()}
+      />
+      <PrivateInferenceOffer
+        offered={privateInference.offered}
+        busy={privateInference.busy}
+        error={privateInference.error}
+        onAnswer={(enabled) => void privateInference.answer(enabled)}
+      />
+    </>
+  );
+}
+
+/**
+ * Something the inspector must show has appeared: an undo window, a review
+ * the contributor just opened, a folder submit in flight, or one of the
+ * core's offers. Each value is null when there is nothing to show, so a
+ * caller can open the inspector on each change to non-null.
+ */
+export function useInspectorDemand() {
   const workspace = useTracesWorkspace();
   const arming = useArmingOffer();
   const privateInference = usePrivateInferenceOffer();
+  return [
+    workspace.undo.scope
+      ? `undo:${workspace.undo.scope.id}:${workspace.undo.scope.hold_until}`
+      : null,
+    workspace.selection?.kind === "session"
+      ? `review:${workspace.selection.id}`
+      : null,
+    workspace.bulk.busyId ? `submit:${workspace.bulk.busyId}` : null,
+    arming.offer ? `arming:${arming.offer.project_id}` : null,
+    privateInference.offered ? "private-ai-offer" : null,
+  ];
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: the summary composes the queue safeguards; each block is a presence check.
+function SummaryInspector({ status }: { status: CoreStatus | null }) {
+  const workspace = useTracesWorkspace();
   const outcomes = useQueueOutcomeCounts();
   const evidenceAdmitted =
     workspace.settings.data?.admission_evidence_required === true;
@@ -212,19 +263,6 @@ function SummaryInspector({ status }: { status: CoreStatus | null }) {
           gateHeld={status.daemon.automatic_contribution_held}
         />
       )}
-      <ArmingOffer
-        offer={arming.offer}
-        busy={arming.state === "loading" || arming.state === "busy"}
-        error={arming.error}
-        onAccept={() => void arming.accept()}
-        onDecline={() => void arming.decline()}
-      />
-      <PrivateInferenceOffer
-        offered={privateInference.offered}
-        busy={privateInference.busy}
-        error={privateInference.error}
-        onAnswer={(enabled) => void privateInference.answer(enabled)}
-      />
       <CertificatePanel entries={entries} copy={certificateCopy.data ?? null} />
       <QueueOutcomeDisclosure
         reasons={outcomes.data?.reasons ?? null}
@@ -393,8 +431,9 @@ function SessionInspector() {
         onCorrectionChange={review.setCorrection}
         onApprove={() => void review.approve()}
         onDismiss={() => {
-          void review.dismiss();
-          workspace.select(null);
+          void review.dismiss().then((dismissed) => {
+            if (dismissed) workspace.select(null);
+          });
         }}
         onInspect={() => workspace.setInspecting(true)}
       />
