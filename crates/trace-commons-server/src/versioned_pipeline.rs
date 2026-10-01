@@ -136,6 +136,12 @@ pub const PIPELINE_ATTEMPTS_EXHAUSTED_LABEL: &str = "attempts_exhausted";
 pub const PIPELINE_BUNDLE_MISSING_LABEL: &str = "bundle_package_missing";
 pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
+/// A phase commit, or a receipt's final transaction, found no `staged`
+/// attempt row naming the object it is about to record (or the row names
+/// another object or hash). Only an out-of-band change or a defect gets
+/// there: the commit is refused, and a phase records it as a charged retry
+/// under this label (wave 2, fix round 1; review I2, I3).
+pub const PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL: &str = "pipeline_attempt_artifact_missing";
 /// A bundle whose own configuration is not qualifiable
 /// (`PipelineBundleQualification::configuration_qualifiable`).
 pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
@@ -1926,15 +1932,54 @@ impl PgPipelineStore {
         // transaction, the one that records it as an object ref of the
         // submission; from here on the withdrawal, not the attempt sweep,
         // owns its deletion. A refused commit above already returned without
-        // reaching here, so this never runs for one; nothing to move when a
-        // rejection staged no object (the `UPDATE` then matches zero rows).
-        tx.execute(
-            "UPDATE pipeline_attempt_artifacts
-                SET state = 'committed', committed_at = NOW()
-              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND state = 'staged'",
-            &[&run.tenant_id, &run.run_id, &lease_token],
-        )
-        .await?;
+        // reaching here, so this never runs for one.
+        //
+        // An approval must move exactly the one `approved` row that names
+        // the object it records (its key, and its hash); a rejection staged
+        // no object and must move none (wave 2, fix round 1; review I3).
+        // Anything else is `pipeline_attempt_artifact_missing`, which rolls
+        // this transaction back; the caller deletes the approved object
+        // (`phase_commit_refused`), as for any refused commit.
+        let moved = match &approved {
+            Some(approved) => {
+                let ciphertext_sha256 = approved
+                    .object_ref
+                    .content_sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&approved.object_ref.content_sha256);
+                tx.execute(
+                    "UPDATE pipeline_attempt_artifacts
+                        SET state = 'committed', committed_at = NOW()
+                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                        AND artifact = 'approved' AND state = 'staged'
+                        AND object_key = $4
+                        AND (ciphertext_sha256 IS NULL OR ciphertext_sha256 = $5)",
+                    &[
+                        &run.tenant_id,
+                        &run.run_id,
+                        &lease_token,
+                        &approved.object_ref.object_key,
+                        &ciphertext_sha256,
+                    ],
+                )
+                .await?
+            }
+            None => {
+                tx.execute(
+                    "UPDATE pipeline_attempt_artifacts
+                        SET state = 'committed', committed_at = NOW()
+                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                        AND state = 'staged'",
+                    &[&run.tenant_id, &run.run_id, &lease_token],
+                )
+                .await?
+            }
+        };
+        if moved != u64::from(approved.is_some()) {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
+            ));
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -2573,14 +2618,16 @@ impl PgPipelineStore {
         // no object exists for it. Only a row with no hash is deleted: a row
         // with a hash was staged just before its object was published.
         //
-        // Each written artifact must move exactly one row (wave 2; rebase 10
-        // review, M4): an object no committed row names would be the
-        // attempt sweep's to delete although the run's object ref names it.
-        // Only the sweep removes a `staged` row, and only once its
-        // `cleanup_after` -- past the latest moment this attempt's lease
-        // could be live -- has passed, so a missing row means the attempt
-        // is past its own bound: the commit is refused as a stale lease,
-        // like the publish bound, which rolls this transaction back, and the
+        // Each written artifact must move exactly one row, the one that names
+        // its object: the same key, and either no hash yet or the same hash
+        // (wave 2; rebase 10 review, M4; fix round 1, review I2). An object
+        // no committed row names would be the attempt sweep's to delete
+        // although the run's object ref names it. The lease was found live
+        // above, and the sweep removes a `staged` row only once its
+        // `cleanup_after`, past any lease this attempt can hold, has passed,
+        // so a missing or mismatched row is an out-of-band change or a
+        // defect: `pipeline_attempt_artifact_missing`, the label the Review
+        // commit and the receipt use, which rolls this transaction back; the
         // caller deletes the attempt's objects (`phase_commit_refused`).
         for (artifact, stored) in [("index-command", command), ("score-neighbors", neighbor)] {
             match stored {
@@ -2591,24 +2638,35 @@ impl PgPipelineStore {
                         .ok_or_else(|| {
                             DatabaseError::Constraint("score_outcome_invalid".to_string())
                         })?;
+                    let object_key = stored_ref
+                        .rsplit_once('#')
+                        .map(|(object_key, _)| object_key)
+                        .ok_or_else(|| {
+                            DatabaseError::Constraint("score_outcome_invalid".to_string())
+                        })?;
                     let committed = tx
                         .execute(
                             "UPDATE pipeline_attempt_artifacts
                                 SET ciphertext_sha256 = COALESCE(ciphertext_sha256, $5),
                                     state = 'committed', committed_at = NOW()
                               WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
-                                AND artifact = $4 AND state = 'staged'",
+                                AND artifact = $4 AND state = 'staged'
+                                AND object_key = $6
+                                AND (ciphertext_sha256 IS NULL OR ciphertext_sha256 = $5)",
                             &[
                                 &run.tenant_id,
                                 &run.run_id,
                                 &lease_token,
                                 &artifact,
                                 &ciphertext_sha256,
+                                &object_key,
                             ],
                         )
                         .await?;
                     if committed != 1 {
-                        return Err(stale_lease_error());
+                        return Err(DatabaseError::Constraint(
+                            PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
+                        ));
                     }
                 }
                 None => {
@@ -5124,9 +5182,12 @@ async fn insert_receipt_records(
             ],
         )
         .await?;
+    // The same rule as a phase commit's attempt rows (wave 2, fix round 1;
+    // review I2): no `staged` row naming this object is a refusal under
+    // `pipeline_attempt_artifact_missing`.
     if committed != 1 {
         return Err(DatabaseError::Constraint(
-            "receipt artifact staging record is missing".to_string(),
+            PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
         ));
     }
     Ok(())
@@ -8860,7 +8921,8 @@ impl PipelineService {
                     | "score_outcome_invalid"
                     | "settlement_operation_mismatch"
                     | "review_output_invalid"
-                    | "submission_inoperable" => label.as_str(),
+                    | "submission_inoperable"
+                    | PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL => label.as_str(),
                     _ => PIPELINE_OPERATIONAL_ERROR_LABEL,
                 };
                 self.mark_retry_or_record_lease_expired(&run, retry_label)
@@ -9264,9 +9326,10 @@ impl PipelineService {
                         // inoperable refusal the same way.
                         return Err(match error {
                             DatabaseError::Constraint(label)
-                                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                                    || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL =>
                             {
-                                anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+                                anyhow::anyhow!(label)
                             }
                             error => error.into(),
                         });
@@ -9680,7 +9743,8 @@ impl PipelineService {
                 return Err(match error {
                     DatabaseError::Constraint(label)
                         if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL
-                            || label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                            || label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                            || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL =>
                     {
                         anyhow::anyhow!(label)
                     }

@@ -983,14 +983,21 @@ is not. Those rows are staged with no hash:
   records, as it moves the row to `committed`, and deletes the row of an
   artifact the Score did not write (a duplicate at Score writes no index
   command). A `committed` row always has its hash; V108's guard lets only
-  the commit set a missing hash. The commit must move one row for each
-  object it wrote, whichever way the row was staged; a written object with
-  no `staged` row left is refused as a stale lease (`lease_expired`,
-  uncharged), since only the sweep removes such a row, and only once the
-  attempt is past its own bound. The refusal deletes the attempt's objects
-  like any other. Review stages its `approved` row with its
+  the commit set a missing hash. Review stages its `approved` row with its
   hash, and V108 refuses an `approved` row without one, so a row with no
   hash only ever names a compatibility Score's object.
+- Every commit that records an attempt's object must move exactly the
+  `staged` row that names it: the same object key, and no hash yet or the
+  same hash. The Score commit moves one row for each object it wrote; a
+  Review approval moves its one `approved` row, and a rejection moves none;
+  a receipt's final transaction moves its one receipt row. Anything else --
+  the row gone, or naming another object or hash -- refuses the commit as
+  `pipeline_attempt_artifact_missing`. The lease was live when the commit
+  checked it, and the sweep removes a row only past any lease the attempt
+  could hold, so this is an out-of-band change or a defect, not a lease
+  expiry: a phase records it as a charged retry under that label (it ends
+  in `failed`/`attempts_exhausted` if it persists), and the refusal deletes
+  the attempt's objects like any other.
 - For a due `staged` row with no hash, the sweep first derives the key
   again, through the store, from the row's artifact, run and lease token.
   Only when the row's key is that key does it delete whatever object is

@@ -24490,66 +24490,114 @@ async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
     );
 }
 
-/// A hook that deletes `run_id`'s `staged` attempt row for `artifact`, as
-/// the database owner, on a thread and runtime of its own (as
-/// `expire_the_lease_hook` does): what the attempt sweep does to a row once
-/// its `cleanup_after` has passed.
-fn delete_attempt_row_hook(
+/// How `attempt_row_hook` changes an attempt's `staged` row between the
+/// write of its object and the phase commit.
+#[derive(Clone, Copy, Debug)]
+enum AttemptRowChange {
+    /// The row is gone.
+    Deleted,
+    /// The row names another object key.
+    OtherKey,
+    /// The row names the object under another ciphertext hash.
+    OtherHash,
+}
+
+/// A hook that applies `change` to `run_id`'s `staged` attempt row for
+/// `artifact`, as the database owner, on a thread and runtime of its own
+/// (as `expire_the_lease_hook` does). V108's guard refuses an UPDATE of a
+/// staged row, so a changed row is deleted and inserted again, changed, in
+/// one transaction.
+fn attempt_row_hook(
     tenant_id: String,
     run_id: uuid::Uuid,
     artifact: &'static str,
+    change: AttemptRowChange,
 ) -> Box<dyn Fn() + Send + Sync> {
     Box::new(move || {
         let tenant_id = tenant_id.clone();
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().expect("build the delete runtime");
+            let runtime = tokio::runtime::Runtime::new().expect("build the change runtime");
             runtime.block_on(async move {
-                let deleted = owner_client()
-                    .await
-                    .execute(
+                let mut owner = owner_client().await;
+                let tx = owner.transaction().await.unwrap();
+                let rows = tx
+                    .query(
                         "DELETE FROM pipeline_attempt_artifacts
                           WHERE tenant_id = $1 AND run_id = $2 AND artifact = $3
-                            AND state = 'staged'",
+                            AND state = 'staged'
+                          RETURNING lease_token, object_key, ciphertext_sha256, cleanup_after",
                         &[&tenant_id, &run_id, &artifact],
                     )
                     .await
-                    .expect("delete the attempt row");
-                assert_eq!(deleted, 1, "the attempt staged one {artifact} row");
+                    .expect("remove the attempt row");
+                assert_eq!(rows.len(), 1, "the attempt staged one {artifact} row");
+                let row = &rows[0];
+                let lease_token: uuid::Uuid = row.get(0);
+                let mut object_key: String = row.get(1);
+                let mut ciphertext_sha256: Option<String> = row.get(2);
+                let cleanup_after: chrono::DateTime<chrono::Utc> = row.get(3);
+                match change {
+                    AttemptRowChange::Deleted => {}
+                    AttemptRowChange::OtherKey | AttemptRowChange::OtherHash => {
+                        if matches!(change, AttemptRowChange::OtherKey) {
+                            object_key.push_str("-elsewhere");
+                        } else {
+                            ciphertext_sha256 = Some("0".repeat(64));
+                        }
+                        tx.execute(
+                            "INSERT INTO pipeline_attempt_artifacts (
+                                 tenant_id, run_id, lease_token, artifact, object_key,
+                                 ciphertext_sha256, cleanup_after
+                             ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                            &[
+                                &tenant_id,
+                                &run_id,
+                                &lease_token,
+                                &artifact,
+                                &object_key,
+                                &ciphertext_sha256,
+                                &cleanup_after,
+                            ],
+                        )
+                        .await
+                        .expect("stage the changed attempt row");
+                    }
+                }
+                tx.commit().await.unwrap();
             });
         })
         .join()
-        .expect("the delete thread completes");
+        .expect("the change thread completes");
     })
 }
 
-/// Wave 2 (rebase 10 review, M4): the Score commit requires one updated
-/// attempt row for each object it wrote. With the index command's `staged`
-/// row removed after its object is published and before the commit, the
-/// commit is refused as a stale lease (only the sweep removes a staged row,
-/// and only past the attempt's own bound): nothing commits, the run waits in
-/// retry under the uncharged `lease_expired`, the attempt's Score objects
-/// are deleted, and the retry stages, writes and commits its own.
-#[tokio::test]
-async fn a_score_commit_missing_its_attempt_row_is_refused_and_leaves_no_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+/// A minimal-bundle service over a store that runs `attempt_row_hook` with
+/// `change` once, right after the write of the first object whose id
+/// starts with `prefix`, and a receipt for a fresh tenant: `(service,
+/// tenant, run_id, artifact directory)`.
+async fn service_changing_an_attempt_row(
+    backend: &Arc<PgBackend>,
+    prefix: &'static str,
+    artifact: &'static str,
+    change: AttemptRowChange,
+) -> (Arc<PipelineService>, String, uuid::Uuid, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let tenant = format!("score-missing-row-{}", uuid::Uuid::new_v4());
+    let tenant = format!("attempt-row-{change:?}-{}", uuid::Uuid::new_v4()).to_lowercase();
     let env = envelope(uuid::Uuid::new_v4()).await;
     let run_id_cell = Arc::new(std::sync::OnceLock::<uuid::Uuid>::new());
     let hook_tenant = tenant.clone();
     let hook_run = run_id_cell.clone();
     let store = Arc::new(RunOnWriteStore {
         inner: artifact_store(&dir),
-        trigger_object_id_prefix: "pipeline-index-command-",
+        trigger_object_id_prefix: prefix,
         triggered: AtomicBool::new(false),
         preparing_trigger: AtomicBool::new(false),
         hook: Box::new(move || {
-            delete_attempt_row_hook(
+            attempt_row_hook(
                 hook_tenant.clone(),
                 *hook_run.get().expect("the run id"),
-                "index-command",
+                artifact,
+                change,
             )()
         }),
     });
@@ -24570,71 +24618,177 @@ async fn a_score_commit_missing_its_attempt_row_is_refused_and_leaves_no_object(
         panic!("receipt creates a run")
     };
     run_id_cell.set(created.run_id).unwrap();
-    let reviewed = service
-        .process_run(&tenant, created.run_id)
-        .await
-        .unwrap()
-        .expect("Review commits");
-    assert_eq!(reviewed.next_phase, Some(Phase::Score));
-    assert_eq!(count_files_under(dir.path()), 2);
+    (service, tenant, created.run_id, dir)
+}
 
-    let refused = service
-        .process_run(&tenant, created.run_id)
-        .await
-        .unwrap()
-        .expect("the refused Score commit is recorded");
-    assert_eq!(
-        (
-            refused.state,
-            refused.next_phase,
-            refused.last_error_label.as_deref(),
-            refused.attempt_count,
-        ),
-        (
-            PipelineRunState::Retry,
-            Some(Phase::Score),
-            Some(PIPELINE_LEASE_EXPIRED_LABEL),
-            reviewed.attempt_count,
-        ),
-        "a commit with no row for its index command is refused, uncharged"
-    );
-    assert!(refused.index_command_ref.is_none());
-    assert!(
-        service
-            .store()
-            .list_outcomes(&tenant, created.run_id)
+/// Wave 2 (rebase 10 review, M4; fix round 1, review I2): the Score commit
+/// requires, for each object it wrote, one `staged` row that names it (its
+/// key, and no hash or the same hash). With the index command's row gone,
+/// naming another key, or naming another hash, after its object is
+/// published and before the commit, the commit is refused under
+/// `pipeline_attempt_artifact_missing`, a charged retry (the lease was live,
+/// so this is not a lease expiry): nothing commits, the attempt's Score
+/// objects are deleted, and the retry stages, writes and commits its own.
+#[tokio::test]
+async fn a_score_commit_missing_its_attempt_row_is_refused_and_leaves_no_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for change in [
+        AttemptRowChange::Deleted,
+        AttemptRowChange::OtherKey,
+        AttemptRowChange::OtherHash,
+    ] {
+        let (service, tenant, run_id, dir) = service_changing_an_attempt_row(
+            &backend,
+            "pipeline-index-command-",
+            "index-command",
+            change,
+        )
+        .await;
+        let reviewed = service
+            .process_run(&tenant, run_id)
             .await
             .unwrap()
-            .iter()
-            .all(|outcome| outcome.phase != Phase::Score),
-        "no Score outcome is recorded"
-    );
-    assert_eq!(
-        count_files_under(dir.path()),
-        2,
-        "the refused attempt's Score objects are deleted"
-    );
-    let rows = attempt_artifact_rows(&backend, &tenant, created.run_id).await;
-    assert!(
-        rows.iter()
-            .all(|(artifact, state)| artifact == "approved" || state == "staged"),
-        "the refused commit committed no Score row: {rows:?}"
-    );
+            .expect("Review commits");
+        assert_eq!(reviewed.next_phase, Some(Phase::Score));
+        assert_eq!(count_files_under(dir.path()), 2);
 
-    force_due(&backend, &tenant, created.run_id).await;
-    let scored = service
-        .process_run(&tenant, created.run_id)
-        .await
-        .unwrap()
-        .expect("the retry commits Score");
-    assert_eq!(scored.next_phase, Some(Phase::Settle));
-    assert!(scored.index_command_ref.is_some());
-    assert!(
-        attempt_artifact_rows(&backend, &tenant, created.run_id)
+        let refused = service
+            .process_run(&tenant, run_id)
             .await
-            .contains(&("index-command".to_string(), "committed".to_string())),
-        "the retry's index command row is committed"
-    );
+            .unwrap()
+            .expect("the refused Score commit is recorded");
+        assert_eq!(
+            (
+                refused.state,
+                refused.next_phase,
+                refused.last_error_label.as_deref(),
+                refused.attempt_count,
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(Phase::Score),
+                Some(PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL),
+                reviewed.attempt_count + 1,
+            ),
+            "{change:?}: a commit with no row naming its index command is refused, charged"
+        );
+        assert!(refused.index_command_ref.is_none());
+        assert!(
+            service
+                .store()
+                .list_outcomes(&tenant, run_id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|outcome| outcome.phase != Phase::Score),
+            "{change:?}: no Score outcome is recorded"
+        );
+        assert_eq!(
+            count_files_under(dir.path()),
+            2,
+            "{change:?}: the refused attempt's Score objects are deleted"
+        );
+        let rows = attempt_artifact_rows(&backend, &tenant, run_id).await;
+        assert!(
+            rows.iter()
+                .all(|(artifact, state)| artifact == "approved" || state == "staged"),
+            "{change:?}: the refused commit committed no Score row: {rows:?}"
+        );
+
+        force_due(&backend, &tenant, run_id).await;
+        let scored = service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .expect("the retry commits Score");
+        assert_eq!(scored.next_phase, Some(Phase::Settle), "{change:?}");
+        assert!(scored.index_command_ref.is_some());
+        assert!(
+            attempt_artifact_rows(&backend, &tenant, run_id)
+                .await
+                .contains(&("index-command".to_string(), "committed".to_string())),
+            "{change:?}: the retry's index command row is committed"
+        );
+    }
+}
+
+/// Wave 2, fix round 1 (review I3): the Review commit holds the same rule.
+/// An approval must move the one `staged` `approved` row that names its
+/// object. With that row gone, or naming another key, after the approved
+/// object is published and before the commit, the commit is refused under
+/// `pipeline_attempt_artifact_missing`, a charged retry: no Review outcome,
+/// the approved object is deleted, and the retry writes and commits its
+/// own.
+#[tokio::test]
+async fn a_review_commit_missing_its_attempt_row_is_refused_and_leaves_no_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for change in [AttemptRowChange::Deleted, AttemptRowChange::OtherKey] {
+        let (service, tenant, run_id, dir) =
+            service_changing_an_attempt_row(&backend, "pipeline-approved-", "approved", change)
+                .await;
+        let received = service
+            .store()
+            .get_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(count_files_under(dir.path()), 1, "the source envelope");
+
+        let refused = service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .expect("the refused Review commit is recorded");
+        assert_eq!(
+            (
+                refused.state,
+                refused.next_phase,
+                refused.last_error_label.as_deref(),
+                refused.attempt_count,
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(Phase::Review),
+                Some(PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL),
+                received.attempt_count + 1,
+            ),
+            "{change:?}: an approval with no row naming its object is refused, charged"
+        );
+        assert!(refused.approved_revision_id.is_none());
+        assert!(
+            service
+                .store()
+                .list_outcomes(&tenant, run_id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|outcome| outcome.phase != Phase::Review),
+            "{change:?}: no Review outcome is recorded"
+        );
+        assert_eq!(
+            count_files_under(dir.path()),
+            1,
+            "{change:?}: the refused attempt's approved object is deleted"
+        );
+
+        force_due(&backend, &tenant, run_id).await;
+        let reviewed = service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .expect("the retry commits Review");
+        assert_eq!(reviewed.next_phase, Some(Phase::Score), "{change:?}");
+        assert!(
+            attempt_artifact_rows(&backend, &tenant, run_id)
+                .await
+                .contains(&("approved".to_string(), "committed".to_string())),
+            "{change:?}: the retry's approved row is committed"
+        );
+    }
 }
 
 /// Finding 6: the contributor status reads a Review rejection's reason from
