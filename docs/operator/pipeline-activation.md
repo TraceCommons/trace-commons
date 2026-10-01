@@ -964,9 +964,13 @@ is not. Those rows are staged with no hash:
   content exists and delete at a key alone. The local store, the
   filesystem-remote provider and the GCS provider can. A store that cannot
   refuses with `serialized_json_object_key_unavailable` or
-  `artifact_delete_at_object_key_unavailable`. A compatibility Score on such
-  a store then fails closed before it scores, and the sweep keeps such a
-  row and logs `pipeline_attempt_sweep_delete_failed`.
+  `artifact_delete_at_object_key_unavailable`. A compatibility Score on a
+  store that cannot derive a key stops before it scores, and its run waits
+  in retry under `serialized_json_object_key_unavailable` without being
+  charged, as for any other deployment gap (ruling FR3); so does one whose
+  store prepares an object under a key other than the one it derived
+  (`pipeline_attempt_object_key_mismatch`), which publishes nothing. The
+  sweep keeps such a row and logs `pipeline_attempt_sweep_delete_failed`.
 
 Score's withdrawal rule follows from the same split: withdrawing a
 submission whose run already committed Score deletes the index command and

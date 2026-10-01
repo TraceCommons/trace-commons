@@ -316,6 +316,19 @@ const PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL: &str = "receipt_object_task_fai
 /// returned (Zaki review 1, round 2, N-6). Fails closed.
 const PIPELINE_BLOCKING_CALL_FAILED_LABEL: &str = "blocking_call_failed";
 
+/// The artifact store cannot derive an object key before the content
+/// exists (`TraceArtifactStore::serialized_json_object_key`'s default
+/// refusal), which a compatibility Score needs before its tenant lock
+/// (rebase 10, option D). A deployment gap: the uncharged suspension of
+/// ruling FR3 (rebase 10 review, M2).
+const PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL: &str = "serialized_json_object_key_unavailable";
+/// The key the store prepared a compatibility Score's object under differs
+/// from the key it derived, and the attempt staged, before the tenant lock;
+/// publishing it would leave an object no row names, so nothing is
+/// published. A deployment gap, suspended uncharged like
+/// `PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL` (rebase 10 review, M2).
+const PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL: &str = "pipeline_attempt_object_key_mismatch";
+
 /// Runs `call`, a synchronous dependency call (an object store or an index:
 /// file or network I/O), on the blocking pool, so it never parks a runtime
 /// worker thread (Zaki review 1, round 2, N-6). A caller may hold a
@@ -8610,10 +8623,16 @@ impl PipelineService {
                 // Ruling FR3: a settlement adapter the service does not hold
                 // is a deployment gap, not the trace's fault -- the same
                 // uncharged suspension as a missing bound dependency. So is
-                // a missing per-instrument cap.
+                // a missing per-instrument cap, and so is an artifact store
+                // that cannot derive a compatibility Score's object key
+                // ahead of its content or prepares the object under another
+                // key (rebase 10 review, M2): the operator's store, never
+                // the contributor's trace.
                 if let Some(gap) = [
                     PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
                     PIPELINE_SETTLEMENT_CAP_MISSING_LABEL,
+                    PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL,
+                    PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL,
                 ]
                 .into_iter()
                 .find(|gap| *gap == label)
@@ -9169,8 +9188,9 @@ impl PipelineService {
     /// the store, before any content exists, and stages a row with that key
     /// and no hash (`PgPipelineStore::stage_unhashed_attempt_artifacts`). A
     /// store that cannot derive a key refuses
-    /// (`serialized_json_object_key_unavailable`), and the Score fails
-    /// closed before it scores.
+    /// (`serialized_json_object_key_unavailable`): the Score stops before it
+    /// scores, and the run waits in retry without being charged, a
+    /// deployment gap under ruling FR3 (rebase 10 review, M2).
     async fn stage_score_artifacts_before_lock(
         &self,
         run: &PipelineRunRecord,
@@ -9327,7 +9347,7 @@ impl PipelineService {
                         anyhow::ensure!(
                             prestaged.object_key(artifact)
                                 == Some(prepared.receipt().object_key.as_str()),
-                            "pipeline_attempt_object_key_mismatch"
+                            PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL
                         );
                         if Utc::now() >= prestaged.publish_deadline {
                             return Err(stale_lease_error().into());

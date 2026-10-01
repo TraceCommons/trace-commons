@@ -26811,6 +26811,221 @@ async fn the_sweep_keeps_a_no_hash_row_whose_key_names_another_object() {
     );
 }
 
+/// How `ObjectKeyGapStore` breaks the key derivation a compatibility Score
+/// needs before its tenant lock (rebase 10, option D).
+#[derive(Clone, Copy)]
+enum ObjectKeyGap {
+    /// The trait's default refusal, `serialized_json_object_key_unavailable`.
+    Unavailable,
+    /// A key other than the one `prepare_serialized_json` then writes under.
+    Other,
+}
+
+/// A store that delegates every call to `inner` except the key derivation,
+/// which `gap` breaks: an operator's store that lacks the method, or one
+/// whose derived key and prepared key disagree.
+struct ObjectKeyGapStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    gap: ObjectKeyGap,
+}
+
+impl TraceArtifactStore for ObjectKeyGapStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        match self.gap {
+            ObjectKeyGap::Unavailable => anyhow::bail!("serialized_json_object_key_unavailable"),
+            ObjectKeyGap::Other => self.inner.serialized_json_object_key(
+                tenant_storage_ref,
+                artifact_kind,
+                &format!("{object_id}-other"),
+            ),
+        }
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+}
+
+/// Rebase 10 review, M2 (ruling FR3): an artifact store that cannot derive
+/// a compatibility Score's object key ahead of its content
+/// (`serialized_json_object_key_unavailable`), or derives one that differs
+/// from the key it then prepares (`pipeline_attempt_object_key_mismatch`),
+/// is an operator's deployment gap, not the trace's fault. The run waits in
+/// retry under that label without being charged, and no Score object is
+/// written.
+#[tokio::test]
+async fn a_store_without_a_usable_object_key_suspends_the_score_uncharged() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for (gap, label) in [
+        (
+            ObjectKeyGap::Unavailable,
+            "serialized_json_object_key_unavailable",
+        ),
+        (ObjectKeyGap::Other, "pipeline_attempt_object_key_mismatch"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = artifact_store(&dir);
+        let service = compatibility_test_builder(
+            backend.clone(),
+            Arc::new(ObjectKeyGapStore {
+                inner: artifacts.clone(),
+                gap,
+            }),
+            near_duplicate_config(),
+            None,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks::default(),
+            IsolatedPipelineIndex::new(),
+        )
+        .build()
+        .expect("build pipeline service");
+        let tenant = format!("compat-object-key-gap-{}", uuid::Uuid::new_v4());
+        let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+        let reviewed = compatibility_run_past_review(&service, &tenant).await;
+        let waited = service
+            .process_run(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+            .expect("the Score attempt runs");
+        assert_eq!(waited.state, PipelineRunState::Retry, "{label}");
+        assert_eq!(waited.next_phase, Some(Phase::Score), "{label}");
+        assert_eq!(waited.last_error_label.as_deref(), Some(label));
+        assert_eq!(
+            waited.attempt_count, reviewed.attempt_count,
+            "{label}: the deployment gap is not charged"
+        );
+        assert!(
+            service
+                .store()
+                .list_outcomes(&tenant, reviewed.run_id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|outcome| outcome.phase != Phase::Score),
+            "{label}: no Score outcome is recorded"
+        );
+        // A store with no key stages nothing; one with another key stages
+        // rows under that key, which the prepared key then contradicts, so
+        // nothing is published there.
+        for (artifact, state, key, hash) in
+            score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id).await
+        {
+            assert!(matches!(gap, ObjectKeyGap::Other), "{label}: {artifact}");
+            assert_eq!(
+                (state.as_str(), hash),
+                ("staged", None),
+                "{label}: {artifact}"
+            );
+            assert_eq!(
+                artifacts
+                    .artifact_present_by_object_key(
+                        tenant_ref.as_str(),
+                        TraceArtifactKind::VectorPayload,
+                        &key,
+                        "",
+                    )
+                    .unwrap(),
+                Some(false),
+                "{label}: nothing is published at the staged {artifact} key"
+            );
+        }
+    }
+}
+
 /// Final review M6: V108's guard trigger lets an attempt artifact row move
 /// once, from `staged` to `committed` with `committed_at` set, and refuses
 /// every other change. A committed row cannot go back to `staged`, where
