@@ -969,7 +969,7 @@ is not. Those rows are staged with no hash:
 - The artifact store must be able to derive an object key before the
   content exists and delete at a key alone. The local store, the
   filesystem-remote provider and the GCS provider can. Three labels name a
-  store that cannot, and only the first stops a Score:
+  store that cannot, and only the first, and a key mismatch, stop a Score:
   - `serialized_json_object_key_unavailable`: the store cannot derive a
     key. A compatibility Score stops before it scores, and its run waits in
     retry under this label without being charged, as for any other
