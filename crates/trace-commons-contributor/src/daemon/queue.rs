@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::config::{ConfigStore, DAEMON_QUEUE_FILE};
 use crate::daemon::approved_envelope::WITNESS_PIN_PREFIX;
 use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+use crate::daemon::settings::ScrubCheck;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2257,6 +2258,12 @@ impl Queue {
 /// The menu-bar badge (K6): `Pending` entries that need a decision from a
 /// person. Never `queue_depth` -- see `status.decisions_owed`.
 ///
+/// The rule is "would anything move this entry without a person?", asked the
+/// way the watcher's unattended approval asks it (`watcher::visit_session`,
+/// `would_approve` and `would_arm`), so the badge and the watcher cannot
+/// disagree. An entry the watcher would approve on the contributor's behalf
+/// is not owed; one it would leave for a person is.
+///
 /// An armed folder's `Pending` entries are excluded by default: they will go
 /// out unattended once they settle or the automatic-contribution gate clears,
 /// so the design never asks about them (`arming_rewordings`, `gate_held`,
@@ -2266,14 +2273,33 @@ impl Queue {
 /// `automatic_gate`): both are "armed means no decision", so neither counts,
 /// exactly like the design rule "armed folders never move it".
 ///
-/// Two exceptions inside an armed folder DO need a person, so they count:
+/// Inside an armed folder, these DO need a person, so they count:
 ///
 /// - [`QueueEntry::held_for_review`] -- revoked for a reason in
 ///   [`REASONS_NEEDING_A_PERSON`] that no unattended re-approval can satisfy
-///   (`watcher::visit_session` already refuses to auto-approve these).
-/// - [`ProjectPolicy::holds_back_unattended`] -- a pre-grant session: it was
-///   already on disk when the automatic grant armed the folder, so the grant
-///   deliberately leaves it for a person rather than sweeping it in.
+///   (`watcher::visit_session` already refuses to auto-approve these). This
+///   includes the Automatic Scrub check's `second-look-review-required`
+///   hold (K4).
+/// - Every entry while `scrub_check` is [`ScrubCheck::Manual`] (K4, #1139):
+///   the watcher approves nothing on anyone's behalf then, so an armed
+///   folder's session waits for a person like an Ask-me one -- the fresh
+///   ones the watcher leaves `Pending`, and the unattended approvals
+///   returned to waiting under `scrub-check-manual`. Under Automatic a
+///   `scrub-check-manual` entry is not owed: the watcher re-approves it and
+///   it goes back through the Automatic check, as that label's doc says.
+/// - [`QueueEntry::returned_from_keep`] (K5, #1134) -- the contributor undid
+///   a "Keep on this Mac", and the watcher never approves that on their
+///   behalf. Not in `REASONS_NEEDING_A_PERSON` (see its doc), so it needs
+///   its own line.
+/// - [`ProjectPolicy::waits_for_a_person_at_send`] -- a pre-grant session
+///   the automatic grant held back (`holds_back_unattended`), or one on disk
+///   when the contributor armed the folder from now (K5, #1134,
+///   `holds_back_from_arming_at_send`). The send-time form, because an entry
+///   does not carry the source key the discovery-time form needs; it is the
+///   stricter of the two, and the one the upload pass holds on. Until a full
+///   pass has recorded any source for an arming from now, it holds every
+///   session in that folder, so they count until that pass (the next one)
+///   records what was on disk.
 ///
 /// A folder in `NotifyOnly` ("Ask me") always counts every `Pending` entry:
 /// that is the ordinary Ask-me case the badge exists for.
@@ -2285,30 +2311,35 @@ impl Queue {
 /// ask them to decide about it. The check is therefore `== NotifyOnly`, not
 /// `!= AutoUpload`.
 ///
+/// `scrub_check` is the daemon's setting (`DaemonSettings::scrub_check`),
+/// passed in because it lives outside the queue and the policy; a caller
+/// reads it without holding the policy or queue lock.
+///
 /// Deliberately one small function, with one predicate
-/// ([`needs_a_person`]), so a state that must also count or must not --
-/// K5's returned-from-keep entries and from-now backlog (#1134), and a
-/// `scrub_check` manual hold (#1139), once those land -- has exactly one
-/// place to add its rule, rather than a second badge-counting path drifting
-/// from this one. Extend `needs_a_person`, not `status_value`.
-pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy) -> usize {
+/// ([`needs_a_person`]), so a state that must also count or must not has
+/// exactly one place to add its rule, rather than a second badge-counting
+/// path drifting from this one. Extend `needs_a_person`, not `status_value`.
+pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy, scrub_check: ScrubCheck) -> usize {
     queue
         .pending()
         .into_iter()
-        .filter(|entry| needs_a_person(entry, policy))
+        .filter(|entry| needs_a_person(entry, policy, scrub_check))
         .count()
 }
 
 /// Whether one `Pending` entry is a decision owed to a person. See
 /// [`decisions_owed`] for each rule and why.
-fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy) -> bool {
+fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy, scrub_check: ScrubCheck) -> bool {
     if entry.held_for_review() {
         return true;
     }
     match policy.resolve(&entry.project_key) {
         ProjectMode::NotifyOnly => true,
         ProjectMode::AutoUpload => {
-            policy.holds_back_unattended(&entry.project_key, &entry.path.to_string_lossy())
+            scrub_check == ScrubCheck::Manual
+                || entry.returned_from_keep()
+                || policy
+                    .waits_for_a_person_at_send(&entry.project_key, &entry.path.to_string_lossy())
         }
         ProjectMode::Ignore => false,
     }
@@ -4325,7 +4356,7 @@ mod tests {
     fn decisions_owed_counts_an_ask_me_pending() {
         let policy = ProjectPolicy::new(); // unset project keys resolve NotifyOnly ("Ask me")
         let q = queue_of(vec![entry_in("/w/ask-me", QueueState::Pending)]);
-        assert_eq!(decisions_owed(&q, &policy), 1);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
     }
 
     /// A mixed queue, each entry a different reason to count or not: an
@@ -4358,7 +4389,7 @@ mod tests {
         let q = queue_of(vec![ask_me, decided, settling, held]);
         assert_eq!(q.pending().len(), 3);
         assert_eq!(
-            decisions_owed(&q, &policy),
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
             2,
             "the Ask-me pending and the held-for-review one"
         );
@@ -4379,7 +4410,7 @@ mod tests {
             .unwrap();
         let q = queue_of(vec![entry_in("/w/ignored", QueueState::Pending)]);
         assert_eq!(q.pending().len(), 1);
-        assert_eq!(decisions_owed(&q, &policy), 0);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 0);
     }
 
     /// A fresh session in an armed folder stays `Pending` while it is
@@ -4401,7 +4432,7 @@ mod tests {
             .unwrap();
         let q = queue_of(vec![entry_in("/w/gated", QueueState::Pending)]);
         assert_eq!(
-            decisions_owed(&q, &policy),
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
             0,
             "an armed pending session, gate-held or merely unsettled, asks nobody yet"
         );
@@ -4425,7 +4456,7 @@ mod tests {
         held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
         assert!(held.held_for_review());
         let q = queue_of(vec![held]);
-        assert_eq!(decisions_owed(&q, &policy), 1);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
     }
 
     /// A session already on disk when the automatic grant armed a folder is
@@ -4450,7 +4481,7 @@ mod tests {
             .insert(pre_grant.path.to_string_lossy().to_string());
         assert!(policy.holds_back_unattended("/w/grant-armed", &pre_grant.path.to_string_lossy()));
         let q = queue_of(vec![pre_grant]);
-        assert_eq!(decisions_owed(&q, &policy), 1);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
     }
 
     /// The whole point: `decisions_owed` is not `queue_depth`. A queue
@@ -4475,9 +4506,162 @@ mod tests {
         let q = queue_of(vec![ask_me, gated]);
         assert_eq!(q.pending().len(), 2, "queue_depth counts both");
         assert_eq!(
-            decisions_owed(&q, &policy),
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
             1,
             "decisions_owed excludes the gate-held armed one"
+        );
+    }
+
+    /// A policy with `/w/armed` armed (`AutoUpload`) and `/w/ignored` set to
+    /// `Ignore`, for the K6 follow-up cases below.
+    fn armed_policy() -> ProjectPolicy {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        policy
+            .set_mode(
+                "/w/ignored",
+                ProjectMode::Ignore,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        policy
+    }
+
+    /// `entry_in`, with its own hash and path so several share a queue.
+    fn entry_named(project_key: &str, name: &str, state: QueueState) -> QueueEntry {
+        let mut e = entry_in(project_key, state);
+        e.session_hash = format!("sha256:{name}");
+        e.path = PathBuf::from(format!("{project_key}/{name}.jsonl"));
+        e
+    }
+
+    /// The Manual Scrub check (K4, #1139): the watcher approves nothing on
+    /// anyone's behalf, so every `Pending` entry in an armed folder waits for
+    /// a person -- a fresh one the watcher left `Pending`, and an unattended
+    /// approval the switch to Manual returned to waiting under
+    /// `scrub-check-manual`. Both count. An `Ignore`d folder's still does
+    /// not: Manual asks nobody about a folder they said never to offer.
+    #[test]
+    fn decisions_owed_counts_every_armed_pending_under_the_manual_scrub_check() {
+        let policy = armed_policy();
+        let fresh = entry_named("/w/armed", "fresh", QueueState::Pending);
+        let was_approved = entry_named("/w/armed", "was-approved", QueueState::Pending);
+        let was_approved_id = was_approved.entry_id;
+        let ignored = entry_named("/w/ignored", "ignored", QueueState::Pending);
+        let mut q = queue_of(vec![fresh, was_approved, ignored]);
+        assert!(q.approve_unattended(was_approved_id, &[], None));
+        assert_eq!(q.return_unattended_to_waiting(), 1);
+        assert_eq!(
+            q.get(was_approved_id).unwrap().reason_label.as_deref(),
+            Some(super::super::second_look::REASON_SCRUB_CHECK_MANUAL)
+        );
+        assert_eq!(q.pending().len(), 3);
+
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Manual),
+            2,
+            "both armed entries wait for a person under Manual; the ignored one does not"
+        );
+    }
+
+    /// The other side of the Manual rule: under Automatic, an armed folder's
+    /// `Pending` entry that the watcher will approve unattended owes nobody
+    /// a decision -- a settling one, and one still labelled
+    /// `scrub-check-manual` from a Manual spell, which the watcher
+    /// re-approves once Automatic is back (see that label's doc). Pins that
+    /// the Manual rule is keyed on the setting, not on the label, and that
+    /// an armed folder is not simply counted whole.
+    #[test]
+    fn decisions_owed_leaves_out_armed_entries_that_go_unattended_under_automatic() {
+        let policy = armed_policy();
+        let settling = entry_named("/w/armed", "settling", QueueState::Pending);
+        let mut left_by_manual = entry_named("/w/armed", "left-by-manual", QueueState::Pending);
+        left_by_manual.reason_label =
+            Some(super::super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string());
+        assert!(!left_by_manual.held_for_review());
+        let q = queue_of(vec![settling, left_by_manual]);
+        assert_eq!(q.pending().len(), 2);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 0);
+    }
+
+    /// The Automatic Scrub check's hold (K4): an unattended approval the
+    /// scrubber was unsure about is returned to waiting under
+    /// `second-look-review-required`, which nothing re-approves unattended.
+    /// It counts in an armed folder under Automatic.
+    #[test]
+    fn decisions_owed_counts_a_second_look_hold_in_an_armed_folder() {
+        let policy = armed_policy();
+        let held = entry_named("/w/armed", "unsure", QueueState::Pending);
+        let id = held.entry_id;
+        let mut q = queue_of(vec![held]);
+        assert!(q.approve_unattended(id, &[], None));
+        assert!(q.hold_with_scrub_pin(
+            id,
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            None
+        ));
+        assert_eq!(q.get(id).unwrap().state, QueueState::Pending);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
+    }
+
+    /// #1134: undoing a "Keep on this Mac" returns the entry to waiting as
+    /// `returned-from-keep`, which the watcher never approves on anyone's
+    /// behalf, armed folder included. It counts there, although the label
+    /// is not in `REASONS_NEEDING_A_PERSON`.
+    #[test]
+    fn decisions_owed_counts_a_returned_from_keep_entry_in_an_armed_folder() {
+        let policy = armed_policy();
+        let e = entry_named("/w/armed", "kept", QueueState::Pending);
+        let id = e.entry_id;
+        let mut q = queue_of(vec![e]);
+        q.keep(id).unwrap();
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            0,
+            "kept"
+        );
+        q.undo_keep(id, at("2026-08-09T00:00:00Z"), 5000).unwrap();
+        assert!(q.get(id).unwrap().returned_from_keep());
+        assert!(!q.get(id).unwrap().held_for_review());
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
+    }
+
+    /// #1134's arm-from-now backlog: a session on disk when the contributor
+    /// armed the folder from now waits for them
+    /// (`holds_back_from_arming_at_send`) and counts; a session first seen
+    /// after the record is the folder's to send and does not. Before any
+    /// source is recorded the hold fails closed, so both count until then.
+    #[test]
+    fn decisions_owed_counts_the_arm_from_now_backlog_and_not_what_came_after() {
+        let mut policy = armed_policy();
+        policy.arm_from_now("/w/armed", at("2026-08-08T12:00:00Z"));
+        let backlog = entry_named("/w/armed", "backlog", QueueState::Pending);
+        let after = entry_named("/w/armed", "after", QueueState::Pending);
+        let backlog_path = backlog.path.to_string_lossy().to_string();
+        let q = queue_of(vec![backlog, after]);
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            2,
+            "nothing recorded yet: everything waits"
+        );
+
+        let armings = policy.armings_from_now();
+        assert!(policy.record_source_for_armings(
+            &armings,
+            "claude-code",
+            std::collections::BTreeSet::from([backlog_path.clone()]),
+        ));
+        assert!(policy.holds_back_from_arming_at_send("/w/armed", &backlog_path));
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            1,
+            "only the backlog session"
         );
     }
 }

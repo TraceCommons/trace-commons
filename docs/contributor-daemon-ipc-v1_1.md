@@ -750,15 +750,28 @@ clears (`automatic_contribution_held` above) -- the design never asks about
 either, so armed folders must not move the badge whether they are merely
 unsettled or gate-held.
 
-Two kinds of entry count even inside an armed folder, because they do need a
-person:
+The rule is "would anything move this entry without a person?", asked the
+way the watcher's unattended approval asks it, so the badge and the watcher
+cannot disagree. These count even inside an armed folder, because they do
+need a person:
 
 - an entry `held_for_review` -- revoked for a reason in
-  `REASONS_NEEDING_A_PERSON` that no unattended re-approval can satisfy;
-- a pre-grant session the automatic grant is holding back
-  (`holds_back_unattended`): it was already on disk when the grant armed the
-  folder, and the grant arms nothing already on disk, so it waits for a
-  person instead of going unattended.
+  `REASONS_NEEDING_A_PERSON` that no unattended re-approval can satisfy,
+  including the Automatic Scrub check's `second-look-review-required` hold;
+- every `Pending` entry while `scrub_check` is `manual`: the watcher approves
+  nothing on anyone's behalf then, so each waits for a person -- the ones it
+  left `Pending`, and the unattended approvals the switch to Manual returned
+  to waiting under `scrub-check-manual`. Under `automatic`, an entry still
+  labelled `scrub-check-manual` does not count: the watcher re-approves it
+  and it goes back through the Automatic check;
+- an entry `returned-from-keep` (#1134): the contributor undid a "Keep on
+  this Mac", and that is never approved on their behalf;
+- a session held back from unattended approval in the folder: a pre-grant
+  session the automatic grant is holding back (`holds_back_unattended`), or
+  one on disk when the contributor armed the folder from now
+  (`holds_back_from_arming_at_send`, #1134). Until a full pass has recorded
+  what was on disk for an arming from now, that hold covers every session in
+  the folder, so they all count until the next full pass records it.
 
 A `Pending` entry in an `ignore` folder does not count (setting `ignore`
 refuses what was waiting, so one there is only a transient, and the
@@ -771,18 +784,21 @@ Computed fresh on every `status` (and therefore on `snapshot`, since
 same way `witness_capacity` is: never a second stored counter that could
 disagree with the rows it counts. `decisions_owed` and `queue_depth` are read
 under the same queue lock, so one `status` never pairs two different queues.
-The single function behind it, `queue::decisions_owed(queue, policy)`, is
-written around one small predicate for exactly this reason: a later state
-that must also count, or must not, extends that predicate rather than
-growing a second badge-counting path elsewhere. Two are already tracked as
-follow-ups for when their PRs land: K5's returned-from-keep entries and
-from-now backlog (#1134), and a `scrub_check` manual hold (#1139).
+The single function behind it, `queue::decisions_owed(queue, policy,
+scrub_check)`, is written around one small predicate for exactly this
+reason: a later state that must also count, or must not, extends that
+predicate rather than growing a second badge-counting path elsewhere.
 
-A policy change can move this count without changing the queue: arming a
-folder with entries waiting (`set_project_mode`), or the watcher arming a
-newly discovered project under the automatic grant. When one does, the daemon
-publishes `status_changed`, so a shell that refreshes status only on
-`queue_changed` does not keep the old badge.
+A policy or settings change can move this count without changing the queue:
+arming a folder with entries waiting (`set_project_mode`), the watcher arming
+a newly discovered project under the automatic grant or recording what was
+on disk for an arming from now, or switching `scrub_check` in
+`set_settings`. When one does, the daemon publishes `status_changed`, so a
+shell that refreshes status only on `queue_changed` does not keep the old
+badge.
+
+Shells draw their badge from this field, not from `list_pending`'s length
+or `queue_depth`: only the daemon knows which pending entries need a person.
 
 #### `routing`
 

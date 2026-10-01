@@ -886,8 +886,17 @@ final class AppModel: ObservableObject {
 
     /// The badge counts DECISIONS OWED -- entries actually waiting for a yes
     /// or no -- not sessions found and not queue total.
+    ///
+    /// The daemon's `status.decisions_owed`, not `awaitingDecision.count`:
+    /// every `Pending` entry is in `awaitingDecision`, including an armed
+    /// folder's sessions that will go out on their own, and only the daemon
+    /// knows which of them need a person (the Manual Scrub check, a
+    /// second-look hold, an undone keep, an arming's backlog -- see
+    /// `queue::decisions_owed`). `awaitingDecision` stays the list the
+    /// queue views render. A daemon that predates the field reports `nil`,
+    /// and the count falls back to the waiting list, as before.
     var decisionsOwed: Int {
-        awaitingDecision.count
+        status.decisionsOwed ?? awaitingDecision.count
     }
 
     /// The single place the two derived queue views are rebuilt. Called

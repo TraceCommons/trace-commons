@@ -183,6 +183,10 @@ fn tick_over(
     // The whole pass, from the config read to the epilogue, under the pass
     // lock: see `DaemonShared::pass_lock`.
     let _pass = shared.pass_lock.lock().expect("pass lock");
+    // Recording what was on disk for an arming from now (below) releases
+    // the sessions that came after it from `decisions_owed`, with no queue
+    // change for one still settling -- so compare across the pass (K6).
+    let decisions_owed_before = shared.decisions_owed_value();
     release_stale_holds(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
@@ -229,6 +233,7 @@ fn tick_over(
     let report = finish_pass(shared, out, true)?;
     report_gate(shared, &ctx.gate, &report);
     record_gate_held(shared, &ctx, &report, held_by_project);
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
     Ok(report)
 }
 

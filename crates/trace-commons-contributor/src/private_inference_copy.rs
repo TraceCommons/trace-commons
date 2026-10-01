@@ -2579,8 +2579,6 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         return line;
     }
     match label {
-        crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
-        | crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL => "Waiting for review; not sent",
         queue::REASON_DISMISSED => "Skipped; not sent",
         queue::REASON_EXPIRED => "Expired without a decision; not sent",
         queue::REASON_CHANGED => "Session changed; review it again before sending",

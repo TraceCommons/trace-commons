@@ -10,6 +10,10 @@ export const coreStatusSchema = z.object({
     consent_scopes: z.array(z.string()),
     paused: z.boolean(),
     queue_depth: z.number(),
+    // The badge's count (K6): pending entries that need this person, which
+    // excludes an armed folder's sessions that will go on their own. Only
+    // the daemon knows which those are. Absent on a daemon older than it.
+    decisions_owed: z.number().optional(),
     daily_budget: z
       .object({
         bytes_today: z.number(),

@@ -30,6 +30,31 @@ final class DaemonFieldDecodingTests: XCTestCase {
         XCTAssertEqual(status.grantVoids.map(\.id), [4])
     }
 
+    // MARK: - Decisions owed (K6)
+
+    /// The badge's count comes from the daemon. A daemon that predates the
+    /// field reports none, and the app then counts its waiting list.
+    @MainActor
+    func testTheBadgeReadsDecisionsOwedFromStatus() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":3,
+         "decisions_owed":1,"health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertEqual(status.decisionsOwed, 1)
+        XCTAssertEqual(status.queueDepth, 3)
+        let model = AppModel()
+        model.setStatusForTesting(status)
+        XCTAssertEqual(model.decisionsOwed, 1, "the daemon's count, not the queue's")
+
+        let older = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":3,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertNil(older.decisionsOwed)
+        model.setStatusForTesting(older)
+        XCTAssertEqual(model.decisionsOwed, model.awaitingDecision.count)
+    }
+
     // MARK: - Legacy invite migration
 
     /// The notice after a legacy invite identity moved to a NEAR AI

@@ -251,6 +251,15 @@ struct DaemonStatus: Decodable, Equatable {
     var consentScopes: [String]
     let paused: Bool
     let queueDepth: Int
+    /// `status.decisions_owed` (K6): the badge's count, the `Pending`
+    /// entries that actually need this person -- not `queueDepth`, which
+    /// also counts an armed folder's sessions that will go on their own.
+    /// The daemon's rule (`queue::decisions_owed`) knows the Scrub check
+    /// setting and the holds a shell cannot see from a row.
+    ///
+    /// `nil` from a daemon that predates the field; `AppModel.decisionsOwed`
+    /// falls back to the waiting list then.
+    let decisionsOwed: Int?
     let nextDigestAt: Date?
     let health: DaemonHealth
     /// The daily volume caps and what they are holding back.
@@ -286,6 +295,7 @@ struct DaemonStatus: Decodable, Equatable {
         case consentScopes = "consent_scopes"
         case paused
         case queueDepth = "queue_depth"
+        case decisionsOwed = "decisions_owed"
         case nextDigestAt = "next_digest_at"
         case health
         case dailyBudget = "daily_budget"
@@ -304,6 +314,7 @@ struct DaemonStatus: Decodable, Equatable {
         consentScopes: [String],
         paused: Bool,
         queueDepth: Int,
+        decisionsOwed: Int? = nil,
         nextDigestAt: Date?,
         health: DaemonHealth,
         dailyBudget: DailyBudget = .unknown,
@@ -320,6 +331,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.consentScopes = consentScopes
         self.paused = paused
         self.queueDepth = queueDepth
+        self.decisionsOwed = decisionsOwed
         self.nextDigestAt = nextDigestAt
         self.health = health
         self.dailyBudget = dailyBudget
@@ -339,6 +351,7 @@ struct DaemonStatus: Decodable, Equatable {
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         queueDepth = try c.decodeIfPresent(Int.self, forKey: .queueDepth) ?? 0
+        decisionsOwed = try c.decodeIfPresent(Int.self, forKey: .decisionsOwed)
         nextDigestAt = try c.decodeIfPresent(Date.self, forKey: .nextDigestAt)
         health = try c.decodeIfPresent(DaemonHealth.self, forKey: .health)
             ?? DaemonHealth(lastErrorLabel: nil, since: nil)

@@ -66,6 +66,19 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// The tray's count: the daemon's `status.decisions_owed` (K6), never the
+/// length of `list_pending`, which also lists an armed folder's sessions
+/// that will go out on their own. Only the daemon knows which pending
+/// entries need a person (`queue::decisions_owed`). A daemon that predates
+/// the field falls back to the pending list, as before.
+fn decisions_owed(status: &Value, pending_len: usize) -> usize {
+    status
+        .get("decisions_owed")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(pending_len)
+}
+
 fn read_snapshot(state: &AppState) -> Option<TraySnapshot> {
     let daemon = state.optional_daemon().ok().flatten()?;
     let status = call_daemon_blocking(daemon.clone(), "status", serde_json::json!({})).ok()?;
@@ -112,7 +125,7 @@ fn read_snapshot(state: &AppState) -> Option<TraySnapshot> {
         })
         .collect();
     Some(TraySnapshot {
-        decisions_owed: entries.len(),
+        decisions_owed: decisions_owed(&status, entries.len()),
         paused: status
             .get("paused")
             .and_then(Value::as_bool)
@@ -341,7 +354,15 @@ pub(crate) fn start_tray_refresh<R: TauriRuntime>(app: AppHandle<R>) {
 mod tests {
     use trace_commons_contributor::private_inference_copy::{DESTINATION, TRAY_TURN_OFF};
 
-    use super::private_ai_tray_items;
+    use super::{decisions_owed, private_ai_tray_items};
+
+    #[test]
+    fn tray_counts_the_daemons_decisions_owed_not_the_pending_list() {
+        let status = serde_json::json!({ "queue_depth": 3, "decisions_owed": 1 });
+        assert_eq!(decisions_owed(&status, 3), 1);
+        let older = serde_json::json!({ "queue_depth": 3 });
+        assert_eq!(decisions_owed(&older, 3), 3, "an older daemon: the list");
+    }
 
     #[test]
     fn tray_names_private_ai_with_the_shared_destination_and_stop_action() {
