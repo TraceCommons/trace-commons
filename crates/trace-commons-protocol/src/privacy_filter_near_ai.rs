@@ -575,7 +575,8 @@ impl NearAiPrivacyFilterAdapter {
 
             let status = response.status();
             if !status.is_success() {
-                if status.is_server_error() && attempt < MAX_CLASSIFY_ATTEMPTS {
+                let transient = crate::privacy_filter_spans::is_transient_classifier_status(status);
+                if transient && attempt < MAX_CLASSIFY_ATTEMPTS {
                     backoff(attempt).await;
                     continue;
                 }
@@ -586,8 +587,8 @@ impl NearAiPrivacyFilterAdapter {
                     hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body_bytes))
                 );
                 // Same split the retry decision above makes, carried out to
-                // the caller: a 5xx that outlived our retries is the vendor's
-                // problem, anything else (4xx) is ours or the trace's.
+                // the caller: a 5xx, 429 or 408 that outlived our retries is
+                // the vendor's problem, any other 4xx is ours or the trace's.
                 let diagnostics = classify_input_diagnostics(&[text]);
                 tracing::warn!(
                     classify_input = %diagnostics,
@@ -607,7 +608,7 @@ impl NearAiPrivacyFilterAdapter {
                     attempt,
                     diagnostics
                 );
-                return Err(if status.is_server_error() {
+                return Err(if transient {
                     TraceContributionError::TransientRedactionFailed { reason }
                 } else {
                     TraceContributionError::RedactionFailed { reason }

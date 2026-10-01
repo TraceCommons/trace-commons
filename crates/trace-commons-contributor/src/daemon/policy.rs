@@ -227,6 +227,10 @@ pub struct ArmingRewordNotice {
     pub was: super::arming_wording::ArmingClaim,
     /// What the words in force for it claim now.
     pub now: super::arming_wording::ArmingClaim,
+    /// This notice announces the Automatic-default upgrade, not a claim
+    /// narrowing. Existing shells pass the whole object to shared copy.
+    #[serde(default)]
+    pub scrub_check_defaulted: bool,
 }
 
 /// A project the app should offer to arm, and the evidence for offering.
@@ -295,6 +299,64 @@ pub struct ProjectPolicy {
     /// The id the next [`ArmingRewordNotice`] gets. Never reused.
     #[serde(default)]
     pub next_arming_reword_id: u64,
+    /// Recorded atomically with upgrade notices, never cleared by their ack.
+    #[serde(default)]
+    pub scrub_check_upgrade_recorded: bool,
+    /// Projects the contributor armed **from now** (`set_project_mode`
+    /// `auto_upload` with `from_now: true`), by project key. See
+    /// [`ArmedFromNow`]. An entry leaves when the project's mode is set
+    /// again by any route, since that is a fresh decision about the project.
+    #[serde(default)]
+    pub armed_from_now: BTreeMap<String, ArmedFromNow>,
+    /// Every session path an arm-from-now record found on disk, with the
+    /// sequence number of the **first** record that saw it. See
+    /// [`ArmedFromNow`] for why this is ordered rather than a set like
+    /// `sessions_on_disk_at_grant`.
+    #[serde(default)]
+    pub sessions_on_disk_at_arming: BTreeMap<String, u64>,
+    /// The sequence number the next arm-from-now record takes. Never reused.
+    #[serde(default)]
+    pub next_arming_record: u64,
+}
+
+/// K5: a project armed **from now**: "Share automatically" in Customize, where
+/// the backlog goes only when the contributor picks it.
+///
+/// The same rule as the Flow 1 grant ([`AutomaticGrant`]), applied to one
+/// project the contributor armed themselves: **a session already on disk
+/// when the project was armed -- queued or not -- is never approved
+/// unattended in it**, whichever project it reads as now. It waits for the
+/// contributor, who can still approve it by hand (the past-session picker is
+/// per-entry `approve`). A session that first appears after the arming is
+/// approved unattended like any other session in an armed project.
+///
+/// Recorded the way the grant records the disk, **per source**, by a full
+/// watcher pass, before any session is visited, and only for an arming made
+/// before that pass listed the disk. Until a source has been recorded for
+/// this arming, nothing from that source is approved unattended in this
+/// project: a harness connected after the arming, one re-rooted since, or one
+/// whose discovery failed has its history recorded before it can send
+/// anything. That is the fail-closed direction -- a session created between
+/// the arming and the recording pass waits for a person too.
+///
+/// Why the paths are kept in an ordered map
+/// (`sessions_on_disk_at_arming`) and not added to
+/// `sessions_on_disk_at_grant`: that set means "on disk at *a grant*", and
+/// every project the grant armed holds all of it back. Folding a later
+/// project's arming into it would hold back sessions that are new relative
+/// to the grant. Each path instead remembers the first record that saw it,
+/// and each arming the record it took per source, so "on disk when *this*
+/// project was armed" is one comparison and the paths are stored once, not
+/// once per armed project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArmedFromNow {
+    /// When the contributor armed the project. A pass records only for the
+    /// arming it read before listing the disk.
+    pub armed_at: DateTime<Utc>,
+    /// Sources recorded for this arming, by source key, with the sequence
+    /// number of the record that covered it.
+    #[serde(default)]
+    pub recorded_sources: BTreeMap<String, u64>,
 }
 
 /// The Flow 1 grant: "contribute automatically from projects discovered from
@@ -351,7 +413,219 @@ impl ProjectPolicy {
             arming_claims: BTreeMap::new(),
             arming_rewordings: Vec::new(),
             next_arming_reword_id: 0,
+            // Fresh installs start with Automatic; only old files (whose
+            // serde default is false) need an upgrade announcement.
+            scrub_check_upgrade_recorded: true,
+            armed_from_now: BTreeMap::new(),
+            sessions_on_disk_at_arming: BTreeMap::new(),
+            next_arming_record: 0,
         }
+    }
+
+    /// Arm `project_key` from now (K5). The caller has already set the mode
+    /// to `AutoUpload` through [`Self::set_mode`], which cleared any earlier
+    /// arming record, so this starts a fresh one: nothing is recorded yet,
+    /// and until a full pass records a source nothing from it is approved
+    /// unattended here. See [`ArmedFromNow`].
+    pub fn arm_from_now(&mut self, project_key: &str, now: DateTime<Utc>) {
+        self.armed_from_now.insert(
+            project_key.to_string(),
+            ArmedFromNow {
+                armed_at: now,
+                recorded_sources: BTreeMap::new(),
+            },
+        );
+    }
+
+    /// Put back an arming-from-now record that [`Self::set_mode`] just
+    /// cleared: a re-arm from now over an arming from now keeps the hold it
+    /// had, rather than starting a new one.
+    pub fn restore_arming_from_now(&mut self, project_key: &str, prior: ArmedFromNow) {
+        self.armed_from_now.insert(project_key.to_string(), prior);
+    }
+
+    /// When `project_key` was armed from now, if it was.
+    pub fn armed_from_now_at(&self, project_key: &str) -> Option<DateTime<Utc>> {
+        self.armed_from_now.get(project_key).map(|a| a.armed_at)
+    }
+
+    /// Defence in depth for "on disk at the arming", which the record reads
+    /// by path: content older than the arming that turns up at a **new**
+    /// path -- a resumed conversation written to a fresh file, a restore, a
+    /// sync -- was never listed by the record. The watcher calls this when a
+    /// session's first event, or its file's birth time, predates the arming;
+    /// the path is then recorded as on disk for that arming (the earliest
+    /// record wins), so it is held like the rest of the backlog. Returns
+    /// whether anything changed. A source not yet recorded holds everything
+    /// already, and its record will list this path.
+    pub fn hold_for_arming(
+        &mut self,
+        project_key: &str,
+        session_path: &str,
+        source_key: &str,
+    ) -> bool {
+        let Some(seq) = self
+            .armed_from_now
+            .get(project_key)
+            .and_then(|a| a.recorded_sources.get(source_key).copied())
+        else {
+            return false;
+        };
+        match self.sessions_on_disk_at_arming.get_mut(session_path) {
+            Some(first) if *first <= seq => false,
+            Some(first) => {
+                *first = seq;
+                true
+            }
+            None => {
+                self.sessions_on_disk_at_arming
+                    .insert(session_path.to_string(), seq);
+                true
+            }
+        }
+    }
+
+    /// Drop recorded paths no arming in force can still hold: one first seen
+    /// by a record later than every arming's own records holds nothing, and
+    /// with no arming from now left the record is empty. Returns whether
+    /// anything was dropped.
+    pub fn prune_arming_record(&mut self) -> bool {
+        let before = self.sessions_on_disk_at_arming.len();
+        match self
+            .armed_from_now
+            .values()
+            .flat_map(|a| a.recorded_sources.values().copied())
+            .max()
+        {
+            Some(latest) => self
+                .sessions_on_disk_at_arming
+                .retain(|_, first| *first <= latest),
+            None if self.armed_from_now.is_empty() => self.sessions_on_disk_at_arming.clear(),
+            // Armed from now, nothing recorded yet: everything is held
+            // anyway, and the coming record decides what stays.
+            None => {}
+        }
+        self.sessions_on_disk_at_arming.len() != before
+    }
+
+    /// Whether `project_key` is armed from now rather than with its backlog.
+    pub fn is_armed_from_now(&self, project_key: &str) -> bool {
+        self.armed_from_now.contains_key(project_key)
+    }
+
+    /// The arm-from-now armings in force, by project key and instant. A pass
+    /// reads this before it lists anything and records only for these, so
+    /// an arming made while discovery walks the disk is recorded from a
+    /// later listing -- the rule [`Self::grant_id`] follows for the grant.
+    pub fn armings_from_now(&self) -> Vec<(String, DateTime<Utc>)> {
+        self.armed_from_now
+            .iter()
+            .map(|(key, a)| (key.clone(), a.armed_at))
+            .collect()
+    }
+
+    /// Whether any of `armings` still needs `source_key` recorded.
+    pub fn needs_arming_record(
+        &self,
+        armings: &[(String, DateTime<Utc>)],
+        source_key: &str,
+    ) -> bool {
+        armings.iter().any(|(key, at)| {
+            self.armed_from_now
+                .get(key)
+                .is_some_and(|a| a.armed_at == *at && !a.recorded_sources.contains_key(source_key))
+        })
+    }
+
+    /// Record what one source had on disk for each of `armings` still in
+    /// force unchanged and not yet recorded for it. Returns whether anything
+    /// was recorded. A path keeps the first record that saw it.
+    pub fn record_source_for_armings(
+        &mut self,
+        armings: &[(String, DateTime<Utc>)],
+        source_key: &str,
+        sessions: BTreeSet<String>,
+    ) -> bool {
+        if !self.needs_arming_record(armings, source_key) {
+            return false;
+        }
+        let seq = self.next_arming_record;
+        self.next_arming_record = seq.saturating_add(1);
+        for path in sessions {
+            self.sessions_on_disk_at_arming.entry(path).or_insert(seq);
+        }
+        for (key, at) in armings {
+            if let Some(a) = self.armed_from_now.get_mut(key) {
+                if a.armed_at == *at {
+                    a.recorded_sources
+                        .entry(source_key.to_string())
+                        .or_insert(seq);
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether the session at `session_path`, from `source_key`, must not be
+    /// approved unattended in `project_key` because the project is armed
+    /// from now and the session was on disk at the arming -- or its source
+    /// has not been recorded for the arming yet, which fails closed.
+    pub fn holds_back_from_arming(
+        &self,
+        project_key: &str,
+        session_path: &str,
+        source_key: &str,
+    ) -> bool {
+        let Some(arming) = self.armed_from_now.get(project_key) else {
+            return false;
+        };
+        match arming.recorded_sources.get(source_key) {
+            None => true,
+            Some(recorded) => self
+                .sessions_on_disk_at_arming
+                .get(session_path)
+                .is_some_and(|first| first <= recorded),
+        }
+    }
+
+    /// The send-time form of [`Self::holds_back_from_arming`], for a caller
+    /// that holds a queue entry and not the source key it was discovered
+    /// under. Stricter in the only direction it can be: no source recorded
+    /// yet holds everything, and a path is held if it was on disk at the
+    /// record of any source for this arming.
+    pub fn holds_back_from_arming_at_send(&self, project_key: &str, session_path: &str) -> bool {
+        let Some(arming) = self.armed_from_now.get(project_key) else {
+            return false;
+        };
+        if arming.recorded_sources.is_empty() {
+            return true;
+        }
+        self.sessions_on_disk_at_arming
+            .get(session_path)
+            .is_some_and(|first| arming.recorded_sources.values().any(|r| first <= r))
+    }
+
+    /// The send-time form of [`Self::waits_for_a_person`], for the upload
+    /// pass, which holds a queue entry and not its source key: the grant's
+    /// hold, and [`Self::holds_back_from_arming_at_send`].
+    pub fn waits_for_a_person_at_send(&self, project_key: &str, session_path: &str) -> bool {
+        self.holds_back_unattended(project_key, session_path)
+            || self.holds_back_from_arming_at_send(project_key, session_path)
+    }
+
+    /// The one question both unattended approval sites ask: must this
+    /// session wait for the contributor although its project is armed?
+    /// Either the grant armed the project and the session predates a grant
+    /// ([`Self::holds_back_unattended`]), or the contributor armed it from
+    /// now and the session predates that ([`Self::holds_back_from_arming`]).
+    pub fn waits_for_a_person(
+        &self,
+        project_key: &str,
+        session_path: &str,
+        source_key: &str,
+    ) -> bool {
+        self.holds_back_unattended(project_key, session_path)
+            || self.holds_back_from_arming(project_key, session_path, source_key)
     }
 
     /// Give the Flow 1 grant, replacing any earlier one. Arms nothing until
@@ -805,7 +1079,8 @@ impl ProjectPolicy {
         let mut labels = Vec::with_capacity(reworded.len());
         for (key, label, was, in_force) in reworded {
             self.arming_claims.insert(key.clone(), in_force);
-            self.arming_rewordings.retain(|n| n.project_key != key);
+            self.arming_rewordings
+                .retain(|n| n.project_key != key || n.scrub_check_defaulted);
             let id = self.next_arming_reword_id;
             self.next_arming_reword_id = id.saturating_add(1);
             self.arming_rewordings.push(ArmingRewordNotice {
@@ -814,6 +1089,7 @@ impl ProjectPolicy {
                 project_key: key,
                 was,
                 now: in_force,
+                scrub_check_defaulted: false,
             });
             labels.push(label);
         }
@@ -826,6 +1102,34 @@ impl ProjectPolicy {
         let before = self.arming_rewordings.len();
         self.arming_rewordings.retain(|n| !ids.contains(&n.id));
         before - self.arming_rewordings.len()
+    }
+
+    /// Announce changed hold behavior only for folders armed at upgrade.
+    /// The marker and notices are saved together by startup, before work.
+    pub fn record_scrub_check_upgrade(&mut self, automatic: bool, now: DateTime<Utc>) -> bool {
+        if self.scrub_check_upgrade_recorded {
+            return false;
+        }
+        if automatic {
+            for (key, entry) in &self.projects {
+                if entry.mode != ProjectMode::AutoUpload || key == UNKNOWN_PROJECT_KEY {
+                    continue;
+                }
+                let claim = self.arming_claim(key);
+                let id = self.next_arming_reword_id;
+                self.next_arming_reword_id = id.saturating_add(1);
+                self.arming_rewordings.push(ArmingRewordNotice {
+                    id,
+                    reworded_at: now,
+                    project_key: key.clone(),
+                    was: claim,
+                    now: claim,
+                    scrub_check_defaulted: true,
+                });
+            }
+        }
+        self.scrub_check_upgrade_recorded = true;
+        true
     }
 
     /// Record a notice, replacing any still outstanding for the same grant:
@@ -896,6 +1200,11 @@ impl ProjectPolicy {
         // A mode set here is the contributor's own decision about the project,
         // not the grant's; `arm_by_grant` re-adds it after calling this.
         self.armed_by_grant.remove(project_key);
+        // Likewise an earlier arm-from-now: any mode set here replaces it,
+        // and `set_project_mode` re-adds it after this when the new setting
+        // is itself from now. A plain `auto_upload` therefore releases the
+        // backlog, which is what that call has always meant.
+        self.armed_from_now.remove(project_key);
         // And it answers any notice that this project's grant had stopped.
         self.grant_voids
             .retain(|n| n.project_key.as_deref() != Some(project_key));
@@ -1649,6 +1958,119 @@ mod tests {
         );
     }
 
+    /// K5: a project armed from now holds back every session its sources had
+    /// on disk at the arming -- and everything from a source not yet recorded
+    /// for it -- while a session first seen after the record is its to send.
+    /// Setting the mode again by any route ends the hold.
+    #[test]
+    fn an_arming_from_now_holds_back_only_what_was_on_disk_at_it() {
+        let mut p = ProjectPolicy::new();
+        let now = t("2026-09-28T00:00:00Z");
+        p.set_mode("/w/a", ProjectMode::AutoUpload, now).unwrap();
+        p.arm_from_now("/w/a", now);
+        assert!(p.is_armed_from_now("/w/a"));
+        assert!(
+            p.holds_back_from_arming("/w/a", "/s/new.jsonl", SRC),
+            "nothing is sent before a record"
+        );
+        assert!(p.holds_back_from_arming_at_send("/w/a", "/s/new.jsonl"));
+
+        let armings = p.armings_from_now();
+        assert!(p.needs_arming_record(&armings, SRC));
+        assert!(p.record_source_for_armings(&armings, SRC, set_of(&["/s/pre.jsonl"])));
+        assert!(!p.needs_arming_record(&armings, SRC), "once per source");
+        assert!(p.holds_back_from_arming("/w/a", "/s/pre.jsonl", SRC));
+        assert!(p.holds_back_from_arming_at_send("/w/a", "/s/pre.jsonl"));
+        assert!(!p.holds_back_from_arming("/w/a", "/s/new.jsonl", SRC));
+        assert!(!p.holds_back_from_arming_at_send("/w/a", "/s/new.jsonl"));
+        assert!(
+            p.holds_back_from_arming("/w/a", "/s/other.jsonl", "codex /late"),
+            "a source not recorded yet"
+        );
+        assert!(
+            !p.holds_back_from_arming("/w/other", "/s/pre.jsonl", SRC),
+            "only in the project armed from now"
+        );
+        assert!(p.waits_for_a_person("/w/a", "/s/pre.jsonl", SRC));
+
+        // A later arming of another project records a session that is new
+        // to the first: it is held there, not here.
+        let later = t("2026-09-28T01:00:00Z");
+        p.set_mode("/w/b", ProjectMode::AutoUpload, later).unwrap();
+        p.arm_from_now("/w/b", later);
+        let armings = p.armings_from_now();
+        assert!(p.record_source_for_armings(
+            &armings,
+            SRC,
+            set_of(&["/s/pre.jsonl", "/s/new.jsonl"])
+        ));
+        assert!(p.holds_back_from_arming("/w/b", "/s/new.jsonl", SRC));
+        assert!(!p.holds_back_from_arming("/w/a", "/s/new.jsonl", SRC));
+        assert!(p.holds_back_from_arming("/w/a", "/s/pre.jsonl", SRC));
+
+        // A plain arming by the contributor replaces it: the backlog is
+        // theirs to send, as `auto_upload` has always meant.
+        p.set_mode("/w/a", ProjectMode::AutoUpload, later).unwrap();
+        assert!(!p.is_armed_from_now("/w/a"));
+        assert!(!p.holds_back_from_arming("/w/a", "/s/pre.jsonl", SRC));
+    }
+
+    /// A pass records only for the armings it read before listing the disk,
+    /// so an arming made while discovery walked it stays unrecorded -- and
+    /// so holds everything -- until a later pass.
+    #[test]
+    fn an_arming_record_is_only_for_the_arming_read_before_the_listing() {
+        let mut p = ProjectPolicy::new();
+        let first = t("2026-09-28T00:00:00Z");
+        p.set_mode("/w/a", ProjectMode::AutoUpload, first).unwrap();
+        p.arm_from_now("/w/a", first);
+        let stale = p.armings_from_now();
+        let again = t("2026-09-28T00:05:00Z");
+        p.set_mode("/w/a", ProjectMode::AutoUpload, again).unwrap();
+        p.arm_from_now("/w/a", again);
+        assert!(!p.record_source_for_armings(&stale, SRC, set_of(&["/s/x.jsonl"])));
+        assert!(p.holds_back_from_arming("/w/a", "/s/y.jsonl", SRC));
+    }
+
+    /// The record is pruned to what an arming in force can still hold, and
+    /// emptied with the last arming from now.
+    #[test]
+    fn the_arming_record_is_pruned_to_what_can_still_hold() {
+        let mut p = ProjectPolicy::new();
+        let a = t("2026-09-28T00:00:00Z");
+        p.set_mode("/w/a", ProjectMode::AutoUpload, a).unwrap();
+        p.arm_from_now("/w/a", a);
+        p.record_source_for_armings(&p.armings_from_now(), SRC, set_of(&["/s/one.jsonl"]));
+        let b = t("2026-09-28T01:00:00Z");
+        p.set_mode("/w/b", ProjectMode::AutoUpload, b).unwrap();
+        p.arm_from_now("/w/b", b);
+        p.record_source_for_armings(&p.armings_from_now(), SRC, set_of(&["/s/two.jsonl"]));
+        assert!(!p.prune_arming_record(), "both armings can hold");
+
+        p.set_mode("/w/b", ProjectMode::NotifyOnly, b).unwrap();
+        assert!(p.prune_arming_record());
+        assert!(p.holds_back_from_arming("/w/a", "/s/one.jsonl", SRC));
+        assert!(!p.sessions_on_disk_at_arming.contains_key("/s/two.jsonl"));
+
+        p.set_mode("/w/a", ProjectMode::NotifyOnly, b).unwrap();
+        assert!(p.prune_arming_record());
+        assert!(p.sessions_on_disk_at_arming.is_empty());
+    }
+
+    /// The fields are additive: a policy file written before them loads, with
+    /// nothing armed from now.
+    #[test]
+    fn a_policy_file_without_armings_from_now_loads_with_none() {
+        let mut value = serde_json::to_value(ProjectPolicy::new()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("armed_from_now");
+        object.remove("sessions_on_disk_at_arming");
+        object.remove("next_arming_record");
+        let p: ProjectPolicy = serde_json::from_value(value).unwrap();
+        assert!(p.armed_from_now.is_empty());
+        assert!(!p.holds_back_from_arming("/w/a", "/s/pre.jsonl", SRC));
+    }
+
     /// R6 reaches the grant itself: widened terms void it, so it cannot go
     /// on arming new projects under terms nobody agreed to. Unchanged terms
     /// keep it.
@@ -1873,9 +2295,11 @@ mod tests {
         let object = value.as_object_mut().unwrap();
         object.remove("grant_voids");
         object.remove("next_grant_void_id");
+        object.remove("scrub_check_upgrade_recorded");
         let p: ProjectPolicy = serde_json::from_value(value).unwrap();
         assert!(p.grant_voids.is_empty());
         assert_eq!(p.next_grant_void_id, 0);
+        assert!(!p.scrub_check_upgrade_recorded);
     }
 
     use super::super::arming_wording::ArmingClaim;
@@ -1887,6 +2311,45 @@ mod tests {
                 .unwrap();
         }
         p
+    }
+
+    #[test]
+    fn scrub_check_upgrade_is_once_only_and_keeps_other_notices() {
+        let now = t("2026-09-30T00:00:00Z");
+        let mut p = armed_by_hand(&["/w/api"]);
+        p.scrub_check_upgrade_recorded = false;
+        assert!(p.record_scrub_check_upgrade(true, now));
+        assert_eq!(p.arming_rewordings.len(), 1);
+        let upgrade_id = p.arming_rewordings[0].id;
+        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
+        assert_eq!(p.arming_rewordings.len(), 2);
+        assert!(
+            p.arming_rewordings
+                .iter()
+                .any(|n| n.id == upgrade_id && n.scrub_check_defaulted)
+        );
+        p.acknowledge_arming_rewordings(&[upgrade_id]);
+        assert_eq!(p.arming_rewordings.len(), 1);
+        assert!(!p.record_scrub_check_upgrade(true, now));
+        p.set_mode("/w/api", ProjectMode::NotifyOnly, now).unwrap();
+        assert!(p.arming_rewordings.is_empty());
+    }
+
+    #[test]
+    fn scrub_check_upgrade_does_not_notify_manual_or_later_armed_folders() {
+        let now = t("2026-09-30T00:00:00Z");
+        let mut manual = armed_by_hand(&["/w/api"]);
+        manual.scrub_check_upgrade_recorded = false;
+        assert!(manual.record_scrub_check_upgrade(false, now));
+        assert!(manual.arming_rewordings.is_empty());
+        let mut no_folders = ProjectPolicy::new();
+        no_folders.scrub_check_upgrade_recorded = false;
+        assert!(no_folders.record_scrub_check_upgrade(true, now));
+        no_folders
+            .set_mode("/w/api", ProjectMode::AutoUpload, now)
+            .unwrap();
+        assert!(!no_folders.record_scrub_check_upgrade(true, now));
+        assert!(no_folders.arming_rewordings.is_empty());
     }
 
     /// K5: a folder armed under the old "will be scrubbed" wording, whose

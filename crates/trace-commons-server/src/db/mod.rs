@@ -53,6 +53,10 @@ pub struct InviteGrantWrite {
     pub issued_by_label: Option<String>,
     pub credential_binding_hash: Option<String>,
     pub note_label: Option<String>,
+    /// Public issuer name shown by the non-redeeming lookup (V103).
+    pub issuer_display_name: Option<String>,
+    /// Operator-set `(min, max)` credit points per accepted trace (V103).
+    pub credit_range: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1573,8 +1577,10 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Count passkey-origin accounts that are still `unbound`, in EVERY tenant
-    /// (Z2 S2, the unbound-account ceiling). A cross-tenant read, so the
+    /// Count passkey-origin accounts that hold a slot under the unbound-account
+    /// ceiling, in EVERY tenant (Z2 S2): `unbound` ones, and since V102
+    /// `closed` ones the reaper has not yet removed, so create-then-close
+    /// cycles cannot escape the ceiling. A cross-tenant read, so the
     /// PostgreSQL backend answers through the V98 SECURITY DEFINER function,
     /// never through a runtime-pool query. The default refuses: a backend that
     /// cannot count cannot enforce the ceiling, so creation stays closed.
@@ -1997,6 +2003,10 @@ pub struct ValidatedSession {
     /// is [`AccountBindingState::Legacy`](crate::account_binding::AccountBindingState::Legacy),
     /// which is never gated.
     pub binding: crate::account_binding::AccountBindingState,
+    /// The session's absolute expiry, as stored. Rotation-on-use never moves
+    /// it; the auth middleware caps a rotated cookie's Max-Age at what is left
+    /// of it, so a rotated cookie never outlives its row.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A registered passkey resolved for the LOGIN (assertion) path. Carries only

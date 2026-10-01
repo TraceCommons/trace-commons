@@ -88,9 +88,19 @@ fn digest_body(
         } else {
             "sessions"
         };
-        let from = summarize_digest_labels(contributed_projects)
-            .map(|labels| format!(" from {labels}"))
-            .unwrap_or_default();
+        // A project is named only when exactly one contributed -- the same
+        // rule as the daemon's `notify::contribution_text` and the three
+        // native shells (K9, #1118), matching the design's evening-digest
+        // examples. Unlike the waiting half, never a list.
+        let named: BTreeSet<String> = contributed_projects
+            .iter()
+            .map(String::as_str)
+            .filter_map(sanitize_digest_label)
+            .collect();
+        let from = match named.iter().collect::<Vec<_>>().as_slice() {
+            [only] => format!(" from {only}"),
+            _ => String::new(),
+        };
         let mut line = format!("{contributed_count} {noun} contributed{from}.");
         if credit_pending.is_finite() && credit_pending > 0.0 {
             let rounded = (credit_pending * 10.0).round() / 10.0;
@@ -475,6 +485,27 @@ mod tests {
             Some(
                 "2 sessions ready from alpha and beta.\nNothing is sent until you review them.\n1 session contributed from alpha. 4.3 credit pending."
             )
+        );
+    }
+
+    /// The design's Flow 2 and Flow 3 evening-digest examples, verbatim --
+    /// the same two the daemon and the native shells pin.
+    #[test]
+    fn contribution_line_matches_the_design_examples() {
+        assert_eq!(
+            digest_body(0, &[], 1, &["orchard-api".to_owned()], 6.0).as_deref(),
+            Some("1 session contributed from orchard-api. 6.0 credit pending.")
+        );
+        assert_eq!(
+            digest_body(
+                0,
+                &[],
+                2,
+                &["orchard-api".to_owned(), "portfolio".to_owned()],
+                10.5
+            )
+            .as_deref(),
+            Some("2 sessions contributed. 10.5 credit pending.")
         );
     }
 

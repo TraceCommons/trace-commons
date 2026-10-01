@@ -578,6 +578,10 @@ final class AppModel: ObservableObject {
         submitNearAiCredential { try $0.nearAiCredentialForget() }
     }
 
+    func migrateNearAiCredential() {
+        submitNearAiCredential { try $0.nearAiCredentialMigrate() }
+    }
+
     /// One write, then a re-read of everything the key is behind.
     ///
     /// The listener and the tool list are re-read as well as the card: the
@@ -880,10 +884,11 @@ final class AppModel: ObservableObject {
     /// `recomputeWaiting` and `applyPreviewOutcome`.
     @Published private(set) var nothingMatchedCount: Int = 0
 
-    /// The badge counts DECISIONS OWED -- entries actually waiting for a yes
-    /// or no -- not sessions found and not queue total.
-    var decisionsOwed: Int {
-        awaitingDecision.count
+    /// Only the daemon decides which sessions owe a decision (K6). The
+    /// review list can include sessions held by other gates. Missing on an
+    /// older daemon means unavailable, never an inferred count or zero.
+    var decisionsOwed: Int? {
+        status.decisionsOwed
     }
 
     /// The single place the two derived queue views are rebuilt. Called
@@ -1068,9 +1073,9 @@ final class AppModel: ObservableObject {
             applyPreviewOutcome(result)
         case .queueChanged:
             refreshQueue()
-            // `queue_depth` lives on `status`, and the daemon does not
-            // publish `status_changed` for a queue change, so a status
-            // fetched at launch would stay at 0 forever.
+            // The daemon count lives on `status`, not this local review
+            // list. Fetch it too, including for older event publishers
+            // that don't accompany queue changes with `status_changed`.
             refreshStatus()
             // A queue change is when a project can first become visible:
             // `list_projects` reports discovered projects from the queue, and

@@ -56,6 +56,7 @@ export async function getCoreStatus(): Promise<CoreStatus> {
         consent_scopes: [],
         paused: false,
         queue_depth: 0,
+        decisions_owed: null,
         health: { last_error_label: null, since: null },
       },
     };

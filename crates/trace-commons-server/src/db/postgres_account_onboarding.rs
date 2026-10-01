@@ -5,6 +5,9 @@ use super::*;
 use crate::account_onboarding::{
     NativeProvisioningPending, ProvisionedNearAccount, VerifiedNearProvisioning,
 };
+// The device key is already registered under a different tenant. Public, in
+// `account_onboarding`, because bind shows this refusal to its caller.
+use crate::account_onboarding::DEVICE_KEY_REGISTERED_ELSEWHERE;
 use crate::db::NewSession;
 use crate::near_account_identity::{NearAccountIdentity, random_near_tenant_id};
 use base64::Engine;
@@ -12,15 +15,6 @@ use base64::Engine;
 fn refused() -> DatabaseError {
     DatabaseError::Pool("near_provisioning_refused".into())
 }
-
-/// The device key is already registered under a different tenant.
-///
-/// `device_keys.device_key_id` is a global primary key, so the provisioning
-/// insert cannot place the key under this tenant, and the key would go on
-/// authenticating into the tenant that holds it. Named, so it is not one more
-/// `near_provisioning_refused`; label-only, because which tenant holds the key
-/// is exactly what this path must not disclose.
-const DEVICE_KEY_REGISTERED_ELSEWHERE: &str = "near_provisioning_device_key_registered_elsewhere";
 
 /// The wallet public key is already bound to a different tenant or account.
 const WALLET_KEY_REGISTERED_ELSEWHERE: &str = "near_provisioning_wallet_key_registered_elsewhere";
@@ -796,11 +790,23 @@ impl PgBackend {
         )))
     }
 
-    /// The existing-account branch: provision X as provisioning would, then
-    /// close the passkey account. Two transactions, one per tenant, in that
-    /// order: if X's fails, the passkey account is untouched; if the closure
-    /// fails, the request fails and the passkey account stays `unbound` (the
-    /// session minted for X is never returned, so its secret is gone).
+    /// The existing-account branch: re-check the passkey account, provision X
+    /// as provisioning would, then close the passkey account. Separate
+    /// transactions, one per tenant, in that order: if the re-check fails,
+    /// nothing is written anywhere; if X's fails, the passkey account is
+    /// untouched; if the closure fails, the request fails and the passkey
+    /// account stays `unbound` (the session minted for X is never returned, so
+    /// its secret is gone).
+    ///
+    /// The re-check (#1135 review) is what stops a bind that lost a race --
+    /// the passkey account closed or bound after the anchor resolved -- from
+    /// provisioning X a device and a session nobody is handed. It narrows the
+    /// window rather than closing it: holding the passkey account's row lock
+    /// across X's transaction would close it, but would hold one pooled
+    /// connection while waiting on a second, and the runtime pool has no wait
+    /// timeout, so enough concurrent binds would starve it. What is left is a
+    /// close landing between the re-check and the closure, which the closure's
+    /// own `unbound` guard still refuses.
     #[allow(clippy::too_many_arguments)]
     async fn near_ai_bind_refuse_existing(
         &self,
@@ -812,6 +818,12 @@ impl PgBackend {
         session: &NewSession<'_>,
         material: &NearAiAnchorMaterial,
     ) -> Result<Option<crate::account_onboarding::NearAiBindOutcome>, DatabaseError> {
+        if !self
+            .near_ai_bind_account_still_unbound(own_tenant, account)
+            .await?
+        {
+            return Err(named_refusal(BIND_ACCOUNT_NOT_UNBOUND));
+        }
         let Some(provisioned) = self
             .near_ai_login_provision_in_tenant(
                 login,
@@ -845,34 +857,53 @@ impl PgBackend {
         ))
     }
 
+    /// Whether the passkey account is still an open, `unbound` one: the same
+    /// predicate the in-place state flip matches, read in its own tenant.
+    async fn near_ai_bind_account_still_unbound(
+        &self,
+        tenant: &str,
+        account: &Uuid,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx
+            .query_opt(
+                "SELECT 1 FROM trace_account_bindings b
+                  WHERE b.tenant_id = trace_current_tenant_id() AND b.account_id = $1
+                    AND b.state = 'unbound'
+                    AND EXISTS (SELECT 1 FROM trace_accounts a
+                                 WHERE a.tenant_id = b.tenant_id AND a.account_id = b.account_id
+                                   AND a.closed_at IS NULL)",
+                &[account],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.is_some())
+    }
+
     /// X's active strong-authenticator count and binding state, read under X's
-    /// own tenant. Read-only.
+    /// own tenant. Read-only. The count is the shared
+    /// [`super::active_strong_authenticator_count`] that
+    /// `count_active_strong_authenticators` also reads, not a copy of its SQL.
+    /// That method itself is not called: it first upserts the tenant row, a
+    /// write this path neither needs nor holds a grant for.
     async fn near_ai_bind_existing_account_facts(
         &self,
         tenant: &str,
         account: &Uuid,
     ) -> Result<(i64, crate::account_binding::AccountBindingState), DatabaseError> {
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let row = tx
-            .query_one(
-                "SELECT
-                    (SELECT count(*) FROM trace_webauthn_credentials
-                      WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
-                        AND revoked_at IS NULL)
-                  + (SELECT count(*) FROM trace_near_identities
-                      WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
-                        AND revoked_at IS NULL),
-                    (SELECT state FROM trace_account_bindings
-                      WHERE tenant_id = trace_current_tenant_id() AND account_id = $1)",
-                &[account],
-            )
-            .await?;
-        tx.commit().await?;
-        let state: Option<String> = row.get(1);
-        let binding = crate::account_binding::AccountBindingState::from_stored(state.as_deref())
+        let strong = {
+            let mut client = self.trace_pool().get().await?;
+            let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+            let strong = super::active_strong_authenticator_count(&tx, account).await?;
+            tx.commit().await?;
+            strong
+        };
+        let binding = self
+            .binding_state_for_account(tenant, *account)
+            .await
             .map_err(|_| refused())?;
-        Ok((row.get(0), binding))
+        Ok((strong, binding))
     }
 
     /// Close a passkey account that lost its bind to an existing account, in

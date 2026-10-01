@@ -45,12 +45,13 @@
  * this library returns -- fixed labels only, the same discipline the
  * daemon's socket already applies.
  *
- * THREE NAMED EXEMPTIONS, and no others: tc_discover_sources returns
- * filesystem paths, tc_preview_body returns post-redaction trace content,
- * and tc_witness_status_json returns the witness URL and signing address.
- * Each is documented where it is declared, and each is a value the
- * contributor is being asked to make a decision about -- a consent prompt
- * that will not name what it is asking about is not a consent prompt.
+ * FOUR NAMED EXEMPTIONS, and no others: tc_discover_sources and
+ * tc_discover_opencode_export return filesystem paths, tc_preview_body
+ * returns post-redaction trace content, and tc_witness_status_json returns
+ * the witness URL and signing address. Each is documented where it is
+ * declared, and each is a value the contributor is being asked to make a
+ * decision about -- a consent prompt that will not name what it is asking
+ * about is not a consent prompt.
  *
  * THE PREVIEW EXEMPTION: tc_preview_body is the one and only interface here
  * that deliberately carries trace content, and the rule above is absolute
@@ -89,9 +90,10 @@
  * another thread is inside an accessor for it; the check narrows accidental
  * misuse to a clean error, it does not replace ownership discipline.
  *
- * The six functions that borrow rather than free a tc_handle* --
+ * The seven functions that borrow rather than free a tc_handle* --
  * tc_daemon_stop, tc_call, tc_subscribe, tc_unsubscribe, tc_preview_open,
- * and tc_preview_turns_json -- run the same shape of check on handle
+ * tc_preview_turns_json and tc_preview_unsure_spans_json -- run the same
+ * shape of check on handle
  * before they dereference it: a pointer that is not currently a live
  * tc_handle* (already freed by tc_handle_free, or a tc_preview* passed
  * here by mistake) is refused with the fixed tc_last_error label
@@ -314,7 +316,8 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  *     another window, and a shell that did not start it does not get to end
  *     it. tc_call(h, "shutdown", ...) is refused for the same reason, with
  *     the error frame code "refused" and message "attached-stop-refused".
- *   - tc_preview_open and tc_preview_turns_json are refused with
+ *   - tc_preview_open, tc_preview_turns_json and
+ *     tc_preview_unsure_spans_json are refused with
  *     "preview-requires-embedded". The redacted BODY is this ABI's
  *     in-process content exemption; the socket's "preview" carries the
  *     summary only, and answering with a summary where a body was asked for
@@ -365,15 +368,22 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  * daemon from starting.
  *
  * Returns an owned JSON array; free it with tc_string_free. Each element:
- *   source            "claude-code" | "codex"
+ *   source            "claude-code" | "codex" | "gemini-cli" | "cline"
  *   path              where this store would be watched
  *   exists            whether that directory is there right now
  *   session_count     how many session files, counted recursively
  *   most_recent       RFC 3339 timestamp, or null
  *   relocated_by_env  whether CLAUDE_CONFIG_DIR / CODEX_HOME moved it
+ *   answers_at        the vendor this tool's own calls answer at by
+ *                     default (e.g. "Anthropic"), or null for a tool with
+ *                     no single default. A fixed label this build ships
+ *                     with, never a claim checked against the copy
+ *                     actually installed. OpenCode has none of these
+ *                     rows at all -- see tc_discover_opencode_export.
  *
- * This is the ONE place in this ABI that deliberately returns a filesystem
- * path. Everywhere else a path is withheld because the caller is being told
+ * This is one of the places in this ABI that deliberately returns a
+ * filesystem path -- see the exemptions listed at the top of this file.
+ * Everywhere else a path is withheld because the caller is being told
  * about a trace; here the caller is the contributor's own machine asking
  * which of their own folders to watch, and a consent prompt that will not
  * name what it is asking about is not a consent prompt.
@@ -382,6 +392,30 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  * Returns NULL only on a caught panic.
  */
 char*       tc_discover_sources(void);
+
+/* Describe a folder the contributor has already named as their OpenCode
+ * export directory, so a Customize screen can say "N sessions found" for
+ * the folder they just picked rather than trusting the folder name alone.
+ *
+ * Takes no handle, like tc_discover_sources, and for a stronger reason:
+ * OpenCode has no conventional per-user store to guess at before anyone
+ * has said anything -- its export folder is picked by the contributor, one
+ * at a time -- so it is not one of tc_discover_sources's rows at all,
+ * blind or otherwise. This call describes OpenCode once a folder IS named,
+ * whether that is moments after a folder chooser closes or on a later run
+ * reading back what was already declared (opencode_source in the daemon's
+ * settings).
+ *
+ * Returns an owned JSON object with the same shape as one row of
+ * tc_discover_sources: source (always "opencode"), path, exists,
+ * session_count, most_recent, relocated_by_env (always false) and
+ * answers_at (always null: OpenCode ships with no single default vendor to
+ * name). Free it with tc_string_free.
+ *
+ * Reads directory entries and metadata only; never opens a session file.
+ * Returns NULL for a NULL or non-UTF-8 path, and NULL on a caught panic.
+ */
+char*       tc_discover_opencode_export(const char* path);
 
 /* Every fixed word on the routing surface, in one call.
  *
@@ -746,6 +780,10 @@ int32_t     tc_private_inference_state_tone(const char* state);
 #define TC_CREDENTIAL_ACTION_OBTAIN 31
 #define TC_CREDENTIAL_ACTION_CANCEL 32
 #define TC_CREDENTIAL_ACTION_FORGET 33
+/* Copy a sign-in an earlier build kept in the macOS login keychain into the
+ * store this build uses (near_ai_credential_migrate). Offered only for
+ * "migration_available", which only macOS produces. */
+#define TC_CREDENTIAL_ACTION_MIGRATE 34
 
 /* Why a connect control is not on offer, or the EMPTY STRING.
  *
@@ -1060,6 +1098,19 @@ int32_t     tc_contribution_group_control(int64_t pending, int64_t contributable
  * panic.
  */
 char*       tc_contribution_withheld_line(int64_t withheld);
+
+/* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
+ * limit X of Y", the WYSIWYG design's Flow 2/3 example.
+ *
+ * uploads_today and max_uploads_per_day are status.daily_budget's fields of
+ * the same names; decisions_owed is status.decisions_owed (K6, a separate
+ * branch). All three are clamped to 0 on a negative value, which no honest
+ * caller sends.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a
+ * caught panic.
+ */
+char*       tc_toast_sent_text(int64_t uploads_today, int64_t max_uploads_per_day, int64_t decisions_owed);
 
 /* The sentence for one near_ai_balance state.
  *
@@ -1580,8 +1631,19 @@ char*       tc_route_disclosure_copy(const char* facts_json);
  */
 char*       tc_certificate_detail_copy(void);
 
+/* K9 (#1118): the per-session notification's words -- the design's
+ * "Notification. Body is the consent sentence; one action, 'Look, then
+ * decide'."
+ *
+ * Needs no handle, like tc_consent_copy: it describes the build, not a
+ * running daemon. Returns an owned JSON object with body (the same sentence
+ * tc_consent_copy's gate_statement carries) and action; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_session_notification_copy(void);
+
 /* What a disclosure surface says when tc_route_disclosure_copy answers NULL:
- * panel and session. Owned JSON; free it with tc_string_free. NULL only on a
+ * title, panel and session. Owned JSON; free it with tc_string_free. NULL only on a
  * caught panic.
  */
 char*       tc_route_disclosure_unreadable_copy(void);
@@ -2168,6 +2230,29 @@ int32_t     tc_search_original(tc_handle*, const char* entry_id, const char* nee
 char*       tc_preview_turns_json(tc_handle*, const char* entry_id,
                                   const char* body_digest, char** err);
 
+/* Spans of a redacted preview body that look like personal data the
+ * scrubber did not mark:
+ *   {entry_id, body_digest, envelope_digest, span_count,
+ *    spans: [{label, byte_offset, byte_len}], spans_truncated}
+ *
+ * label is one of looks-like-email, looks-like-phone, looks-like-key. The
+ * offsets index the exact bytes tc_preview_body returned; the text at them
+ * is never repeated here. span_count is the total; spans holds at most 2000
+ * and spans_truncated says whether it was cut.
+ *
+ * body_digest is required and is the anchor, exactly as for
+ * tc_preview_turns_json: a body that is not that one is refused with
+ * preview-body-changed. A body that cannot be indexed exactly is refused
+ * with preview-unsure-index-failed.
+ *
+ * Returns an OWNED JSON string; free with tc_string_free. Returns NULL and
+ * sets *err (owned; also freed with tc_string_free) on failure. A non-NULL
+ * handle that is not a live tc_handle* is refused with
+ * "invalid-handle-pointer".
+ */
+char*       tc_preview_unsure_spans_json(tc_handle*, const char* entry_id,
+                                         const char* body_digest, char** err);
+
 /* The instance an invite link names, as an owned UTF-8 string, or NULL if
  * the argument is not a usable invite.
  *
@@ -2203,6 +2288,21 @@ void        tc_string_free(char*);
  * the returned pointer.
  */
 const char* tc_last_error(void);
+
+/*
+ * Can this process reach the Cloud credential store?
+ *
+ * 0 reachable, 1 unentitled, 2 otherwise. Reads and writes nothing. Exists so
+ * a release pipeline can ask a signed bundle a question no unit test can
+ * answer.
+ *
+ * "Reachable" means the store answered -- with nothing stored, which is the
+ * expected answer for a probe of a reference that was never written. Any
+ * other read failure is 2, not 0: this gates a release, so a store that is
+ * broken for a reason other than entitlement must not report PASS. The
+ * daemon's own sign-in guard maps the same probe more leniently on purpose.
+ */
+int32_t     tc_credential_store_self_check(void);
 
 #ifdef __cplusplus
 }

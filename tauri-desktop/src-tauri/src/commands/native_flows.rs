@@ -97,6 +97,35 @@ pub(crate) fn contributor_disclosure_copy() -> Value {
             })
         })
         .collect::<serde_json::Map<String, Value>>();
+    // Every runtime state's sentence, and whether an indicator may paint it
+    // as working, so a shell renders the core's words for the label the
+    // daemon reports (`private_inference_state.state`) and never its own.
+    let inference_states = {
+        use trace_commons_contributor::private_inference_copy as copy;
+        [
+            copy::LABEL_OFF,
+            copy::LABEL_STOPPING,
+            copy::LABEL_RUNNING,
+            copy::LABEL_RUNNING_NO_BACKENDS,
+            copy::LABEL_RUNNING_ANSWERED_ELSEWHERE,
+            copy::LABEL_RUNNING_DESTINATION_UNKNOWN,
+            copy::LABEL_RUNNING_ELSEWHERE,
+            copy::LABEL_PORT_IN_USE,
+            copy::LABEL_START_FAILED,
+            copy::LABEL_CRASHED,
+        ]
+        .into_iter()
+        .map(|label| {
+            (
+                label.to_owned(),
+                json!({
+                    "line": copy::state_line(label),
+                    "working": copy::state_tone(label).reads_as_working(),
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>()
+    };
     json!({
         "witness_review": witness.review,
         "wallet": witness.wallet,
@@ -125,6 +154,9 @@ pub(crate) fn contributor_disclosure_copy() -> Value {
             "offer_accept": inference.offer_accept,
             "offer_decline": inference.offer_decline,
             "offer_asked_once": inference.offer_asked_once,
+            "states": inference_states,
+            "state_unknown": inference.state_unknown,
+            "state_unreported": inference.state_unreported,
         },
         "project_automatic_unavailable":
             trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE,
@@ -328,6 +360,38 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    /// The runtime state the shell shows is the core's sentence for the
+    /// daemon's label, and only the state the core paints as working may be
+    /// drawn as on.
+    #[test]
+    fn private_ai_state_copy_is_the_cores_line_and_tone_for_each_label() {
+        use trace_commons_contributor::private_inference_copy::{
+            LABEL_OFF, LABEL_PORT_IN_USE, LABEL_RUNNING, LABEL_RUNNING_NO_BACKENDS, STATE_UNKNOWN,
+            STATE_UNREPORTED, state_line,
+        };
+        let copy = contributor_disclosure_copy();
+        let states = copy
+            .pointer("/private_inference/states")
+            .and_then(Value::as_object)
+            .expect("state copy is carried");
+        assert_eq!(states.len(), 10);
+        for label in [
+            LABEL_OFF,
+            LABEL_RUNNING,
+            LABEL_RUNNING_NO_BACKENDS,
+            LABEL_PORT_IN_USE,
+        ] {
+            assert_eq!(states[label]["line"], state_line(label), "{label}");
+            assert_eq!(states[label]["working"], label == LABEL_RUNNING, "{label}");
+        }
+        assert!(states.values().all(|state| state["line"] != STATE_UNKNOWN));
+        assert_eq!(copy["private_inference"]["state_unknown"], STATE_UNKNOWN);
+        assert_eq!(
+            copy["private_inference"]["state_unreported"],
+            STATE_UNREPORTED
+        );
     }
 
     #[test]

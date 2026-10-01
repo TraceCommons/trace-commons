@@ -786,6 +786,58 @@ fn certificate_signing_bytes(certificate: &serde_json::Value) -> Option<Vec<u8>>
     Some(bytes)
 }
 
+/// Ingest's collateral route, joined onto the ingest base.
+pub(crate) const COLLATERAL_PATH: &str = "/v1/attestation-collateral";
+
+/// The largest collateral body read from ingest. A real one is about 25 KB
+/// (PCK chain, CRLs, TCB info and QE identity); this leaves ample headroom
+/// while keeping a misbehaving answer from being buffered whole.
+pub(crate) const MAX_COLLATERAL_BYTES: usize = 1024 * 1024;
+
+/// Why collateral could not be had. Carries nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CollateralUnavailable;
+
+/// Ask ingest for the Intel DCAP collateral of one quote.
+///
+/// Ingest already runs a PCCS client; asking it keeps a second HTTP stack and
+/// Intel's endpoints out of this crate. Shared by the witness transport and
+/// the IronWire quote attestor (`crate::routing::proof_attestor`), so the two
+/// cannot come to fetch or parse it differently. The caller checks `url`
+/// against its allowlist first.
+///
+/// The body is read up to [`MAX_COLLATERAL_BYTES`] and refused past it.
+pub(crate) async fn fetch_collateral(
+    http: &reqwest::Client,
+    url: url::Url,
+    quote: &[u8],
+) -> Result<Collateral, CollateralUnavailable> {
+    let mut response = http
+        .post(url)
+        .json(&serde_json::json!({ "quote_hex": hex::encode(quote) }))
+        .send()
+        .await
+        .map_err(|_| CollateralUnavailable)?;
+    if !response.status().is_success() {
+        return Err(CollateralUnavailable);
+    }
+    if response
+        .content_length()
+        .is_some_and(|declared| declared > MAX_COLLATERAL_BYTES as u64)
+    {
+        return Err(CollateralUnavailable);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| CollateralUnavailable)? {
+        if body.len().saturating_add(chunk.len()) > MAX_COLLATERAL_BYTES {
+            return Err(CollateralUnavailable);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body = std::str::from_utf8(&body).map_err(|_| CollateralUnavailable)?;
+    parse_collateral(body).map_err(|_| CollateralUnavailable)
+}
+
 /// The HTTP implementation.
 pub struct HttpWitnessTransport {
     http: reqwest::Client,
@@ -921,23 +973,11 @@ impl WitnessTransport for HttpWitnessTransport {
     async fn collateral(&self, quote: &[u8]) -> Result<Collateral, WitnessTrustError> {
         let base = self.allowed(&self.collateral_url)?;
         let url = base
-            .join("/v1/attestation-collateral")
+            .join(COLLATERAL_PATH)
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
-        let response = self
-            .http
-            .post(url)
-            .json(&serde_json::json!({ "quote_hex": hex::encode(quote) }))
-            .send()
+        fetch_collateral(&self.http, url, quote)
             .await
-            .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)?;
-        if !response.status().is_success() {
-            return Err(WitnessTrustError::WitnessCollateralUnavailable);
-        }
-        let body = response
-            .text()
-            .await
-            .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)?;
-        parse_collateral(&body).map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)
+            .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)
     }
 
     async fn witness(
@@ -2525,6 +2565,7 @@ mod tests {
             output_tokens: Some(1),
             cost_usd: Some(0.0),
             status: 200,
+            ..Default::default()
         };
         let call = crate::routing::attested::attested_final_call(&[row], dir.path())
             .expect("the fixture must actually be attestable, or these tests prove nothing");

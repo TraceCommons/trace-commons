@@ -23,6 +23,7 @@ should not have made it alone.
 | A.11 Governing law | California, Santa Clara County | Follows the entity's operating location. |
 | B.4 Sub-processors | Named in the document, changes published by amendment | Confirm whether a DPA is required with either processor before contributors in the EU or UK are onboarded. |
 | C Scope definitions | The five scopes as the enum defines them | Confirm the plain-language descriptions do not narrow or widen what the clause permits. |
+| Invite lookup pre-join credit range (`POST /v1/invite/lookup`) | An unauthenticated invite-code holder sees an operator-set credit range (min to max points per accepted trace) before joining, and clients are required to label it "estimated credit per accepted trace, not yet settled" | Settlement is disabled and grading is shadow-mode, and the ledger does not enforce the range, so this is a pre-contract statement about what contributing may earn. Confirm the label is enough to avoid it reading as a payment promise or inducement, and that it is consistent with A.6 (no entitlement, no value). Only someone holding the code sees it; the route is rate-limited. |
 
 ## Facts, each traceable — flag any that read wrongly and I will correct the text
 
@@ -39,7 +40,8 @@ should not have made it alone.
 | No retention or pruning schedule configured | No `TRACE_COMMONS_RETENTION_*` variable set on the pilot |
 | Deleted objects purged from soft-delete after 7 days | Bucket `softDeletePolicy.retentionDurationSeconds = 604800` |
 | Aggregates: minimum cell of 2, suppression only, no noise | `COMMUNITY_MIN_CELL_COUNT_FLOOR = 2`; `TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS=suppression_only`; noise seed is the placeholder `v1:no_noise_yet`, refused on recompute and serve |
-| Withdrawal deletes artifact, file record, object refs, status-derived paths, and errors propagate | `delete_withdrawn_trace_objects`, `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` |
+| Withdrawal deletes the stored envelope and the encrypted artifact, wherever they are recorded: the file-side submission record's receipt, `trace_object_refs`, and every status-derived path. It evicts the trace from the vector index, dedup clusters and future exports. Errors propagate. The submission's metadata record is **kept** as a tombstone and marked revoked, not deleted; the file-side record is marked revoked from #1112 | `delete_withdrawn_trace_objects`, `evict_withdrawn_trace_from_derived_surfaces`, `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` |
+| An account withdrawal keeps a tombstone row indefinitely, and uses it to refuse re-contribution of identical content | A `trace_tombstones` row per withdrawn submission, written by the account withdraw route (#1142) with `trace_id`, `redaction_hash`, `canonical_summary_hash` and the actor ref (`created_by_principal_ref`). It is not deleted by the withdrawal. On PipelineReceipts tenants `receipt_is_tombstoned` (`versioned_pipeline.rs`) matches on `trace_id` or `redaction_hash`, so a re-upload of identical content under a new submission is refused. This is consistent with the legacy path since #1112. See also #1117. |
 | Snapshots refuse to serve when older than 15 minutes | `COMMUNITY_SNAPSHOT_MAX_AGE = 900` seconds |
 | Credits compute but do not settle | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=disabled` |
 

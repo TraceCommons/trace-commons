@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   Breadcrumb,
@@ -9,8 +9,13 @@ import {
 import { HistoryPage } from "../../features/history";
 import { MissionDraftsPage } from "../../features/mission-drafts";
 import { PrivateAiPage } from "../../features/private-ai";
+import { usePrivateAiState } from "../../features/private-ai/public";
 import type { usePublicProfile } from "../../features/profile/public";
-import { WaitingPage } from "../../features/waiting";
+import {
+  useInspectorDemand,
+  WaitingPage,
+  WaitingPrompts,
+} from "../../features/waiting";
 import {
   TracesGraph,
   TracesTree,
@@ -87,6 +92,20 @@ export function MonitorShell({
 
   const go = (next: MonitorView) => navigate(viewPaths[next]);
 
+  // The inspector starts closed in a narrow window, but the undo window,
+  // a review just opened, a folder submit and the core's offers live in it:
+  // each opens it when it appears, so none runs out of sight.
+  const demand = useInspectorDemand();
+  const demandKey = demand.filter(Boolean).join("|");
+  const lastDemand = useRef<string[]>([]);
+  useEffect(() => {
+    const current = demandKey ? demandKey.split("|") : [];
+    if (current.some((item) => !lastDemand.current.includes(item))) {
+      setInspectorOpen(true);
+    }
+    lastDemand.current = current;
+  }, [demandKey]);
+
   return (
     <Window className="h-screen" onClick={() => setViewMenu(false)}>
       <Pane
@@ -111,7 +130,15 @@ export function MonitorShell({
           onInspector={setInspectorOpen}
           onSettings={() => setSettings({ section: null })}
         />
-        <MonitorTabs view={view} queueDepth={core.data?.daemon.queue_depth} onGo={go} />
+        <MonitorTabs
+          view={view}
+          decisionsOwed={
+            core.state === "ready"
+              ? (core.data?.daemon.decisions_owed ?? null)
+              : null
+          }
+          onGo={go}
+        />
         <div
           className={`min-h-0 flex-1 overflow-auto ${view === "traces" ? "px-2" : "px-3 pb-3"}`}
         >
@@ -140,6 +167,9 @@ export function MonitorShell({
           style={{ width: "var(--tc-width-inspector)" }}
           aria-label="Inspector"
         >
+          <div className="tc-page mb-2.5 empty:hidden">
+            <WaitingPrompts />
+          </div>
           {view === "inference" ? (
             <InferenceInspector />
           ) : (
@@ -161,15 +191,16 @@ export function MonitorShell({
 /** Home · Inference · Traces, and the breadcrumb for Home's sub-views. */
 function MonitorTabs({
   view,
-  queueDepth,
+  decisionsOwed,
   onGo,
 }: {
   view: MonitorView;
-  queueDepth: number | undefined;
+  /** The core's count; `null` when unavailable (older daemon, not ready). */
+  decisionsOwed: number | null;
   onGo: (view: MonitorView) => void;
 }) {
-  const workspace = useTracesWorkspace();
-  const privateAiOn = workspace.settings.data?.private_inference === true;
+  // Painted as working only when the core says the reported state is.
+  const privateAiOn = usePrivateAiState().working;
   const subView = view === "missions" || view === "history";
   return (
     <>
@@ -190,8 +221,12 @@ function MonitorTabs({
           {
             value: "traces",
             label: "Traces",
-            // Decisions owed: the sessions waiting for an answer.
-            badge: queueDepth ?? workspace.entries.length,
+            // Decisions owed, never the upload queue: `null` draws a dash.
+            badge: decisionsOwed,
+            badgeLabel:
+              decisionsOwed === null
+                ? "Decisions owed unavailable"
+                : `${decisionsOwed} decisions owed`,
           },
         ]}
       />

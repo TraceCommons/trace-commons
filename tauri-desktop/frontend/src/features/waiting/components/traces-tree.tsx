@@ -1,7 +1,10 @@
 import { useState } from "react";
-import { ListRow } from "../../../design-system";
-import { useEligibilityGroupCopy } from "../../../lib/tauri/use-contributor-copy";
-import { useDirectoryPicker } from "../../../lib/tauri/use-platform-actions";
+import { ResponsiveOverlay } from "../../../components/responsive-overlay";
+import { GlassButton, ListRow } from "../../../design-system";
+import {
+  useContributorDisclosureCopy,
+  useEligibilityGroupCopy,
+} from "../../../lib/tauri/use-contributor-copy";
 import { useSourceRoots } from "../../settings/public";
 import {
   type FolderNode,
@@ -13,6 +16,7 @@ import {
 import { useTracesWorkspace } from "../traces-workspace";
 import type { WaitingEntry } from "../types";
 import { IgnoreProjectControl } from "./ignore-project-control";
+import { ToolWatchDialog } from "./tool-watch-dialog";
 
 type RowMenu = { id: string; kind: "folder" | "session"; label: string };
 
@@ -85,36 +89,20 @@ function ToolBranch({
 }) {
   const workspace = useTracesWorkspace();
   const roots = useSourceRoots();
-  const picker = useDirectoryPicker();
-  const [error, setError] = useState<string | null>(null);
+  const disclosure = useContributorDisclosureCopy();
+  // The switch asks first: the dialog carries the core's source disclosure.
+  const [asking, setAsking] = useState<boolean | null>(null);
   const open = workspace.expanded.includes(tool.id);
   const off = tool.mode !== "watch";
+  // A tool that is not being watched is described in the core's words
+  // (`source_check_lines`); a watched one by its counts.
+  const checkLine = tool.source
+    ? disclosure.data?.source_check_lines[tool.source.name]?.[tool.mode]
+    : undefined;
   const sub =
-    tool.mode === "off"
-      ? "not watched"
-      : tool.mode === "unset" && tool.source
-        ? "folder not set"
-        : `${plural(tool.waiting, "session")} waiting · ${tool.contributed} contributed`;
-
-  const toggleWatch = async (next: boolean) => {
-    if (!tool.source) return;
-    setError(null);
-    try {
-      if (!next) {
-        await roots.save(tool.source.name, "off", "");
-        return;
-      }
-      // The core does not return saved paths, so watching needs a folder.
-      const path = await picker.pick("source_root");
-      await roots.save(tool.source.name, "watch", path);
-    } catch {
-      setError(
-        next
-          ? "Folder not chosen, so nothing changed."
-          : "The source was not changed.",
-      );
-    }
-  };
+    tool.source && tool.mode !== "watch"
+      ? (checkLine ?? disclosure.data?.source_settings.unavailable ?? "—")
+      : `${plural(tool.waiting, "session")} waiting · ${tool.contributed} contributed`;
 
   return (
     <>
@@ -142,13 +130,15 @@ function ToolBranch({
         }
         watched={tool.source ? tool.mode === "watch" : null}
         watchLabel={`Watch ${tool.label}`}
-        watchDisabled={roots.busy || picker.isPending}
-        onToggleWatch={(next) => void toggleWatch(next)}
+        watchDisabled={roots.busy || !disclosure.data || asking !== null}
+        onToggleWatch={(next) => setAsking(next)}
       />
-      {error ? (
-        <p className="m-0 px-11 tc-caption tc-text-outside" role="alert">
-          {error}
-        </p>
+      {asking !== null && tool.source ? (
+        <ToolWatchDialog
+          source={tool.source}
+          next={asking}
+          onClose={() => setAsking(null)}
+        />
       ) : null}
       {open
         ? tool.folders.map((folder) => (
@@ -224,7 +214,11 @@ function FolderBranch({
           submitLabel={
             busy ? "Submitting…" : eligible ? `Submit · ${eligible}` : "Submit"
           }
-          submitTip="Sends every eligible waiting session here."
+          submitTip={
+            eligibility.data?.withheld_line
+              ? `Sends every eligible waiting session here. ${eligibility.data.withheld_line}`
+              : "Sends every eligible waiting session here."
+          }
           onSubmit={
             eligible && !busy && !ignored
               ? () =>
@@ -264,6 +258,14 @@ function FolderBranch({
           />
         ) : null}
       </div>
+      {!ignored && eligibility.data?.withheld_line ? (
+        // The core's line for what Submit leaves behind, with the count the
+        // pill sends -- as the folder card showed it.
+        <p className="m-0 px-14 tc-caption tc-text-tertiary">
+          {eligibility.data.eligible_count} eligible ·{" "}
+          {eligibility.data.withheld_line}
+        </p>
+      ) : null}
       {workspace.bulk.messages[folder.id] ? (
         <p className="m-0 px-14 tc-caption tc-text-accent">
           {workspace.bulk.messages[folder.id]}
@@ -306,9 +308,26 @@ function SessionRow({
   onMenu: (menu: RowMenu | null) => void;
 }) {
   const workspace = useTracesWorkspace();
+  const [confirming, setConfirming] = useState(false);
+  const [dismissError, setDismissError] = useState<string | null>(null);
+  const dismissing = workspace.review.dismissMutation.isPending;
   const selected =
     workspace.selection?.kind === "session" &&
     workspace.selection.id === entry.entry_id;
+  const dismiss = async () => {
+    setDismissError(null);
+    try {
+      await workspace.review.dismissMutation.mutateAsync(entry.entry_id);
+    } catch (cause) {
+      // Kept open, with the selection, so the failure is read where it
+      // happened.
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      setDismissError(`Could not dismiss session. ${detail}`.trim());
+      return;
+    }
+    setConfirming(false);
+    if (selected) workspace.select(null);
+  };
   const tone = entry.attestation_copy?.tone;
   const flagged = tone === "attention" || tone === "refused";
   const menuOpen = menu?.id === entry.entry_id;
@@ -350,11 +369,44 @@ function SessionRow({
           label={menu.label}
           onSelect={() => {
             onMenu(null);
-            void workspace.review.dismissMutation.mutateAsync(entry.entry_id);
-            if (selected) workspace.select(null);
+            setDismissError(null);
+            setConfirming(true);
           }}
         />
       ) : null}
+      <ResponsiveOverlay
+        open={confirming}
+        onOpenChange={(open) => {
+          if (!open && !dismissing) setConfirming(false);
+        }}
+        title="Dismiss this session?"
+        description={`${sessionWhen(entry)} · ${formatBytes(entry.size_bytes)}. Dismissing removes it from the sessions waiting for you, without sending it.`}
+        footer={
+          <div className="flex justify-end gap-2">
+            <GlassButton
+              type="button"
+              onClick={() => setConfirming(false)}
+              disabled={dismissing}
+            >
+              Keep it
+            </GlassButton>
+            <GlassButton
+              className="tc-text-outside"
+              type="button"
+              onClick={() => void dismiss()}
+              disabled={dismissing}
+            >
+              {dismissing ? "Dismissing…" : "Dismiss"}
+            </GlassButton>
+          </div>
+        }
+      >
+        {dismissError ? (
+          <p className="tc-alert m-0" role="alert">
+            {dismissError}
+          </p>
+        ) : null}
+      </ResponsiveOverlay>
     </div>
   );
 }

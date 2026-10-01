@@ -22,7 +22,10 @@ use super::cline::{
     CLINE_DATA_DIR_ENV, CLINE_DIR_ENV, CLINE_SESSION_DATA_DIR_ENV, conventional_root as cline_root,
 };
 use super::gemini_cli::{GEMINI_CLI_HOME_ENV, conventional_root};
-use super::{SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI};
+use super::{
+    SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI, SOURCE_OPENCODE,
+    source_answers_at,
+};
 
 /// The environment variable Claude Code uses to relocate its config
 /// directory, and therefore its `projects/` session store.
@@ -51,6 +54,25 @@ const JSON_SUFFIX: &str = ".json";
 /// messages file specifically.
 const MESSAGES_JSON_SUFFIX: &str = ".messages.json";
 
+/// OpenCode's own export writes one `<session-id>.json` file per session,
+/// directly in the declared folder -- see `source::opencode`, which reads
+/// that folder non-recursively. The count here is flat too, so "N sessions
+/// found" never includes a file the adapter would not read.
+const OPENCODE_JSON_SUFFIX: &str = ".json";
+
+/// How far [`count_sessions`] may look below the store it was handed.
+#[derive(Debug, Clone, Copy)]
+enum Walk {
+    /// Descend into every subdirectory. Only for the conventional stores
+    /// [`probe`] derives itself, whose layouts nest by project or by date.
+    Recursive,
+    /// Read the one directory and nothing below it, stopping after
+    /// `entry_budget` directory entries. For a folder a shell named -- if it
+    /// passes `$HOME` by mistake, this reads one directory's first entries on
+    /// the calling thread rather than the whole tree.
+    Flat { entry_budget: usize },
+}
+
 /// One candidate session store, described well enough to consent to.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceCandidate {
@@ -71,6 +93,16 @@ pub struct SourceCandidate {
     /// Whether an environment variable relocated this store, so a screen can
     /// say why the path is not the usual one.
     pub relocated_by_env: bool,
+    /// The vendor this tool's own calls answer at by default, e.g.
+    /// `"Anthropic"` for Claude Code -- so a folder screen can show "answers
+    /// at Anthropic" beside the row the way the design does.
+    ///
+    /// `None` for a tool this build does not name a default for, which
+    /// includes both an unrecognised source and one -- Cline, OpenCode --
+    /// that ships with no single default to name. This is a fixed label
+    /// from [`super::source_answers_at`]'s table, not a claim this daemon
+    /// checked or verified for the copy actually running on this machine.
+    pub answers_at: Option<String>,
 }
 
 /// Probe both conventional session stores.
@@ -110,6 +142,7 @@ where
                 .join("projects"),
             claude_base.is_some(),
             JSONL_SUFFIX,
+            Walk::Recursive,
         ),
         describe(
             SOURCE_CODEX,
@@ -119,6 +152,7 @@ where
                 .join("sessions"),
             codex_base.is_some(),
             JSONL_SUFFIX,
+            Walk::Recursive,
         ),
         // Appended rather than inserted: a shell written before this source
         // existed indexes the first two rows by position.
@@ -129,6 +163,7 @@ where
             conventional_root(home, &env),
             gemini_relocated,
             JSON_SUFFIX,
+            Walk::Recursive,
         ),
         // Appended: shells index the first rows by position.
         describe(
@@ -138,19 +173,58 @@ where
             cline_root(home, &env),
             cline_relocated,
             MESSAGES_JSON_SUFFIX,
+            Walk::Recursive,
         ),
     ]
 }
 
 /// Probe using this machine's real home and environment.
+///
+/// OpenCode is deliberately absent from this list. Every other row here has
+/// a conventional per-user location this build can guess before anyone has
+/// said anything -- that guess is exactly what `Undeclared::Conventional` in
+/// `source::mod` is for. OpenCode has none: its export folder is picked by
+/// the contributor, one at a time, so there is nothing to probe blind and no
+/// path this call could put in a row without inventing one. See
+/// [`describe_opencode`] for the folder a contributor has actually named.
 pub fn probe_this_machine() -> Vec<SourceCandidate> {
     let home = super::home_dir();
     probe(&home, |key| std::env::var(key).ok())
 }
 
-fn describe(source: &str, path: PathBuf, relocated_by_env: bool, suffix: &str) -> SourceCandidate {
+/// Describe a folder the contributor has already named as their OpenCode
+/// export directory, the way [`probe`]'s rows describe a conventional store.
+///
+/// Unlike every source `probe` returns, this is never called blind: OpenCode
+/// has no conventional location (see [`probe_this_machine`]), so the only
+/// path worth describing is one the contributor picked, typically moments
+/// earlier through a folder chooser. A shell calls this right after that
+/// pick to say "N sessions found" with a real count rather than trusting the
+/// folder name alone, and again later to refresh the row for a folder
+/// recorded in settings (`opencode_source` in
+/// `daemon::settings::DaemonSettings`).
+#[must_use]
+pub fn describe_opencode(path: &Path) -> SourceCandidate {
+    describe(
+        SOURCE_OPENCODE,
+        path.to_path_buf(),
+        false,
+        OPENCODE_JSON_SUFFIX,
+        Walk::Flat {
+            entry_budget: super::opencode::DISCOVERY_ENTRY_BUDGET,
+        },
+    )
+}
+
+fn describe(
+    source: &str,
+    path: PathBuf,
+    relocated_by_env: bool,
+    suffix: &str,
+    walk: Walk,
+) -> SourceCandidate {
     let (exists, session_count, most_recent) = if path.is_dir() {
-        let (count, recent) = count_sessions(&path, suffix);
+        let (count, recent) = count_sessions(&path, suffix, walk);
         (true, count, recent)
     } else {
         (false, 0, None)
@@ -162,6 +236,7 @@ fn describe(source: &str, path: PathBuf, relocated_by_env: bool, suffix: &str) -
         session_count,
         most_recent,
         relocated_by_env,
+        answers_at: source_answers_at(source).map(str::to_string),
     }
 }
 
@@ -174,7 +249,7 @@ fn describe(source: &str, path: PathBuf, relocated_by_env: bool, suffix: &str) -
 /// symlinks: a symlinked directory could point anywhere, and this is a
 /// counting pass whose whole justification is that it stays inside the store
 /// it is describing.
-fn count_sessions(root: &Path, suffix: &str) -> (u64, Option<DateTime<Utc>>) {
+fn count_sessions(root: &Path, suffix: &str, walk: Walk) -> (u64, Option<DateTime<Utc>>) {
     let mut count = 0_u64;
     let mut most_recent: Option<DateTime<Utc>> = None;
     let mut stack = vec![root.to_path_buf()];
@@ -183,7 +258,15 @@ fn count_sessions(root: &Path, suffix: &str) -> (u64, Option<DateTime<Utc>>) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
+        for (index, entry) in entries.enumerate() {
+            if let Walk::Flat { entry_budget } = walk
+                && index >= entry_budget
+            {
+                break;
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
@@ -192,7 +275,9 @@ fn count_sessions(root: &Path, suffix: &str) -> (u64, Option<DateTime<Utc>>) {
             }
             let path = entry.path();
             if file_type.is_dir() {
-                stack.push(path);
+                if matches!(walk, Walk::Recursive) {
+                    stack.push(path);
+                }
                 continue;
             }
             let is_session = entry
@@ -422,5 +507,93 @@ mod tests {
 
         let found = probe(home.path(), no_env);
         assert_eq!(found[0].session_count, 1);
+    }
+
+    #[test]
+    fn opencode_is_never_in_the_blind_probe() {
+        // OpenCode has no conventional location to guess at, unlike every
+        // other row here -- see `describe_opencode` for the folder a
+        // contributor has actually named.
+        let home = Scratch::new("opencode-blind");
+        let found = probe(home.path(), no_env);
+        assert!(!found.iter().any(|c| c.source == SOURCE_OPENCODE));
+    }
+
+    #[test]
+    fn opencode_is_discovered_once_a_folder_is_named() {
+        let exports = Scratch::new("opencode-exports");
+        write_session(exports.path(), "ses_a.json");
+        write_session(exports.path(), "ses_b.json");
+
+        let candidate = describe_opencode(exports.path());
+        assert_eq!(candidate.source, SOURCE_OPENCODE);
+        assert!(candidate.exists);
+        assert_eq!(candidate.session_count, 2);
+        assert!(!candidate.relocated_by_env);
+    }
+
+    #[test]
+    fn an_opencode_folder_is_counted_flat_like_the_adapter_reads_it() {
+        // `source::opencode` reads the declared folder non-recursively, so a
+        // nested `.json` must not show up in "N sessions found".
+        let exports = Scratch::new("opencode-flat");
+        write_session(exports.path(), "ses_a.json");
+        let nested = exports.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        write_session(&nested, "ses_b.json");
+
+        assert_eq!(describe_opencode(exports.path()).session_count, 1);
+    }
+
+    #[test]
+    fn an_opencode_folder_count_stops_at_the_adapters_entry_budget() {
+        // A shell that passes a huge folder (say `$HOME` by mistake) gets a
+        // bounded read on the calling thread, not a full listing.
+        let exports = Scratch::new("opencode-budget");
+        let budget = crate::source::opencode::DISCOVERY_ENTRY_BUDGET;
+        for i in 0..budget + 10 {
+            write_session(exports.path(), &format!("ses_{i}.json"));
+        }
+
+        let counted = describe_opencode(exports.path()).session_count;
+        assert_eq!(counted, budget as u64);
+    }
+
+    #[test]
+    fn a_folder_named_for_opencode_that_is_not_there_is_reported_absent() {
+        let home = Scratch::new("opencode-missing");
+        let candidate = describe_opencode(&home.path().join("never-created"));
+        assert!(!candidate.exists);
+        assert_eq!(candidate.session_count, 0);
+        assert_eq!(candidate.most_recent, None);
+    }
+
+    #[test]
+    fn each_tools_answers_at_label_is_a_fixed_word_or_absent() {
+        let home = Scratch::new("answers-at");
+        let found = probe(home.path(), no_env);
+
+        let by_source = |name: &str| {
+            found
+                .iter()
+                .find(|c| c.source == name)
+                .unwrap_or_else(|| panic!("probe must report {name}"))
+                .answers_at
+                .clone()
+        };
+        assert_eq!(by_source(SOURCE_CLAUDE_CODE), Some("Anthropic".to_string()));
+        assert_eq!(by_source(SOURCE_CODEX), Some("OpenAI".to_string()));
+        assert_eq!(by_source(SOURCE_GEMINI_CLI), Some("Google".to_string()));
+        assert_eq!(
+            by_source(SOURCE_CLINE),
+            None,
+            "Cline ships with no single default vendor to name"
+        );
+
+        assert_eq!(
+            describe_opencode(home.path()).answers_at,
+            None,
+            "OpenCode ships with no single default vendor to name"
+        );
     }
 }

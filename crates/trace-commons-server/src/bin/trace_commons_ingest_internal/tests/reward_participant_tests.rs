@@ -530,6 +530,15 @@ async fn suspended_offer_scenario(fixture: &RewardHttpFixture) {
     .await;
 }
 
+/// How long `blocked_reservation_preserves_query_capacity_scenario` waits on
+/// any one step before calling it hung. The scenario holds the tenant's
+/// advisory lock open until its final rollback, so a request that wrongly
+/// queued on that lock or on the pool would never answer at all; one that is
+/// refused in process, or served, answers as soon as the runner gets to it.
+/// The bound only turns a hang into a failure, so it is generous: a two-second
+/// bound failed on a loaded runner (`Elapsed`) with nothing wrong.
+const SCENARIO_HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn blocked_reservation_preserves_query_capacity_scenario(fixture: &RewardHttpFixture) {
     let offer = publish_offer(fixture.backends.issuer.as_ref(), Uuid::new_v4()).await;
     let mut admin = fixture
@@ -557,14 +566,14 @@ async fn blocked_reservation_preserves_query_capacity_scenario(fixture: &RewardH
             &json!({"reservation_id":Uuid::new_v4(),"offer_version_hash":offer.offer_version_hash}),
         );
     let pending = tokio::spawn(request.send());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(SCENARIO_HANG_BOUND, async {
         loop {
             let waiting: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))", &[]).await.unwrap().get(0);
             if waiting { break; }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }).await.expect("first reservation reaches its database lock");
-    let repeated = tokio::time::timeout(std::time::Duration::from_secs(2), fixture.client
+    let repeated = tokio::time::timeout(SCENARIO_HANG_BOUND, fixture.client
         .post(format!("{}/v1/account/reward-offers/{}/reservations", fixture.base, offer.program_id))
         .header(COOKIE.as_str(), fixture.cookie_header())
         .json(&json!({"reservation_id":Uuid::new_v4(),"offer_version_hash":offer.offer_version_hash}))
@@ -572,7 +581,7 @@ async fn blocked_reservation_preserves_query_capacity_scenario(fixture: &RewardH
     assert_eq!(repeated.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
     assert_safe_reqwest_headers(repeated.headers());
     let public = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        SCENARIO_HANG_BOUND,
         fixture
             .client
             .get(format!(
@@ -599,7 +608,7 @@ async fn blocked_reservation_preserves_query_capacity_scenario(fixture: &RewardH
             .header(COOKIE.as_str(), fixture.cookie_header())
             .send(),
     );
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(SCENARIO_HANG_BOUND, async {
         loop {
             let waiting: i64 = tx.query_one("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())", &[]).await.unwrap().get(0);
             if waiting >= 2 { break; }

@@ -1,2 +1,6 @@
 export * from "./public";
-export { WaitingPage } from "./waiting-page";
+export {
+  useInspectorDemand,
+  WaitingPage,
+  WaitingPrompts,
+} from "./waiting-page";

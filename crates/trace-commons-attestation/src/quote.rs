@@ -92,6 +92,13 @@ pub struct VerifiedQuote {
     pub advisory_ids: Vec<String>,
 }
 
+/// The only TCB verdict a verifier in this repo accepts. Anything else --
+/// `OutOfDate`, `ConfigurationNeeded`, `SWHardeningNeeded`, their
+/// combinations, `Revoked` -- means the platform is behind on a fix Intel
+/// considers necessary, and it earns nothing. The server's NEAR AI drill and
+/// the contributor's receipt-proof attestor both read this one constant.
+pub const REQUIRED_TCB_STATUS: &str = "UpToDate";
+
 /// Parse Intel DCAP collateral from its JSON serialization.
 pub fn parse_collateral(json: &str) -> Result<Collateral, QuoteVerifyError> {
     serde_json::from_str(json).map_err(|e| QuoteVerifyError::CollateralMalformed {

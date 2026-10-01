@@ -12,8 +12,9 @@ export const routePaths = {
   "mission-drafts": "/mission-drafts",
   profile: "/profile",
   settings: "/settings",
-  // Kept so a deep link or tray path to them still lands somewhere: the
-  // Monitor design has no place for these views, so they open Home.
+  // Kept so a deep link or tray path still lands somewhere. Insights has no
+  // place in the Monitor design and opens Home; Compute opens its Settings
+  // section, where its consent is paused, resumed and withdrawn.
   insights: "/insights",
   compute: "/compute",
 } as const;
@@ -77,5 +78,6 @@ export function settingsSectionFromPath(pathname: string): string | null {
   const route = routeIdFromPath(pathname);
   if (route === "settings") return "connection";
   if (route === "profile") return "profile";
+  if (route === "compute") return "compute";
   return null;
 }

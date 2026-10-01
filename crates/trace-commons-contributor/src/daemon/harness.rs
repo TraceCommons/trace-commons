@@ -750,6 +750,14 @@ fn catalog() -> Catalog {
     }
 }
 
+/// The harness rows as `harness_list` would compute them right now.
+///
+/// For `inference_map`, which needs the same `connected` / `wired` answer the
+/// list gives rather than a second reading of the same files.
+pub(crate) fn rows_now(shared: &DaemonShared) -> Vec<HarnessRow> {
+    list(&catalog(), &activity_for(shared), shared.destination_port())
+}
+
 /// What the ledger can say about calls that arrived, rolled up by family.
 fn activity_for(shared: &DaemonShared) -> FamilyActivity {
     let Some(ledger) = shared.routing_ledger() else {
@@ -872,6 +880,14 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
                 "config_path": path_value(row.config_path.as_deref()),
                 "connect_command": row.connect_command,
                 "family": row.family,
+                // The vendor this tool answers at by default, from the same
+                // fixed table `source::discovery` draws its rows'
+                // `answers_at` from -- see `source::vendor_label`. Derived
+                // from `family` rather than a second lookup by `id`, so the
+                // two surfaces cannot name a family and its vendor
+                // differently. `None` for a catalog-described tool, which
+                // has no family and therefore no claimed default either.
+                "answers_at": row.family.and_then(crate::source::vendor_label),
                 "state": row.state.label(),
                 // The time that makes "answering" mean something. Present
                 // only where the family belongs to this tool alone; a shared
@@ -1408,6 +1424,7 @@ mod tests {
             output_tokens: None,
             cost_usd: None,
             status: 200,
+            ..Default::default()
         }
     }
 

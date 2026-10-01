@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { GlassButton, Modal } from "../../design-system";
+import { ComputePanel, useComputeStatus } from "../../features/compute";
+import { usePrivateAiState } from "../../features/private-ai/public";
 import { ProfilePage } from "../../features/profile";
 import type { usePublicProfile } from "../../features/profile/public";
 import { SettingsPage, settingsSections } from "../../features/settings";
@@ -87,6 +89,7 @@ export function SettingsModal({
       </nav>
       <div ref={bodyRef} className="relative min-h-0 overflow-auto px-5 pt-3.5 pb-6">
         <SettingsPage
+          key={core.scope}
           onTurnOnAutomaticContributing={() => {
             onClose();
             navigate(flowPaths["automatic-contributing"]);
@@ -103,10 +106,7 @@ export function SettingsModal({
           }
           privateAi={
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <span className="tc-label font-normal">
-                Private AI has its own screen: the connection, the tools that
-                answer through it, and the balance.
-              </span>
+              <PrivateAiStateLine />
               <GlassButton
                 onClick={() => {
                   onClose();
@@ -117,8 +117,35 @@ export function SettingsModal({
               </GlassButton>
             </div>
           }
+          compute={<ComputeSection />}
         />
       </div>
     </Modal>
   );
+}
+
+/** The core's sentence for what Private AI is doing now. */
+function PrivateAiStateLine() {
+  const state = usePrivateAiState();
+  return (
+    <span className="tc-label min-w-0 flex-1 font-normal">
+      {state.line ?? "—"}
+    </span>
+  );
+}
+
+/**
+ * Compute consent, reachable whatever else is on screen: a consent granted
+ * in any build can be paused, resumed and withdrawn here.
+ */
+function ComputeSection() {
+  const compute = useComputeStatus();
+  if (compute.state === "loading") {
+    return (
+      <p className="m-0 tc-body tc-text-tertiary" role="status">
+        Reading compute settings…
+      </p>
+    );
+  }
+  return <ComputePanel compute={compute} />;
 }
