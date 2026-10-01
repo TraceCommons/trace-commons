@@ -1257,15 +1257,19 @@ async fn pipeline_restore_resume() {
             .expect("restore_owner_connection_failed"),
     );
     let tenants = tenant_fingerprint(&owner).await;
-    assert!(
-        tenants.hash == seed.tenant_fingerprint && tenants.tenants.len() == seed.tenant_count,
-        "restore_tenant_fingerprint_mismatch"
-    );
+    // The audit chain is verified before the fingerprint is compared (wave
+    // 2; review-fix concern 4): the fingerprint covers `trace_audit_events`
+    // too, so a changed audit row would otherwise report as a fingerprint
+    // mismatch rather than as the broken chain it is.
     let audit_events_verified: usize =
         verified_audit_events(&mains, &tenants.tenants, "restore_audit_chain_broken")
             .await
             .values()
             .sum();
+    assert!(
+        tenants.hash == seed.tenant_fingerprint && tenants.tenants.len() == seed.tenant_count,
+        "restore_tenant_fingerprint_mismatch"
+    );
     assert_eq!(
         audit_events_verified, seed.audit_event_count,
         "restore_audit_event_count_mismatch"

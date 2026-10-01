@@ -115,8 +115,9 @@ resume's protected log:
 | Every one of those tables enables and forces RLS | `restore_rls_not_enabled_and_forced` |
 | Every RLS policy in the schema is the seed's, field for field: table, name, command, permissive or restrictive, roles, and both expressions. PostgreSQL ORs permissive policies, so a policy added beside the tenant policy, or one whose roles widen, would open a table the two checks above call isolated | `restore_rls_policy_set_changed` |
 | The runtime login holds every privilege it held before the dump, of every type: tables, columns, sequences, functions, and the schema | `restore_runtime_privileges_changed` |
+| Every tenant's `main` audit chain verifies (`main`'s own verifier). Checked before the fingerprint below, which covers the audit rows too, so a changed audit row reports here | `restore_audit_chain_broken` |
 | Every tenant's rows in those tables (count and row hash per table and tenant, read by the owner) equal the seed's | `restore_tenant_fingerprint_mismatch` |
-| Every tenant's `main` audit chain verifies (`main`'s own verifier) and holds the seed's events | `restore_audit_chain_broken`, `restore_audit_event_count_mismatch` |
+| The audit chains hold the seed's hashed events | `restore_audit_event_count_mismatch` |
 
 On success it prints a second line with this evidence (the table count,
 the policy set's hash and size, the privilege set's hash and size, the
