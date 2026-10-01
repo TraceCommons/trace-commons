@@ -23543,6 +23543,126 @@ async fn a_score_that_finds_the_tenant_lock_held_is_released_uncharged() {
     assert_eq!(scored.next_phase, Some(Phase::Settle));
 }
 
+/// Zaki review 3, Z3-L1: a compatibility Score reads the index commands of
+/// the tenant's runs waiting for Settle, and one it cannot read fails the
+/// Score closed (`index_unavailable`, uncharged): leaving it out could credit
+/// a duplicate twice. The read never selects a run whose command was
+/// removed on purpose -- its submission withdrawn, its revision's
+/// invalidation queued, or the run failed for good -- so deleting those
+/// commands' objects does not stop a later Score; deleting the command of a
+/// run still waiting for Settle does.
+#[tokio::test]
+async fn a_compatibility_score_reads_only_commands_still_to_apply() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // Every trace novel and every chunk inserted, so each run stores a
+    // command.
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.embed_insert_novelty_micros = 0;
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        config,
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let runs = PgPipelineStore::new(backend.clone());
+    let tenant = format!("compat-unapplied-guard-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let scored = || async {
+        let run_id = receive_envelope(
+            &service,
+            &tenant,
+            RECEIPT_PRINCIPAL,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await;
+        for phase in ["Review", "Score"] {
+            service
+                .process_run(&tenant, run_id)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{phase} runs"));
+        }
+        let run = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+        assert_eq!(run.next_phase, Some(Phase::Settle));
+        assert!(
+            run.index_command_ref.is_some(),
+            "the Score stored a command"
+        );
+        run
+    };
+    let delete_command = |run: &PipelineRunRecord| {
+        let (object_key, _) = run
+            .index_command_ref
+            .as_deref()
+            .unwrap()
+            .rsplit_once('#')
+            .unwrap();
+        std::fs::remove_file(artifact_file_path(
+            dir.path(),
+            tenant_ref.as_str(),
+            object_key,
+        ))
+        .unwrap();
+    };
+
+    let withdrawn = scored().await;
+    withdraw(&service, &tenant, withdrawn.submission_id).await;
+    let invalidated = scored().await;
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    PgPipelineStore::enqueue_index_invalidation_on_tx(&tx, &invalidated, "run_failed", None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let failed = scored().await;
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET state = 'failed', last_error_label = 'attempts_exhausted'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &failed.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    for run in [&withdrawn, &invalidated, &failed] {
+        delete_command(run);
+    }
+    scored().await;
+
+    let waiting = runs
+        .get_run(&tenant, scored().await.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    delete_command(&waiting);
+    let next = receive_envelope(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    service.process_run(&tenant, next).await.unwrap();
+    service.process_run(&tenant, next).await.unwrap();
+    let blocked = runs.get_run(&tenant, next).await.unwrap().unwrap();
+    assert_eq!(
+        (blocked.state, blocked.last_error_label.as_deref()),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+        ),
+        "an unreadable command still to apply fails the Score closed, uncharged"
+    );
+}
+
 /// Finding 12 on a pool of one: a compatibility Score reads its approved
 /// bytes before it opens the transaction that holds the tenant's Score
 /// lock, reads the unapplied index commands and commits on that same

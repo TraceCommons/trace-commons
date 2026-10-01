@@ -2477,17 +2477,22 @@ impl PgPipelineStore {
     /// A run no claim can select (not `leased`, its attempts spent) is left
     /// out: it would never apply its command, so it must not take a later
     /// near-duplicate's award (multi-lens review L2-1's backstop).
-    /// Each row is `(stored ref, command hash, revision id)`, by `run_id`.
-    /// `idx_pipeline_runs_work` leads with `(tenant_id, state)`, so the read
-    /// covers the tenant's runs in flight, not its history.
+    /// Each row is `(run id, stored ref, command hash, revision id)`, by
+    /// `run_id`. A run whose command was removed on purpose -- its
+    /// submission withdrawn, revoked, purged or expired, its revision's
+    /// invalidation queued, or the run failed for good -- is never selected
+    /// (Zaki review 3, Z3-L1). `idx_pipeline_runs_work` leads with
+    /// `(tenant_id, state)`, so the read covers the tenant's runs in flight,
+    /// not its history.
     pub async fn unapplied_index_commands_on_tx(
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
-    ) -> Result<Vec<(String, String, Uuid)>, DatabaseError> {
+    ) -> Result<Vec<(Uuid, String, String, Uuid)>, DatabaseError> {
         let rows = tx
             .query(
                 concat!(
-                    "SELECT r.index_command_ref, r.index_command_hash, r.approved_revision_id
+                    "SELECT r.run_id, r.index_command_ref, r.index_command_hash,
+                        r.approved_revision_id
                    FROM pipeline_runs r
                    JOIN trace_submissions s
                      ON s.tenant_id = r.tenant_id AND s.submission_id = r.submission_id
@@ -2515,9 +2520,10 @@ impl PgPipelineStore {
             .iter()
             .map(|row| {
                 (
-                    row.get::<_, String>(0),
+                    row.get::<_, Uuid>(0),
                     row.get::<_, String>(1),
-                    row.get::<_, Uuid>(2),
+                    row.get::<_, String>(2),
+                    row.get::<_, Uuid>(3),
                 )
             })
             .collect())
@@ -8295,13 +8301,22 @@ impl PipelineService {
             return Err(stale_lease_error().into());
         }
         let mut commands = Vec::new();
-        for (stored_ref, command_hash, revision) in
+        for (unapplied_run_id, stored_ref, command_hash, revision) in
             PgPipelineStore::unapplied_index_commands_on_tx(&lock, run).await?
         {
             commands.push(
                 self.read_index_command(&run.tenant_id, &stored_ref, &command_hash, revision)
                     .await
                     .map_err(|_| {
+                        // Zaki review 3, Z3-L1: fail closed, and name the run
+                        // whose command cannot be read by its hash, so an
+                        // operator can find it.
+                        tracing::warn!(
+                            label = "pipeline_unapplied_index_command_unreadable",
+                            tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
+                            run_ref_hash = %sha256_prefixed(unapplied_run_id.to_string().as_bytes()),
+                            "a compatibility Score cannot read another run's index command"
+                        );
                         PolicyError::transient(PIPELINE_INDEX_UNAVAILABLE_LABEL)
                             .expect("static label")
                     })?,

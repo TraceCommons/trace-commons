@@ -736,6 +736,18 @@ uncharged, as `score_lock_busy`, for 2 seconds, and that replica ends the
 tenant's batch for the pass and goes on to its other tenants. Other tenants
 and the other phases are not serialized.
 
+A Score that cannot read one of those unapplied index commands fails closed:
+its run waits in `retry`, uncharged, as `index_unavailable`, since leaving
+the command out could credit a near-duplicate twice. Until that command can
+be read, or its run settles or fails, every compatibility Score of the tenant
+waits the same way. The read never selects a run whose command was removed on
+purpose (its submission withdrawn, revoked, purged or expired, its revision's
+invalidation queued, or the run failed for good). The worker logs
+`pipeline_unapplied_index_command_unreadable` with `run_ref_hash`, the
+SHA-256 of the run id's text; find the run with
+`SELECT run_id FROM pipeline_runs WHERE tenant_id = '<tenant>' AND
+'sha256:' || encode(sha256(run_id::text::bytea), 'hex') = '<run_ref_hash>'`.
+
 The Score holds its transaction (and the lock) open while the scorer and the
 embedder run, so the ingest login must not have an
 `idle_in_transaction_session_timeout` (or a `statement_timeout`) shorter than
