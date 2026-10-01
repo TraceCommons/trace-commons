@@ -7939,10 +7939,14 @@ impl PipelineService {
     /// present, or cannot tell (`None`), gets one. A row with no hash (a
     /// compatibility Score staged it before its tenant lock and never
     /// committed it; rebase 10, option D) gets
-    /// `delete_artifact_at_object_key` at its key. A delete failure (or a
-    /// presence check that itself errors) logs
-    /// `pipeline_attempt_sweep_delete_failed` and keeps the row for the next
-    /// pass; otherwise the row is deleted.
+    /// `delete_artifact_at_object_key` at its key, but only when the store
+    /// derives that same key from the row's artifact, run and lease token
+    /// (rebase 10 review, M1); a row whose key differs is kept, with its
+    /// object, and logs `pipeline_attempt_sweep_key_mismatch`. A delete
+    /// failure (or a presence check or key derivation that itself errors)
+    /// logs `pipeline_attempt_sweep_delete_failed` and keeps the row for the
+    /// next pass; otherwise the row is deleted. Every store call runs on the
+    /// blocking pool.
     /// The run's own `pipeline_runs` row, and its committed objects, are
     /// never touched here. Returns how many rows it removed.
     pub async fn sweep_attempt_artifacts(
@@ -7979,9 +7983,9 @@ impl PipelineService {
             // loosens the constraint, or direct DB tampering), fail this
             // sweep pass closed -- an error the caller logs and retries next
             // pass -- rather than panic the worker's supervised task.
-            let artifact_kind = PipelineAttemptArtifact::from_db_str(&artifact)
-                .ok_or_else(|| anyhow::anyhow!("pipeline_attempt_artifact_kind_unrecognized"))?
-                .store_kind();
+            let attempt_artifact = PipelineAttemptArtifact::from_db_str(&artifact)
+                .ok_or_else(|| anyhow::anyhow!("pipeline_attempt_artifact_kind_unrecognized"))?;
+            let artifact_kind = attempt_artifact.store_kind();
 
             // The store calls are synchronous, so they run on the blocking
             // pool while this transaction keeps the rows locked, as every
@@ -7991,19 +7995,40 @@ impl PipelineService {
             let store = self.artifact_store.clone();
             let tenant = tenant_storage_ref.clone();
             let key = object_key.clone();
-            let delete_failed = on_blocking_pool(move || {
+            let outcome = on_blocking_pool(move || {
                 Ok(match ciphertext_sha256 {
                     // Rebase 10, option D: a row a compatibility Score staged
                     // before its tenant lock and never committed has no
                     // hash. Its object, if the attempt published one, is at
-                    // the row's key, which carries the attempt's own lease
-                    // token, so no other object is ever stored there: delete
-                    // whatever is stored at the key (`Ok(false)` when the
-                    // attempt published nothing). No hash comparison is
-                    // possible, and none is needed to pick the object.
-                    None => store
-                        .delete_artifact_at_object_key(tenant.as_str(), artifact_kind, &key)
-                        .is_err(),
+                    // the key the store derives from the row's own artifact,
+                    // run and lease token (`pipeline_attempt_object_id`), and
+                    // the lease token is the attempt's own, so no other
+                    // object is ever stored there. The sweep derives that key
+                    // again and deletes only when the row names it (rebase
+                    // 10 review, M1): a row whose key names another object is
+                    // kept, and that object is never deleted by key alone.
+                    // `Ok(false)` from the delete is an attempt that
+                    // published nothing.
+                    None => match store.serialized_json_object_key(
+                        tenant.as_str(),
+                        artifact_kind.clone(),
+                        &pipeline_attempt_object_id(attempt_artifact.as_str(), run_id, lease_token),
+                    ) {
+                        Ok(derived) if derived == key => {
+                            match store.delete_artifact_at_object_key(
+                                tenant.as_str(),
+                                artifact_kind,
+                                &key,
+                            ) {
+                                Ok(_) => AttemptSweepRow::Remove,
+                                Err(_) => {
+                                    AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED)
+                                }
+                            }
+                        }
+                        Ok(_) => AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH),
+                        Err(_) => AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED),
+                    },
                     Some(ciphertext_sha256) => {
                         let present = store.artifact_present_by_object_key(
                             tenant.as_str(),
@@ -8022,8 +8047,8 @@ impl PipelineService {
                         // whose delete errors on an absent object keeps the
                         // row for the next pass rather than mistaking
                         // "unknown" for "gone".
-                        match present {
-                            Ok(Some(false)) => false,
+                        let deleted = match present {
+                            Ok(Some(false)) => true,
                             Ok(Some(true)) | Ok(None) => {
                                 let receipt = EncryptedTraceArtifactReceipt {
                                     tenant_storage_ref: tenant.as_str().to_string(),
@@ -8032,21 +8057,34 @@ impl PipelineService {
                                     ciphertext_sha256,
                                     encrypted_at: Utc::now(),
                                 };
-                                store.delete_artifact(tenant.as_str(), &receipt).is_err()
+                                store.delete_artifact(tenant.as_str(), &receipt).is_ok()
                             }
-                            Err(_) => true,
+                            Err(_) => false,
+                        };
+                        if deleted {
+                            AttemptSweepRow::Remove
+                        } else {
+                            AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED)
                         }
                     }
                 })
             })
             .await
-            .unwrap_or(true);
-            if delete_failed {
-                tracing::warn!(
-                    label = "pipeline_attempt_sweep_delete_failed",
-                    "a pipeline attempt object could not be deleted; its row is kept \
-                     for the next pass"
-                );
+            .unwrap_or(AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED));
+            if let AttemptSweepRow::Keep(label) = outcome {
+                if label == PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH {
+                    tracing::warn!(
+                        label,
+                        "a pipeline attempt row names an object key other than its own; \
+                         the row and that object are kept"
+                    );
+                } else {
+                    tracing::warn!(
+                        label,
+                        "a pipeline attempt object could not be deleted; its row is kept \
+                         for the next pass"
+                    );
+                }
                 continue;
             }
             tx.execute(
@@ -11864,6 +11902,23 @@ impl PipelineAttemptArtifact {
             Self::IndexCommand | Self::ScoreNeighbors => TraceArtifactKind::VectorPayload,
         }
     }
+}
+
+/// The sweep could not delete a due attempt row's object (or could not
+/// tell whether it is gone); the row stays for the next pass.
+const PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED: &str = "pipeline_attempt_sweep_delete_failed";
+/// A due attempt row with no hash names an object key other than the one
+/// the store derives from the row's artifact, run and lease token (rebase
+/// 10 review, M1); the row and that object stay.
+const PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH: &str = "pipeline_attempt_sweep_key_mismatch";
+
+/// What `PipelineService::sweep_attempt_artifacts` does with one due row
+/// once it has handled the row's object.
+enum AttemptSweepRow {
+    /// The object is gone; the row is deleted.
+    Remove,
+    /// The row stays, and the sweep logs this label.
+    Keep(&'static str),
 }
 
 /// The attempt rows a compatibility Score staged before it took its

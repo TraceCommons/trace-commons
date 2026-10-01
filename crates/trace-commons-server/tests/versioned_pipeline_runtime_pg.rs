@@ -26698,6 +26698,119 @@ async fn index_rebuild_writes_off_the_runtime_workers() {
     );
 }
 
+/// Rebase 10 review, M1: the sweep deletes a no-hash row's object only at
+/// the key the store derives from the row's own artifact, run and lease
+/// token (`pipeline_attempt_object_id`). A due no-hash row whose key names
+/// another object of the tenant -- here one stored under an unrelated
+/// object id -- is kept (the sweep logs `pipeline_attempt_sweep_key_mismatch`),
+/// and that object stays. A due no-hash row whose key is its own derived
+/// key is still swept, with its object.
+#[tokio::test]
+async fn the_sweep_keeps_a_no_hash_row_whose_key_names_another_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("sweep-key-mismatch-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run_id = run_past_review(&service, &tenant).await.run_id;
+    let content = serde_json::to_vec(&serde_json::json!({ "sweep_key_test": true })).unwrap();
+
+    // Another object of the tenant, which no attempt row names.
+    let other = artifacts
+        .put_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            "pipeline-sweep-key-mismatch-other",
+            &content,
+        )
+        .unwrap();
+    // An attempt object at its own derived key.
+    let own_lease_token = uuid::Uuid::new_v4();
+    let own = artifacts
+        .put_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &pipeline_attempt_object_id("score-neighbors", run_id, own_lease_token),
+            &content,
+        )
+        .unwrap();
+
+    let forged_lease_token = uuid::Uuid::new_v4();
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        for (lease_token, artifact, object_key) in [
+            (forged_lease_token, "index-command", &other.object_key),
+            (own_lease_token, "score-neighbors", &own.object_key),
+        ] {
+            tx.execute(
+                "INSERT INTO pipeline_attempt_artifacts (
+                     tenant_id, run_id, lease_token, artifact, object_key,
+                     ciphertext_sha256, cleanup_after
+                 ) VALUES ($1, $2, $3, $4, $5, NULL, NOW() - INTERVAL '1 second')",
+                &[&tenant, &run_id, &lease_token, &artifact, object_key],
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+
+    assert_eq!(
+        service.sweep_attempt_artifacts(&tenant, 10).await.unwrap(),
+        1,
+        "only the row whose key is its own derived key is swept"
+    );
+    let remaining = attempt_artifact_rows_with_hashes(&backend, &tenant, run_id)
+        .await
+        .into_iter()
+        .filter(|(_, state, ..)| state == "staged")
+        .map(|(artifact, _, key, hash)| (artifact, key, hash))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining,
+        vec![("index-command".to_string(), other.object_key.clone(), None)],
+        "the row whose key names another object is kept"
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &other.object_key,
+                &other.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(true),
+        "the other object stays"
+    );
+    assert!(
+        artifacts.read_json(tenant_ref.as_str(), &other).is_ok(),
+        "the other object still reads"
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &own.object_key,
+                &own.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(false),
+        "the attempt object at its own key is deleted"
+    );
+}
+
 /// Final review M6: V108's guard trigger lets an attempt artifact row move
 /// once, from `staged` to `committed` with `committed_at` set, and refuses
 /// every other change. A committed row cannot go back to `staged`, where

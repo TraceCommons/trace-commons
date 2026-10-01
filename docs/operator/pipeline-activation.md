@@ -947,11 +947,15 @@ is not. Those rows are staged with no hash:
   artifact the Score did not write (a duplicate at Score writes no index
   command). A `committed` row always has its hash; V108's guard lets only
   the commit set a missing hash.
-- For a due `staged` row with no hash, the sweep deletes whatever object is
-  stored at the row's key, then the row. It does not compare a hash, and
-  needs none to pick the object: the key carries the attempt's own lease
-  token, so no other object is ever stored there. If the attempt wrote
-  nothing, the store answers that nothing was there and the row goes.
+- For a due `staged` row with no hash, the sweep first derives the key
+  again, through the store, from the row's artifact, run and lease token.
+  Only when the row's key is that key does it delete whatever object is
+  stored there, and then the row. It compares no hash, and needs none to
+  pick the object: the key carries the attempt's own lease token, so no
+  other object is ever stored there. If the attempt wrote nothing, the
+  store answers that nothing was there and the row goes. A row whose key
+  is not its derived key is kept, the object at that key is not touched,
+  and the sweep logs `pipeline_attempt_sweep_key_mismatch` on each pass.
 - A compatibility Score publishes nothing after the latest moment its lease
   could still be live (four leases after its rows were staged), so an object
   is never written after its row could have been swept. It stops as an
