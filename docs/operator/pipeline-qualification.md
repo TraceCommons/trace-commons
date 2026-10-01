@@ -97,13 +97,37 @@ With the workspace already built, a full local run takes about 1.5 minutes
 
 One local restore drill, standalone (`qualify` runs the same steps as its
 last scenario). In order: seed a pipeline database and encrypted artifact
-directory with a pending run; dump the seed database with `pg_dump`; create
-a sibling database in the same cluster and restore into it with
-`pg_restore`; copy the artifact directory and compare every file byte for
-byte; resume the pending run against the restored database and artifacts,
-and require it to reach the same settlement legs and Trace Credit ledger
-event the seed produced, with no duplicate effect. See
-[backup-restore.md](backup-restore.md#versioned-pipeline) for what this
+directory with a pending run, plus one completed run for a second tenant;
+dump the seed database with `pg_dump`; create a sibling database in the
+same cluster and restore into it with `pg_restore`; copy the artifact
+directory and compare every file byte for byte; check the restored
+database before anything resumes; resume the pending run against the
+restored database and artifacts, and require it to reach the same
+settlement legs and Trace Credit ledger event the seed produced, with no
+duplicate effect.
+
+The checks before the resume, each with its own failure label in the
+resume's protected log:
+
+| Check | Label |
+| --- | --- |
+| Every table in `TRACE_COMMONS_RLS_TABLES` has its `trace_corpus_tenant_isolation` policy, and the policy's `USING` and `WITH CHECK` expressions are the tenant predicate on `trace_current_tenant_id()` (the diagnostic `trace_corpus_pg_rls.rs` reads) | `restore_rls_policy_predicate_mismatch` |
+| Every one of those tables enables and forces RLS | `restore_rls_not_enabled_and_forced` |
+| The runtime login holds every privilege it held before the dump, of every type: tables, columns, sequences, functions, and the schema | `restore_runtime_privileges_changed` |
+| Every tenant's rows in those tables (count and row hash per table and tenant, read by the owner) equal the seed's | `restore_tenant_fingerprint_mismatch` |
+| Every tenant's `main` audit chain verifies (`main`'s own verifier) and holds the seed's events | `restore_audit_chain_broken`, `restore_audit_event_count_mismatch` |
+
+On success it prints a second line with this evidence (the table count,
+the privilege set's hash and size, the tenant count and fingerprint, and
+the audit events verified):
+
+```
+PipelineRestoreOK: database=sha256:... artifacts=sha256:... index=sha256:... legs_per_run=1 credit_events_per_run=1 pending_runs_resumed=1 duplicate_effects=0
+PipelineRestoreChecks: rls_tables=96 runtime_privileges=sha256:... runtime_privilege_count=412 tenants=2 tenant_fingerprint=sha256:... audit_events_verified=2
+PipelineRestoreScope: filesystem_restore_local_only -- the artifact restore is a local filesystem copy, local evidence only, not a remote object-store restore
+```
+
+See [backup-restore.md](backup-restore.md#versioned-pipeline) for what this
 does and does not prove about a real restore.
 
 ## The environment: container digest, `--postgres-admin-url`, one server at a time

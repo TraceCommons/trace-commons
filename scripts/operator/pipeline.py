@@ -71,14 +71,22 @@ _RESTORE_FINGERPRINT_HASHES = (
     "artifact_fingerprint",
     "index_entry_set_hash",
     "pending_run_id_hash",
+    "runtime_privilege_set_hash",
+    "tenant_fingerprint",
 )
-# The seed's counts: its adapter requests, and the completed run's
-# settlement legs and Trace Credit ledger events (the resume requires the
-# pending run to reach the same two).
+# The seed's counts: its adapter requests, the completed run's settlement
+# legs and Trace Credit ledger events (the resume requires the pending run
+# to reach the same two), the trace tables it found isolated, the runtime
+# login's privileges, the tenants with rows (at least two), and the audit
+# events `main`'s verifier accepted.
 _RESTORE_FINGERPRINT_COUNTS = (
     "adapter_request_count",
     "completed_settlement_count",
     "completed_credit_event_count",
+    "rls_table_count",
+    "runtime_privilege_count",
+    "tenant_count",
+    "audit_event_count",
 )
 
 # `qualify`: the contract test manifest whose bytes it hashes (ruling T11-2),
@@ -515,8 +523,8 @@ def require_same_artifact_bytes(source, destination):
 
 
 def _read_restore_fingerprint(path):
-    """The seed's fingerprint file: exactly its schema, four hashes, and
-    three positive counts."""
+    """The seed's fingerprint file: exactly its schema, six hashes, and
+    seven positive counts, two tenants or more among them."""
     value = _read_json(path, "restore_fingerprint_invalid")
     require(
         isinstance(value, dict)
@@ -526,7 +534,8 @@ def _read_restore_fingerprint(path):
             isinstance(value[key], str) and _HASH.fullmatch(value[key]) is not None
             for key in _RESTORE_FINGERPRINT_HASHES
         )
-        and all(type(value[key]) is int and value[key] > 0 for key in _RESTORE_FINGERPRINT_COUNTS),
+        and all(type(value[key]) is int and value[key] > 0 for key in _RESTORE_FINGERPRINT_COUNTS)
+        and value["tenant_count"] >= 2,
         "restore_fingerprint_invalid",
     )
     return value
@@ -611,6 +620,11 @@ def run_restore_drill(run, environment):
             "index_entry_set_hash": seed["index_entry_set_hash"],
             "pending_runs_resumed": 1,
             "duplicate_effects": 0,
+            "rls_tables_checked": seed["rls_table_count"],
+            "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
+            "tenant_fingerprint": seed["tenant_fingerprint"],
+            "tenant_count": seed["tenant_count"],
+            "audit_events_verified": seed["audit_event_count"],
         },
         "restore_evidence_mismatch",
     )
@@ -628,6 +642,13 @@ def restore_drill(args, run):
         f"legs_per_run={seed['completed_settlement_count']} "
         f"credit_events_per_run={seed['completed_credit_event_count']} "
         "pending_runs_resumed=1 duplicate_effects=0"
+    )
+    print(
+        f"PipelineRestoreChecks: rls_tables={seed['rls_table_count']} "
+        f"runtime_privileges={seed['runtime_privilege_set_hash']} "
+        f"runtime_privilege_count={seed['runtime_privilege_count']} "
+        f"tenants={seed['tenant_count']} tenant_fingerprint={seed['tenant_fingerprint']} "
+        f"audit_events_verified={seed['audit_event_count']}"
     )
     print(
         f"PipelineRestoreScope: {RESTORE_SAFE_BLOCKER} -- the artifact restore is a local "

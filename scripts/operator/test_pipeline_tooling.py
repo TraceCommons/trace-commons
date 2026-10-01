@@ -1850,6 +1850,12 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "adapter_request_count": 1,
                     "completed_settlement_count": 1,
                     "completed_credit_event_count": 1,
+                    "rls_table_count": 96,
+                    "runtime_privilege_set_hash": _fake_hash("privileges"),
+                    "runtime_privilege_count": 500,
+                    "tenant_fingerprint": _fake_hash("tenants"),
+                    "tenant_count": 2,
+                    "audit_event_count": 2,
                 }
                 fingerprint.update(overrides.get("fingerprint", {}))
                 Path(env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"]).write_bytes(
@@ -1863,6 +1869,11 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "index_entry_set_hash": seed["index_entry_set_hash"],
                     "pending_runs_resumed": 1,
                     "duplicate_effects": 0,
+                    "rls_tables_checked": seed["rls_table_count"],
+                    "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
+                    "tenant_fingerprint": seed["tenant_fingerprint"],
+                    "tenant_count": seed["tenant_count"],
+                    "audit_events_verified": seed["audit_event_count"],
                 }
                 evidence.update(overrides.get("evidence", {}))
                 raw = {
@@ -1978,14 +1989,20 @@ class RestoreDrillTests(_RestoreDrillCase):
         output = self.stdout.getvalue() + self.stderr.getvalue()
         self.assertNotIn(key, output)
         lines = [line for line in self.stdout.getvalue().splitlines() if line]
-        self.assertEqual(len(lines), 2, self.stdout.getvalue())
+        self.assertEqual(len(lines), 3, self.stdout.getvalue())
         self.assertTrue(lines[0].startswith("PipelineRestoreOK: "))
         self.assertIn(f"database={_fake_hash('database')}", lines[0])
         self.assertIn("pending_runs_resumed=1", lines[0])
         self.assertIn("legs_per_run=1 credit_events_per_run=1", lines[0])
         self.assertIn("duplicate_effects=0", lines[0])
-        self.assertIn("filesystem_restore_local_only", lines[1])
-        self.assertIn("local evidence", lines[1])
+        self.assertEqual(
+            lines[1],
+            f"PipelineRestoreChecks: rls_tables=96 runtime_privileges={_fake_hash('privileges')} "
+            f"runtime_privilege_count=500 tenants=2 tenant_fingerprint={_fake_hash('tenants')} "
+            "audit_events_verified=2",
+        )
+        self.assertIn("filesystem_restore_local_only", lines[2])
+        self.assertIn("local evidence", lines[2])
         # The dump does not outlive the restore.
         self.assertEqual(list(self.run.run_dir.glob("*.dump")), [])
 
@@ -2031,6 +2048,16 @@ class RestoreDrillTests(_RestoreDrillCase):
             ({"evidence": {"database_fingerprint": _fake_hash("other")}}, "restore_evidence_mismatch"),
             ({"evidence": {"duplicate_effects": 1}}, "restore_evidence_mismatch"),
             ({"evidence": {"pending_runs_resumed": 0}}, "restore_evidence_mismatch"),
+            # Zaki's review of #1166, Major 2: the new checks' evidence must
+            # be the seed's too.
+            ({"evidence": {"rls_tables_checked": 95}}, "restore_evidence_mismatch"),
+            ({"evidence": {"runtime_privilege_set_hash": _fake_hash("other")}}, "restore_evidence_mismatch"),
+            ({"evidence": {"tenant_fingerprint": _fake_hash("other")}}, "restore_evidence_mismatch"),
+            ({"evidence": {"tenant_count": 1}}, "restore_evidence_mismatch"),
+            ({"evidence": {"audit_events_verified": 1}}, "restore_evidence_mismatch"),
+            ({"fingerprint": {"tenant_count": 1}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"audit_event_count": 0}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"tenant_fingerprint": "sha256:short"}}, "restore_fingerprint_invalid"),
             ({"safe_blockers": []}, "restore_safe_blocker_missing"),
             ({"fingerprint": {"tenant_id": "tenant-a"}}, "restore_fingerprint_invalid"),
             ({"fingerprint": {"completed_credit_event_count": 0}}, "restore_fingerprint_invalid"),

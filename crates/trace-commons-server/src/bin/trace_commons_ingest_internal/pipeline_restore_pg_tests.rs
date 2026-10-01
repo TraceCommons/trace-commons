@@ -14,16 +14,28 @@
 //!   T10-4: the bundle whose Trace Credit leg calls its adapter and then
 //!   writes a ledger event). The first lifetime has no crash point and
 //!   completes, and credits, the first fixture of `main`'s minimal corpus.
+//!   The first lifetime also completes, and credits, the same fixture for a
+//!   second tenant (`SECOND_TENANT`), and waits until both tenants' credit
+//!   events are in `main`'s audit chain.
 //!   The second has the crash point `AfterSettleSelection` and is stopped
 //!   once a second receipt's Settle selection is durable. It then writes the
 //!   seed fingerprint: the authoritative rows (the Trace Credit ledger
 //!   included), the artifact tree, the index entry set, the pending run, the
-//!   adapter request count, and the completed run's leg and credit event
-//!   counts, all as hashes or counts.
+//!   adapter request count, the completed run's leg and credit event
+//!   counts, the number of tables `TRACE_COMMONS_RLS_TABLES` names, the
+//!   runtime login's privilege set, every tenant's rows in those tables, and
+//!   the audit events `main`'s verifier accepts, all as hashes or counts.
 //! - `pipeline_restore_resume` runs against the restored database, named
 //!   directly by `TRACE_COMMONS_PG_TEST_DATABASE_URL` (no `_pilot`, no drop,
-//!   no migration), and the copied artifact root. It proves the restore kept
-//!   what the seed recorded, rebuilds the index from sealed commands, starts
+//!   no migration), and the copied artifact root. Before anything resumes it
+//!   proves the restore kept what the seed recorded: every table in
+//!   `TRACE_COMMONS_RLS_TABLES` enables and forces RLS with the tenant
+//!   policy's predicate on `trace_current_tenant_id()` (the diagnostic
+//!   `trace_corpus_pg_rls.rs` reads), the runtime login holds the same
+//!   privileges (every type, every table, column, sequence, and function),
+//!   every tenant's rows are the seed's, and every tenant's audit chain
+//!   verifies (Zaki's review of #1166, Major 2). It then rebuilds the index
+//!   from sealed commands, starts
 //!   the app, and proves the pending run completes once, with its durable
 //!   selection honored, one adapter request and one ledger event per leg,
 //!   and no duplicate effect, as a `NOBYPASSRLS` runtime login on tables
@@ -56,7 +68,7 @@ use super::pipeline_http_pg_tests::{
 };
 use trace_commons_gate_api::SettlementAdapter;
 use trace_commons_gate_api::pipeline::InstrumentId;
-use trace_commons_server::db::postgres::registered_migrations;
+use trace_commons_server::db::postgres::{TRACE_COMMONS_RLS_TABLES, registered_migrations};
 use trace_commons_server::versioned_pipeline::{PipelineCrashPoint, pipeline_tenant_storage_ref};
 use trace_commons_server::versioned_pipeline_bundle::MINIMAL_INDEX_ID;
 use trace_commons_server::versioned_pipeline_credit::RecordingSettlementAdapter;
@@ -77,6 +89,55 @@ const RESTORE_SAFE_BLOCKERS: [&str; 1] = ["filesystem_restore_local_only"];
 /// (`test_state_with_options`'s static tokens).
 const RESTORE_TENANT: &str = "tenant-a";
 const RESTORE_TOKEN: &str = "token-a";
+
+/// A second routed tenant with one completed run, so the restore is checked
+/// across tenants and not only for `RESTORE_TENANT`.
+const SECOND_TENANT: &str = "tenant-b";
+const SECOND_TOKEN: &str = "token-b";
+
+/// Every privilege the current login holds in the `public` schema, one line
+/// each, sorted: each privilege type on each table, view, and foreign table;
+/// each column privilege no table-level grant already gives; each sequence
+/// privilege; `EXECUTE` on each function; and the schema's own `USAGE` and
+/// `CREATE`. Run as the runtime login, so grants through its group
+/// memberships and to `PUBLIC` count, and a `REVOKE` of any one of them
+/// changes the text.
+const RUNTIME_PRIVILEGES_SQL: &str = r"
+    WITH relations AS (
+        SELECT c.oid, c.relname::TEXT AS relname, c.relkind
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+    ), entries AS (
+        SELECT 'table|' || r.relname || '|' || p.privilege AS entry
+          FROM relations r
+         CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
+                                 'REFERENCES', 'TRIGGER']) AS p(privilege)
+         WHERE r.relkind <> 'S' AND has_table_privilege(r.oid, p.privilege)
+        UNION ALL
+        SELECT 'column|' || r.relname || '|' || a.attname::TEXT || '|' || p.privilege
+          FROM relations r
+          JOIN pg_attribute a ON a.attrelid = r.oid AND a.attnum > 0 AND NOT a.attisdropped
+         CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']) AS p(privilege)
+         WHERE r.relkind <> 'S'
+           AND has_column_privilege(r.oid, a.attnum, p.privilege)
+           AND NOT has_table_privilege(r.oid, p.privilege)
+        UNION ALL
+        SELECT 'sequence|' || r.relname || '|' || p.privilege
+          FROM relations r
+         CROSS JOIN unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) AS p(privilege)
+         WHERE r.relkind = 'S' AND has_sequence_privilege(r.oid, p.privilege)
+        UNION ALL
+        SELECT 'function|' || f.oid::regprocedure::TEXT || '|EXECUTE'
+          FROM pg_proc f
+          JOIN pg_namespace n ON n.oid = f.pronamespace
+         WHERE n.nspname = 'public' AND has_function_privilege(f.oid, 'EXECUTE')
+        UNION ALL
+        SELECT 'schema|public|' || p.privilege
+          FROM unnest(ARRAY['USAGE', 'CREATE']) AS p(privilege)
+         WHERE has_schema_privilege('public', p.privilege)
+    )
+    SELECT COALESCE(string_agg(entry, E'\n' ORDER BY entry), ''), COUNT(*) FROM entries";
 
 /// Every table the pipeline migrations create (V92 to V95, V105 to V108),
 /// sorted: the set the resume requires to enable and force RLS in the
@@ -205,6 +266,13 @@ struct RestoreFingerprint {
     adapter_request_count: usize,
     completed_settlement_count: usize,
     completed_credit_event_count: usize,
+    /// `TRACE_COMMONS_RLS_TABLES`'s length, all isolated in the seed.
+    rls_table_count: usize,
+    runtime_privilege_set_hash: String,
+    runtime_privilege_count: usize,
+    tenant_fingerprint: String,
+    tenant_count: usize,
+    audit_event_count: usize,
 }
 
 impl RestoreFingerprint {
@@ -216,11 +284,17 @@ impl RestoreFingerprint {
             &fingerprint.artifact_fingerprint,
             &fingerprint.index_entry_set_hash,
             &fingerprint.pending_run_id_hash,
+            &fingerprint.runtime_privilege_set_hash,
+            &fingerprint.tenant_fingerprint,
         ];
         if fingerprint.schema != RESTORE_FINGERPRINT_SCHEMA
             || !hashes.into_iter().all(|hash| is_sha256_label(hash))
             || fingerprint.completed_settlement_count == 0
             || fingerprint.completed_credit_event_count == 0
+            || fingerprint.rls_table_count == 0
+            || fingerprint.runtime_privilege_count == 0
+            || fingerprint.tenant_count < 2
+            || fingerprint.audit_event_count == 0
         {
             return Err("restore_fingerprint_invalid");
         }
@@ -309,7 +383,7 @@ async fn database_fingerprint(backend: &Arc<PgBackend>) -> String {
     sha256_bytes(text.as_bytes())
 }
 
-/// One run of `RESTORE_TENANT`, with the phases it has an outcome for (one
+/// One run of a tenant, with the phases it has an outcome for (one
 /// entry per outcome row), its settlement leg count, its Trace Credit legs,
 /// its ledger events, and the legs whose `credit_event_id` names one of
 /// those events.
@@ -337,13 +411,13 @@ impl RunRow {
     }
 }
 
-async fn tenant_runs(backend: &Arc<PgBackend>) -> Vec<RunRow> {
+async fn tenant_runs(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<RunRow> {
     let mut client = backend
         .trace_pool_for_test()
         .get()
         .await
         .expect("restore_runs_connection_failed");
-    let tx = tenant_tx(&mut client, RESTORE_TENANT).await;
+    let tx = tenant_tx(&mut client, tenant_id).await;
     let rows = tx
         .query(
             "SELECT r.run_id, r.submission_id, r.state, r.next_phase,
@@ -368,7 +442,7 @@ async fn tenant_runs(backend: &Arc<PgBackend>) -> Vec<RunRow> {
                FROM pipeline_runs r
               WHERE r.tenant_id = $1
               ORDER BY r.created_at, r.run_id",
-            &[&RESTORE_TENANT],
+            &[&tenant_id],
         )
         .await
         .expect("restore_runs_query_failed");
@@ -543,7 +617,7 @@ fn compatibility_service(
     )
 }
 
-/// An `AppState` serving `service` for `RESTORE_TENANT`, as the corpus
+/// An `AppState` serving `service` for `RESTORE_TENANT` and `SECOND_TENANT`, as the corpus
 /// harness builds one: `main`'s database (`mains`) and the pipeline service
 /// (built by the caller) both run on the runtime login, with the pilot
 /// ingest login's privileges only, never the owner superuser (PR 3's
@@ -567,7 +641,7 @@ fn restore_app_state(
     state_mut.pipeline_service = Some(service);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
-        &[RESTORE_TENANT],
+        &[RESTORE_TENANT, SECOND_TENANT],
     );
     state
 }
@@ -647,6 +721,201 @@ async fn pipeline_table_security(backend: &Arc<PgBackend>) -> Vec<(String, bool,
         .collect()
 }
 
+/// The runtime login's privilege set (`RUNTIME_PRIVILEGES_SQL`), hashed, and
+/// how many privileges it holds.
+async fn runtime_privileges(runtime: &Arc<PgBackend>) -> (String, usize) {
+    let row = runtime
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("restore_privileges_connection_failed")
+        .query_one(RUNTIME_PRIVILEGES_SQL, &[])
+        .await
+        .expect("restore_privileges_query_failed");
+    let text: String = row.get(0);
+    let count = usize::try_from(row.get::<_, i64>(1)).expect("a count is not negative");
+    (sha256_bytes(text.as_bytes()), count)
+}
+
+/// Every tenant's rows in every table of `TRACE_COMMONS_RLS_TABLES`.
+struct TenantFingerprint {
+    /// SHA-256 over one sorted line per table and tenant: the table, the
+    /// tenant id's hash, its row count, and a hash of its rows' JSON.
+    hash: String,
+    /// The tenant ids found, raw: they stay in this process (the audit
+    /// chain check reads each one) and are never printed or written.
+    tenants: Vec<String>,
+}
+
+/// `TenantFingerprint`, read by `owner`, a login RLS does not bind (checked
+/// first): a tenant's rows count whether or not a policy admits them, so a
+/// restore that drops or changes another tenant's rows changes the hash.
+async fn tenant_fingerprint(owner: &Arc<PgBackend>) -> TenantFingerprint {
+    let client = owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("restore_tenant_fingerprint_connection_failed");
+    let sees_every_tenant: bool = client
+        .query_one(
+            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+            &[],
+        )
+        .await
+        .expect("restore_tenant_fingerprint_query_failed")
+        .get(0);
+    assert!(
+        sees_every_tenant,
+        "restore_tenant_fingerprint_reader_bound_by_rls"
+    );
+    let mut lines = Vec::new();
+    let mut tenants = BTreeSet::new();
+    for table in TRACE_COMMONS_RLS_TABLES {
+        // `table` is one of this crate's own constant names, never input.
+        let rows = client
+            .query(
+                &format!(
+                    r#"SELECT t.tenant_id::TEXT, COUNT(*),
+                              encode(sha256(convert_to(
+                                  string_agg(row_to_json(t)::TEXT, E'\n'
+                                             ORDER BY row_to_json(t)::TEXT),
+                                  'UTF8')), 'hex')
+                         FROM public."{table}" t
+                        GROUP BY t.tenant_id"#
+                ),
+                &[],
+            )
+            .await
+            .expect("restore_tenant_fingerprint_query_failed");
+        for row in rows {
+            let tenant: Option<String> = row.get(0);
+            let count: i64 = row.get(1);
+            let rows_hash: String = row.get(2);
+            let tenant_hash = tenant
+                .as_deref()
+                .map(|tenant| sha256_bytes(tenant.as_bytes()))
+                .unwrap_or_default();
+            lines.push(format!("{table}|{tenant_hash}|{count}|{rows_hash}"));
+            tenants.extend(tenant);
+        }
+    }
+    lines.sort();
+    TenantFingerprint {
+        hash: sha256_bytes(lines.join("\n").as_bytes()),
+        tenants: tenants.into_iter().collect(),
+    }
+}
+
+/// `main`'s database audit chain of each tenant in `tenants`, by `main`'s
+/// own verifier (`verify_db_audit_chain`, the check behind
+/// `POST /v1/admin/audit-chain-drill`), with no file log: the drill's file
+/// logs are in the seed's temporary state directory, which a database
+/// restore does not carry, so every tenant's first hashed row must chain
+/// from genesis. Panics with `label` on a chain that does not verify;
+/// returns each tenant's event count.
+async fn verified_audit_events(
+    mains: &Arc<dyn Database>,
+    tenants: &[String],
+    label: &'static str,
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for tenant in tenants {
+        let report = verify_db_audit_chain(mains.as_ref(), tenant, &[])
+            .await
+            .unwrap_or_else(|_| panic!("{label}"));
+        assert!(report.verified, "{label}");
+        counts.insert(tenant.clone(), report.event_count);
+    }
+    counts
+}
+
+/// Polls, up to 60 s, until `tenant_id` has at least one Trace Credit leg
+/// with a credit event and every such leg is marked audited: the worker's
+/// `CreditMutate` audit event for each credit event is in `main`'s chain.
+async fn wait_for_credit_audited(backend: &Arc<PgBackend>, tenant_id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let mut client = backend
+            .trace_pool_for_test()
+            .get()
+            .await
+            .expect("restore_seed_audit_wait_connection_failed");
+        let tx = tenant_tx(&mut client, tenant_id).await;
+        let row = tx
+            .query_one(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE credit_audited_at IS NULL)
+                   FROM pipeline_run_settlements
+                  WHERE tenant_id = $1 AND credit_event_id IS NOT NULL",
+                &[&tenant_id],
+            )
+            .await
+            .expect("restore_seed_audit_wait_query_failed");
+        tx.commit()
+            .await
+            .expect("restore_seed_audit_wait_query_failed");
+        let (legs, unaudited): (i64, i64) = (row.get(0), row.get(1));
+        if legs > 0 && unaudited == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restore_seed_credit_audit_timeout"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// The RLS diagnostic `tests/trace_corpus_pg_rls.rs` reads
+/// (`pg_trace_corpus_rls_diagnostics_report_policy_coverage`), run as the
+/// runtime login over every table in `TRACE_COMMONS_RLS_TABLES`: each table
+/// enables and forces RLS, and its `trace_corpus_tenant_isolation` policy's
+/// `USING` and `WITH CHECK` expressions, read back with `pg_get_expr`, are
+/// the tenant predicate on `trace_current_tenant_id()`. Each failure names
+/// its own label and the tables (table names only). Returns the number of
+/// tables checked.
+async fn require_trace_tables_isolated(runtime: &Arc<PgBackend>, stage: &str) -> usize {
+    let rls = runtime
+        .trace_corpus_rls_diagnostics()
+        .await
+        .expect("restore_rls_diagnostics_failed")
+        .expect("restore_rls_diagnostics_unavailable");
+    let mut mismatched = rls
+        .missing_policy_tables
+        .iter()
+        .chain(&rls.policy_expression_mismatch_tables)
+        .collect::<Vec<_>>();
+    mismatched.sort();
+    mismatched.dedup();
+    assert!(
+        mismatched.is_empty(),
+        "{stage}_rls_policy_predicate_mismatch: {mismatched:?}"
+    );
+    let mut unforced = rls
+        .rls_disabled_tables
+        .iter()
+        .chain(&rls.force_rls_disabled_tables)
+        .collect::<Vec<_>>();
+    unforced.sort();
+    unforced.dedup();
+    assert!(
+        unforced.is_empty(),
+        "{stage}_rls_not_enabled_and_forced: {unforced:?}"
+    );
+    assert!(
+        !rls.current_role_bypasses_rls && !rls.current_role_owns_trace_tables,
+        "{stage}_runtime_role_bypasses_rls"
+    );
+    assert!(
+        rls.tenant_context_transaction_local,
+        "{stage}_tenant_context_not_transaction_local"
+    );
+    assert!(
+        rls.production_ready() && rls.expected_table_count == TRACE_COMMONS_RLS_TABLES.len(),
+        "{stage}_rls_not_production_ready"
+    );
+    rls.expected_table_count
+}
+
 // ---------------------------------------------------------------------------
 // The two ignored tests.
 // ---------------------------------------------------------------------------
@@ -671,7 +940,8 @@ async fn pipeline_restore_seed() {
         .await
         .expect("restore_database_url_missing");
     // Migrates the suite's database and resets the account rate limiter.
-    account_owner_backend()
+    // The owner also reads every tenant's rows for the tenant fingerprint.
+    let owner = account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
     let mains = mains_database().await;
@@ -699,6 +969,19 @@ async fn pipeline_restore_seed() {
         "restore_seed_receipt_refused"
     );
     wait_for_run_complete(&runtime, RESTORE_TENANT, completed_envelope.submission_id).await;
+    // The second tenant's run: the same fixture, its own tenant, so the
+    // restore is checked across tenants (Zaki's review of #1166, Major 2).
+    let (status, receipt) = post_trace(&client, &base, SECOND_TOKEN, &body).await;
+    assert!(
+        status == reqwest::StatusCode::OK && receipt["status"] == "processing",
+        "restore_seed_receipt_refused"
+    );
+    wait_for_run_complete(&runtime, SECOND_TENANT, completed_envelope.submission_id).await;
+    // Both credit events are in `main`'s audit chain before the app stops,
+    // so the chain the restore must keep is not empty.
+    for tenant in [RESTORE_TENANT, SECOND_TENANT] {
+        wait_for_credit_audited(&runtime, tenant).await;
+    }
     stop.send(())
         .expect("send shutdown to the seed's first app");
     join_within(server, 20, "the seed's first app").await;
@@ -727,7 +1010,7 @@ async fn pipeline_restore_seed() {
     // outcomes and a credited Trace Credit leg, and one leased run with a
     // durable Settle selection, three outcomes, and no settlement request or
     // ledger event yet.
-    let runs = tenant_runs(&runtime).await;
+    let runs = tenant_runs(&runtime, RESTORE_TENANT).await;
     let [completed, pending] = runs.as_slice() else {
         panic!("restore_seed_run_count");
     };
@@ -768,10 +1051,31 @@ async fn pipeline_restore_seed() {
         pending.credit_events, 0,
         "restore_seed_pending_run_credited"
     );
-    let request_runs = adapters.request_runs();
+    let second_runs = tenant_runs(&runtime, SECOND_TENANT).await;
+    let [second] = second_runs.as_slice() else {
+        panic!("restore_seed_second_tenant_run_count");
+    };
     assert!(
-        request_runs.iter().all(|run| *run == completed.run_id)
-            && request_runs.len() == completed.settlement_count
+        second.state == "complete"
+            && second.phases == ["admission", "review", "score", "settle"]
+            && second.credited_once()
+            && second.trace_credit_legs == second.settlement_count,
+        "restore_seed_second_tenant_run_not_credited"
+    );
+    // The adapter saw the completed run's legs and the second tenant's, and
+    // nothing of the pending run. Only `RESTORE_TENANT`'s count is recorded:
+    // the resume adds the pending run's to it.
+    let request_runs = adapters.request_runs();
+    let completed_requests = request_runs
+        .iter()
+        .filter(|run| **run == completed.run_id)
+        .count();
+    assert!(
+        request_runs
+            .iter()
+            .all(|run| *run == completed.run_id || *run == second.run_id)
+            && completed_requests == completed.settlement_count
+            && request_runs.len() - completed_requests == second.settlement_count
             && completed.settlement_count > 0,
         "restore_seed_adapter_requests_unexpected"
     );
@@ -784,15 +1088,43 @@ async fn pipeline_restore_seed() {
     );
     let artifact_fingerprint = artifact_fingerprint(&config.artifact_root);
 
+    // What the resume compares across the restore, taken from the database
+    // the dump reads: the RLS diagnostic over every trace table, the runtime
+    // login's privileges, every tenant's rows, and every tenant's audit
+    // chain, each of the two tenants with at least one audited event.
+    let rls_table_count = require_trace_tables_isolated(&runtime, "restore_seed").await;
+    let (runtime_privilege_set_hash, runtime_privilege_count) = runtime_privileges(&runtime).await;
+    let tenants = tenant_fingerprint(&owner).await;
+    assert!(
+        [RESTORE_TENANT, SECOND_TENANT]
+            .iter()
+            .all(|tenant| tenants.tenants.iter().any(|seen| seen == tenant)),
+        "restore_seed_tenant_missing"
+    );
+    let audit_events =
+        verified_audit_events(&mains, &tenants.tenants, "restore_seed_audit_chain_broken").await;
+    assert!(
+        [RESTORE_TENANT, SECOND_TENANT]
+            .iter()
+            .all(|tenant| audit_events.get(*tenant).is_some_and(|count| *count > 0)),
+        "restore_seed_audit_chain_empty"
+    );
+
     let fingerprint = RestoreFingerprint {
         schema: RESTORE_FINGERPRINT_SCHEMA.to_string(),
         database_fingerprint: database_fingerprint(&runtime).await,
         artifact_fingerprint,
         index_entry_set_hash: entry_set_hash,
         pending_run_id_hash: id_hash(pending.run_id),
-        adapter_request_count: request_runs.len(),
+        adapter_request_count: completed_requests,
         completed_settlement_count: completed.settlement_count,
         completed_credit_event_count: completed.credit_events,
+        rls_table_count,
+        runtime_privilege_set_hash,
+        runtime_privilege_count,
+        tenant_fingerprint: tenants.hash,
+        tenant_count: tenants.tenants.len(),
+        audit_event_count: audit_events.values().sum(),
     };
     write_atomically(&config.fingerprint_path, &fingerprint.to_bytes());
 }
@@ -834,6 +1166,21 @@ async fn pipeline_restore_resume() {
         tables.iter().all(|(_, _, readable)| *readable),
         "restore_privileges_lost"
     );
+    // Zaki's review of #1166, Major 2: the flags above are not the
+    // isolation. Every trace table, `trace_credit_ledger` and the others the
+    // drill reads included, must still carry the tenant predicate.
+    let rls_tables_checked = require_trace_tables_isolated(&runtime, "restore").await;
+    assert_eq!(
+        rls_tables_checked, seed.rls_table_count,
+        "restore_rls_table_count_changed"
+    );
+    // Every privilege of every type, not only SELECT.
+    let (runtime_privilege_set_hash, runtime_privilege_count) = runtime_privileges(&runtime).await;
+    assert!(
+        runtime_privilege_set_hash == seed.runtime_privilege_set_hash
+            && runtime_privilege_count == seed.runtime_privilege_count,
+        "restore_runtime_privileges_changed"
+    );
 
     // What the restore kept.
     let database_fingerprint = database_fingerprint(&runtime).await;
@@ -841,12 +1188,32 @@ async fn pipeline_restore_resume() {
         database_fingerprint, seed.database_fingerprint,
         "restore_database_fingerprint_mismatch"
     );
+    // Every tenant's rows, read by the restored database's owner.
+    let owner = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+            .await
+            .expect("restore_owner_connection_failed"),
+    );
+    let tenants = tenant_fingerprint(&owner).await;
+    assert!(
+        tenants.hash == seed.tenant_fingerprint && tenants.tenants.len() == seed.tenant_count,
+        "restore_tenant_fingerprint_mismatch"
+    );
+    let audit_events_verified: usize =
+        verified_audit_events(&mains, &tenants.tenants, "restore_audit_chain_broken")
+            .await
+            .values()
+            .sum();
+    assert_eq!(
+        audit_events_verified, seed.audit_event_count,
+        "restore_audit_event_count_mismatch"
+    );
     let artifact_fingerprint = artifact_fingerprint(&config.artifact_root);
     assert_eq!(
         artifact_fingerprint, seed.artifact_fingerprint,
         "restore_artifact_fingerprint_mismatch"
     );
-    let before = tenant_runs(&runtime).await;
+    let before = tenant_runs(&runtime, RESTORE_TENANT).await;
     let pending: Vec<&RunRow> = before
         .iter()
         .filter(|run| run.state != "complete")
@@ -909,7 +1276,7 @@ async fn pipeline_restore_resume() {
     join_within(server, 20, "the restored app").await;
 
     // One logical effect.
-    let after = tenant_runs(&runtime).await;
+    let after = tenant_runs(&runtime, RESTORE_TENANT).await;
     assert_eq!(after.len(), before.len(), "restore_run_count_changed");
     assert!(
         after.iter().all(|run| run.state == "complete"
@@ -1003,6 +1370,11 @@ async fn pipeline_restore_resume() {
             "index_entry_set_hash": index_entry_set_hash,
             "pending_runs_resumed": pending_runs_resumed,
             "duplicate_effects": duplicate_effects,
+            "rls_tables_checked": rls_tables_checked,
+            "runtime_privilege_set_hash": runtime_privilege_set_hash,
+            "tenant_fingerprint": tenants.hash,
+            "tenant_count": tenants.tenants.len(),
+            "audit_events_verified": audit_events_verified,
         }),
     );
 }
@@ -1090,6 +1462,12 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         adapter_request_count: 1,
         completed_settlement_count: 1,
         completed_credit_event_count: 1,
+        rls_table_count: TRACE_COMMONS_RLS_TABLES.len(),
+        runtime_privilege_set_hash: hash("privileges"),
+        runtime_privilege_count: 1,
+        tenant_fingerprint: hash("tenants"),
+        tenant_count: 2,
+        audit_event_count: 2,
     };
     assert_eq!(
         RestoreFingerprint::parse(&fingerprint.to_bytes()),
@@ -1120,6 +1498,27 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         edited(&|value| value["completed_settlement_count"] = 0.into()),
         Err("restore_fingerprint_invalid")
     );
+    // A one-tenant seed cannot show a restore that drops another tenant.
+    assert_eq!(
+        edited(&|value| value["tenant_count"] = 1.into()),
+        Err("restore_fingerprint_invalid")
+    );
+    for count in [
+        "rls_table_count",
+        "runtime_privilege_count",
+        "audit_event_count",
+    ] {
+        assert_eq!(
+            edited(&|value| value[count] = 0.into()),
+            Err("restore_fingerprint_invalid")
+        );
+    }
+    for hash_field in ["runtime_privilege_set_hash", "tenant_fingerprint"] {
+        assert_eq!(
+            edited(&|value| value[hash_field] = "not-a-hash".into()),
+            Err("restore_fingerprint_invalid")
+        );
+    }
     assert_eq!(
         RestoreFingerprint::parse(b"not json"),
         Err("restore_fingerprint_invalid")

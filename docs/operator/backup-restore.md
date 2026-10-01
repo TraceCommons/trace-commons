@@ -118,7 +118,10 @@ for what it runs, step by step.
 PostgreSQL rows, plus a byte-for-byte copy of the encrypted artifact
 directory, resumes a pending run to the same settlement legs and Trace
 Credit ledger event the original run reached, with the index's entry set
-and the pending-run set unchanged and no duplicate effect.
+and the pending-run set unchanged and no duplicate effect. Before the
+resume, the restored database keeps every trace table's RLS (enabled,
+forced, and the tenant policy's predicate), the runtime login's full
+privilege set, every tenant's rows, and every tenant's audit chain.
 
 **What it does not prove.** The artifact "restore" is a local filesystem
 copy (`shutil.copytree`), never a restore from a remote object store; the
