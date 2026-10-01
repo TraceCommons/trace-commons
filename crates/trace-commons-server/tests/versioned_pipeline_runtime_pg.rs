@@ -27142,6 +27142,95 @@ async fn the_attempt_artifact_guard_lets_only_the_commit_set_a_missing_hash() {
     );
 }
 
+/// The renewal gap rebase 10 named: a compatibility Score that waits for
+/// its tenant's Score lock has its lease renewed while it waits. With a
+/// 1-second Score lease, the Score is still `leased` under its own token
+/// 2.5 seconds after its claim, its lease has moved forward, and once the
+/// lock is free it scores and commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compatibility_score_waiting_for_its_tenant_lock_keeps_its_lease_renewed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s leases are in bounds; the Score's cap is 4s");
+    let service = Arc::new(
+        compatibility_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            near_duplicate_config(),
+            None,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks::default(),
+            IsolatedPipelineIndex::new(),
+        )
+        .with_lease_config(lease_config)
+        .build()
+        .expect("build pipeline service"),
+    );
+    let tenant = format!("compat-lock-renewal-{}", uuid::Uuid::new_v4());
+    let run_id = compatibility_run_past_review(&service, &tenant)
+        .await
+        .run_id;
+
+    let mut holder = owner_client().await;
+    let lock = holder.transaction().await.unwrap();
+    hold_compatibility_score_lock(&lock, &tenant).await;
+    let scoring = {
+        let service = service.clone();
+        let tenant = tenant.clone();
+        tokio::spawn(async move { service.process_run(&tenant, run_id).await })
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let claimed = loop {
+        let run = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+        if run.state == PipelineRunState::Leased && run.next_phase == Some(Phase::Score) {
+            break run;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Score never claimed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let waiting = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+    assert!(!scoring.is_finished(), "the Score still waits for the lock");
+    assert_eq!(waiting.state, PipelineRunState::Leased);
+    assert_eq!(waiting.lease_token, claimed.lease_token, "the same claim");
+    let expires_at = waiting
+        .lease_expires_at
+        .expect("a leased run has an expiry");
+    assert!(
+        expires_at > chrono::Utc::now(),
+        "the waiting Score's lease is live 2.5s after a 1s claim: {expires_at}"
+    );
+    assert!(
+        expires_at >= claimed.lease_expires_at.unwrap() + chrono::Duration::milliseconds(1500),
+        "renewal moved the lease forward while the Score waited"
+    );
+
+    lock.commit().await.unwrap();
+    let scored = tokio::time::timeout(HELD_CALL_BOUND, scoring)
+        .await
+        .expect("the Score finishes once the lock is free")
+        .expect("the Score task did not panic")
+        .unwrap()
+        .expect("the Score runs");
+    assert_eq!(
+        scored.next_phase,
+        Some(Phase::Settle),
+        "the Score committed"
+    );
+}
+
 /// The cap still holds while a compatibility Score waits for its tenant's
 /// Score lock: with a 1-second Score lease (cap 4 seconds), its lease is
 /// renewed up to the cap and no further. A Score that gets the lock only
