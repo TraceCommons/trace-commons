@@ -67,6 +67,13 @@ pub struct IngestPipelineRuntimeContext {
 /// assembly. The stock binary intentionally has no implementation: the
 /// scorer, embedder, vector index, settlement, and payout backends a
 /// deployable pipeline needs do not live in this tree.
+///
+/// The index writer an assembly injects must return from every call well
+/// within `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS` (60 s): Settle stops
+/// starting index calls at its lease's end, and a withdrawal waits out that
+/// margin before it removes the revision, so a call that outlives it could
+/// write a withdrawn revision's entry after its removal (multi-lens review
+/// L4-3).
 pub trait IngestPipelineRuntimeAssembler: Send + Sync {
     fn assemble(
         &self,

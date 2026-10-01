@@ -7546,6 +7546,22 @@ async fn held_index_test_service(
     artifact_store: Arc<dyn TraceArtifactStore>,
     config: PipelineBundleConfig,
 ) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
+    held_index_test_service_with_leases(
+        backend,
+        artifact_store,
+        config,
+        PipelineLeaseConfig::default(),
+    )
+    .await
+}
+
+/// `held_index_test_service` with `lease_config`.
+async fn held_index_test_service_with_leases(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    lease_config: PipelineLeaseConfig,
+) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
@@ -7582,9 +7598,190 @@ async fn held_index_test_service(
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_lease_config(lease_config)
     .build()
     .expect("build pipeline service");
     (Arc::new(service), index, held)
+}
+
+/// Multi-lens review L4-3 and the PR 4 review: Settle's index writes run in
+/// a task of their own that holds the run and submission rows, so a dropped
+/// Settle future (`join_or_abort` at shutdown) does not roll the
+/// transaction back while the blocking writes go on. The rows stay locked
+/// while the held write runs, and the task commits the write when it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_settle_keeps_its_rows_locked_until_its_index_writes_end() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) =
+        held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
+    let tenant = format!("dispatch-dropped-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    settle.abort();
+    let _ = settle.await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+        .await
+        .unwrap();
+    let locked = tx
+        .query_opt(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await;
+    assert!(
+        locked.is_err(),
+        "the run row stays locked while the dropped Settle's write runs"
+    );
+    drop(tx);
+    drop(client);
+
+    held.release();
+    let runs = PgPipelineStore::new(backend.clone());
+    let written = tokio::time::timeout(HELD_CALL_BOUND, async {
+        loop {
+            let current = runs.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+            if current.index_write_state == "complete" {
+                return current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the write's own task commits it once the write ends");
+    assert_eq!(written.index_write_state, "complete");
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+}
+
+/// Multi-lens review L4-3: the index write stops at its lease's deadline. A
+/// write held past a one-second Settle lease applies the entry already in
+/// flight and no other, so a dispatch whose locks were lost cannot keep
+/// writing a withdrawn revision's entries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_write_stops_at_its_lease_deadline() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) = held_index_test_service_with_leases(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap(),
+    )
+    .await;
+    let tenant = format!("dispatch-deadline-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
+    let entry_count = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command")
+        .keyed_entries(&tenant_ref)
+        .count();
+    assert!(entry_count >= 2, "the command has entries after the first");
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    held.release();
+    let _ = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle ends once released");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        1,
+        "only the entry in flight at the deadline is written"
+    );
+    let current = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.index_write_state, "pending");
+}
+
+/// Multi-lens review L4-3: a withdrawal that finds a `pending` index write
+/// on a run another Settle holds the lease of queues the revision's
+/// invalidation no earlier than that lease's end plus the fence margin, so
+/// an upsert still in flight cannot land after the invalidation ran.
+#[tokio::test]
+async fn a_withdrawal_delays_the_invalidation_of_a_write_a_live_lease_may_make() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("dispatch-invalidation-floor-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = PgPipelineStore::new(backend.clone());
+    let leased = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(120))
+        .await
+        .unwrap()
+        .expect("another Settle holds the lease");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET index_write_state = 'pending'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+
+    service
+        .withdraw_submission(&tenant, run.submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner withdraws the submission");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let due: chrono::DateTime<chrono::Utc> = tx
+        .query_one(
+            "SELECT next_attempt_at FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    let floor = leased.lease_expires_at.unwrap()
+        + chrono::Duration::seconds(PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS);
+    assert!(
+        due >= floor - chrono::Duration::seconds(1),
+        "due {due} is before the lease's end plus the margin, {floor}"
+    );
 }
 
 /// An embedder whose first `embed` call is held (`CallHold`) until the test
@@ -8240,7 +8437,7 @@ async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
     // row and the run's state as they are.
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &tenant).await;
-    PgPipelineStore::enqueue_index_invalidation_on_tx(&tx, &settled, "withdrawn")
+    PgPipelineStore::enqueue_index_invalidation_on_tx(&tx, &settled, "withdrawn", None)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -15658,8 +15855,9 @@ async fn withdrawal_before_selection_excludes_the_index() {
 
 /// Ruling T7-3: a run whose index write is `pending` may be partly written.
 /// A withdrawal cancels the write, excludes the run from the index, and
-/// queues an invalidation in the same transaction. Settle then finishes
-/// without writing.
+/// queues an invalidation in the same transaction (due after the leased
+/// run's lease plus the fence margin, multi-lens review L4-3). Settle then
+/// finishes without writing.
 #[tokio::test]
 async fn withdrawal_during_pending_index_work_cancels_it() {
     let Some(backend) = runtime_backend(4).await else {
@@ -15705,6 +15903,9 @@ async fn withdrawal_during_pending_index_work_cancels_it() {
         .unwrap();
     assert_eq!(cancelled.index_write_state, "cancelled");
     assert_eq!(cancelled.index_membership, "excluded");
+    // Multi-lens review L4-3: the crashed worker's run is still leased, and
+    // a dispatch on that lease could still be writing, so the invalidation is
+    // queued but not due before the lease's end plus the fence margin.
     let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
     assert_eq!(
         rows,
@@ -15712,7 +15913,7 @@ async fn withdrawal_during_pending_index_work_cancels_it() {
             revision_id,
             "withdrawn".to_string(),
             "pending".to_string(),
-            true
+            false
         )]
     );
     assert_eq!(run_state, "pending");

@@ -135,8 +135,18 @@ exceed a short lease on the pilot.
 The scorer, the embedder, the index, and the object store are synchronous,
 so the worker calls them on the blocking thread pool, never on a runtime
 worker thread that ingest's HTTP routes share: Score's whole evaluation,
-Settle's index writes (with the run and submission rows still locked), the
-invalidation pass, and every object read, write, and delete of a phase.
+Settle's index writes, the invalidation pass, and every object read, write,
+and delete of a phase.
+
+Settle's index writes run in a task of their own that holds the run and
+submission rows locked until the write commits, so a Settle that is stopped
+(a shutdown past its grace period) does not release them while the writes
+go on. The index cannot see those locks, and a lost database session or a
+process exit still releases them during a write. So the writes also stop at
+the Settle lease's end: no index call starts after it, and the index writer
+must return from each call within 60 seconds. A withdrawal that finds an
+unfinished write on a run whose lease is still live queues the revision's
+removal no earlier than that lease's end plus those 60 seconds.
 
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` -- whole seconds, default 300
   (5 minutes).
