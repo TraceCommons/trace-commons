@@ -23086,3 +23086,90 @@ async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
         "the invalidation pass removed the revision off the runtime workers"
     );
 }
+
+/// Owner ruling on Zaki review 1, round 2, N-7: the index holds only
+/// revisions of runs that completed. A Settle that crashes after its index
+/// write on the run's last attempt leaves the write `pending` and the run
+/// `leased`; the claim's sweep then fails the run for good
+/// (`attempts_exhausted`), and with it queues the invalidation of the
+/// run's revision through the queue a withdrawal uses (reason
+/// `run_failed`). The invalidation pass removes the revision.
+#[tokio::test]
+async fn a_run_that_fails_for_good_after_its_index_write_has_its_revision_removed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterIndexApply),
+    )
+    .await;
+    let tenant = format!("failed-run-invalidation-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET attempt_count = max_attempts - 1
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let crashed = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .expect_err("Settle crashes after its index write");
+    assert_eq!(crashed.to_string(), INJECTED_PIPELINE_CRASH);
+    assert!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
+        "the crashed Settle wrote the revision's entries"
+    );
+    expire_lease(&backend, &tenant, run.run_id).await;
+    assert!(
+        service.process_one(&tenant).await.unwrap().is_none(),
+        "the run has no attempt left"
+    );
+    let failed = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let queued: i64 = {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let count = tx
+            .query_one(
+                "SELECT COUNT(*) FROM pipeline_index_invalidations
+                  WHERE tenant_id = $1 AND run_id = $2 AND reason_code = 'run_failed'",
+                &[&tenant, &run.run_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    assert_eq!(queued, 1, "the failed run's revision is queued for removal");
+    service
+        .process_index_invalidations(&tenant, 8)
+        .await
+        .expect("the invalidation pass runs");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "the failed run's revision left the index"
+    );
+}

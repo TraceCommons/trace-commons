@@ -291,6 +291,15 @@ not the trace's fault:
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
 
+The index holds only revisions of runs that completed. A run that fails for
+good at Settle after its index write may have written entries (the write is
+`pending`, `complete`, `failed`, or `cancelled`) -- a crash after the write on
+its last attempt, or legs that exhaust its attempts -- queues the
+invalidation of its revision in the transaction that fails it, through the
+queue a withdrawal uses (reason `run_failed`); a `pending` write is
+cancelled and the run excluded. The worker's invalidation pass removes the
+entries.
+
 Settle reads whether the submission is still operable once, before its legs.
 Only the Trace Credit leg checks it again, under the submission's row lock,
 in the transaction that writes its ledger row. Any other leg's adapter call

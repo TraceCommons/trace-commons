@@ -139,6 +139,9 @@ const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
 /// The reason code of an index invalidation `main`'s revocation queues (Zaki
 /// review 1, round 2, finding 5).
 const PIPELINE_REVOCATION_INVALIDATION_REASON: &str = "revoked";
+/// The reason code of the index invalidation a run failed for good queues
+/// (owner ruling on Zaki review 1, round 2, N-7).
+const PIPELINE_FAILED_RUN_INVALIDATION_REASON: &str = "run_failed";
 
 /// What `main`'s retention maintenance did to a submission with a pipeline
 /// run (ruling RB-30; Zaki review 1, round 2, finding 18): the pipeline's
@@ -1301,6 +1304,7 @@ impl PgPipelineStore {
             .map(|row| row.get::<_, Uuid>("run_id"))
             .collect::<Vec<_>>();
         resolve_open_settlement_legs_on_tx(&tx, tenant_id, &swept_settle_runs).await?;
+        invalidate_index_writes_of_failed_runs_on_tx(&tx, tenant_id, &swept_settle_runs).await?;
         let lease_token = Uuid::new_v4();
         let review_milliseconds = lease_config.review().num_milliseconds();
         let score_milliseconds = lease_config.score().num_milliseconds();
@@ -3576,6 +3580,8 @@ impl PgPipelineStore {
             .ok_or_else(stale_lease_error)?;
         if phase_from_db(row.get("next_phase"))? == Some(Phase::Settle) {
             resolve_open_settlement_legs_on_tx(&tx, &run.tenant_id, &[run.run_id]).await?;
+            invalidate_index_writes_of_failed_runs_on_tx(&tx, &run.tenant_id, &[run.run_id])
+                .await?;
         }
         tx.commit().await?;
         Ok(())
@@ -3634,6 +3640,8 @@ impl PgPipelineStore {
         let updated = pipeline_run_from_row(&row)?;
         if updated.state == PipelineRunState::Failed && updated.next_phase == Some(Phase::Settle) {
             resolve_open_settlement_legs_on_tx(&tx, &run.tenant_id, &[run.run_id]).await?;
+            invalidate_index_writes_of_failed_runs_on_tx(&tx, &run.tenant_id, &[run.run_id])
+                .await?;
         }
         tx.commit().await?;
         Ok(updated)
@@ -4308,6 +4316,47 @@ async fn receipt_is_tombstoned(
 /// `settlement_leg_is_unresolved`) is never touched. With a worker present,
 /// `PipelineService::reconcile_dispatched_settlement_legs` has already
 /// resolved the dispatched external legs it may call, so this only forfeits.
+/// Owner ruling on Zaki review 1, round 2, N-7: the index holds only
+/// revisions of runs that completed. For each run of `run_ids` that this
+/// transaction failed for good and whose index write may have written
+/// entries (`pending`, possibly partly written; `complete`; `failed`, a
+/// content conflict after earlier entries; `cancelled`), it queues the
+/// invalidation of the run's revision through the queue a withdrawal uses
+/// (`end_runs_of_inoperable_submission_on_tx`, reason `run_failed`): a
+/// `pending` write is cancelled and the run excluded from the index. Every
+/// failure path that resolves a Settle run's open legs calls it in the same
+/// transaction: the claim's sweep, `mark_failed`, and `mark_retry` when it
+/// exhausts the run. Lock order: the run rows the caller's update holds,
+/// then the invalidation rows. Idempotent.
+async fn invalidate_index_writes_of_failed_runs_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    run_ids: &[Uuid],
+) -> Result<(), DatabaseError> {
+    if run_ids.is_empty() {
+        return Ok(());
+    }
+    let runs = tx
+        .query(
+            "SELECT * FROM pipeline_runs
+              WHERE tenant_id = $1 AND run_id = ANY($2)
+                AND state = 'failed' AND index_write_state <> 'none'
+              ORDER BY run_id",
+            &[&tenant_id, &run_ids],
+        )
+        .await?
+        .iter()
+        .map(pipeline_run_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    PgPipelineStore::end_runs_of_inoperable_submission_on_tx(
+        tx,
+        tenant_id,
+        &runs,
+        PIPELINE_FAILED_RUN_INVALIDATION_REASON,
+    )
+    .await
+}
+
 async fn resolve_open_settlement_legs_on_tx(
     tx: &Transaction<'_>,
     tenant_id: &str,
