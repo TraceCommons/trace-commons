@@ -27008,6 +27008,7 @@ async fn a_store_without_a_usable_object_key_suspends_the_score_uncharged() {
         let tenant = format!("compat-object-key-gap-{}", uuid::Uuid::new_v4());
         let tenant_ref = pipeline_tenant_storage_ref(&tenant);
         let reviewed = compatibility_run_past_review(&service, &tenant).await;
+        let files_before_score = files_under(dir.path());
         let waited = service
             .process_run(&tenant, reviewed.run_id)
             .await
@@ -27055,7 +27056,167 @@ async fn a_store_without_a_usable_object_key_suspends_the_score_uncharged() {
                 "{label}: nothing is published at the staged {artifact} key"
             );
         }
+        // Review of the follow-up wave, m3: a wrong publish would land at
+        // the key the store prepares from the attempt's own object id, not
+        // at the staged one, so that key is checked too, for each staged
+        // row's lease token.
+        for (artifact, lease_token) in
+            score_attempt_lease_tokens(&backend, &tenant, reviewed.run_id).await
+        {
+            let prepared_key = artifacts
+                .serialized_json_object_key(
+                    tenant_ref.as_str(),
+                    TraceArtifactKind::VectorPayload,
+                    &pipeline_attempt_object_id(&artifact, reviewed.run_id, lease_token),
+                )
+                .unwrap();
+            assert_eq!(
+                artifacts
+                    .artifact_present_by_object_key(
+                        tenant_ref.as_str(),
+                        TraceArtifactKind::VectorPayload,
+                        &prepared_key,
+                        "",
+                    )
+                    .unwrap(),
+                Some(false),
+                "{label}: nothing is published at the prepared {artifact} key"
+            );
+        }
+        // And whatever the keys: the Score attempt added no file to the
+        // store's directory.
+        assert_eq!(
+            files_under(dir.path()),
+            files_before_score,
+            "{label}: the Score attempt wrote no object"
+        );
     }
+}
+
+/// Every file under `root`, as sorted paths relative to it.
+fn files_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, files);
+            } else {
+                files.push(path.strip_prefix(root).unwrap().to_path_buf());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort();
+    files
+}
+
+/// `(artifact, lease_token)` of each of the run's Score attempt rows.
+async fn score_attempt_lease_tokens(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Vec<(String, uuid::Uuid)> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT artifact, lease_token FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND artifact <> 'approved'
+              ORDER BY artifact, lease_token",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    rows.into_iter()
+        .map(|row| (row.get("artifact"), row.get("lease_token")))
+        .collect()
+}
+
+/// Review of the follow-up wave, m3: a store that cannot derive a key
+/// (`ObjectKeyGap::Unavailable`, the trait's default refusal) gives the sweep
+/// no key to check a no-hash row against. A due no-hash row is then kept,
+/// and the object at its own key stays: the sweep never deletes by the
+/// row's key alone.
+#[tokio::test]
+async fn the_sweep_keeps_a_no_hash_row_when_the_store_cannot_derive_its_key() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        Arc::new(ObjectKeyGapStore {
+            inner: artifacts.clone(),
+            gap: ObjectKeyGap::Unavailable,
+        }),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("sweep-key-unavailable-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run_id = run_past_review(&service, &tenant).await.run_id;
+    let lease_token = uuid::Uuid::new_v4();
+    let object = artifacts
+        .put_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &pipeline_attempt_object_id("score-neighbors", run_id, lease_token),
+            &serde_json::to_vec(&serde_json::json!({ "sweep_key_test": true })).unwrap(),
+        )
+        .unwrap();
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "INSERT INTO pipeline_attempt_artifacts (
+                 tenant_id, run_id, lease_token, artifact, object_key,
+                 ciphertext_sha256, cleanup_after
+             ) VALUES ($1, $2, $3, 'score-neighbors', $4, NULL, NOW() - INTERVAL '1 second')",
+            &[&tenant, &run_id, &lease_token, &object.object_key],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    for pass in 0..2 {
+        assert_eq!(
+            service.sweep_attempt_artifacts(&tenant, 10).await.unwrap(),
+            0,
+            "pass {pass}: nothing is swept"
+        );
+    }
+    let staged = attempt_artifact_rows_with_hashes(&backend, &tenant, run_id)
+        .await
+        .into_iter()
+        .filter(|(_, state, ..)| state == "staged")
+        .map(|(artifact, _, key, hash)| (artifact, key, hash))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        staged,
+        vec![(
+            "score-neighbors".to_string(),
+            object.object_key.clone(),
+            None
+        )],
+        "the due no-hash row is kept"
+    );
+    assert_eq!(
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &object.object_key,
+                &object.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(true),
+        "its object stays"
+    );
 }
 
 /// Final review M6: V108's guard trigger lets an attempt artifact row move
