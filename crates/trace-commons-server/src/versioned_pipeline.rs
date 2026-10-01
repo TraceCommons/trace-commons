@@ -8077,19 +8077,45 @@ impl PipelineService {
     /// again on each pass. Every store call runs on the blocking pool.
     /// The run's own `pipeline_runs` row, and its committed objects, are
     /// never touched here. Returns how many rows it removed.
+    ///
+    /// This pass starts at the oldest due row; see
+    /// [`Self::sweep_attempt_artifacts_from`] for a pass that resumes where
+    /// an earlier one stopped.
     pub async fn sweep_attempt_artifacts(
         &self,
         tenant_id: &str,
         limit: usize,
     ) -> anyhow::Result<usize> {
+        Ok(self
+            .sweep_attempt_artifacts_from(tenant_id, limit, None)
+            .await?
+            .removed)
+    }
+
+    /// `sweep_attempt_artifacts`, starting after `resume_after` (the due
+    /// rows before it wait for a later pass) instead of at the oldest due
+    /// row. The pass's `resume_after` is where the next pass resumes: the
+    /// last row it examined when it stopped at its limit or its bound, and
+    /// `None` when it reached the end of the due rows, so the next pass
+    /// starts over at the oldest. The worker carries it from one pass to the
+    /// next for each tenant (wave 2; follow-up review, m2): however many
+    /// rows a tenant's sweep keeps, every due row is examined within a few
+    /// passes, so kept rows never stall the tenant.
+    pub async fn sweep_attempt_artifacts_from(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+        resume_after: Option<AttemptSweepCursor>,
+    ) -> anyhow::Result<AttemptSweepPass> {
         let examine_bound = limit.saturating_mul(PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL);
         let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
 
-        let mut cursor: Option<AttemptSweepCursor> = None;
+        let mut cursor = resume_after;
         let mut removed = 0usize;
         let mut examined = 0usize;
+        let mut reached_the_end = false;
         'pages: while removed < limit && examined < examine_bound {
             let page_size = limit.min(examine_bound - examined);
             let rows = tx
@@ -8268,11 +8294,15 @@ impl PipelineService {
                 removed += 1;
             }
             if !page_was_full {
+                reached_the_end = true;
                 break;
             }
         }
         tx.commit().await?;
-        Ok(removed)
+        Ok(AttemptSweepPass {
+            removed,
+            resume_after: if reached_the_end { None } else { cursor },
+        })
     }
 
     /// Loads a run's committed outcome for `phase` and decodes its decision.
@@ -12117,13 +12147,25 @@ impl PipelineAttemptArtifact {
 pub const PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL: usize = 4;
 
 /// The key of the last due attempt row a sweep pass examined, in the
-/// sweep's order: the keyset cursor its next page reads after.
+/// sweep's order: the keyset cursor its next page, or the next pass
+/// (`PipelineService::sweep_attempt_artifacts_from`), reads after. Opaque
+/// outside this module; it holds no tenant id and is never logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AttemptSweepCursor {
+pub struct AttemptSweepCursor {
     cleanup_after: DateTime<Utc>,
     run_id: Uuid,
     lease_token: Uuid,
     artifact: String,
+}
+
+/// What one attempt sweep pass did
+/// (`PipelineService::sweep_attempt_artifacts_from`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptSweepPass {
+    /// How many rows it removed.
+    pub removed: usize,
+    /// Where the next pass resumes; `None` to start at the oldest due row.
+    pub resume_after: Option<AttemptSweepCursor>,
 }
 
 /// The sweep could not delete a due attempt row's object (or could not

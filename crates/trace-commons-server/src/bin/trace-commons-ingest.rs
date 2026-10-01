@@ -260,13 +260,13 @@ use trace_commons_server::trace_score_attestation::{
     sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore,
-    PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig,
-    PipelineNearPayoutControls, PipelineNearSettlementMode, PipelineNoveltyUtilityChecks,
-    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
-    PipelineRetentionAction, PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
-    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
-    is_pipeline_score_object_ref,
+    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+    PgPipelineStore, PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport,
+    PipelineLeaseConfig, PipelineNearPayoutControls, PipelineNearSettlementMode,
+    PipelineNoveltyUtilityChecks, PipelineQuotaScope, PipelineReceiptRequest,
+    PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction, PipelineReviewClaim,
+    PipelineReviewClaimOutcome, PipelineService, PipelineWithdrawalFollowUpState,
+    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,

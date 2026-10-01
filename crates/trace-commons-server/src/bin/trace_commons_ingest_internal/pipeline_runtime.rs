@@ -461,9 +461,11 @@ const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
 
 /// How many pipeline phase attempt artifacts the worker sweeps for one
-/// tenant per pass (`PipelineService::sweep_attempt_artifacts`), right after
-/// the receipt sweep. The rest wait for the next pass.
-const PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT: usize = 32;
+/// tenant per pass (`PipelineService::sweep_attempt_artifacts_from`), right
+/// after the receipt sweep, examining at most
+/// `PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times as many due rows. The
+/// rest wait for the next pass, which resumes where this one stopped.
+pub(crate) const PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT: usize = 32;
 
 /// How many of one tenant's due index invalidations the worker processes
 /// each time it runs the tenant's invalidation step
@@ -508,13 +510,40 @@ pub(crate) enum PipelineFollowUpStep {
 /// When the worker last ran each tenant's follow-up steps, so an idle
 /// tenant costs no invalidation or payout query on most passes (Zaki review
 /// 1, round 2, item 4). One per worker loop; the run drain and the
-/// staged-receipt sweep are not scheduled here and run on every pass.
+/// staged-receipt sweep are not scheduled here and run on every pass. It
+/// also keeps where each tenant's attempt sweep stopped, so the next pass
+/// resumes there (wave 2; follow-up review, m2).
 #[derive(Debug, Default)]
 pub(crate) struct PipelineFollowUpCadence {
     last_run: HashMap<(String, PipelineFollowUpStep), std::time::Instant>,
+    attempt_sweep_resume: HashMap<String, AttemptSweepCursor>,
 }
 
 impl PipelineFollowUpCadence {
+    /// Where `tenant_id`'s next attempt sweep pass resumes; `None` to start
+    /// at its oldest due row.
+    pub(crate) fn attempt_sweep_resume_after(&self, tenant_id: &str) -> Option<AttemptSweepCursor> {
+        self.attempt_sweep_resume.get(tenant_id).cloned()
+    }
+
+    /// Records where `tenant_id`'s last attempt sweep pass said the next
+    /// one resumes.
+    pub(crate) fn record_attempt_sweep(
+        &mut self,
+        tenant_id: &str,
+        resume_after: Option<AttemptSweepCursor>,
+    ) {
+        match resume_after {
+            Some(cursor) => {
+                self.attempt_sweep_resume
+                    .insert(tenant_id.to_string(), cursor);
+            }
+            None => {
+                self.attempt_sweep_resume.remove(tenant_id);
+            }
+        }
+    }
+
     /// The follow-up steps that run for `tenant_id` on the pass at `now`,
     /// each recorded as run at `now`. A step runs when `woken` names it
     /// (this process queued work for it: `PipelineService::take_follow_ups`),
@@ -815,19 +844,24 @@ pub(crate) async fn drain_pipeline_tenant(
             "pipeline worker receipt sweep failed"
         );
     }
-    if let Err(error) = service
-        .sweep_attempt_artifacts(
+    let resume_after = lock_cadence().attempt_sweep_resume_after(&tenant_id);
+    match service
+        .sweep_attempt_artifacts_from(
             &tenant_id,
             PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT,
+            resume_after,
         )
         .await
     {
-        tracing::warn!(
-            error_class = "pipeline_worker_attempt_sweep_failed",
-            tenant_storage_ref = %tenant_storage_ref(&tenant_id),
-            error_hash = %safe_display_error_hash(&error),
-            "pipeline worker attempt sweep failed"
-        );
+        Ok(pass) => lock_cadence().record_attempt_sweep(&tenant_id, pass.resume_after),
+        Err(error) => {
+            tracing::warn!(
+                error_class = "pipeline_worker_attempt_sweep_failed",
+                tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker attempt sweep failed"
+            );
+        }
     }
 }
 

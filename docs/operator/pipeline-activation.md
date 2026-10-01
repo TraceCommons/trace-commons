@@ -943,11 +943,14 @@ deleting which row is a fixed split (controller ruling R2-1):
   delete failure logs `pipeline_attempt_sweep_delete_failed` (with the
   store's own refusal label beside it, `store_label`, when the store gave
   one) and keeps the row for the next pass. A kept row keeps its
-  `cleanup_after`, so every pass meets it again, but it does not stop the
-  pass: the pass goes on to the next due rows, a page at a time, until it
-  has removed 32 rows or examined 128 (four for each row it may remove).
-  So kept rows hold back later rows only once more than 128 of them are
-  due ahead of those rows.
+  `cleanup_after`, but it does not stop the pass: the pass goes on to the
+  next due rows, a page at a time, until it has removed 32 rows or examined
+  128 (four for each row it may remove). The worker keeps where the pass
+  stopped, and the tenant's next pass resumes there; a pass that reaches
+  the last due row makes the next one start over at the oldest. So however
+  many rows are kept, every due row is examined within a few passes, and
+  kept rows never stall a tenant's sweep. The position is held in the
+  worker's memory only: a restarted worker starts over at the oldest.
 - A `committed` row's object is an object ref of the submission, recorded
   by the same phase commit that committed the row. Deleting it belongs to
   the withdrawal, not this sweep: a withdrawal invalidates the object ref
@@ -1021,11 +1024,10 @@ is not. Those rows are staged with no hash:
   The sweep is affected in each case: for a due row with no hash, the store
   refuses with that label, and the sweep keeps the row and logs
   `pipeline_attempt_sweep_delete_failed`, with that label as `store_label`,
-  on each pass until the store is fixed. The pass goes on past such rows to
-  later ones, up to 128 rows examined, so the tenant's other due rows,
-  hashed rows included, are still swept while no more than 128 kept rows
-  are due ahead of them. For the last two labels, a Score itself is not
-  affected.
+  on each pass that reaches it, until the store is fixed. The sweep goes
+  on past such rows to later ones (see the first bullet above), so the
+  tenant's other due rows, hashed rows included, are still swept. For the
+  last two labels, a Score itself is not affected.
 
 Score's withdrawal rule follows from the same split: withdrawing a
 submission whose run already committed Score deletes the index command and

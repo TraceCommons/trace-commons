@@ -3064,6 +3064,149 @@ async fn the_worker_drain_sweeps_a_due_attempt_artifact() {
     );
 }
 
+/// Wave 2 (follow-up review, m2): the worker carries each tenant's attempt
+/// sweep position from one drain to the next. With more kept rows due than
+/// one pass examines (`PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times
+/// the worker's limit, 128) ahead of a deletable row, the first drain keeps
+/// all it examines and leaves the row; the second, on the same worker
+/// cadence, resumes where the first stopped and deletes it with its object.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_resumes_the_attempt_sweep_past_kept_rows() {
+    use trace_commons_server::versioned_pipeline::{
+        PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL, PipelineAttemptArtifact,
+        pipeline_attempt_object_id, pipeline_tenant_storage_ref,
+    };
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_drain_resume_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-worker-sweep-resume-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-worker-sweep-resume-{suffix}"));
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+
+    // More kept rows than one pass examines: no hash, and keys that are not
+    // the keys the store derives for them, so the sweep keeps each one.
+    let examined_per_pass = PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL
+        * pipeline_runtime::PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT;
+    let kept = i32::try_from(examined_per_pass + 1).unwrap();
+    {
+        let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "INSERT INTO pipeline_attempt_artifacts (
+                 tenant_id, run_id, lease_token, artifact, object_key,
+                 ciphertext_sha256, cleanup_after
+             )
+             SELECT $1, $2, gen_random_uuid(), 'index-command', 'kept-object-' || g, NULL,
+                    NOW() - make_interval(secs => 1000 - g)
+               FROM generate_series(1, $3) AS g",
+            &[&tenant, &run.run_id, &kept],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    // Behind them, a crashed attempt's row at its own key, with its object.
+    let mut crashed = run.clone();
+    crashed.lease_token = Some(Uuid::new_v4());
+    let prepared = artifacts
+        .prepare_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &pipeline_attempt_object_id(
+                PipelineAttemptArtifact::IndexCommand.as_str(),
+                run.run_id,
+                crashed.lease_token.unwrap(),
+            ),
+            br#"{"probe":"crashed_score_attempt"}"#,
+        )
+        .expect("prepare the crashed attempt's object");
+    service
+        .store()
+        .stage_attempt_artifact(
+            &crashed,
+            PipelineAttemptArtifact::IndexCommand,
+            &prepared.receipt().object_key,
+            &prepared.receipt().ciphertext_sha256,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("stage the crashed attempt's row, already due");
+    let receipt = artifacts
+        .publish_serialized_json(&prepared)
+        .expect("publish the crashed attempt's object");
+    let present = || {
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .unwrap()
+    };
+
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence.clone(),
+    )
+    .await;
+    assert_eq!(
+        present(),
+        Some(true),
+        "the first drain examined only kept rows"
+    );
+    assert!(
+        cadence
+            .lock()
+            .unwrap()
+            .attempt_sweep_resume_after(&tenant)
+            .is_some(),
+        "the worker kept where the first pass stopped"
+    );
+
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
+    assert_eq!(
+        present(),
+        Some(false),
+        "the second drain resumed past the kept rows and deleted the object"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        i64::from(kept),
+        "only the kept rows stay"
+    );
+}
+
 /// Zaki review 1, item 1: Score stores the index command (embeddings and
 /// content hashes) and the neighbour set as objects of their own. A run of
 /// the compatibility bundle has both. The run is withdrawn after Score and

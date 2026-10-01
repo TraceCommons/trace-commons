@@ -27917,6 +27917,74 @@ async fn the_sweep_goes_on_past_rows_it_keeps() {
     );
 }
 
+/// Wave 2 (follow-up review, m2): a pass that stops at its bound says where
+/// the next pass resumes, so more kept rows than one pass examines still
+/// cannot stall the tenant. With a limit of 1 (four rows examined) and five
+/// kept rows ahead of a deletable row, a pass from the start never reaches
+/// that row, however often it runs; the pass that resumes where the first
+/// stopped deletes it, and the pass after that reaches the end of the due
+/// rows and starts the next one over.
+#[tokio::test]
+async fn the_sweep_resumes_where_its_last_pass_stopped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("sweep-resume-{}", uuid::Uuid::new_v4());
+    let run_id = run_past_review(&service, &tenant).await.run_id;
+    let deletable = kept_rows_then_a_deletable_one(&backend, &artifacts, &tenant, run_id, 5).await;
+
+    let first = service
+        .sweep_attempt_artifacts_from(&tenant, 1, None)
+        .await
+        .unwrap();
+    assert_eq!(first.removed, 0, "four kept rows fill the first pass");
+    let stopped_at = first
+        .resume_after
+        .clone()
+        .expect("a pass that stopped at its bound says where to resume");
+    assert_eq!(
+        service.sweep_attempt_artifacts(&tenant, 1).await.unwrap(),
+        0,
+        "a pass from the start meets the same four kept rows again"
+    );
+    assert_eq!(
+        staged_rows_and_presence(&backend, &artifacts, &tenant, run_id, &deletable).await,
+        (6, Some(true))
+    );
+
+    let second = service
+        .sweep_attempt_artifacts_from(&tenant, 1, Some(stopped_at))
+        .await
+        .unwrap();
+    assert_eq!(
+        second.removed, 1,
+        "the resumed pass passes the fifth kept row and deletes the one behind it"
+    );
+    assert_eq!(
+        staged_rows_and_presence(&backend, &artifacts, &tenant, run_id, &deletable).await,
+        (5, Some(false))
+    );
+
+    let third = service
+        .sweep_attempt_artifacts_from(&tenant, 1, second.resume_after)
+        .await
+        .unwrap();
+    assert_eq!(third.removed, 0);
+    assert_eq!(
+        third.resume_after, None,
+        "a pass that reaches the end of the due rows starts the next over"
+    );
+}
+
 /// How `ObjectKeyGapStore` breaks the key derivation a compatibility Score
 /// needs before its tenant lock (rebase 10, option D).
 #[derive(Clone, Copy)]
