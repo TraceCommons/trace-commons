@@ -139,6 +139,14 @@ pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
 pub const PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL: &str = "artifact_store_unavailable";
+/// Startup refusal labels of `PipelineService::check_tenant_bundles` that
+/// the default package's checks do not share: a tenant bundle whose scorer
+/// or embedder the service does not hold, one no policy family runs, and
+/// one that cannot be read (multi-lens review L5-2).
+pub const PIPELINE_TENANT_BUNDLE_DEPENDENCY_MISSING_LABEL: &str =
+    "pipeline_tenant_bundle_dependency_missing";
+pub const PIPELINE_TENANT_BUNDLE_NOT_RUNNABLE_LABEL: &str = "pipeline_tenant_bundle_not_runnable";
+pub const PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL: &str = "pipeline_tenant_bundle_unreadable";
 pub const PIPELINE_INDEX_CONFLICT_LABEL: &str = "index_key_conflict";
 pub const PIPELINE_CREDIT_HELD_LABEL: &str = "credit_held";
 pub const PIPELINE_CREDIT_CAP_LABEL: &str = "credit_cap_exceeded";
@@ -1262,6 +1270,27 @@ impl PgPipelineStore {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// The bundles a worker may run for `tenant_id`: its active bundle and
+    /// the bundle of each run not yet `complete` or `failed` (a tenant keeps
+    /// both when the default package changes). Sorted, without repeats.
+    pub async fn runnable_bundle_ids(&self, tenant_id: &str) -> Result<Vec<String>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1
+                 UNION
+                 SELECT bundle_id FROM pipeline_runs
+                  WHERE tenant_id = $1
+                    AND state IN ('pending', 'leased', 'retry', 'awaiting_review')
+                 ORDER BY 1",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get("bundle_id")).collect())
     }
 
     pub async fn active_bundle_id(&self, tenant_id: &str) -> Result<Option<String>, DatabaseError> {
@@ -5529,8 +5558,9 @@ pub struct PipelineNearPayoutControls {
 /// - `issuer_principal_ref` is the principal the pipeline issues credit as
 ///   (Ruling T15-10), checked against that list in place of `main`'s calling
 ///   gate worker, and in place of the principal that runs `main`'s live
-///   settlement for a paid leg. With a non-empty list and no issuer, every
-///   positive award is withheld and no payout is made.
+///   settlement for a paid leg. With no issuer, every `NoveltyUtility` leg
+///   is withheld (Zaki review 3, Z3-2); with a non-empty list and no issuer,
+///   no payout is made either.
 /// - `require_production_gate` is `main`'s
 ///   `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` (Ruling T15-11).
 /// - `settlement_allowed_policy_versions` is `main`'s
@@ -6337,6 +6367,71 @@ impl PipelineService {
         self.store
             .activate_bundle_if_none(tenant_id, self.bundle_id())
             .await?;
+        Ok(())
+    }
+
+    /// The startup checks of every bundle a worker may run for `tenant_id`
+    /// (multi-lens review L5-2, Zaki review 3, Z3-2): its active bundle and
+    /// the bundle of each run in flight (`runnable_bundle_ids`), which a
+    /// tenant keeps when the default package changes
+    /// (`activate_bundle_if_none`). Each gets the checks ingest gives the
+    /// default package at assembly: its dependencies resolve (`construct`),
+    /// and a compatibility package inserts under `main`'s threshold
+    /// (`embed_insert_novelty_micros`), has the pipeline's credit issuer,
+    /// and, with `require_qualifiable`, is qualifiable. The error is the
+    /// first failure's label, the default package check's where they share
+    /// one; ingest refuses to start on it.
+    pub async fn check_tenant_bundles(
+        &self,
+        tenant_id: &str,
+        embed_insert_novelty_micros: u64,
+        require_qualifiable: bool,
+    ) -> anyhow::Result<()> {
+        let bundle_ids = self
+            .store
+            .runnable_bundle_ids(tenant_id)
+            .await
+            .map_err(|_| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?;
+        for bundle_id in bundle_ids {
+            let package = self
+                .store
+                .load_bundle(tenant_id, &bundle_id)
+                .await
+                .map_err(|_| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?;
+            self.check_runnable_package(&package, embed_insert_novelty_micros, require_qualifiable)
+                .map_err(|label| anyhow::anyhow!(label))?;
+        }
+        Ok(())
+    }
+
+    /// `check_tenant_bundles`'s checks of one package.
+    fn check_runnable_package(
+        &self,
+        package: &BundlePackage,
+        embed_insert_novelty_micros: u64,
+        require_qualifiable: bool,
+    ) -> Result<(), &'static str> {
+        self.construct(package.clone()).map_err(|label| {
+            if label == PIPELINE_DEPENDENCY_MISSING_LABEL {
+                PIPELINE_TENANT_BUNDLE_DEPENDENCY_MISSING_LABEL
+            } else {
+                PIPELINE_TENANT_BUNDLE_NOT_RUNNABLE_LABEL
+            }
+        })?;
+        if let Some(config) =
+            crate::versioned_pipeline_bundle::package_compatibility_config(package)
+        {
+            if config.embed_insert_novelty_micros != embed_insert_novelty_micros {
+                return Err("pipeline_runtime_embed_insert_novelty_mismatch");
+            }
+            if self.novelty_utility_checks.issuer_principal_ref.is_none() {
+                return Err("pipeline_credit_issuer_principal_missing");
+            }
+            if require_qualifiable && !config.is_qualifiable() {
+                return Err("pipeline_runtime_dependencies_not_production_qualified");
+            }
+        }
         Ok(())
     }
 
@@ -9402,18 +9497,16 @@ impl PipelineService {
         // that issued a `NoveltyUtility` event -- its calling gate worker --
         // as the event's actor. The pipeline issues it as its configured
         // issuer (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), the
-        // principal Settle checks against `main`'s central-issuer list. A
-        // runtime that routes or drains a compatibility bundle refuses to
-        // start without one, so the contributor stands in only on a runtime
-        // that processes no tenant. A `PipelineScore` event keeps the
+        // principal Settle checks against `main`'s central-issuer list. With
+        // no issuer the leg is withheld before its ledger row
+        // (`novelty_utility_withheld_reason`; Zaki review 3, Z3-2): nobody
+        // stands in for the issuer. A `PipelineScore` event keeps the
         // contributor, as PR 2 wrote it.
         let actor_principal_ref = match trace_credit_event {
-            PipelineTraceCreditEvent::NoveltyUtility => self
-                .novelty_utility_checks
-                .issuer_principal_ref
-                .clone()
-                .unwrap_or_else(|| account_ref.to_string()),
-            PipelineTraceCreditEvent::PipelineScore => account_ref.to_string(),
+            PipelineTraceCreditEvent::NoveltyUtility => {
+                self.novelty_utility_checks.issuer_principal_ref.clone()
+            }
+            PipelineTraceCreditEvent::PipelineScore => Some(account_ref.to_string()),
         };
         // Zaki review 1, item 4 (owner: as `main`): a batched leg's line
         // settles under `main`'s settlement key -- the principal's account,
@@ -9548,7 +9641,9 @@ impl PipelineService {
                 &ledger_event_type_label,
                 &actor_role,
                 &settlement_state,
-                &actor_principal_ref,
+                &actor_principal_ref.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+                })?,
                 &witness_provenance_class,
             ],
         )
@@ -9645,6 +9740,10 @@ impl PipelineService {
     /// - The central issuer: with a non-empty issuer allowlist, a positive
     ///   award needs the pipeline's configured issuer on it, where `main`
     ///   needs its calling gate worker there (`central_issuer_denied`).
+    /// - The issuer: with no configured pipeline issuer (and an empty list),
+    ///   the event has no actor, where `main` always has its calling gate
+    ///   worker (`credit_check_error`, as `main` fails a check it cannot
+    ///   make; Zaki review 3, Z3-2).
     /// - `main` also applies its calling token's scoped allowlists. Settle
     ///   has no calling token, so that check does not apply here (Ruling
     ///   T15-9); the tenant authority's own allowlists were applied to this
@@ -9684,6 +9783,12 @@ impl PipelineService {
                 .is_some_and(|issuer| checks.central_issuer_principal_refs.contains(issuer))
         {
             return Ok(Some(PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL));
+        }
+        // Zaki review 3, Z3-2: the event's actor is the configured issuer,
+        // and nobody stands in for a missing one, so the leg is withheld, as
+        // `main` fails a credit check it cannot make.
+        if checks.issuer_principal_ref.is_none() {
+            return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
         }
         let Some(authority) = self
             .authority

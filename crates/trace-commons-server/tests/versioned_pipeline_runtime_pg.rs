@@ -14265,7 +14265,7 @@ async fn compatibility_test_service_with_payout(
         config,
         near,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
     )
     .await
 }
@@ -14879,13 +14879,9 @@ async fn a_compatibility_award_needs_the_model_training_allowed_use() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let service = checked_compatibility_service(
-        &backend,
-        &dir,
-        allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
-    )
-    .await;
+    let service =
+        checked_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
+            .await;
     let default_consent = envelope(uuid::Uuid::new_v4()).await;
     assert!(
         !default_consent
@@ -14970,7 +14966,7 @@ async fn the_production_gate_flag_withholds_an_award_from_unqualified_dependenci
         allow_all_authority(),
         PipelineNoveltyUtilityChecks {
             require_production_gate: true,
-            ..PipelineNoveltyUtilityChecks::default()
+            ..issuing_checks()
         },
     )
     .await;
@@ -15020,13 +15016,9 @@ async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
             require_policy: true,
         },
     )));
-    let service = checked_compatibility_service(
-        &backend,
-        &dir,
-        evaluation_only.clone(),
-        PipelineNoveltyUtilityChecks::default(),
-    )
-    .await;
+    let service =
+        checked_compatibility_service(&backend, &dir, evaluation_only.clone(), issuing_checks())
+            .await;
     assert_withheld(
         &settled_compatibility_award(
             &service,
@@ -15116,13 +15108,9 @@ async fn a_compatibility_award_needs_a_consent_scope_the_tenant_policy_allows() 
                 require_policy: true,
             },
         )));
-        let service = checked_compatibility_service(
-            &backend,
-            &dir,
-            authority.clone(),
-            PipelineNoveltyUtilityChecks::default(),
-        )
-        .await;
+        let service =
+            checked_compatibility_service(&backend, &dir, authority.clone(), issuing_checks())
+                .await;
         let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
         let env = model_training_envelope(uuid::Uuid::new_v4()).await;
         assert_eq!(env.consent.scopes, vec![ConsentScope::ModelTraining]);
@@ -22099,13 +22087,9 @@ async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let service = checked_compatibility_service(
-        &backend,
-        &dir,
-        allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
-    )
-    .await;
+    let service =
+        checked_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
+            .await;
     let tenant = format!("compat-held-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:compat-held";
     service.register_default_bundle(&tenant).await.unwrap();
@@ -22254,6 +22238,172 @@ async fn a_novelty_utility_ledger_row_names_the_pipeline_issuer() {
         "the issuer, not the contributor"
     );
     assert_eq!(row.get::<_, String>("actor_role"), "vector_worker");
+}
+
+/// The pipeline issuer the compatibility tests configure: with none, every
+/// `NoveltyUtility` leg is withheld (Zaki review 3, Z3-2).
+const TEST_PIPELINE_ISSUER: &str =
+    "principal_sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+/// `PipelineNoveltyUtilityChecks` with `TEST_PIPELINE_ISSUER` as the issuer
+/// and every other check at its default.
+fn issuing_checks() -> PipelineNoveltyUtilityChecks {
+    PipelineNoveltyUtilityChecks {
+        issuer_principal_ref: Some(TEST_PIPELINE_ISSUER.to_string()),
+        ..PipelineNoveltyUtilityChecks::default()
+    }
+}
+
+/// Zaki review 3, Z3-2: with no configured pipeline issuer, a compatibility
+/// run's `NoveltyUtility` leg is withheld (`credit_check_error`, as `main`
+/// fails a credit check it cannot make): no ledger row, and never the
+/// contributor standing in as the issuer.
+#[tokio::test]
+async fn a_novelty_utility_award_with_no_configured_issuer_is_withheld() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("compat-no-issuer-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-no-issuer-contributor";
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "no issuer, no NoveltyUtility row"
+    );
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref()
+        ),
+        (
+            "complete",
+            Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+        )
+    );
+}
+
+/// Multi-lens review L5-2 and Zaki review 3, Z3-2: startup checks every
+/// bundle a worker may run for a routed or drained tenant -- its active
+/// bundle, and the bundle of each run in flight -- as it checks the default
+/// package: `main`'s index-insert threshold, the pipeline's credit issuer,
+/// and (without test dependencies) a qualifiable configuration.
+#[tokio::test]
+async fn startup_checks_every_bundle_a_tenant_may_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let old_config = near_duplicate_config();
+    let mut new_config = near_duplicate_config();
+    new_config.embed_insert_novelty_micros = old_config.embed_insert_novelty_micros * 2;
+    let threshold = new_config.embed_insert_novelty_micros;
+    let old = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        old_config,
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let new = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        new_config.clone(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let label = |result: anyhow::Result<()>| result.unwrap_err().to_string();
+    let tenant = format!("startup-tenant-bundles-{}", uuid::Uuid::new_v4());
+
+    old.register_default_bundle(&tenant).await.unwrap();
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, threshold, false).await),
+        "pipeline_runtime_embed_insert_novelty_mismatch",
+        "the tenant keeps its first active bundle when the default package changes"
+    );
+
+    let run_id = receive_envelope(
+        &old,
+        &tenant,
+        "principal_sha256:startup-tenant-bundles",
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    new.register_default_bundle(&tenant).await.unwrap();
+    // The bundle switch, as an operator makes it (the runtime login has no
+    // UPDATE on the selection).
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_active_bundles SET bundle_id = $2 WHERE tenant_id = $1",
+        &[&tenant, &new.bundle_id()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, threshold, false).await),
+        "pipeline_runtime_embed_insert_novelty_mismatch",
+        "a run in flight is still bound to the old bundle"
+    );
+    process_until_idle(&old, &tenant).await;
+    let run = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.state, PipelineRunState::Complete);
+    new.check_tenant_bundles(&tenant, threshold, false)
+        .await
+        .expect("only the new bundle is left to run");
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, threshold, true).await),
+        "pipeline_runtime_dependencies_not_production_qualified",
+        "the local reference configuration is not qualifiable"
+    );
+
+    let no_issuer = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        new_config,
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        index,
+    )
+    .await;
+    assert_eq!(
+        label(
+            no_issuer
+                .check_tenant_bundles(&tenant, threshold, false)
+                .await
+        ),
+        "pipeline_credit_issuer_principal_missing"
+    );
 }
 
 /// Finding 16, first bullet: the payout pays only a leg Score seeded for
@@ -22489,6 +22639,7 @@ async fn a_withheld_novelty_utility_leg_never_reaches_its_adapter() {
         .with_embedder(embedder)
         .with_authority(allow_all_authority())
         .with_privacy(default_privacy_boundary())
+        .with_novelty_utility_checks(issuing_checks())
         .build()
         .expect("build the compatibility service"),
     );
@@ -22631,7 +22782,7 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_one_worker() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -22659,7 +22810,7 @@ async fn identical_receipts_earn_one_novelty_utility_award_when_interleaved() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -22706,7 +22857,7 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
             near_duplicate_config(),
             None,
             allow_all_authority(),
-            PipelineNoveltyUtilityChecks::default(),
+            issuing_checks(),
             index.clone(),
         )
     };
@@ -22745,7 +22896,7 @@ async fn compatibility_score_never_holds_two_pooled_connections() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -22795,7 +22946,7 @@ async fn a_phase_that_commits_on_its_last_attempt_leaves_the_next_phase_its_budg
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -22845,7 +22996,7 @@ async fn a_run_no_claim_can_select_is_not_a_compatibility_neighbour() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -23016,7 +23167,7 @@ async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         IsolatedPipelineIndex::new(),
     )
     .await;
@@ -23291,6 +23442,7 @@ async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_novelty_utility_checks(issuing_checks())
     .build()
     .expect("build pipeline service");
     let tenant = format!("compat-blocking-pool-{}", uuid::Uuid::new_v4());

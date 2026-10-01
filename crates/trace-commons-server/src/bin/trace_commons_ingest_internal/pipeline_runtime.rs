@@ -792,6 +792,35 @@ pub(crate) fn pipeline_tenants_processed(
         || !drain_tenant_ids.is_empty()
 }
 
+/// Multi-lens review L5-2 and Zaki review 3, Z3-2: before ingest serves,
+/// runs the default package's startup checks on every bundle a worker may
+/// run for a routed or drained tenant -- its active bundle and the bundle of
+/// each run in flight (`PipelineService::check_tenant_bundles`) -- and
+/// refuses to start on the first failure, under its label. A tenant keeps
+/// its active bundle when the default package changes, so the assembly's
+/// checks of the default package alone do not cover it.
+pub(crate) async fn validate_pipeline_tenant_bundles(
+    service: &PipelineService,
+    tenant_rollout_gates: &TraceTenantRolloutGates,
+    drain_tenant_ids: &BTreeSet<String>,
+    embed_insert_novelty_micros: u64,
+    allow_test_dependencies: bool,
+) -> anyhow::Result<()> {
+    let mut tenant_ids =
+        tenant_rollout_gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
+    tenant_ids.extend(drain_tenant_ids.iter().cloned());
+    for tenant_id in tenant_ids {
+        service
+            .check_tenant_bundles(
+                &tenant_id,
+                embed_insert_novelty_micros,
+                !allow_test_dependencies,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 /// The tenants the pipeline worker drains on each pass, each once, in order:
 /// the tenants whose receipts are routed to the pipeline
 /// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) and the drain list

@@ -3925,6 +3925,12 @@ impl AppState {
         let near_settlement_mode = NearSettlementMode::from_env();
         let near_credit_require_adapter_auth =
             env_truthy(TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH);
+        // Zaki review 1, round 2, finding 14: `main`'s own index-insert
+        // threshold, with `main`'s default.
+        let pipeline_embed_insert_novelty_micros = parse_usize_env(
+            TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS,
+            TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS,
+        )? as u64;
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
@@ -3940,12 +3946,7 @@ impl AppState {
                 require_adapter_auth: near_credit_require_adapter_auth,
             },
             &pipeline_novelty_utility_checks,
-            // Zaki review 1, round 2, finding 14: `main`'s own index-insert
-            // threshold, with `main`'s default.
-            parse_usize_env(
-                TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS,
-                TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS,
-            )? as u64,
+            pipeline_embed_insert_novelty_micros,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         if let Some(service) = pipeline_service.as_ref() {
@@ -3953,6 +3954,14 @@ impl AppState {
                 require_privacy_filter,
                 service,
             )?;
+            pipeline_runtime::validate_pipeline_tenant_bundles(
+                service,
+                &tenant_rollout_gates,
+                &pipeline_drain_tenant_ids,
+                pipeline_embed_insert_novelty_micros,
+                pipeline_allow_test_dependencies,
+            )
+            .await?;
         }
         validate_pipeline_drain_tenants(&pipeline_drain_tenant_ids, pipeline_service.is_some())?;
         let pipeline_product = pipeline_service
