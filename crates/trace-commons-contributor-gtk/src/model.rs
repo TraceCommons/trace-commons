@@ -25,6 +25,10 @@ pub struct Status {
     pub paused: bool,
     #[serde(default)]
     pub queue_depth: u64,
+    /// The daemon's unresolved decision count. Missing on older daemons;
+    /// queue occupancy and pending rows are not substitutes.
+    #[serde(default)]
+    pub decisions_owed: Option<u64>,
     #[serde(default)]
     pub next_digest_at: Option<String>,
     #[serde(default)]

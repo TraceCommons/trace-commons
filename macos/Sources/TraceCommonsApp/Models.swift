@@ -251,6 +251,9 @@ struct DaemonStatus: Decodable, Equatable {
     var consentScopes: [String]
     let paused: Bool
     let queueDepth: Int
+    /// The daemon's K6 count, never inferred from a pending list or queue
+    /// depth. Older daemons omit it, which means unavailable, not zero.
+    let decisionsOwed: Int?
     let nextDigestAt: Date?
     let health: DaemonHealth
     /// The daily volume caps and what they are holding back.
@@ -286,6 +289,7 @@ struct DaemonStatus: Decodable, Equatable {
         case consentScopes = "consent_scopes"
         case paused
         case queueDepth = "queue_depth"
+        case decisionsOwed = "decisions_owed"
         case nextDigestAt = "next_digest_at"
         case health
         case dailyBudget = "daily_budget"
@@ -304,6 +308,7 @@ struct DaemonStatus: Decodable, Equatable {
         consentScopes: [String],
         paused: Bool,
         queueDepth: Int,
+        decisionsOwed: Int? = nil,
         nextDigestAt: Date?,
         health: DaemonHealth,
         dailyBudget: DailyBudget = .unknown,
@@ -320,6 +325,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.consentScopes = consentScopes
         self.paused = paused
         self.queueDepth = queueDepth
+        self.decisionsOwed = decisionsOwed
         self.nextDigestAt = nextDigestAt
         self.health = health
         self.dailyBudget = dailyBudget
@@ -339,6 +345,7 @@ struct DaemonStatus: Decodable, Equatable {
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         queueDepth = try c.decodeIfPresent(Int.self, forKey: .queueDepth) ?? 0
+        decisionsOwed = try c.decodeIfPresent(Int.self, forKey: .decisionsOwed)
         nextDigestAt = try c.decodeIfPresent(Date.self, forKey: .nextDigestAt)
         health = try c.decodeIfPresent(DaemonHealth.self, forKey: .health)
             ?? DaemonHealth(lastErrorLabel: nil, since: nil)

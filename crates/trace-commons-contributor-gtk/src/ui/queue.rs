@@ -411,23 +411,10 @@ pub fn wire(app: &Rc<App>) {
         .connect_value_changed(move |_| app_for_scroll.schedule_visible_preview_update());
 }
 
-pub fn render(app: &Rc<App>) {
-    let view = &app.queue;
-    view.first_contribution
-        .set_visible(app.rollup.borrow().all_time.total() == 0);
-    clear(&view.list);
-    clear(&view.disclosure);
-    clear(&view.week);
-    // Rebuilt below alongside `view.list`: every row is redrawn from
-    // scratch each render, so the old widgets in here are already gone.
-    app.card_widgets.borrow_mut().clear();
-
+/// Refresh the badge when either status or pending preview flags change.
+pub(super) fn render_badge(app: &Rc<App>) {
     let entries = app.entries.borrow();
     let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
-    // The certificate section filters the same rows, and `certificate::held`
-    // takes a slice so it can be tested without a window.
-    let pending_owned: Vec<QueueEntry> = pending.iter().map(|e| (*e).clone()).collect();
-
     // The two facts the count cannot carry, both read off the previews the
     // cards already hold: a session scrubbing matched NOTHING in, and one
     // that was trimmed to fit the raw byte budget. An entry with no preview
@@ -444,9 +431,31 @@ pub fn render(app: &Rc<App>) {
     drop(previews);
     let trimmed = pending.iter().filter(|e| e.subagents_dropped > 0).count();
     app.set_queue_count(
-        pending.len(),
+        app.status
+            .borrow()
+            .as_ref()
+            .and_then(|status| status.decisions_owed),
         crate::shield::state(pending.len(), nothing_matched, trimmed),
     );
+}
+
+pub fn render(app: &Rc<App>) {
+    render_badge(app);
+    let view = &app.queue;
+    view.first_contribution
+        .set_visible(app.rollup.borrow().all_time.total() == 0);
+    clear(&view.list);
+    clear(&view.disclosure);
+    clear(&view.week);
+    // Rebuilt below alongside `view.list`: every row is redrawn from
+    // scratch each render, so the old widgets in here are already gone.
+    app.card_widgets.borrow_mut().clear();
+
+    let entries = app.entries.borrow();
+    let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
+    // The certificate section filters the same rows, and `certificate::held`
+    // takes a slice so it can be tested without a window.
+    let pending_owned: Vec<QueueEntry> = pending.iter().map(|e| (*e).clone()).collect();
     view.empty.set_visible(pending.is_empty());
     view.scroller.set_visible(!pending.is_empty());
     view.heading.set_text(&copy::waiting_heading(pending.len()));
