@@ -1748,13 +1748,28 @@ mod tests {
         }
         let mut package = evidence.clone();
         name_package(&mut package[0].check, "candidate");
+        // Each digest alone, against the same named package (fix round 1,
+        // review M5): a hash that left out any one of them would repeat
+        // `package`'s.
+        let mut package_hash = package.clone();
+        package_hash[0].check.package_hash = Some(sha256_prefixed(b"other-package"));
+        let mut configuration = package.clone();
+        configuration[0].check.configuration_digest = Some(sha256_prefixed(b"other-configuration"));
         let mut dependency = package.clone();
         dependency[0].check.dependency_digest = Some(sha256_prefixed(b"other-dependency"));
         let mut observed = evidence.clone();
         observed[0].check.evidence_hash = sha256_prefixed(b"other-evidence");
 
         let mut hashes = vec![base];
-        for changed in [run, revision, package, dependency, observed] {
+        for changed in [
+            run,
+            revision,
+            package,
+            package_hash,
+            configuration,
+            dependency,
+            observed,
+        ] {
             let decision = evaluate_promotion(&changed, now).unwrap();
             hashes.push(decision.evidence_hash);
         }
