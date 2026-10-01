@@ -948,9 +948,10 @@ deleting which row is a fixed split (controller ruling R2-1):
   128 (four for each row it may remove). The worker keeps where the pass
   stopped, and the tenant's next pass resumes there; a pass that reaches
   the last due row makes the next one start over at the oldest. So however
-  many rows are kept, every due row is examined within about N / 128 passes
-  for N due rows (kept rows included), and kept rows never stall a
-  tenant's sweep. The position is held in the worker's memory only: a
+  many rows are kept, kept rows never stall a tenant's sweep. A pass
+  removes at most 32 rows and examines at most 128, so clearing N due rows
+  takes between about N / 128 passes (most rows kept) and N / 32 passes
+  (most rows removed). The position is held in the worker's memory only: a
   restarted worker starts over at the oldest. One pass is one database
   transaction: it examines up to 128 rows and makes up to about 256 object
   store calls (a presence check or key derivation, then a delete, for each
