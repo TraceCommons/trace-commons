@@ -22882,6 +22882,203 @@ async fn a_run_no_claim_can_select_is_not_a_compatibility_neighbour() {
     );
 }
 
+/// Multi-lens review L2-2: a store whose reads, or whose writes, fail while
+/// the matching flag is set, as an object-store outage does.
+struct OutageArtifactStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    fail_reads: AtomicBool,
+    fail_writes: AtomicBool,
+}
+
+impl OutageArtifactStore {
+    fn over(inner: Arc<dyn TraceArtifactStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            fail_reads: AtomicBool::new(false),
+            fail_writes: AtomicBool::new(false),
+        })
+    }
+
+    fn set(&self, reads: bool, writes: bool) {
+        self.fail_reads.store(reads, Ordering::SeqCst);
+        self.fail_writes.store(writes, Ordering::SeqCst);
+    }
+
+    fn check(flag: &AtomicBool) -> anyhow::Result<()> {
+        anyhow::ensure!(!flag.load(Ordering::SeqCst), "object store unavailable");
+        Ok(())
+    }
+}
+
+impl TraceArtifactStore for OutageArtifactStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        Self::check(&self.fail_writes)?;
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::check(&self.fail_writes)?;
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::check(&self.fail_writes)?;
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        Self::check(&self.fail_reads)?;
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::check(&self.fail_reads)?;
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::check(&self.fail_reads)?;
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// Multi-lens review L2-2 and ruling FR3: an object-store call that fails
+/// is a dependency outage, the uncharged suspension
+/// `artifact_store_unavailable`, at each of the run path's store calls:
+/// Review's source read and approved write, and Score's approved read and
+/// object write. The run then completes once the store is back. (Settle's
+/// read of the stored index command stays charged, held for a ruling;
+/// `stored_command_binding_failures_fail_closed` covers it.)
+#[tokio::test]
+async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = OutageArtifactStore::over(artifact_store(&dir));
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        store.clone(),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let runs = PgPipelineStore::new(backend.clone());
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(
+        &service,
+        &tenant,
+        "principal_sha256:artifact-store-outage",
+        &first,
+    )
+    .await;
+    // (outage of reads, outage of writes, the phase it hits).
+    for (reads, writes, phase) in [
+        (true, false, "Review's source read"),
+        (false, true, "Review's approved write"),
+        (true, false, "Score's approved read"),
+        (false, true, "Score's object write"),
+    ] {
+        let before = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+        store.set(reads, writes);
+        service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} is claimed"));
+        let after = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+        assert_eq!(
+            (
+                after.state,
+                after.last_error_label.as_deref(),
+                after.attempt_count,
+                after.next_phase,
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL),
+                before.attempt_count,
+                before.next_phase,
+            ),
+            "{phase} failing is uncharged"
+        );
+        store.set(false, false);
+        force_due(&backend, &tenant, run_id).await;
+        if phase.ends_with("write") {
+            service
+                .process_run(&tenant, run_id)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("the phase after {phase} runs"));
+        }
+    }
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    let run = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
+}
+
 /// Zaki review 1, round 2, N-6: a store whose every call made on a Tokio
 /// runtime worker fails, so a pipeline object-store call that was not moved
 /// to the blocking pool shows as a failed phase.

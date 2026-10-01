@@ -297,6 +297,14 @@ not the trace's fault:
   adapter call returned before the failure, the next attempt calls the
   adapter again with the same operation reference. The adapter must answer
   that call from the first one.
+- `artifact_store_unavailable` (Review and Score): an object-store call of
+  the run failed -- Review's source read or approved write, or Score's
+  approved read or object writes. A check of what the store returned (a
+  decode or hash mismatch) is still charged. The store's errors carry no
+  type, so an integrity failure the store itself reports waits here too,
+  retried at most once an hour; look for a run that stays on this label.
+  Settle's read of the stored index command is still charged
+  (`index_command_invalid`).
 
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
