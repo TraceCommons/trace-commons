@@ -155,6 +155,11 @@ pub const PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS: i64 = 2_000;
 /// lease's end plus this margin, which also covers clock skew between
 /// replicas.
 pub const PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS: i64 = 60;
+/// The longest Settle's index dispatch holds the run and submission rows
+/// (multi-lens review L4-1): past the earlier of its lease's end and this
+/// budget, it stops writing, rolls back, and the run waits uncharged as
+/// `index_unavailable`.
+pub const PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS: i64 = 30;
 /// Startup refusal labels of `PipelineService::check_tenant_bundles` that
 /// the default package's checks do not share: a tenant bundle whose scorer
 /// or embedder the service does not hold, one no policy family runs, and
@@ -1438,16 +1443,27 @@ impl PgPipelineStore {
     ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // Multi-lens review L4-1 and L4-6(a): the sweep locks in run id order
+        // and skips a row another transaction holds (a live dispatch, a
+        // withdrawal), so a claim never waits behind one and two sweeps
+        // cannot deadlock with a withdrawal; a later claim sweeps the row.
         let swept = tx
             .query(
-                "UPDATE pipeline_runs
+                "WITH expired AS MATERIALIZED (
+                    SELECT run_id FROM pipeline_runs
+                     WHERE tenant_id = $1
+                       AND state = 'leased'
+                       AND lease_expires_at <= NOW()
+                       AND attempt_count >= max_attempts
+                     ORDER BY run_id
+                     FOR UPDATE SKIP LOCKED
+                 )
+                 UPDATE pipeline_runs p
                  SET state = 'failed', lease_token = NULL, lease_expires_at = NULL,
                      last_error_label = $2, updated_at = NOW()
-                 WHERE tenant_id = $1
-                   AND state = 'leased'
-                   AND lease_expires_at <= NOW()
-                   AND attempt_count >= max_attempts
-                 RETURNING run_id, next_phase",
+                 FROM expired
+                 WHERE p.tenant_id = $1 AND p.run_id = expired.run_id
+                 RETURNING p.run_id, p.next_phase",
                 &[&tenant_id, &PIPELINE_ATTEMPTS_EXHAUSTED_LABEL],
             )
             .await?;
@@ -10947,8 +10963,12 @@ enum IndexDispatchOutcome {
 /// awaits the writes, so a dropped Settle future does not end it early. The
 /// locks can still go while the writes run -- a lost database session, or a
 /// process exit, which drops this task with the runtime while the blocking
-/// writes go on -- so the writes also stop at the lease's end: no upsert
-/// starts once `lease_expires_at` has passed. An upsert in flight then must
+/// writes go on -- so the writes also stop at the deadline: no upsert starts
+/// once the earlier of `lease_expires_at` and the dispatch budget
+/// (`PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`, multi-lens review L4-1) has
+/// passed. At the deadline the transaction rolls back at once, so the rows
+/// are free, and the run is released only once the upsert in flight has
+/// returned (or the fence margin has passed). An upsert in flight then must
 /// return within `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, which a
 /// withdrawal waits out before the revision's invalidation runs
 /// (`end_runs_of_inoperable_submission_on_tx`). A task that did not return
@@ -10986,7 +11006,12 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
         return Ok(IndexDispatchOutcome::Cancelled(run));
     }
     let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
-    let deadline = run.lease_expires_at.ok_or_else(stale_lease_error)?;
+    // Multi-lens review L4-1: the rows are held no longer than the earlier
+    // of the lease's end and the dispatch budget.
+    let deadline = run
+        .lease_expires_at
+        .ok_or_else(stale_lease_error)?
+        .min(Utc::now() + Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS));
     let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
     // Each entry is written under its own key: the command pairs them, so
     // one entry is never stored under another's key.
@@ -10994,7 +11019,7 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
         .keyed_entries(&tenant)
         .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
         .collect::<Vec<_>>();
-    let written = tokio::task::spawn_blocking(move || {
+    let mut writes = tokio::task::spawn_blocking(move || {
         for (key, embedding, content_hash) in &entries {
             if Utc::now() >= deadline {
                 return Err(IndexWriteError::Uncertain);
@@ -11002,9 +11027,26 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
             writer.upsert(key, embedding, content_hash)?;
         }
         Ok(())
-    })
-    .await
-    .unwrap_or(Err(IndexWriteError::Uncertain));
+    });
+    let budget = (deadline - Utc::now()).to_std().unwrap_or_default();
+    let written = match tokio::time::timeout(budget, &mut writes).await {
+        Ok(joined) => joined.unwrap_or(Err(IndexWriteError::Uncertain)),
+        Err(_) => {
+            // Past the deadline: roll back at once, so the rows are free,
+            // then wait (bounded by the fence margin) for the call in flight
+            // to return before the run is released, so that a run that is
+            // not leased has no write in flight.
+            drop(tx);
+            drop(client);
+            let margin = std::time::Duration::from_secs(
+                PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
+            );
+            let _ = tokio::time::timeout(margin, writes).await;
+            return Ok(IndexDispatchOutcome::WriteFailed(
+                IndexWriteError::Uncertain,
+            ));
+        }
+    };
     if let Err(error) = written {
         // Rolled back: `pending` stays.
         drop(tx);

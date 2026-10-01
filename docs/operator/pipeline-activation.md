@@ -141,12 +141,16 @@ and delete of a phase.
 Settle's index writes run in a task of their own that holds the run and
 submission rows locked until the write commits, so a Settle that is stopped
 (a shutdown past its grace period) does not release them while the writes
-go on. The index cannot see those locks, and a lost database session or a
-process exit still releases them during a write. So the writes also stop at
-the Settle lease's end: no index call starts after it, and the index writer
-must return from each call within 60 seconds. A withdrawal that finds an
-unfinished write on a run whose lease is still live queues the revision's
-removal no earlier than that lease's end plus those 60 seconds.
+go on. The rows are held at most until the Settle lease's end or 30 seconds
+after the write starts, whichever is earlier: past that, the write rolls
+back, the rows are free, and once the index call in flight returns the run
+waits in `retry`, uncharged, as `index_unavailable`. The index cannot see
+the locks, and a lost database session or a process exit still releases
+them during a write. So the writes also stop at that deadline: no index call
+starts after it, and the index writer must return from each call within 60
+seconds. A withdrawal that finds an unfinished write on a run whose lease is
+still live queues the revision's removal no earlier than that lease's end
+plus those 60 seconds.
 
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` -- whole seconds, default 300
   (5 minutes).

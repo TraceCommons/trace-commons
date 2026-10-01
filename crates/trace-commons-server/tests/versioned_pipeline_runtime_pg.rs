@@ -7723,6 +7723,148 @@ async fn an_index_write_stops_at_its_lease_deadline() {
     assert_eq!(current.index_write_state, "pending");
 }
 
+/// Multi-lens review L4-1 (Zaki review 3, Z3-M2): the index dispatch does
+/// not hold the run and submission rows past its deadline (the lease's end,
+/// or 30 seconds). A write held past a one-second Settle lease leaves the
+/// run row free while the held call still runs, and the run is released only
+/// once that call returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_write_past_its_deadline_releases_the_rows() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) = held_index_test_service_with_leases(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap(),
+    )
+    .await;
+    let tenant = format!("dispatch-timeout-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+        .await
+        .unwrap();
+    let state: String = tx
+        .query_one(
+            "SELECT state FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect("the run row is free once the dispatch's deadline passed")
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        state, "leased",
+        "the run is not released while its write runs"
+    );
+
+    held.release();
+    let _ = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle ends once released");
+    let current = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (current.state, current.index_write_state.as_str()),
+        (PipelineRunState::Retry, "pending")
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+}
+
+/// Multi-lens review L4-1 and L4-6(a): `claim_next`'s sweep of expired,
+/// exhausted leases skips a run row another transaction holds (it locks in
+/// run id order, `SKIP LOCKED`), so a claim never waits behind it, and a
+/// later claim sweeps it.
+#[tokio::test]
+async fn the_claim_sweep_skips_a_locked_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("sweep-skip-locked-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = PgPipelineStore::new(backend.clone());
+    store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("a worker claims the Settle");
+    set_attempt_count(&backend, &tenant, run.run_id, run.max_attempts as i32).await;
+    expire_lease(&backend, &tenant, run.run_id).await;
+
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let held = tenant_tx(&mut holder, &tenant).await;
+    held.query_one(
+        "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    let claimed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.claim_next(&tenant, PipelineLeaseConfig::default()),
+    )
+    .await
+    .expect("the sweep does not wait for the locked run")
+    .unwrap();
+    assert!(claimed.is_none());
+    held.rollback().await.unwrap();
+    drop(holder);
+    assert_eq!(
+        store
+            .get_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        PipelineRunState::Leased,
+        "the locked run was skipped"
+    );
+
+    store
+        .claim_next(&tenant, PipelineLeaseConfig::default())
+        .await
+        .unwrap();
+    let swept = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(
+        (swept.state, swept.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        )
+    );
+}
+
 /// Multi-lens review L4-3: a withdrawal that finds a `pending` index write
 /// on a run another Settle holds the lease of queues the revision's
 /// invalidation no earlier than that lease's end plus the fence margin, so
