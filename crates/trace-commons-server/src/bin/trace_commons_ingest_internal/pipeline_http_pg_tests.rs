@@ -2046,11 +2046,17 @@ pub(super) async fn account_owner_backend() -> Option<Arc<PgBackend>> {
 /// never as the owner superuser (Zaki review 1, round 2, finding 17).
 /// Fixture writes that are not the ingest runtime's go through
 /// `account_owner_backend` instead.
-async fn mains_database() -> Arc<dyn Database> {
+pub(super) async fn mains_database() -> Arc<dyn Database> {
     let url = pipeline_http_database_url()
         .await
         .expect("the same variable runtime_backend read is set");
-    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    mains_database_at(&url).await
+}
+
+/// `mains_database` for a database the caller names: the restore drill's
+/// resume serves `main` from the restored database this way.
+pub(super) async fn mains_database_at(url: &str) -> Arc<dyn Database> {
+    let mut runtime_url = reqwest::Url::parse(url).expect("parse test URL");
     runtime_url
         .set_username(PIPELINE_HTTP_RUNTIME_ROLE)
         .expect("set runtime user");

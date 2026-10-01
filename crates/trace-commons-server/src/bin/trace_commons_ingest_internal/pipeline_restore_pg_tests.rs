@@ -49,9 +49,10 @@ use super::pipeline_corpus_pg_tests::{
 };
 use super::pipeline_http_pg_tests::{
     PIPELINE_HTTP_RUNTIME_ROLE, PassThroughPipelinePrivacyBoundary, account_owner_backend,
-    assemble_compatibility_pipeline_service_with, expire_run_lease, join_within,
-    pilot_runtime_login, post_trace, runtime_backend, runtime_backend_at, serve_pipeline_app,
-    tenant_tx, wait_for_pipeline_ready, wait_for_run_complete, wait_for_settle_selection,
+    assemble_compatibility_pipeline_service_with, expire_run_lease, join_within, mains_database,
+    mains_database_at, pilot_runtime_login, post_trace, runtime_backend, runtime_backend_at,
+    serve_pipeline_app, tenant_tx, wait_for_pipeline_ready, wait_for_run_complete,
+    wait_for_settle_selection,
 };
 use trace_commons_gate_api::SettlementAdapter;
 use trace_commons_gate_api::pipeline::InstrumentId;
@@ -543,17 +544,19 @@ fn compatibility_service(
 }
 
 /// An `AppState` serving `service` for `RESTORE_TENANT`, as the corpus
-/// harness builds one: the receipt route's database is the migration owner,
-/// and the pipeline service (built by the caller) runs on the runtime login.
+/// harness builds one: `main`'s database (`mains`) and the pipeline service
+/// (built by the caller) both run on the runtime login, with the pilot
+/// ingest login's privileges only, never the owner superuser (PR 3's
+/// `mains_database`).
 fn restore_app_state(
     state_dir: &Path,
-    owner: &Arc<PgBackend>,
+    mains: &Arc<dyn Database>,
     artifacts: &Arc<LocalEncryptedTraceArtifactStore>,
     service: Arc<PipelineService>,
 ) -> Arc<AppState> {
     let mut state = test_state_with_options(
         state_dir.to_path_buf(),
-        Some(owner.clone() as Arc<dyn Database>),
+        Some(mains.clone()),
         Some(artifacts.clone()),
         false,
         false,
@@ -605,18 +608,15 @@ async fn restored_database_url() -> Option<String> {
     );
     drop(client);
     let _ = connection.await;
-    pilot_runtime_login::provision_runtime_login(&url, PIPELINE_HTTP_RUNTIME_ROLE, &[]).await;
-    Some(url)
-}
-
-/// The migration owner on the restored database, for the receipt route's
-/// state: a plain connection that applies no migration.
-async fn restored_owner_backend(url: &str) -> Arc<PgBackend> {
-    Arc::new(
-        PgBackend::new(&DatabaseConfig::from_postgres_url(url, 4))
-            .await
-            .expect("connect to the restored database as its owner"),
+    // The pilot ingest login's two groups, as the HTTP suite provisions this
+    // same login (`pipeline_http_database_url`).
+    pilot_runtime_login::provision_runtime_login(
+        &url,
+        PIPELINE_HTTP_RUNTIME_ROLE,
+        &["trace_account_admission_runtime"],
     )
+    .await;
+    Some(url)
 }
 
 /// Every `pipeline_*` table (and `phase_outcomes`) in the database `backend`
@@ -670,9 +670,11 @@ async fn pipeline_restore_seed() {
     let runtime = runtime_backend(8)
         .await
         .expect("restore_database_url_missing");
-    let owner = account_owner_backend()
+    // Migrates the suite's database and resets the account rate limiter.
+    account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
+    let mains = mains_database().await;
     let state_dir = tempfile::tempdir().expect("temp dir");
     let artifacts = test_artifact_store_with_key(&config.artifact_root, &config.master_key_hex);
     // Shared by both lifetimes (PF-2): the in-memory index and the recording
@@ -682,7 +684,7 @@ async fn pipeline_restore_seed() {
     let adapters = RecordingAdapters::new();
     let start = |crash_point: Option<PipelineCrashPoint>| {
         let service = compatibility_service(&runtime, &artifacts, &index, &adapters, crash_point);
-        restore_app_state(state_dir.path(), &owner, &artifacts, service)
+        restore_app_state(state_dir.path(), &mains, &artifacts, service)
     };
     let client = reqwest::Client::new();
 
@@ -814,7 +816,7 @@ async fn pipeline_restore_resume() {
     // `runtime_backend_at` checks the login is neither SUPERUSER nor
     // BYPASSRLS before anything else connects.
     let runtime = runtime_backend_at(&url, 8).await;
-    let owner = restored_owner_backend(&url).await;
+    let mains = mains_database_at(&url).await;
     let tables = pipeline_table_security(&runtime).await;
     assert_eq!(
         tables
@@ -898,7 +900,7 @@ async fn pipeline_restore_resume() {
 
     // The app on the restored state resumes the pending run by itself.
     let package = service.default_package().clone();
-    let state = restore_app_state(state_dir.path(), &owner, &artifacts, service.clone());
+    let state = restore_app_state(state_dir.path(), &mains, &artifacts, service.clone());
     let (base, stop, server) = serve_pipeline_app(state).await;
     let client = reqwest::Client::new();
     wait_for_pipeline_ready(&client, &base).await;

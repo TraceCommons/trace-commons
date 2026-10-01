@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use super::pipeline_http_pg_tests::{
     PassThroughPipelinePrivacyBoundary, account_owner_backend, allow_all_test_authority,
-    compatibility_reference_package, join_within, minimal_storage_rebate_package,
+    compatibility_reference_package, join_within, mains_database, minimal_storage_rebate_package,
     post_submission_status, post_trace, runtime_backend, send_http, serve_pipeline_app,
     wait_for_pipeline_ready,
 };
@@ -1306,7 +1306,8 @@ async fn pipeline_corpus_run() {
     let runtime = runtime_backend(8)
         .await
         .expect("corpus_database_url_missing");
-    let owner = account_owner_backend()
+    // Migrates the suite's database and resets the account rate limiter.
+    account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
     let state_dir = tempfile::tempdir().expect("temp dir");
@@ -1353,12 +1354,13 @@ async fn pipeline_corpus_run() {
         OTHER_ADMIN_TOKEN,
         TokenRole::Admin,
     );
-    // As the compatibility HTTP test: the account side on the migration
-    // owner; the pipeline service and the product store on the runtime
-    // login (NOBYPASSRLS, NOSUPERUSER).
+    // As the compatibility HTTP test: `main`'s database, the pipeline
+    // service, and the product store all on the runtime login (NOBYPASSRLS,
+    // NOSUPERUSER, the pilot ingest login's groups only; PR 3's
+    // `mains_database`), never the owner superuser.
     let mut state = test_state_with_options(
         state_dir.path().to_path_buf(),
-        Some(owner as Arc<dyn Database>),
+        Some(mains_database().await),
         Some(artifacts),
         false,
         false,
