@@ -24755,7 +24755,8 @@ async fn a_score_commit_missing_its_attempt_row_is_refused_and_leaves_no_object(
 
 /// Wave 2, fix round 1 (review I3): the Review commit holds the same rule.
 /// An approval must move the one `staged` `approved` row that names its
-/// object. With that row gone, or naming another key, after the approved
+/// object. With that row gone, naming another key, or naming another hash
+/// (fix round 2), after the approved
 /// object is published and before the commit, the commit is refused under
 /// `pipeline_attempt_artifact_missing`, a charged retry: no Review outcome,
 /// the approved object is deleted, and the retry writes and commits its
@@ -24765,7 +24766,11 @@ async fn a_review_commit_missing_its_attempt_row_is_refused_and_leaves_no_object
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
-    for change in [AttemptRowChange::Deleted, AttemptRowChange::OtherKey] {
+    for change in [
+        AttemptRowChange::Deleted,
+        AttemptRowChange::OtherKey,
+        AttemptRowChange::OtherHash,
+    ] {
         let (service, tenant, run_id, dir) =
             service_changing_an_attempt_row(&backend, "pipeline-approved-", "approved", change)
                 .await;
