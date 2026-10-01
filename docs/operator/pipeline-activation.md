@@ -533,8 +533,9 @@ below). With payout disabled, nothing is submitted to NEAR.
   after payout is turned on. Only a Trace Credit leg that settles into a
   batch is seeded `pending`; any other instrument on the `near` rail is
   `disabled`. A leg is paid only when Score marked it payout-eligible
-  (`payout_eligible`, V105): a `pending` leg seeded by earlier code, whose
-  batch line has no account settlement key or hold, is never paid.
+  (`payout_eligible`, V105): a leg seeded by earlier code, whose batch line
+  has no account settlement key or hold, is never paid, and V109 marks the
+  payout of such a Trace Credit leg `disabled` where it read `pending`.
 - A leg Settle completed and ledgered is paid even when its run later fails
   for good (attempts exhausted, or a crash before Settle's own commit on its
   last attempt), as a withdrawal does not stop it either. The contributor

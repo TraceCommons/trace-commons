@@ -22766,9 +22766,10 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
 
 /// Finding 16, first bullet: the payout pays only a leg Score seeded for
 /// the batches Settle writes now -- a batch line under the account's
-/// settlement key, carrying the account's hold (`payout_eligible`). A
-/// `pending` leg without that marker (one the earlier V94 code seeded) is
-/// never paid, by the pass or by a direct `process_payout`.
+/// settlement key, carrying the account's hold (`payout_eligible`). A leg
+/// without that marker (one the earlier V94 code seeded, whose payout V109
+/// marks `disabled`) is never paid, by the pass or by a direct
+/// `process_payout`.
 #[tokio::test]
 async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
     let Some(backend) = runtime_backend(4).await else {
@@ -22790,10 +22791,15 @@ async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
     let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
     assert_eq!(leg.payout_state, "pending");
     assert!(leg.payout_eligible, "a leg this code seeds is marked");
+    // The leg as V109 leaves one the V94-era code seeded: unmarked, and its
+    // payout `disabled` rather than `pending` for good (Zaki review 3, Z3-M3;
+    // `v109_disables_the_payout_of_pending_legs_the_v94_code_seeded` runs
+    // the migration itself).
     let mut owner = owner_client().await;
     let tx = owner_tenant_tx(&mut owner, &tenant).await;
     tx.execute(
-        "UPDATE pipeline_run_settlements SET payout_eligible = FALSE
+        "UPDATE pipeline_run_settlements
+            SET payout_eligible = FALSE, payout_state = 'disabled'
           WHERE tenant_id = $1 AND run_id = $2",
         &[&tenant, &run.run_id],
     )
@@ -22808,6 +22814,13 @@ async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
         .expect("a direct payout of an unmarked leg changes nothing");
     assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
     assert!(near.requests().is_empty());
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "disabled",
+        "the leg reads as a payout nothing will make"
+    );
 }
 
 /// Finding 16, second bullet (and addendum C-16): a Trace Credit leg that

@@ -1656,6 +1656,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_exports",
         include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
     ),
+    // V109 (V107 and V108 belong to #1166): the versioned pipeline's data
+    // follow-ups after #1143, starting with legacy V94 payouts.
+    (
+        109,
+        "versioned_pipeline_followups",
+        include_str!("../../../../migrations/V109__versioned_pipeline_followups.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus

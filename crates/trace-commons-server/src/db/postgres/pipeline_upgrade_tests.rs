@@ -74,6 +74,24 @@ async fn apply_real_migrations_through_v91(client: &mut Client) {
     }
 }
 
+async fn apply_real_migrations_through(client: &mut Client, last: i32) {
+    client
+        .batch_execute(
+            "CREATE TABLE _trace_commons_migrations (\
+                version INTEGER PRIMARY KEY,\
+                name TEXT NOT NULL,\
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
+            );",
+        )
+        .await
+        .expect("create migration history table");
+    for (version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= last) {
+        apply_and_record_migration(client, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("apply real V{version} ({name}): {error}"));
+    }
+}
+
 async fn set_tenant(client: &Client, tenant: &str) {
     client
         .execute(
@@ -302,7 +320,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 105, 106] {
+    for pipeline_version in [92, 93, 94, 95, 105, 106, 109] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
@@ -447,4 +465,162 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         .get(0);
     assert_eq!(unscoped, 0, "no tenant context sees nothing");
     admin.batch_execute("RESET ROLE").await.unwrap();
+}
+
+/// Zaki review 3, Z3-M3: a Trace Credit leg the V94-era code seeded with
+/// payout `pending` has no batch line under the account's settlement key, so
+/// the payout never pays it. V109 marks it `disabled` (a payout nothing will
+/// make) instead of leaving it `pending` for good; a leg of another
+/// instrument keeps its state.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
+async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
+    // A database of its own beside the isolated one, so this upgrade starts
+    // from nothing whatever else ran on that one.
+    let base = isolated_upgrade_database_url();
+    let (prefix, base_name) = base.rsplit_once('/').expect("a database name");
+    let (base_name, query) = base_name
+        .split_once('?')
+        .map_or((base_name, String::new()), |(name, query)| {
+            (name, format!("?{query}"))
+        });
+    let name = format!("{base_name}_v94_legs");
+    let (setup, connection) = tokio_postgres::connect(&base, tokio_postgres::NoTls)
+        .await
+        .expect("connect to the isolated database");
+    tokio::spawn(async move { connection.await.expect("setup connection") });
+    setup
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .await
+        .unwrap();
+    setup
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap();
+    let url = format!("{prefix}/{name}{query}");
+    let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect upgrade admin");
+    tokio::spawn(async move { connection.await.expect("upgrade connection") });
+    apply_real_migrations_through(&mut admin, 104).await;
+
+    let tenant = "upgrade-v94-legs";
+    set_tenant(&admin, tenant).await;
+    let submission_id = uuid::Uuid::new_v4();
+    let run_id = uuid::Uuid::new_v4();
+    let object_ref_id = uuid::Uuid::new_v4();
+    let hash = |byte: &str| format!("sha256:{}", byte.repeat(64));
+    let bundle_id = hash("c");
+    admin
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                redaction_counts
+             ) VALUES ($1, $2, $3, 'principal', 'ironclaw.trace_contribution.v1', 'v1',
+                       '[]'::jsonb, '[]'::jsonb, 'retention-default', 'accepted', 'low', 'v1',
+                       $4, '{}'::jsonb)",
+            &[&tenant, &submission_id, &uuid::Uuid::new_v4(), &hash("d")],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_object_refs (
+                tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                object_key, content_sha256, encryption_key_ref, size_bytes
+             ) VALUES ($1, $2, $3, 'submitted_envelope', 'store', 'key', $4, 'key-ref', 0)",
+            &[&tenant, &submission_id, &object_ref_id, &hash("d")],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO pipeline_bundle_packages (tenant_id, bundle_id, manifest_format_version, package)
+             VALUES ($1, $2, 1, '{}'::jsonb)",
+            &[&tenant, &bundle_id],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO pipeline_runs (
+                tenant_id, run_id, submission_id, trace_id, bundle_id,
+                request_idempotency_key, request_content_hash, source_object_ref_id,
+                next_phase, state, admission_decision
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'settle', 'pending', 'admit')",
+            &[
+                &tenant,
+                &run_id,
+                &submission_id,
+                &uuid::Uuid::new_v4(),
+                &bundle_id,
+                &hash("e"),
+                &hash("f"),
+                &object_ref_id,
+            ],
+        )
+        .await
+        .unwrap();
+    for (instrument, payout_rail, payout_state, operation_ref) in [
+        ("trace_credit", "near", "pending", hash("1")),
+        ("storage_rebate", "near", "pending", hash("2")),
+    ] {
+        admin
+            .execute(
+                "INSERT INTO pipeline_run_settlements (
+                    tenant_id, run_id, instrument_id, atomic_units, operation_ref_hash,
+                    payout_rail, payout_state
+                 ) VALUES ($1, $2, $3, 1000, $4, $5, $6)",
+                &[
+                    &tenant,
+                    &run_id,
+                    &instrument,
+                    &operation_ref,
+                    &payout_rail,
+                    &payout_state,
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
+    let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
+    migrator.run_migrations().await.expect("upgrade to current");
+    set_tenant(&admin, tenant).await;
+    let legs: Vec<(String, String, bool)> = admin
+        .query(
+            "SELECT instrument_id, payout_state, payout_eligible FROM pipeline_run_settlements
+              WHERE tenant_id = $1 AND run_id = $2 ORDER BY instrument_id",
+            &[&tenant, &run_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        legs,
+        vec![
+            ("storage_rebate".to_string(), "pending".to_string(), false),
+            ("trace_credit".to_string(), "disabled".to_string(), false),
+        ]
+    );
+    let forced: bool = admin
+        .query_one(
+            "SELECT relforcerowsecurity FROM pg_class WHERE relname = 'pipeline_run_settlements'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(forced, "V109 forces row security again after its update");
 }
