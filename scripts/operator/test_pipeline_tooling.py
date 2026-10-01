@@ -2236,14 +2236,21 @@ def _hf_manifest(bootstrap_bytes, holdout_bytes):
 
 
 class RequiredCheckTests(unittest.TestCase):
-    def test_required_checks_are_a_subset_of_promotion_checks(self):
+    def test_required_checks_are_the_promotion_checks_less_the_promotion_only_ones(self):
         promotion = _promotion_required_checks()
         self.assertEqual(len(promotion), len(set(promotion)), "no duplicate promotion id")
-        self.assertTrue(
-            checks.REQUIRED_CHECK_IDS.issubset(promotion),
-            sorted(checks.REQUIRED_CHECK_IDS.difference(promotion)),
-        )
+        # Equality, not a subset (Zaki's review of #1166, nit 1): a Rust
+        # promotion check that `qualify` has no step for fails here, as does
+        # a `qualify` check the Rust list does not name.
         self.assertTrue(_PROMOTION_ONLY.issubset(promotion))
+        self.assertEqual(
+            checks.REQUIRED_CHECK_IDS,
+            frozenset(promotion) - _PROMOTION_ONLY,
+            (
+                sorted(frozenset(promotion) - _PROMOTION_ONLY - checks.REQUIRED_CHECK_IDS),
+                sorted(checks.REQUIRED_CHECK_IDS - frozenset(promotion)),
+            ),
+        )
         self.assertEqual(checks.REQUIRED_CHECK_IDS & _PROMOTION_ONLY, frozenset())
         self.assertNotIn("pipeline_http_corpus_package", checks.REQUIRED_CHECK_IDS)
 

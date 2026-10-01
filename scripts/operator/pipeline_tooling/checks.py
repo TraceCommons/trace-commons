@@ -7,8 +7,9 @@ groups. `REQUIRED_DATABASE_CHECKS` and `REQUIRED_CHECK_IDS` are what
 `qualify` requires a current pass result for (P4-D5): each database check
 is one exact test that emits its own check id after its assertions, and the
 three corpus checks and the restore drill are emitted by the harnesses
-`run` and `restore-drill` start. `REQUIRED_CHECK_IDS` stays a subset of the
-Rust `PROMOTION_REQUIRED_CHECKS` (a self-test reads it out of the source);
+`run` and `restore-drill` start. `REQUIRED_CHECK_IDS` is exactly the Rust
+`PROMOTION_REQUIRED_CHECKS` less its three promotion-only checks (a
+self-test reads the list out of the source);
 `pipeline_http_corpus_package` is in neither list (ruling PF-1).
 """
 
