@@ -137,6 +137,12 @@ asserted: injecting one fixture's `secret_probe` into a corpus report makes
 the harness itself panic with `corpus_probe_in_report` before any report is
 written, rather than relying on the tooling to catch a leak after the fact.
 
+Over HTTP, the harness checks the probes (each fixture's `secret_probe` and
+`server_privacy_probe`, and its own bearer tokens) in every request body it
+sends and every response body it receives, success bodies included. It does
+not check headers: the bearer tokens travel in the `Authorization` header by
+design.
+
 ## Failure labels
 
 `pipeline.py` never prints a child command's own output. A failure is
