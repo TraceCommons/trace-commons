@@ -23728,11 +23728,29 @@ async fn an_enabled_payout_needs_an_authenticated_adapter_when_main_requires_one
 /// An artifact store that runs `hook` once, right after the first write whose
 /// object id starts with `trigger_object_id_prefix`, and before the write
 /// returns: between a phase's object write and its commit.
+///
+/// PR 4's phase write sites call `prepare_serialized_json`, then stage the
+/// object's row, then `publish_serialized_json`, so the write the hook
+/// follows is the publish of an object whose prepare matched the prefix
+/// (`preparing_trigger`), as `WithdrawOnApprovedWriteStore` does; a plain
+/// `put_serialized_json` still triggers too.
 struct RunOnWriteStore {
     inner: Arc<dyn TraceArtifactStore>,
     trigger_object_id_prefix: &'static str,
     triggered: AtomicBool,
+    /// Set by `prepare_serialized_json` for an object whose id matches
+    /// `trigger_object_id_prefix`, and taken by the next
+    /// `publish_serialized_json`, the write of that prepared object.
+    preparing_trigger: AtomicBool,
     hook: Box<dyn Fn() + Send + Sync>,
+}
+
+impl RunOnWriteStore {
+    fn run_hook_once(&self) {
+        if !self.triggered.swap(true, Ordering::SeqCst) {
+            (self.hook)();
+        }
+    }
 }
 
 impl TraceArtifactStore for RunOnWriteStore {
@@ -23749,10 +23767,8 @@ impl TraceArtifactStore for RunOnWriteStore {
             object_id,
             serialized_json,
         )?;
-        if object_id.starts_with(self.trigger_object_id_prefix)
-            && !self.triggered.swap(true, Ordering::SeqCst)
-        {
-            (self.hook)();
+        if object_id.starts_with(self.trigger_object_id_prefix) {
+            self.run_hook_once();
         }
         Ok(receipt)
     }
@@ -23764,6 +23780,9 @@ impl TraceArtifactStore for RunOnWriteStore {
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        if object_id.starts_with(self.trigger_object_id_prefix) {
+            self.preparing_trigger.store(true, Ordering::SeqCst);
+        }
         self.inner.prepare_serialized_json(
             tenant_storage_ref,
             artifact_kind,
@@ -23776,7 +23795,11 @@ impl TraceArtifactStore for RunOnWriteStore {
         &self,
         prepared: &PreparedSerializedJsonArtifact,
     ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.publish_serialized_json(prepared)
+        let receipt = self.inner.publish_serialized_json(prepared)?;
+        if self.preparing_trigger.swap(false, Ordering::SeqCst) {
+            self.run_hook_once();
+        }
+        Ok(receipt)
     }
 
     fn read_artifact(
@@ -23866,6 +23889,7 @@ async fn a_review_commit_refused_for_a_stale_lease_leaves_no_object() {
         inner: artifact_store(&dir),
         trigger_object_id_prefix: "pipeline-approved-",
         triggered: AtomicBool::new(false),
+        preparing_trigger: AtomicBool::new(false),
         hook: Box::new(move || {
             expire_the_lease_hook(hook_tenant.clone(), *hook_run.get().expect("the run id"))()
         }),
@@ -23904,6 +23928,11 @@ async fn a_review_commit_refused_for_a_stale_lease_leaves_no_object() {
         1,
         "the refused attempt's approved object is deleted"
     );
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, created.run_id).await,
+        vec![("approved".to_string(), "staged".to_string())],
+        "the refused attempt's row stays staged, for the attempt sweep"
+    );
 
     force_due(&backend, &tenant, created.run_id).await;
     let reviewed = service
@@ -23937,6 +23966,7 @@ async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
         inner: artifact_store(&dir),
         trigger_object_id_prefix: "pipeline-index-command-",
         triggered: AtomicBool::new(false),
+        preparing_trigger: AtomicBool::new(false),
         hook: Box::new(move || {
             expire_the_lease_hook(hook_tenant.clone(), *hook_run.get().expect("the run id"))()
         }),
@@ -23984,6 +24014,17 @@ async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
         count_files_under(dir.path()),
         2,
         "the refused attempt's Score objects are deleted"
+    );
+    let rows = attempt_artifact_rows(&backend, &tenant, created.run_id).await;
+    assert!(rows.contains(&("approved".to_string(), "committed".to_string())));
+    assert!(
+        rows.contains(&("index-command".to_string(), "staged".to_string())),
+        "the refused attempt's index command row stays staged, for the attempt sweep"
+    );
+    assert!(
+        rows.iter()
+            .all(|(artifact, state)| artifact == "approved" || state == "staged"),
+        "the refused commit committed no Score row"
     );
 
     force_due(&backend, &tenant, created.run_id).await;
