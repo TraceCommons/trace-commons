@@ -8843,8 +8843,8 @@ fn score_object_ref_write(
 /// artifact rows -- those of `lease_token`, or every `staged` row of the run
 /// when `None` -- so the sweep finds them due: a test-only time shortcut,
 /// never something production code does. `cleanup_after` is not a column
-/// the runtime role may UPDATE (V104's grant is `state, committed_at`
-/// only), and V104's guard trigger refuses every change but `staged` to
+/// the runtime role may UPDATE (V108's grant is `state, committed_at`
+/// only), and V108's guard trigger refuses every change but `staged` to
 /// `committed`, whoever makes it. So this runs as the database owner, with
 /// that trigger disabled inside the owner's own transaction: `ALTER TABLE`
 /// is transactional, and the lock it takes keeps every other session off
@@ -24972,7 +24972,7 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-// Task 6: `pipeline_bundle_qualifications` (V103) and `PipelineQualificationStore`.
+// Task 6: `pipeline_bundle_qualifications` (V107) and `PipelineQualificationStore`.
 //
 // Every double below reports `production_qualified() == true` and a content
 // descriptor free of the five development markers
@@ -26139,7 +26139,7 @@ async fn index_rebuild_holds_the_guard_and_skips_a_run_withdrawn_after_listing()
     );
 }
 
-/// Final review M6: V104's guard trigger lets an attempt artifact row move
+/// Final review M6: V108's guard trigger lets an attempt artifact row move
 /// once, from `staged` to `committed` with `committed_at` set, and refuses
 /// every other change. A committed row cannot go back to `staged`, where
 /// the sweep would delete an object the submission's refs name, and its

@@ -854,7 +854,7 @@ would have gotten on a first success.
 
 ### The attempt artifact sweep
 
-A second, parallel table, `pipeline_attempt_artifacts` (V104), stages the
+A second, parallel table, `pipeline_attempt_artifacts` (V108), stages the
 objects a phase attempt writes mid-phase -- Review's approved revision,
 and Score's index command and neighbour set -- the same way
 `pipeline_receipt_artifacts` stages the receipt's envelope. Who owns

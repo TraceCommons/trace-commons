@@ -1,5 +1,7 @@
 # Versioned pipeline PR 4 (qualification, restore, and CI) implementation plan
 
+> Amended 2026-10-01: main took V101 to V104 and PR 3 moved to V105 and V106, so PR 4's migrations are V107 (qualification) and V108 (attempt artifacts). The text below keeps the numbers it was written with.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build delivery PR 4 (`vp/pipeline-qualification`), stacked on PR 3 (`vp/pipeline-compatibility-product`): one tooling entry point (`scripts/operator/pipeline.py` with `test`, `run`, `qualify`, and `restore-drill`), executed check results, mandatory database checks, a restore drill, qualification for each bundle, lease renewal, orphan cleanup, index rebuild, and the CI job and runbooks. Production routing stays off.

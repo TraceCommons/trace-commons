@@ -273,7 +273,7 @@ different bundle, a configuration or dependency-digest mismatch, any
 blocked dependency, or a second call for the same bundle with different
 metadata. A successful call records one append-only row per
 `(tenant_id, bundle_id)` in `pipeline_bundle_qualifications` (migration
-V103).
+V107).
 
 Calling `qualify_bundle` over HTTP, and using its record to activate a
 bundle for a tenant's live traffic, are PR 5 work. See

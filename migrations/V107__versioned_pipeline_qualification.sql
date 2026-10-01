@@ -40,11 +40,11 @@ CREATE TABLE pipeline_bundle_qualifications (
         ON DELETE CASCADE
 );
 
--- Immutable, the same shape as `pipeline_review_assessments` (V101): neither
+-- Immutable, the same shape as `pipeline_review_assessments` (V105): neither
 -- an UPDATE nor a direct DELETE is ever allowed, but a DELETE arriving
 -- through a cascade (the tenant that owns this qualification's package was
 -- deleted, taking the package and then this row with it) is let through. See
--- `reject_pipeline_review_assessment_mutation`'s comment (V101) for why
+-- `reject_pipeline_review_assessment_mutation`'s comment (V105) for why
 -- `pg_trigger_depth() > 1` is the direct/cascade boundary.
 CREATE FUNCTION reject_pipeline_bundle_qualification_mutation()
 RETURNS TRIGGER
@@ -78,7 +78,7 @@ CREATE POLICY trace_corpus_tenant_isolation ON pipeline_bundle_qualifications
 -- column the code does not use gets no grant.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
-        RAISE EXCEPTION 'V103: trace_ingest_runtime is missing; V90 creates it';
+        RAISE EXCEPTION 'V107: trace_ingest_runtime is missing; V90 creates it';
     END IF;
 END $$;
 

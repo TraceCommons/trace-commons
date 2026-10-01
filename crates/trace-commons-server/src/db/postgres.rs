@@ -1658,25 +1658,25 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_exports",
         include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
     ),
-    // V103 (PR 4) adds the immutable production-qualification table the
+    // V107 (PR 4) adds the immutable production-qualification table the
     // qualification store writes once per bundle; PR 5's activation gate
-    // reads it. No cross-tenant claim function, same as V101/V102.
+    // reads it. No cross-tenant claim function, same as V105/V106.
     (
-        103,
+        107,
         "versioned_pipeline_qualification",
-        include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
+        include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
     ),
-    // V104 (PR 4) adds the table that tracks each pipeline phase attempt's
+    // V108 (PR 4) adds the table that tracks each pipeline phase attempt's
     // objects, staged before they are published and committed with the
     // phase commit, so the worker can sweep the objects of an attempt that
     // crashed, lost its lease, or had its commit refused. A committed
     // attempt's objects are object refs of the submission, which the
     // withdrawal and main's revocation-propagation worker delete. No
-    // cross-tenant claim function, same as V101/V102/V103.
+    // cross-tenant claim function, same as V105/V106/V107.
     (
-        104,
+        108,
         "versioned_pipeline_attempt_artifacts",
-        include_str!("../../../../migrations/V104__versioned_pipeline_attempt_artifacts.sql"),
+        include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
     ),
 ];
 
@@ -7033,7 +7033,8 @@ mod tests {
         (95, 4),
         (105, 4),
         (106, 4),
-        (104, 4),
+        (107, 4),
+        (108, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7775,8 +7776,8 @@ mod tests {
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
-            include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
-            include_str!("../../../../migrations/V104__versioned_pipeline_attempt_artifacts.sql"),
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7810,8 +7811,8 @@ mod tests {
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
-            include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
-            include_str!("../../../../migrations/V104__versioned_pipeline_attempt_artifacts.sql"),
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7898,9 +7899,9 @@ mod tests {
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql");
         let exports = include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql");
         let qualification =
-            include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql");
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql");
         let attempt_artifacts =
-            include_str!("../../../../migrations/V104__versioned_pipeline_attempt_artifacts.sql");
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -8031,13 +8032,13 @@ mod tests {
         ] {
             assert!(
                 qualification.contains(required),
-                "V103 is missing `{required}`"
+                "V107 is missing `{required}`"
             );
         }
         for forbidden in ["SECURITY DEFINER", "SET search_path", "ON DELETE RESTRICT"] {
             assert!(
                 !qualification.contains(forbidden),
-                "V103 must not contain `{forbidden}`"
+                "V107 must not contain `{forbidden}`"
             );
         }
         for required in [
@@ -8062,12 +8063,12 @@ mod tests {
         ] {
             assert!(
                 attempt_artifacts.contains(required),
-                "V104 is missing `{required}`"
+                "V108 is missing `{required}`"
             );
         }
         // Controller ruling R2-1: a committed attempt's objects are object
         // refs of the submission, which the withdrawal and main's
-        // revocation-propagation worker delete, so V104 has no `deleted`
+        // revocation-propagation worker delete, so V108 has no `deleted`
         // state for the sweep to record a second deletion in.
         for forbidden in [
             "SECURITY DEFINER",
@@ -8078,7 +8079,7 @@ mod tests {
         ] {
             assert!(
                 !attempt_artifacts.contains(forbidden),
-                "V104 must not contain `{forbidden}`"
+                "V108 must not contain `{forbidden}`"
             );
         }
     }

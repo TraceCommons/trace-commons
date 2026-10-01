@@ -41,7 +41,7 @@ CREATE INDEX pipeline_attempt_artifacts_due
 -- code does today. Every other UPDATE -- any change to a committed row,
 -- and any change to a staged row but its commit -- is refused, whoever
 -- issues it. DELETE is not guarded: the sweep deletes due `staged` rows,
--- and the run's cascade removes the rest. The same shape as V101's
+-- and the run's cascade removes the rest. The same shape as V105's
 -- `reject_pipeline_review_assessment_mutation`: an ordinary invoker-rights
 -- function with no settings of its own, so a non-superuser migration owner
 -- can apply it.
@@ -84,7 +84,7 @@ CREATE POLICY trace_corpus_tenant_isolation ON pipeline_attempt_artifacts
 -- column the code does not use gets no grant.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
-        RAISE EXCEPTION 'V104: trace_ingest_runtime is missing; V90 creates it';
+        RAISE EXCEPTION 'V108: trace_ingest_runtime is missing; V90 creates it';
     END IF;
 END $$;
 

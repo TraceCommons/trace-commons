@@ -806,7 +806,7 @@ pub struct BundleQualificationRecord {
 
 /// Records a production package's qualification once per `(tenant_id,
 /// bundle_id)`. `pipeline_bundle_qualifications` is append-only in the
-/// database (V103): a repeat call with the exact same inputs answers the
+/// database (V107): a repeat call with the exact same inputs answers the
 /// existing row; a repeat call with different metadata for the same bundle
 /// is refused as a conflict, never silently overwritten.
 pub struct PipelineQualificationStore {

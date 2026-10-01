@@ -104,12 +104,12 @@ const PIPELINE_TABLES: [&str; 15] = [
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95, V105 and V106, and V103 and V104
-/// (PR 4) have run, as `(table, privilege, columns)`; no columns means the
-/// whole table. It holds what the pipeline code reads and writes and nothing
-/// broader. The only other grantee is `trace_gate_driver`
-/// (`GATE_DRIVER_PIPELINE_GRANTS`). A privilege the code comes to need goes
-/// into its migration and into this list in the same change.
+/// the pipeline tables once V92 to V95 and V105 to V108 have run, as
+/// `(table, privilege, columns)`; no columns means the whole table. It holds
+/// what the pipeline code reads and writes and nothing broader. The only
+/// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
+/// privilege the code comes to need goes into its migration and into this
+/// list in the same change.
 const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_runs", "SELECT", &[]),
     ("pipeline_runs", "INSERT", &[]),
@@ -232,10 +232,10 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
         "UPDATE",
         &["invalidated_at", "invalidation_reason"],
     ),
-    // V103: append-only, no UPDATE or DELETE.
+    // V107: append-only, no UPDATE or DELETE.
     ("pipeline_bundle_qualifications", "SELECT", &[]),
     ("pipeline_bundle_qualifications", "INSERT", &[]),
-    // V104
+    // V108
     ("pipeline_attempt_artifacts", "SELECT", &[]),
     ("pipeline_attempt_artifacts", "INSERT", &[]),
     ("pipeline_attempt_artifacts", "DELETE", &[]),
@@ -317,7 +317,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 105, 106, 103, 104] {
+    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
@@ -375,7 +375,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     }
 
     // The pipeline's row-guard triggers, as the upgrade leaves them: present,
-    // on their tables, and enabled. V104's guard is what keeps a committed
+    // on their tables, and enabled. V108's guard is what keeps a committed
     // attempt artifact from going back to `staged` (final review M6).
     for (table, trigger) in [
         ("phase_outcomes", "phase_outcomes_reject_update"),

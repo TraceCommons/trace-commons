@@ -77,9 +77,10 @@ const RESTORE_SAFE_BLOCKERS: [&str; 1] = ["filesystem_restore_local_only"];
 const RESTORE_TENANT: &str = "tenant-a";
 const RESTORE_TOKEN: &str = "token-a";
 
-/// Every table the pipeline migrations create (V92 to V104), sorted: the
-/// set the resume requires to enable and force RLS in the restored
-/// database. A new pipeline table must be added here, or the drill fails.
+/// Every table the pipeline migrations create (V92 to V95, V105 to V108),
+/// sorted: the set the resume requires to enable and force RLS in the
+/// restored database. A new pipeline table must be added here, or the drill
+/// fails.
 const PIPELINE_TABLES: [&str; 15] = [
     "phase_outcomes",
     "pipeline_active_bundles",
