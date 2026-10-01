@@ -962,15 +962,25 @@ is not. Those rows are staged with no hash:
   uncharged `lease_expired` instead.
 - The artifact store must be able to derive an object key before the
   content exists and delete at a key alone. The local store, the
-  filesystem-remote provider and the GCS provider can. A store that cannot
-  refuses with `serialized_json_object_key_unavailable` or
-  `artifact_delete_at_object_key_unavailable`. A compatibility Score on a
-  store that cannot derive a key stops before it scores, and its run waits
-  in retry under `serialized_json_object_key_unavailable` without being
-  charged, as for any other deployment gap (ruling FR3); so does one whose
-  store prepares an object under a key other than the one it derived
-  (`pipeline_attempt_object_key_mismatch`), which publishes nothing. The
-  sweep keeps such a row and logs `pipeline_attempt_sweep_delete_failed`.
+  filesystem-remote provider and the GCS provider can. Three labels name a
+  store that cannot, and only the first stops a Score:
+  - `serialized_json_object_key_unavailable`: the store cannot derive a
+    key. A compatibility Score stops before it scores, and its run waits in
+    retry under this label without being charged, as for any other
+    deployment gap (ruling FR3). So does a Score whose store prepares an
+    object under a key other than the one it derived
+    (`pipeline_attempt_object_key_mismatch`); it publishes nothing.
+  - `artifact_delete_at_object_key_unavailable`: the store cannot delete at
+    a key. A compatibility Score still runs and publishes.
+  - `remote_trace_artifact_delete_at_key_unavailable`: the remote provider
+    behind the service-owned store cannot delete at a key. The service-owned
+    store still derives keys, so a compatibility Score runs and publishes as
+    usual.
+
+  The sweep is affected in each case: for a due row with no hash, the store
+  refuses with that label, and the sweep keeps the row and logs
+  `pipeline_attempt_sweep_delete_failed` on each pass until the store is
+  fixed. For the last two labels, that is the only effect.
 
 Score's withdrawal rule follows from the same split: withdrawing a
 submission whose run already committed Score deletes the index command and
