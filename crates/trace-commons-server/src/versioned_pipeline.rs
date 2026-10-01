@@ -2565,6 +2565,16 @@ impl PgPipelineStore {
         // and deletes the row of an artifact this Score did not write, since
         // no object exists for it. Only a row with no hash is deleted: a row
         // with a hash was staged just before its object was published.
+        //
+        // Each written artifact must move exactly one row (wave 2; rebase 10
+        // review, M4): an object no committed row names would be the
+        // attempt sweep's to delete although the run's object ref names it.
+        // Only the sweep removes a `staged` row, and only once its
+        // `cleanup_after` -- past the latest moment this attempt's lease
+        // could be live -- has passed, so a missing row means the attempt
+        // is past its own bound: the commit is refused as a stale lease,
+        // like the publish bound, which rolls this transaction back, and the
+        // caller deletes the attempt's objects (`phase_commit_refused`).
         for (artifact, stored) in [("index-command", command), ("score-neighbors", neighbor)] {
             match stored {
                 Some((stored_ref, _, _)) => {
@@ -2574,21 +2584,25 @@ impl PgPipelineStore {
                         .ok_or_else(|| {
                             DatabaseError::Constraint("score_outcome_invalid".to_string())
                         })?;
-                    tx.execute(
-                        "UPDATE pipeline_attempt_artifacts
-                            SET ciphertext_sha256 = COALESCE(ciphertext_sha256, $5),
-                                state = 'committed', committed_at = NOW()
-                          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
-                            AND artifact = $4 AND state = 'staged'",
-                        &[
-                            &run.tenant_id,
-                            &run.run_id,
-                            &lease_token,
-                            &artifact,
-                            &ciphertext_sha256,
-                        ],
-                    )
-                    .await?;
+                    let committed = tx
+                        .execute(
+                            "UPDATE pipeline_attempt_artifacts
+                                SET ciphertext_sha256 = COALESCE(ciphertext_sha256, $5),
+                                    state = 'committed', committed_at = NOW()
+                              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                                AND artifact = $4 AND state = 'staged'",
+                            &[
+                                &run.tenant_id,
+                                &run.run_id,
+                                &lease_token,
+                                &artifact,
+                                &ciphertext_sha256,
+                            ],
+                        )
+                        .await?;
+                    if committed != 1 {
+                        return Err(stale_lease_error());
+                    }
                 }
                 None => {
                     tx.execute(

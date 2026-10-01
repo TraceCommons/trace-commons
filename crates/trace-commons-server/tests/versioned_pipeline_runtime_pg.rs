@@ -24366,6 +24366,153 @@ async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
     );
 }
 
+/// A hook that deletes `run_id`'s `staged` attempt row for `artifact`, as
+/// the database owner, on a thread and runtime of its own (as
+/// `expire_the_lease_hook` does): what the attempt sweep does to a row once
+/// its `cleanup_after` has passed.
+fn delete_attempt_row_hook(
+    tenant_id: String,
+    run_id: uuid::Uuid,
+    artifact: &'static str,
+) -> Box<dyn Fn() + Send + Sync> {
+    Box::new(move || {
+        let tenant_id = tenant_id.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("build the delete runtime");
+            runtime.block_on(async move {
+                let deleted = owner_client()
+                    .await
+                    .execute(
+                        "DELETE FROM pipeline_attempt_artifacts
+                          WHERE tenant_id = $1 AND run_id = $2 AND artifact = $3
+                            AND state = 'staged'",
+                        &[&tenant_id, &run_id, &artifact],
+                    )
+                    .await
+                    .expect("delete the attempt row");
+                assert_eq!(deleted, 1, "the attempt staged one {artifact} row");
+            });
+        })
+        .join()
+        .expect("the delete thread completes");
+    })
+}
+
+/// Wave 2 (rebase 10 review, M4): the Score commit requires one updated
+/// attempt row for each object it wrote. With the index command's `staged`
+/// row removed after its object is published and before the commit, the
+/// commit is refused as a stale lease (only the sweep removes a staged row,
+/// and only past the attempt's own bound): nothing commits, the run waits in
+/// retry under the uncharged `lease_expired`, the attempt's Score objects
+/// are deleted, and the retry stages, writes and commits its own.
+#[tokio::test]
+async fn a_score_commit_missing_its_attempt_row_is_refused_and_leaves_no_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("score-missing-row-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run_id_cell = Arc::new(std::sync::OnceLock::<uuid::Uuid>::new());
+    let hook_tenant = tenant.clone();
+    let hook_run = run_id_cell.clone();
+    let store = Arc::new(RunOnWriteStore {
+        inner: artifact_store(&dir),
+        trigger_object_id_prefix: "pipeline-index-command-",
+        triggered: AtomicBool::new(false),
+        preparing_trigger: AtomicBool::new(false),
+        hook: Box::new(move || {
+            delete_attempt_row_hook(
+                hook_tenant.clone(),
+                *hook_run.get().expect("the run id"),
+                "index-command",
+            )()
+        }),
+    });
+    let (service, _, _) = test_service(
+        backend.clone(),
+        store as Arc<dyn TraceArtifactStore>,
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    run_id_cell.set(created.run_id).unwrap();
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review commits");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(count_files_under(dir.path()), 2);
+
+    let refused = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the refused Score commit is recorded");
+    assert_eq!(
+        (
+            refused.state,
+            refused.next_phase,
+            refused.last_error_label.as_deref(),
+            refused.attempt_count,
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(Phase::Score),
+            Some(PIPELINE_LEASE_EXPIRED_LABEL),
+            reviewed.attempt_count,
+        ),
+        "a commit with no row for its index command is refused, uncharged"
+    );
+    assert!(refused.index_command_ref.is_none());
+    assert!(
+        service
+            .store()
+            .list_outcomes(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|outcome| outcome.phase != Phase::Score),
+        "no Score outcome is recorded"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the refused attempt's Score objects are deleted"
+    );
+    let rows = attempt_artifact_rows(&backend, &tenant, created.run_id).await;
+    assert!(
+        rows.iter()
+            .all(|(artifact, state)| artifact == "approved" || state == "staged"),
+        "the refused commit committed no Score row: {rows:?}"
+    );
+
+    force_due(&backend, &tenant, created.run_id).await;
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the retry commits Score");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(scored.index_command_ref.is_some());
+    assert!(
+        attempt_artifact_rows(&backend, &tenant, created.run_id)
+            .await
+            .contains(&("index-command".to_string(), "committed".to_string())),
+        "the retry's index command row is committed"
+    );
+}
+
 /// Finding 6: the contributor status reads a Review rejection's reason from
 /// `ReviewDecision`'s serialized shape (`{"kind": "rejected", "reason": ..}`).
 /// Two runs Admission quarantined (`privacy_review_required`): the one a
