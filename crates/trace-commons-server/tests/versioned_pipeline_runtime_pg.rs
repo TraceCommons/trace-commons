@@ -2801,17 +2801,16 @@ async fn qualification_reports_payout_only_when_it_applies() {
     )
     .expect("build a package pinning trace_credit");
 
-    let payout_config =
-        |enabled: bool, settlement_mode: PipelineNearSettlementMode| PipelinePayoutConfig {
-            enabled,
-            require_confirmation_evidence: true,
-            near_contract_id: Some("trace-credits.testnet".to_string()),
-            confirmation_interval: std::time::Duration::from_secs(60),
-            controls: PipelineNearPayoutControls {
-                settlement_mode,
-                ..HTTP_NEAR_PAYOUT_CONTROLS
-            },
-        };
+    // PR 3 (cccb6484): a service has payout exactly when it is built
+    // `with_payout`, so a disabled payout is a service built without one.
+    let payout_config = |settlement_mode: PipelineNearSettlementMode| PipelinePayoutConfig {
+        near_contract_id: Some("trace-credits.testnet".to_string()),
+        confirmation_interval: std::time::Duration::from_secs(60),
+        controls: PipelineNearPayoutControls {
+            settlement_mode,
+            ..HTTP_NEAR_PAYOUT_CONTROLS
+        },
+    };
     let build = |enabled: bool,
                  settlement_mode: PipelineNearSettlementMode,
                  near_adapter: Arc<dyn NearPayoutAdapter>| {
@@ -2822,7 +2821,7 @@ async fn qualification_reports_payout_only_when_it_applies() {
         );
         let registry = SettlementAdapterRegistry::new(vec![trace_credit_adapter])
             .expect("build settlement adapter registry");
-        PipelineServiceBuilder::new(
+        let builder = PipelineServiceBuilder::new(
             backend.clone(),
             artifact_store(&dir),
             default_package.clone(),
@@ -2836,10 +2835,15 @@ async fn qualification_reports_payout_only_when_it_applies() {
         .with_scorer(scorer.clone())
         .with_embedder(embedder.clone())
         .with_authority(allow_all_authority())
-        .with_privacy(default_privacy_boundary())
-        .with_payout(near_adapter, payout_config(enabled, settlement_mode))
-        .build()
-        .expect("build pipeline service")
+        .with_privacy(default_privacy_boundary());
+        let builder = if enabled {
+            builder.with_payout(near_adapter, payout_config(settlement_mode))
+        } else {
+            builder
+        };
+        let service = builder.build().expect("build pipeline service");
+        assert_eq!(service.payout_enabled(), enabled);
+        service
     };
 
     for settlement_mode in [
