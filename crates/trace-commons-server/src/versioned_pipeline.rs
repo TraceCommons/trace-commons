@@ -1567,6 +1567,12 @@ impl PgPipelineStore {
     /// `approved_*` columns stay NULL, satisfying
     /// `pipeline_runs_approved_content_shape`.
     ///
+    /// An approval also resets `attempt_count` to 0: each phase has the
+    /// run's whole `max_attempts` budget (multi-lens review L2-1, owner
+    /// decision of 2026-10-01), so a Review that commits on its last
+    /// attempt leaves Score a claimable run rather than a `pending` one no
+    /// claim can select. A terminal commit keeps its count.
+    ///
     /// The submission-operability
     /// guard that gated the source read at the start of Review
     /// (`load_object_bytes`) was checked in an earlier, already-committed
@@ -1716,6 +1722,7 @@ impl PgPipelineStore {
             .query_one(
                 "UPDATE pipeline_runs
                  SET next_phase = $3, state = $4,
+                     attempt_count = CASE WHEN $3 = 'none' THEN attempt_count ELSE 0 END,
                      approved_revision_id = $5,
                      approved_object_ref_id = $6,
                      approved_content_hash = $7,
@@ -2212,6 +2219,9 @@ impl PgPipelineStore {
     /// transaction (`submission_guard_on_tx`, after the run row's lock) and
     /// refuses the whole commit with `PIPELINE_SUBMISSION_INOPERABLE_LABEL`:
     /// no outcome, no settlement rows, no run update.
+    ///
+    /// The commit resets `attempt_count` to 0, so Settle has the run's whole
+    /// `max_attempts` budget (multi-lens review L2-1; see `commit_review`).
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_score(
         &self,
@@ -2337,7 +2347,7 @@ impl PgPipelineStore {
         let row = tx
             .query_one(
                 "UPDATE pipeline_runs
-                 SET next_phase = 'settle', state = 'pending',
+                 SET next_phase = 'settle', state = 'pending', attempt_count = 0,
                      index_command_ref = $3, index_command_hash = $4,
                      score_neighbor_ref = $5, score_neighbor_hash = $6,
                      lease_token = NULL, lease_expires_at = NULL,
@@ -2372,6 +2382,9 @@ impl PgPipelineStore {
     /// applied), its membership is not `excluded`, no invalidation of its
     /// revision is queued, and its submission is operable (the predicate of
     /// `submission_guard_on_tx`: not withdrawn, revoked, purged or expired).
+    /// A run no claim can select (not `leased`, its attempts spent) is left
+    /// out: it would never apply its command, so it must not take a later
+    /// near-duplicate's award (multi-lens review L2-1's backstop).
     /// Each row is `(stored ref, command hash, revision id)`, by `run_id`.
     /// `idx_pipeline_runs_work` leads with `(tenant_id, state)`, so the read
     /// covers the tenant's runs in flight, not its history.
@@ -2388,6 +2401,7 @@ impl PgPipelineStore {
                      ON s.tenant_id = r.tenant_id AND s.submission_id = r.submission_id
                   WHERE r.tenant_id = $1 AND r.run_id <> $2
                     AND r.state IN ('pending', 'leased', 'retry')
+                    AND (r.state = 'leased' OR r.attempt_count < r.max_attempts)
                     AND r.next_phase = 'settle'
                     AND r.index_command_ref IS NOT NULL
                     AND r.index_command_hash IS NOT NULL

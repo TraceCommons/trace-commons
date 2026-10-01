@@ -173,6 +173,12 @@ token-only fence in `record_lease_expired`), so it changes nothing -- that
 attempt is silently lost, not recorded as `lease_expired` and not otherwise
 un-charged.
 
+`max_attempts` (5) is a budget per phase, not per run. Each claim charges
+one attempt; the Review commit that approves a run, and the Score commit,
+reset `attempt_count` to 0. So Review, Score and Settle each get the whole
+budget, and a phase that commits on its last attempt leaves the next phase
+claimable.
+
 Lease renewal (extending a lease a phase still holds, mid-phase) is PR 4
 work and not implemented yet. It is what will close both gaps above -- a
 live worker renewing its lease before it expires, rather than a phase

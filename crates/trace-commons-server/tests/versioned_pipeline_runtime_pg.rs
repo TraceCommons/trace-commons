@@ -10366,9 +10366,9 @@ async fn transient_policy_errors_do_not_exhaust_the_trace() {
     assert_eq!(scored.state, PipelineRunState::Pending);
     assert_eq!(scored.next_phase, Some(Phase::Settle));
     assert_eq!(
-        scored.attempt_count,
-        attempt_count_before_score + 1,
-        "the attempt that finally succeeds is the only one that charges the trace"
+        scored.attempt_count, 0,
+        "no failed attempt charged the trace (asserted above), and the Score \
+         commit leaves Settle the whole budget (multi-lens L2-1)"
     );
 }
 
@@ -15073,8 +15073,9 @@ async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
         .expect("Settle runs");
     assert_eq!(settled.state, PipelineRunState::Complete);
     assert_eq!(
-        settled.attempt_count, 3,
-        "the withheld leg charged nothing extra"
+        settled.attempt_count, 1,
+        "the withheld leg charged nothing extra: Settle's claim is its phase's \
+         one attempt (each phase commit resets the count, multi-lens L2-1)"
     );
     let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
     let rows = count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await;
@@ -22756,6 +22757,129 @@ async fn compatibility_score_never_holds_two_pooled_connections() {
         .await
         .expect("a compatibility Score never waits for a second connection");
     assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Sets a run's `attempt_count`, as earlier charged attempts of its
+/// current phase would have.
+async fn set_attempt_count(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+    attempt_count: i32,
+) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET attempt_count = $3 WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id, &attempt_count],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// Multi-lens review L2-1 and the owner decision of 2026-10-01: each phase
+/// has its own attempt budget. A run whose Review, and then whose Score,
+/// commits on the last attempt its phase had left is claimed for its next
+/// phase and completes; it is not left `pending` with no attempt to claim.
+#[tokio::test]
+async fn a_phase_that_commits_on_its_last_attempt_leaves_the_next_phase_its_budget() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        index.clone(),
+    )
+    .await;
+    let store = PgPipelineStore::new(backend.clone());
+    let (tenant, first, _) = identical_receipts().await;
+    let principal = "principal_sha256:per-phase-attempt-budget";
+    let run_id = receive_envelope(&service, &tenant, principal, &first).await;
+    let max_attempts = store
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .max_attempts as i32;
+    for phase in ["Review", "Score"] {
+        set_attempt_count(&backend, &tenant, run_id, max_attempts - 1).await;
+        service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} is claimed on the phase's last attempt"));
+        let run = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+        assert_eq!(
+            run.attempt_count, 0,
+            "the {phase} commit leaves the next phase its whole budget"
+        );
+    }
+    process_until_idle(&service, &tenant).await;
+    let run = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
+}
+
+/// L2-1's backstop in C-12's neighbour read: a run waiting for Settle that
+/// no claim can select (its attempts spent, so it is never claimed again)
+/// is not a neighbour, so it does not take the award from a later identical
+/// trace.
+#[tokio::test]
+async fn a_run_no_claim_can_select_is_not_a_compatibility_neighbour() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        index.clone(),
+    )
+    .await;
+    let store = PgPipelineStore::new(backend.clone());
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:stranded-neighbour";
+    let first_run = receive_envelope(&service, &tenant, principal, &first).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, first_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let stranded = store.get_run(&tenant, first_run).await.unwrap().unwrap();
+    assert_eq!(stranded.next_phase, Some(Phase::Settle));
+    set_attempt_count(&backend, &tenant, first_run, stranded.max_attempts as i32).await;
+    let second_run = receive_envelope(&service, &tenant, principal, &second).await;
+    for phase in ["Review", "Score", "Settle"] {
+        service
+            .process_run(&tenant, second_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the second run's {phase} runs"));
+    }
+    assert_eq!(
+        count_novelty_utility_rows(&backend, &tenant).await,
+        1,
+        "the second trace earns NoveltyUtility: the run no claim can select is not its neighbour"
+    );
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        1
+    );
 }
 
 /// Zaki review 1, round 2, N-6: a store whose every call made on a Tokio
