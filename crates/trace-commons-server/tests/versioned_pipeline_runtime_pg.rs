@@ -26660,6 +26660,44 @@ async fn index_rebuild_never_rewrites_a_run_that_failed_for_good() {
     );
 }
 
+/// PR 3 (e2873401) runs every synchronous index call on the blocking pool,
+/// and the index rebuild follows: into an index that fails every call made
+/// on a runtime worker, it writes every entry of the run's sealed command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_rebuild_writes_off_the_runtime_workers() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("index-rebuild-blocking-pool-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (ready, _) = run_to_settle_ready(&service, &tenant).await;
+    settle_included(&service, &tenant, &ready).await;
+    let live_entries = index.entry_count(&tenant_ref, MINIMAL_INDEX_ID);
+    assert!(live_entries > 0);
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    rebuilt.refuse_calls_on_runtime_workers();
+    let report = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect("the rebuild writes off the runtime workers");
+    assert_eq!(report.command_count, 1);
+    assert_eq!(report.entry_count, live_entries);
+    assert_eq!(
+        rebuilt.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID),
+        index.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID),
+        "the rebuilt index matches the live index"
+    );
+}
+
 /// Final review M6: V108's guard trigger lets an attempt artifact row move
 /// once, from `staged` to `committed` with `committed_at` set, and refuses
 /// every other change. A committed row cannot go back to `staged`, where

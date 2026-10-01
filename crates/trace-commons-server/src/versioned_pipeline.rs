@@ -8298,7 +8298,7 @@ impl PipelineService {
         let mut unchanged_entry_count = 0usize;
         let mut skipped_run_count = 0usize;
         for run in runs {
-            match self.rebuild_index_run(&run, writer.as_ref()).await? {
+            match self.rebuild_index_run(&run, &writer).await? {
                 PipelineIndexRebuildRun::Rebuilt {
                     command_hash,
                     entry_count: run_entries,
@@ -8342,10 +8342,15 @@ impl PipelineService {
     /// once. The command's error is raised only once the re-check lets the
     /// write go ahead: a skipped run does not need its command, which the
     /// withdrawal's own object deletion may already have removed.
+    ///
+    /// The writes are synchronous index calls, so they run on the blocking
+    /// pool while the transaction keeps both rows locked, as Settle's index
+    /// writes do (PR 3, e2873401, N-6): the rebuild runs inside ingest's
+    /// worker route and never parks a runtime worker the routes share.
     pub async fn rebuild_index_run(
         &self,
         run: &PipelineRunRecord,
-        writer: &dyn IdentifiedIndexWriter,
+        writer: &Arc<dyn IdentifiedIndexWriter>,
     ) -> anyhow::Result<PipelineIndexRebuildRun> {
         let command = match self
             .committed_evidence::<ScoreEvidence>(run, Phase::Score)
@@ -8366,16 +8371,25 @@ impl PipelineService {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
-        let mut entry_count = 0usize;
-        let mut unchanged_entry_count = 0usize;
-        for (key, entry) in command.keyed_entries(&tenant) {
-            match writer.upsert(&key, &entry.embedding, &entry.content_hash) {
-                Ok(IndexUpsertResult::Inserted) => {}
-                Ok(IndexUpsertResult::Unchanged) => unchanged_entry_count += 1,
-                Err(error) => return Err(anyhow::anyhow!("index rebuild failed: {error}")),
+        let entries = command
+            .keyed_entries(&tenant)
+            .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
+            .collect::<Vec<_>>();
+        let writer = writer.clone();
+        let (entry_count, unchanged_entry_count) = on_blocking_pool(move || {
+            let mut entry_count = 0usize;
+            let mut unchanged_entry_count = 0usize;
+            for (key, embedding, content_hash) in &entries {
+                match writer.upsert(key, embedding, content_hash) {
+                    Ok(IndexUpsertResult::Inserted) => {}
+                    Ok(IndexUpsertResult::Unchanged) => unchanged_entry_count += 1,
+                    Err(error) => return Err(anyhow::anyhow!("index rebuild failed: {error}")),
+                }
+                entry_count += 1;
             }
-            entry_count += 1;
-        }
+            Ok((entry_count, unchanged_entry_count))
+        })
+        .await?;
         tx.commit().await?;
         Ok(PipelineIndexRebuildRun::Rebuilt {
             command_hash,
