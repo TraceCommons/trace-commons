@@ -23,6 +23,7 @@ import {
   type HarnessRow,
   useHarnesses,
   usePrivateAi,
+  usePrivateAiState,
 } from "../../features/private-ai/public";
 import {
   type FolderNode,
@@ -74,8 +75,8 @@ export function FlowMap({
   onViewChange: (view: MapView) => void;
   focusToolId: string | null;
 }) {
-  const workspace = useTracesWorkspace();
-  const privateAiOn = workspace.settings.data?.private_inference === true;
+  // Painted as working only when the core says the reported state is.
+  const privateAi = usePrivateAiState();
   const [zoom, setZoom] = useState(1);
   const [hover, setHover] = useState<Card | null>(null);
   const [pinned, setPinned] = useState<Card | null>(null);
@@ -96,7 +97,7 @@ export function FlowMap({
           onPin={setPinned}
         />
       ) : (
-        <PrivateAiMap on={privateAiOn} onHover={setHover} onPin={setPinned} />
+        <PrivateAiMap state={privateAi} onHover={setHover} onPin={setPinned} />
       )}
       <SegmentedTabs
         floating
@@ -109,7 +110,7 @@ export function FlowMap({
           {
             value: "ai",
             label: "Private AI",
-            dot: privateAiOn
+            dot: privateAi.working
               ? "var(--tc-status-on)"
               : "var(--tc-status-outside)",
           },
@@ -169,7 +170,7 @@ function MapSvg({ children, camera }: { children: ReactNode; camera?: string }) 
       viewBox="0 0 580 760"
       preserveAspectRatio="xMidYMid meet"
       className="absolute inset-0 h-full w-full"
-      role="img"
+      role="group"
       aria-label="Flow map"
     >
       <g
@@ -223,8 +224,8 @@ function TracesMap({
   const waiting = tree.reduce((n, tool) => n + tool.waiting, 0);
   const contributed = tree.reduce((n, tool) => n + tool.contributed, 0);
   const macCard: Card = {
-    title: "This Mac",
-    body: `Sessions are recorded and scrubbed here. ${plural(waiting, "session")} waiting for you; ${contributed} contributed. Nothing is sent unless you say so.`,
+    title: "This computer",
+    body: `Sessions are recorded and scrubbed here. ${plural(waiting, "session")} waiting for you; ${contributed} contributed.`,
     at: [MAC[0] + 20, MAC[1] - 110],
   };
   const libraryCard: Card = {
@@ -270,7 +271,7 @@ function TracesMap({
         r={16}
         fill="#8e8e96"
         ring
-        label="This Mac"
+        label="This computer"
         {...hoverable(macCard)}
       />
       {tree.map((tool) => {
@@ -321,7 +322,7 @@ function ToolGroup({
     title: `${tool.label} · ${plural(tool.folders.length, "folder")}`,
     body:
       tool.mode === "watch"
-        ? `Watched: new sessions are recorded and scrubbed on this Mac. ${tool.waiting ? `${tool.waiting} waiting for you.` : "Nothing waiting."}`
+        ? `Watched: new sessions are recorded and scrubbed on this computer. ${tool.waiting ? `${tool.waiting} waiting for you.` : "Nothing waiting."}`
         : tool.mode === "off"
           ? "Not watched: nothing new is read from this tool."
           : "No sessions folder set for this tool yet.",
@@ -428,7 +429,10 @@ function FolderDot({
         onPin(card);
       }}
       onKeyDown={(event) => {
-        if (event.key === "Enter") onPin(card);
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onPin(card);
+        }
       }}
     >
       <path
@@ -499,11 +503,12 @@ function MapLegend() {
 }
 
 function PrivateAiMap({
-  on,
+  state,
   onHover,
   onPin,
 }: {
-  on: boolean;
+  /** The core's state sentence and whether it may be painted as working. */
+  state: { line: string | null; working: boolean };
   onHover: (card: Card | null) => void;
   onPin: (card: Card | null) => void;
 }) {
@@ -516,9 +521,18 @@ function PrivateAiMap({
     privateAi.credential?.view?.state_line ??
     privateAi.credential?.state ??
     "Credential state unavailable";
+  const on = state.working;
+  // "Connected" is the core's harness fact: the tool's config names this
+  // destination. Whether calls are answered is the core's state sentence.
   const credentialCard: Card = {
     title: "NEAR AI credential",
-    body: `${credentialLine}. ${plural(connected.length, "tool")} point at it. Private AI is ${on ? "on" : "off"}.`,
+    body: [
+      credentialLine,
+      `${plural(connected.length, "tool")} connected.`,
+      state.line,
+    ]
+      .filter(Boolean)
+      .join(" "),
     at: [CREDENTIAL[0] - 130, CREDENTIAL[1] + 60],
   };
   return (
@@ -573,12 +587,14 @@ function PrivateAiMap({
         fill={on ? "#2c7a5b" : "var(--tc-map-node-off)"}
         ring={on}
         label="NEAR AI credential"
-        sublabel={on ? `On · ${plural(connected.length, "tool")}` : "Off · tools answer at their vendors"}
+        sublabel={`${plural(connected.length, "tool")} connected`}
         onHover={(hovering) => onHover(hovering ? credentialCard : null)}
         onSelect={() => onPin(credentialCard)}
       >
+        {/* A key, not a shield: the node is the credential, and no
+            protection is claimed for it. */}
         <path
-          d={`M${CREDENTIAL[0]} ${CREDENTIAL[1] - 14}l10 4v7c0 7-5 12-10 14-5-2-10-7-10-14v-7z M${CREDENTIAL[0] - 5} ${CREDENTIAL[1]}l3 3 7-7`}
+          d={`M${CREDENTIAL[0] - 3} ${CREDENTIAL[1]}a6 6 0 1 1 -12 0a6 6 0 1 1 12 0z M${CREDENTIAL[0] - 3} ${CREDENTIAL[1]}h14 M${CREDENTIAL[0] + 7} ${CREDENTIAL[1]}v5 M${CREDENTIAL[0] + 11} ${CREDENTIAL[1]}v4`}
           fill="none"
           stroke="#f2f2f4"
           strokeWidth={2}
