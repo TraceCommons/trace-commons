@@ -1352,16 +1352,26 @@ class _CorpusRunCase(unittest.TestCase):
         self.calls = []
         self.stdout = io.StringIO()
         self.stderr = io.StringIO()
+        # The tree hash a command recomputes at its end
+        # (`Run.require_code_revision_unchanged`): the run's own unless a
+        # test sets `tree_edited`. `tree_hash_calls` counts the recomputes.
+        self.tree_edited = False
+        self.tree_hash_calls = 0
 
     def tearDown(self):
         shutil.rmtree(self.run.run_dir, ignore_errors=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _tree_hash(self):
+        self.tree_hash_calls += 1
+        return _fake_hash("edited-tree") if self.tree_edited else self.run.code_revision_hash
 
     def _main(self, argv, cargo=None, export=None):
         patches = [
             mock.patch.object(environment, "_invoke", _environment_invoke(self.calls)),
             mock.patch.object(pipeline, "LOCAL_DIR", self.tmp / "local"),
             mock.patch.object(pipeline, "Run"),
+            mock.patch.object(environment, "_code_revision_hash", self._tree_hash),
         ]
         if cargo is not None:
             patches.append(mock.patch.object(pipeline, "cargo_test", cargo))
@@ -1853,6 +1863,7 @@ class _RestoreDrillCase(_CorpusRunCase):
             stack.enter_context(mock.patch.object(pipeline, "cargo_test", cargo))
             run_class = stack.enter_context(mock.patch.object(pipeline, "Run"))
             run_class.create.return_value = self.run
+            stack.enter_context(mock.patch.object(environment, "_code_revision_hash", self._tree_hash))
             stack.enter_context(contextlib.redirect_stdout(self.stdout))
             stack.enter_context(contextlib.redirect_stderr(self.stderr))
             return pipeline.main(argv)
@@ -2607,6 +2618,52 @@ class QualifyTests(_QualifyCase):
         value = json.loads(self.report_path.read_text())
         self.assertEqual((value["status"], value["failure"]), ("fail", "cleanup_failed"))
         self.assertFalse(self.catalog_path.exists())
+
+
+class CodeRevisionChangedTests(_QualifyCase):
+    """Zaki's review of #1166, minor 1: the tree hash was taken once, at
+    `Run.create`, so a file edited mid-run was credited to the tree the run
+    started from. Each command that credits evidence to that hash computes
+    it again at its end and fails `code_revision_changed` on a mismatch."""
+
+    def test_qualify_fails_and_reports_an_edited_tree(self):
+        self.tree_edited = True
+        code = self._qualify("--archive")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: code_revision_changed")
+        self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", "code_revision_changed"))
+        self.assertFalse(self.catalog_path.exists(), "nothing is archived")
+        self.assertEqual(self.tree_hash_calls, 1, "computed again once, after every check ran")
+
+    def test_restore_drill_fails_on_an_edited_tree(self):
+        self.tree_edited = True
+        code = self._drill()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: code_revision_changed")
+        self.assertNotIn("PipelineRestoreOK", self.stdout.getvalue())
+
+    def test_run_fails_on_an_edited_tree_and_archives_nothing(self):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture", "beta_fixture"])))
+        self.tree_edited = True
+        code = _CorpusRunCase._main(
+            self,
+            ["run", "--bundle", "minimal", "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL, "--archive"],
+            cargo=_CorpusRunCase._fake_cargo(self),
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: code_revision_changed")
+        self.assertNotIn("PipelineRunOK", self.stdout.getvalue())
+        self.assertFalse(self.catalog_path.exists())
+
+    def test_an_unchanged_tree_passes_each_command(self):
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        self.assertEqual(self.tree_hash_calls, 1)
+        self._fresh_run()
+        self.assertEqual(self._drill(), 0, self.stderr.getvalue())
+        self.assertEqual(self.tree_hash_calls, 2)
 
 
 if __name__ == "__main__":

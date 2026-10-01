@@ -440,6 +440,7 @@ def run_corpus(args, run):
     with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
         local_report, report = run_corpus_check(run, environment, corpus_run, step="corpus_run")
     require(set(load_results(run)) == {corpus_run.check_id}, "corpus_check_results_unexpected")
+    run.require_code_revision_unchanged()
     if args.archive:
         update_catalog(LOCAL_DIR / CATALOG_NAME, local_report)
     print(f"PipelineRunOK: bundle={report['bundle_id']} fixtures={report['fixture_count']}")
@@ -620,6 +621,7 @@ def restore_drill(args, run):
     with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
         seed = run_restore_drill(run, environment)
     require(set(load_results(run)) == {RESTORE_CHECK_ID}, "restore_check_results_unexpected")
+    run.require_code_revision_unchanged()
     print(
         f"PipelineRestoreOK: database={seed['database_fingerprint']} "
         f"artifacts={seed['artifact_fingerprint']} index={seed['index_entry_set_hash']} "
@@ -754,6 +756,9 @@ def qualify(args, run):
     (LOCAL_DIR / REPORT_NAME).unlink(missing_ok=True)
     try:
         results = _run_required_checks(args, run, inputs)
+        # Before the report: a tree edited during the run writes a failed
+        # report under `code_revision_changed`, never a pass.
+        run.require_code_revision_unchanged()
         report_path = write_report(run, results, inputs, local_dir=LOCAL_DIR)
         if args.archive:
             catalog_path = LOCAL_DIR / CATALOG_NAME

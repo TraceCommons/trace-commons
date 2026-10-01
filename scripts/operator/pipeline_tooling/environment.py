@@ -3,10 +3,12 @@
 `_invoke` is the one place a Docker, cargo, or psql child process starts.
 Every such call in this module goes through it, so the self-tests can
 replace the whole surface with a single monkeypatch and need no Docker and
-no cargo. `_code_revision_hash`'s one `git ls-files` call is the exception:
-it runs once, at `Run.create()` time, to build the tree hash the self-tests
-never exercise (they construct `Run` directly instead), so it calls
-`subprocess` on its own.
+no cargo. `_code_revision_hash`'s `git ls-files` call is the exception: it
+builds the tree hash at `Run.create()` time and again when a command that
+credits evidence to that hash finishes
+(`Run.require_code_revision_unchanged`), so it calls `subprocess` on its
+own. The self-tests construct `Run` directly and replace
+`_code_revision_hash` where a command reaches its end.
 """
 
 from __future__ import annotations
@@ -177,6 +179,14 @@ class Run:
             run_dir=run_dir,
             code_revision_hash=_code_revision_hash(),
         )
+
+    def require_code_revision_unchanged(self):
+        """The tree hash again, at the end of a command that credits its
+        results and report to `code_revision_hash`: a file edited while the
+        command ran would otherwise be credited to the tree it started from
+        (Zaki's review of #1166, minor 1). A mismatch is
+        `code_revision_changed`."""
+        require(_code_revision_hash() == self.code_revision_hash, "code_revision_changed")
 
     def log_path(self, step):
         require(_STEP_LABEL.fullmatch(step) is not None, "step_label_invalid")
