@@ -7983,58 +7983,64 @@ impl PipelineService {
                 .ok_or_else(|| anyhow::anyhow!("pipeline_attempt_artifact_kind_unrecognized"))?
                 .store_kind();
 
-            let delete_failed = match ciphertext_sha256 {
-                // Rebase 10, option D: a row a compatibility Score staged
-                // before its tenant lock and never committed has no hash.
-                // Its object, if the attempt published one, is at the row's
-                // key, which carries the attempt's own lease token, so no
-                // other object is ever stored there: delete whatever is
-                // stored at the key (`Ok(false)` when the attempt published
-                // nothing). No hash comparison is possible, and none is
-                // needed to pick the object.
-                None => self
-                    .artifact_store
-                    .delete_artifact_at_object_key(
-                        tenant_storage_ref.as_str(),
-                        artifact_kind,
-                        &object_key,
-                    )
-                    .is_err(),
-                Some(ciphertext_sha256) => {
-                    let present = self.artifact_store.artifact_present_by_object_key(
-                        tenant_storage_ref.as_str(),
-                        artifact_kind.clone(),
-                        &object_key,
-                        &ciphertext_sha256,
-                    );
-                    // `Some(false)` -- confirmed absent -- is the only answer
-                    // that skips the delete outright. `Some(true)` and
-                    // `None` ("the store cannot tell", the trait's
-                    // documented default, and what
-                    // `GcsRemoteTraceArtifactProvider` answers today since it
-                    // does not override this method) both attempt the
-                    // delete: a store that cannot report presence may still
-                    // hold the object, and a store whose delete errors on an
-                    // absent object keeps the row for the next pass rather
-                    // than mistaking "unknown" for "gone".
-                    match present {
-                        Ok(Some(false)) => false,
-                        Ok(Some(true)) | Ok(None) => {
-                            let receipt = EncryptedTraceArtifactReceipt {
-                                tenant_storage_ref: tenant_storage_ref.as_str().to_string(),
-                                artifact_kind,
-                                object_key: object_key.clone(),
-                                ciphertext_sha256,
-                                encrypted_at: Utc::now(),
-                            };
-                            self.artifact_store
-                                .delete_artifact(tenant_storage_ref.as_str(), &receipt)
-                                .is_err()
+            // The store calls are synchronous, so they run on the blocking
+            // pool while this transaction keeps the rows locked, as every
+            // other object-store call of the pipeline does (PR 3, e2873401,
+            // N-6). A blocking task that did not return counts as a failed
+            // delete: the row stays for the next pass.
+            let store = self.artifact_store.clone();
+            let tenant = tenant_storage_ref.clone();
+            let key = object_key.clone();
+            let delete_failed = on_blocking_pool(move || {
+                Ok(match ciphertext_sha256 {
+                    // Rebase 10, option D: a row a compatibility Score staged
+                    // before its tenant lock and never committed has no
+                    // hash. Its object, if the attempt published one, is at
+                    // the row's key, which carries the attempt's own lease
+                    // token, so no other object is ever stored there: delete
+                    // whatever is stored at the key (`Ok(false)` when the
+                    // attempt published nothing). No hash comparison is
+                    // possible, and none is needed to pick the object.
+                    None => store
+                        .delete_artifact_at_object_key(tenant.as_str(), artifact_kind, &key)
+                        .is_err(),
+                    Some(ciphertext_sha256) => {
+                        let present = store.artifact_present_by_object_key(
+                            tenant.as_str(),
+                            artifact_kind.clone(),
+                            &key,
+                            &ciphertext_sha256,
+                        );
+                        // `Some(false)` -- confirmed absent -- is the only
+                        // answer that skips the delete outright.
+                        // `Some(true)` and `None` ("the store cannot tell",
+                        // the trait's documented default, and what
+                        // `GcsRemoteTraceArtifactProvider` answers today
+                        // since it does not override this method) both
+                        // attempt the delete: a store that cannot report
+                        // presence may still hold the object, and a store
+                        // whose delete errors on an absent object keeps the
+                        // row for the next pass rather than mistaking
+                        // "unknown" for "gone".
+                        match present {
+                            Ok(Some(false)) => false,
+                            Ok(Some(true)) | Ok(None) => {
+                                let receipt = EncryptedTraceArtifactReceipt {
+                                    tenant_storage_ref: tenant.as_str().to_string(),
+                                    artifact_kind,
+                                    object_key: key,
+                                    ciphertext_sha256,
+                                    encrypted_at: Utc::now(),
+                                };
+                                store.delete_artifact(tenant.as_str(), &receipt).is_err()
+                            }
+                            Err(_) => true,
                         }
-                        Err(_) => true,
                     }
-                }
-            };
+                })
+            })
+            .await
+            .unwrap_or(true);
             if delete_failed {
                 tracing::warn!(
                     label = "pipeline_attempt_sweep_delete_failed",

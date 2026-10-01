@@ -27657,6 +27657,133 @@ impl TraceArtifactStore for BlockingPoolOnlyArtifactStore {
     }
 }
 
+/// PR 3 (e2873401) runs every object-store call of the pipeline on the
+/// blocking pool, and PR 4's attempt sweep follows. Through a store that
+/// fails every call made on a runtime worker, the sweep removes a due
+/// `staged` row with a hash (a Review that crashed after publishing its
+/// approved object: a presence check, then a delete) and the due rows with
+/// no hash of a compatibility Score that crashed after publishing (deletes
+/// at a key), and every one of those objects is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_attempt_sweep_calls_the_store_off_the_runtime_workers() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(BlockingPoolOnlyArtifactStore {
+        inner: artifacts.clone(),
+    });
+    let crashing = |point: PipelineCrashPoint| {
+        Arc::new(
+            compatibility_test_builder(
+                backend.clone(),
+                store.clone(),
+                near_duplicate_config(),
+                None,
+                allow_all_authority(),
+                PipelineNoveltyUtilityChecks::default(),
+                IsolatedPipelineIndex::new(),
+            )
+            .with_crash_point(point)
+            .build()
+            .expect("build pipeline service"),
+        )
+    };
+    let review_crash = crashing(PipelineCrashPoint::AfterReviewArtifactStorage);
+    let score_crash = crashing(PipelineCrashPoint::AfterScoreArtifactStorage);
+    let tenant = format!("sweep-blocking-pool-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+
+    let envelope = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let review_run = receive_envelope(
+        &review_crash,
+        &tenant,
+        "principal_sha256:sweep-blocking-pool",
+        &envelope,
+    )
+    .await;
+    assert_eq!(
+        review_crash
+            .process_run(&tenant, review_run)
+            .await
+            .expect_err("Review crashes after storing its approved object")
+            .to_string(),
+        INJECTED_PIPELINE_CRASH
+    );
+    let reviewed = compatibility_run_past_review(&score_crash, &tenant).await;
+    assert_eq!(
+        score_crash
+            .process_run(&tenant, reviewed.run_id)
+            .await
+            .expect_err("Score crashes after storing its objects")
+            .to_string(),
+        INJECTED_PIPELINE_CRASH
+    );
+
+    let approved_rows = attempt_artifact_rows_with_hashes(&backend, &tenant, review_run).await;
+    let score_rows = score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id).await;
+    assert_eq!(
+        approved_rows
+            .iter()
+            .chain(&score_rows)
+            .map(|(artifact, state, _, hash)| (artifact.as_str(), state.as_str(), hash.is_some()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("approved", "staged", true),
+            ("index-command", "staged", false),
+            ("score-neighbors", "staged", false),
+        ],
+        "one staged row with a hash and two without: {approved_rows:?} {score_rows:?}"
+    );
+    let present = |kind: TraceArtifactKind, object_key: &str| {
+        artifacts
+            .artifact_present_by_object_key(tenant_ref.as_str(), kind, object_key, "")
+            .unwrap()
+    };
+    assert_eq!(
+        present(TraceArtifactKind::ContributionEnvelope, &approved_rows[0].2),
+        Some(true)
+    );
+    assert_eq!(
+        present(TraceArtifactKind::VectorPayload, &score_rows[0].2),
+        Some(true)
+    );
+
+    backdate_attempt_artifacts(&tenant, review_run, None).await;
+    backdate_attempt_artifacts(&tenant, reviewed.run_id, None).await;
+    assert_eq!(
+        score_crash
+            .sweep_attempt_artifacts(&tenant, 10)
+            .await
+            .unwrap(),
+        3,
+        "every due row is removed through a store that refuses runtime workers"
+    );
+    assert!(
+        attempt_artifact_rows_with_hashes(&backend, &tenant, review_run)
+            .await
+            .is_empty()
+    );
+    assert!(
+        score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        present(TraceArtifactKind::ContributionEnvelope, &approved_rows[0].2),
+        Some(false),
+        "the approved object is deleted"
+    );
+    for (artifact, _, key, _) in &score_rows {
+        assert_eq!(
+            present(TraceArtifactKind::VectorPayload, key),
+            Some(false),
+            "{artifact} is deleted at its key"
+        );
+    }
+}
+
 /// The reference scorer, failing every call made on a runtime worker (N-6).
 struct BlockingPoolOnlyScorer(ReferencePerplexityScorer);
 
