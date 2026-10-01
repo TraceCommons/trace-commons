@@ -22,6 +22,7 @@ const localCoreStatus = {
     consent_scopes: [],
     paused: false,
     queue_depth: 0,
+    decisions_owed: 0,
     health: { last_error_label: null, since: null },
   },
 };

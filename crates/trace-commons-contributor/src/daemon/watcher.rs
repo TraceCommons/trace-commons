@@ -244,6 +244,9 @@ fn record_sources_for_grant(
     grant: DateTime<Utc>,
     discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
 ) {
+    // A new recording can hold an already-queued session in a grant-armed
+    // project without changing that entry's state.
+    let decisions_owed_before = shared.decisions_owed_value();
     for (source, refs) in discovered {
         let key = ctx.source_key(source.name());
         if !shared
@@ -267,6 +270,7 @@ fn record_sources_for_grant(
             tracing::warn!("could not persist what was on disk for the automatic grant");
         }
     }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
 }
 
 /// Record what is on disk for the arm-from-now armings `armings` (K5), per
@@ -279,6 +283,9 @@ fn record_sources_for_armings(
     armings: &[(String, DateTime<Utc>)],
     discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
 ) {
+    // The first source record replaces the blanket send-time hold with
+    // the recorded paths; queued paths absent from it can stop waiting.
+    let decisions_owed_before = shared.decisions_owed_value();
     for (source, refs) in discovered {
         let key = ctx.source_key(source.name());
         if !shared
@@ -302,6 +309,7 @@ fn record_sources_for_armings(
             tracing::warn!("could not persist what was on disk for an arming from now");
         }
     }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
 }
 
 /// The project a session belongs to, through the same cwd cache the pass
@@ -464,6 +472,7 @@ fn hold_if_older_than_arming(
     if !(started_at.is_some_and(|t| t < armed_at) || born.is_some_and(|b| b < armed_at)) {
         return;
     }
+    let decisions_owed_before = shared.decisions_owed_value();
     let mut policy = shared.policy.lock().expect("policy lock");
     if policy.hold_for_arming(
         project_key,
@@ -473,6 +482,8 @@ fn hold_if_older_than_arming(
     {
         tracing::warn!("could not persist holding an older session for an arming from now");
     }
+    drop(policy);
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
 }
 
 /// Maps a path something happened at to the session that owns it, without
@@ -4030,6 +4041,167 @@ mod tests {
             .filter(|e| matches!(e.state, QueueState::Pending | QueueState::Approved))
             .cloned()
             .collect()
+    }
+
+    /// Recording an empty replacement root can release the send-time hold
+    /// on a queued path no longer in the listing, without changing the queue.
+    #[tokio::test]
+    async fn recording_armings_publishes_a_policy_only_decision_count_change() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", false);
+        let before_queue = serde_json::to_value(live_entries(&f)).unwrap();
+        assert_eq!(f.shared.decisions_owed_value(), 1);
+
+        let roots = f.shared.source_roots_with_routing();
+        let sources = all_sources(&roots);
+        let ctx = PassContext::read(
+            &f.shared,
+            at("2030-01-02T00:00:00Z"),
+            500,
+            roots.source_identities(),
+        );
+        let armings = f.shared.policy.lock().unwrap().armings_from_now();
+        let discovered = vec![(sources[0].as_ref(), Vec::new())];
+        let mut rx = f.shared.events.subscribe();
+
+        record_sources_for_armings(&f.shared, &ctx, &armings, &discovered);
+
+        assert_eq!(f.shared.decisions_owed_value(), 0);
+        assert_eq!(
+            serde_json::to_value(live_entries(&f)).unwrap(),
+            before_queue
+        );
+        assert_eq!(
+            rx.try_recv()
+                .expect("policy-only count change must wake the badge")
+                .event,
+            super::super::ipc::EVENT_STATUS_CHANGED
+        );
+        record_sources_for_armings(&f.shared, &ctx, &armings, &discovered);
+        assert!(rx.try_recv().is_err(), "an unchanged count needs no event");
+    }
+
+    /// A renewed grant records an already-armed project's pending session
+    /// as backlog. Its queue state stays Pending, but a person now decides it.
+    #[tokio::test]
+    async fn recording_a_grant_publishes_a_policy_only_decision_count_change() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let key = live_entries(&f)[0].project_key.clone();
+        let terms = crate::daemon::grant_terms::GrantTerms::in_force(&f.shared).unwrap();
+        f.shared
+            .policy
+            .lock()
+            .unwrap()
+            .arm_by_grant(&key, Utc::now(), terms)
+            .unwrap();
+        grant_automatic(&f);
+        let before_queue = serde_json::to_value(live_entries(&f)).unwrap();
+        assert_eq!(f.shared.decisions_owed_value(), 0);
+
+        let roots = f.shared.source_roots_with_routing();
+        let sources = all_sources(&roots);
+        let ctx = PassContext::read(
+            &f.shared,
+            at("2030-01-02T00:00:00Z"),
+            500,
+            roots.source_identities(),
+        );
+        let discovered: Vec<_> = sources
+            .iter()
+            .map(|source| (source.as_ref(), source.discover().unwrap()))
+            .collect();
+        let grant = f.shared.policy.lock().unwrap().grant_id().unwrap();
+        let mut rx = f.shared.events.subscribe();
+
+        record_sources_for_grant(&f.shared, &ctx, grant, &discovered);
+
+        assert_eq!(f.shared.decisions_owed_value(), 1);
+        assert_eq!(
+            serde_json::to_value(live_entries(&f)).unwrap(),
+            before_queue
+        );
+        assert_eq!(
+            rx.try_recv()
+                .expect("policy-only count change must wake the badge")
+                .event,
+            super::super::ipc::EVENT_STATUS_CHANGED
+        );
+        record_sources_for_grant(&f.shared, &ctx, grant, &discovered);
+        assert!(rx.try_recv().is_err(), "an unchanged count needs no event");
+    }
+
+    /// Re-reading a Pending offer can discover an older-content hold even
+    /// when its content hash still deduplicates, so the policy must wake the
+    /// badge independently of inserting or superseding a queue entry.
+    #[tokio::test]
+    async fn holding_older_content_publishes_a_policy_only_decision_count_change() {
+        let f = WatcherFixture::new();
+        let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", false);
+        let key = live_entries(&f)[0].project_key.clone();
+        let roots = f.shared.source_roots_with_routing();
+        let sources = all_sources(&roots);
+        let source = sources
+            .iter()
+            .find(|s| s.name() == crate::source::SOURCE_CLAUDE_CODE)
+            .unwrap();
+        let ctx = PassContext::read(
+            &f.shared,
+            at("2030-01-02T00:00:00Z"),
+            500,
+            roots.source_identities(),
+        );
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            let armings = policy.armings_from_now();
+            policy.record_source_for_armings(
+                &armings,
+                &ctx.source_key(source.name()),
+                Default::default(),
+            );
+        }
+        let before_queue = serde_json::to_value(live_entries(&f)).unwrap();
+        assert_eq!(f.shared.decisions_owed_value(), 0);
+        let mut rx = f.shared.events.subscribe();
+
+        hold_if_older_than_arming(
+            &f.shared,
+            &ctx,
+            source.as_ref(),
+            &key,
+            &path,
+            Some(at("2026-08-08T10:00:00Z")),
+        );
+
+        assert_eq!(f.shared.decisions_owed_value(), 1);
+        assert_eq!(
+            serde_json::to_value(live_entries(&f)).unwrap(),
+            before_queue
+        );
+        assert_eq!(
+            rx.try_recv()
+                .expect("policy-only count change must wake the badge")
+                .event,
+            super::super::ipc::EVENT_STATUS_CHANGED
+        );
+        hold_if_older_than_arming(
+            &f.shared,
+            &ctx,
+            source.as_ref(),
+            &key,
+            &path,
+            Some(at("2026-08-08T10:00:00Z")),
+        );
+        assert!(rx.try_recv().is_err(), "an unchanged count needs no event");
     }
 
     /// K5: arming is from now by default. `auto_upload` with no parameter
