@@ -572,6 +572,12 @@ impl PgBackend {
             issued_by_label: row.get("issued_by_label"),
             credential_binding_hash: row.get("credential_binding_hash"),
             note_label: row.get("note_label"),
+            issuer_display_name: row.get("issuer_display_name"),
+            credit_range: {
+                let min: Option<i64> = row.get("credit_range_min");
+                let max: Option<i64> = row.get("credit_range_max");
+                min.zip(max)
+            },
             revoked_at: row.get("revoked_at"),
         })
     }
@@ -717,8 +723,9 @@ impl PgBackend {
                     invite_subject_hash, policy_label, tenant_mode, fixed_tenant_id,
                     tenant_template_id, policy_version, allowed_consent_scopes,
                     allowed_uses, max_uses, expires_at, issuance_source,
-                    issued_by_label, credential_binding_hash, note_label
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                    issued_by_label, credential_binding_hash, note_label,
+                    issuer_display_name, credit_range_min, credit_range_max
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                  ON CONFLICT (invite_subject_hash) DO NOTHING
                  RETURNING invite_subject_hash",
                 &[
@@ -736,6 +743,9 @@ impl PgBackend {
                     &write.issued_by_label,
                     &write.credential_binding_hash,
                     &write.note_label,
+                    &write.issuer_display_name,
+                    &write.credit_range.map(|(min, _)| min),
+                    &write.credit_range.map(|(_, max)| max),
                 ],
             )
             .await;
@@ -778,6 +788,40 @@ impl PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         Ok(updated == 1)
+    }
+
+    /// Read-only lookup of one invite by hash, for the non-redeeming
+    /// `POST /v1/invite/lookup`. Unlike the redemption path this returns
+    /// revoked and expired rows too, so the caller can name why an invite is
+    /// no longer usable, and it takes no lock and writes nothing: neither
+    /// `consumed_uses` nor any other column changes.
+    ///
+    /// Runs on the registry pool, whose V42 policy authorizes the by-hash read.
+    pub async fn peek_invite_grant(
+        &self,
+        invite_subject_hash: &str,
+    ) -> Result<Option<InvitePeek>, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let row = client
+            .query_opt(
+                &format!(
+                    "SELECT {INVITE_GRANT_COLUMNS}, consumed_uses
+                       FROM onboarding_invite_grants
+                      WHERE invite_subject_hash = $1"
+                ),
+                &[&invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        row.map(|row| {
+            let consumed_uses: i32 = row.get("consumed_uses");
+            Self::invite_entry_from_row(row).map(|entry| InvitePeek {
+                entry,
+                consumed_uses: consumed_uses.max(0) as u32,
+            })
+        })
+        .transpose()
     }
 
     /// Authoritative in-transaction re-check on the RUNTIME pool. Sets the
@@ -860,6 +904,13 @@ impl PgBackend {
     }
 }
 
+/// An invite as the non-redeeming lookup sees it.
+#[derive(Debug, Clone)]
+pub struct InvitePeek {
+    pub entry: crate::trace_invite_registry::InviteEntry,
+    pub consumed_uses: u32,
+}
+
 /// Resolved grant for a redeemed invite.
 #[derive(Debug, Clone)]
 pub struct InviteRedemption {
@@ -873,7 +924,8 @@ pub struct InviteRedemption {
 const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mode,
     fixed_tenant_id, tenant_template_id, policy_version, allowed_consent_scopes,
     allowed_uses, max_uses, expires_at, issuance_source, issued_by_label,
-    credential_binding_hash, note_label, revoked_at";
+    credential_binding_hash, note_label, issuer_display_name,
+    credit_range_min, credit_range_max, revoked_at";
 
 /// Serialises `run_migrations` across processes sharing one database.
 ///
@@ -1532,8 +1584,9 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_receipt_content",
         include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
     ),
-    // V96 is claimed by a pull request in flight; V97 depends only on V30
-    // (trace_accounts) and V90 (trace_ingest_runtime).
+    // V96 was never used: #1121 held it in flight and took V103 when it
+    // rebased onto main. V97 depends only on V30 (trace_accounts) and V90
+    // (trace_ingest_runtime).
     (
         97,
         "account_bindings",
@@ -1545,14 +1598,70 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "native_passkey_creation",
         include_str!("../../../../migrations/V98__native_passkey_creation.sql"),
     ),
-    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V99 is claimed
-    // by S5 (the unbound reaper) in flight; V100 depends only on V97 and V90.
+    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V100 depends
+    // only on V97 and V90. V99 was never used: S5 held it in flight and took
+    // V101 when it rebased onto main.
     (
         100,
         "near_ai_bind",
         include_str!("../../../../migrations/V100__near_ai_bind.sql"),
     ),
+    // Z2 S5: the unbound passkey-account reaper. Depends only on V30, V32
+    // and V97.
+    (
+        101,
+        "unbound_account_reaper",
+        include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
+    ),
+    // #1135 review: closed-but-not-yet-reaped passkey accounts count against
+    // the unbound ceiling. Supersedes V101's note that closed rows fall
+    // outside V98's count. Depends only on V97 and V98.
+    (
+        102,
+        "passkey_ceiling_counts_closed",
+        include_str!("../../../../migrations/V102__passkey_ceiling_counts_closed.sql"),
+    ),
+    // V103: the invite's public face. Depends only on V42.
+    (
+        103,
+        "invite_public_face",
+        include_str!("../../../../migrations/V103__invite_public_face.sql"),
+    ),
+    // V104 replaces V91's function body and depends only on V81 and V91.
+    (
+        104,
+        "legacy_invite_link_device_guards",
+        include_str!("../../../../migrations/V104__legacy_invite_link_device_guards.sql"),
+    ),
 ];
+
+/// One account's active strong authenticators (unrevoked passkeys plus
+/// unrevoked NEAR identities), inside a transaction already scoped to its
+/// tenant. The single definition of the count: `count_active_strong_
+/// authenticators` and bind's existing-account branch both read it here.
+pub(super) async fn active_strong_authenticator_count(
+    tx: &deadpool_postgres::Transaction<'_>,
+    account_id: &Uuid,
+) -> Result<i64, DatabaseError> {
+    let row = tx
+        .query_one(
+            "SELECT (
+                SELECT count(*) FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+              ) + (
+                SELECT count(*) FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+              ) AS strong_count",
+            &[account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    Ok(row.get("strong_count"))
+}
 
 #[async_trait]
 impl Database for PgBackend {
@@ -3836,6 +3945,7 @@ impl Database for PgBackend {
         let row = tx
             .query_opt(
                 "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
+                        s.expires_at,
                         (s.token_hash = $1) AS matched_current,
                         (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate,
                         b.state AS binding_state
@@ -3885,6 +3995,7 @@ impl Database for PgBackend {
         let account_id: Uuid = row.get("account_id");
         let auth_credential_id: Option<String> = row.get("auth_credential_id");
         let client_kind: String = row.get("client_kind");
+        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
         let needs_rotate: bool = row.get("needs_rotate");
@@ -3959,6 +4070,7 @@ impl Database for PgBackend {
             client_kind,
             rotated_secret,
             binding,
+            expires_at,
         }))
     }
 
@@ -4662,25 +4774,9 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let row = tx
-            .query_one(
-                "SELECT (
-                    SELECT count(*) FROM trace_webauthn_credentials
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND revoked_at IS NULL
-                  ) + (
-                    SELECT count(*) FROM trace_near_identities
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND revoked_at IS NULL
-                  ) AS strong_count",
-                &[&account_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let strong = active_strong_authenticator_count(&tx, &account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(row.get("strong_count"))
+        Ok(strong)
     }
 
     async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
@@ -7436,47 +7532,6 @@ mod tests {
         );
     }
 
-    /// Two changes that each add a `V75` pass every check on their own branch
-    /// and collide on merge. On a fresh database the second insert fails its
-    /// primary key; on a database that already applied the first, the runner
-    /// used to skip the second silently. Refuse the table outright instead.
-    #[test]
-    fn migration_versions_are_unique_and_strictly_increasing() {
-        for pair in super::MIGRATIONS.windows(2) {
-            let ((earlier, earlier_name, _), (later, later_name, _)) = (&pair[0], &pair[1]);
-            assert!(
-                later > earlier,
-                "MIGRATIONS must be strictly increasing by version: V{earlier}                  ({earlier_name}) is followed by V{later} ({later_name})"
-            );
-        }
-    }
-
-    /// The directory can hold two files with one version and different stems
-    /// (two branches, both merged); the table test above only sees the one the
-    /// table lists. Catch the duplicate at the file level too.
-    #[test]
-    fn no_two_migration_files_share_a_version() {
-        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
-        let mut seen: std::collections::BTreeMap<i32, String> = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(MIGRATIONS_DIR).expect("read migrations/") {
-            let name = entry
-                .expect("dir entry")
-                .file_name()
-                .into_string()
-                .expect("utf-8 name");
-            let Some(rest) = name.strip_prefix('V') else {
-                continue;
-            };
-            let Some((version, _)) = rest.split_once("__") else {
-                continue;
-            };
-            let version: i32 = version.parse().expect("numeric migration version");
-            if let Some(previous) = seen.insert(version, name.clone()) {
-                panic!("V{version} is claimed by both {previous} and {name}");
-            }
-        }
-    }
-
     #[test]
     fn an_unrecorded_version_is_applied() {
         assert!(!super::recorded_migration_state(None, 75, "account_trust").expect("not an error"));
@@ -7504,6 +7559,12 @@ mod tests {
         );
     }
 
+    /// Also the check for two migrations claiming one version, whether from
+    /// two branches that each added a `V75` or from a hand-edited table:
+    /// `migrations_on_disk` lists every file, duplicates included, so a second
+    /// `V75__*.sql` makes the table and the directory disagree, and a second
+    /// `V75` row in `MIGRATIONS` fails the strictly-increasing loop. A separate
+    /// test for either would repeat this one.
     #[test]
     fn every_migration_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");

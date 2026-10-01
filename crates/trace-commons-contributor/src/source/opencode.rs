@@ -21,7 +21,8 @@ use std::{
 pub const QUALIFIED_VERSION: &str = "1.18.29";
 const BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 const RECORD_BUDGET: usize = 100_000;
-const DISCOVERY_ENTRY_BUDGET: usize = 256;
+/// Also caps the flat count `source::discovery` gives for a named folder.
+pub(crate) const DISCOVERY_ENTRY_BUDGET: usize = 256;
 const HEADER_BYTE_BUDGET: u64 = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -117,7 +118,7 @@ impl TraceSource for OpenCodeSource {
         SOURCE_OPENCODE
     }
     fn discover(&self) -> Result<Vec<SessionRef>> {
-        let Ok(entries) = std::fs::read_dir(&self.root) else {
+        let Some(entries) = super::read_dir_for_discovery(&self.root)? else {
             return Ok(Vec::new());
         };
         let mut refs = Vec::new();

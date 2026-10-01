@@ -126,6 +126,9 @@ impl Harness {
         }
     }
 
+    /// The session carries an address the scrubber removes, so the default
+    /// (Automatic) Scrub check lets an armed session through: a session it
+    /// removes nothing from would be held for a second look instead.
     fn write_session(&self, project: &str, id: &str) {
         let project_dir = self
             .claude_root
@@ -134,7 +137,7 @@ impl Harness {
         std::fs::write(
             project_dir.join(format!("{id}.jsonl")),
             format!(
-                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"fix the parser\"}},\
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"fix the parser, then mail alice.smith@example.org\"}},\
                  \"cwd\":\"/Users/testuser/code/{project}\",\
                  \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                  \"sessionId\":\"{id}\",\"uuid\":\"a1\"}}\n"

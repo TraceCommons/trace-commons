@@ -38,6 +38,26 @@ export function PrivateAiCredentialAction({
       </GlassButton>
     );
   }
+  if (action === "migrate") {
+    // Both strings come from the core copy module through the status view;
+    // without them nothing is drawn, because the sentence warns about the
+    // macOS password prompt the button can cause.
+    const label = privateAi.credential?.view?.action_label;
+    const explains = privateAi.credential?.view?.action_explains;
+    if (!label || !explains) return null;
+    return (
+      <div className="flex flex-col gap-2">
+        <p className="m-0 text-[11px] text-tc-secondary">{explains}</p>
+        <GlassButton
+          type="button"
+          onClick={() => void privateAi.migrate()}
+          disabled={privateAi.busy}
+        >
+          {label}
+        </GlassButton>
+      </div>
+    );
+  }
   if (action !== "obtain") return null;
   return (
     <GlassButton

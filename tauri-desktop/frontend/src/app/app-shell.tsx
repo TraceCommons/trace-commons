@@ -64,7 +64,7 @@ export function AppShell() {
   );
 
   return (
-    <TracesWorkspaceProvider>
+    <TracesWorkspaceProvider key={core.scope}>
       <AppRoutes
         requiresOnboarding={requiresOnboarding}
         core={core}

@@ -4,8 +4,13 @@ import { cx } from "./cx";
 export type SegmentedItem<T extends string> = {
   value: T;
   label: ReactNode;
-  /** Decisions owed, shown as a count pill. Never queue depth or credit. */
-  badge?: number;
+  /**
+   * Decisions owed, shown as a count pill. Never queue depth or credit.
+   * `null` is "unavailable" and draws a dash, never a zero.
+   */
+  badge?: number | null;
+  /** The badge's accessible name (and tooltip), when it needs one. */
+  badgeLabel?: string;
   /** A status dot after the label (Inference: Private AI on/off). */
   dot?: string;
 };
@@ -57,7 +62,13 @@ export function SegmentedTabs<T extends string>({
             />
           ) : null}
           {item.badge !== undefined ? (
-            <span className="tc-badge tc-badge--count">{item.badge}</span>
+            <span
+              className="tc-badge tc-badge--count"
+              aria-label={item.badgeLabel}
+              title={item.badgeLabel}
+            >
+              {item.badge ?? "—"}
+            </span>
           ) : null}
         </button>
       ))}

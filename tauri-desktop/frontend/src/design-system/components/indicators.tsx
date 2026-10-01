@@ -398,6 +398,56 @@ export function NodeCard({
 }
 
 /** A line-height placeholder while text loads. Size it with a class. */
+/** A small busy ring for a line the core is still reading. */
+export function Spinner({ className }: { className?: string }) {
+  return (
+    <span
+      role="status"
+      aria-label="Loading"
+      className={cx("tc-spinner", className)}
+    />
+  );
+}
+
+/**
+ * A warning triangle, so a caution line is marked by shape as well as
+ * colour. Decorative unless it stands alone (`label`).
+ */
+export function WarningGlyph({
+  className,
+  label,
+}: {
+  className?: string;
+  label?: string;
+}) {
+  return (
+    <svg
+      className={className}
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      role={label ? "img" : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : true}
+    >
+      <path
+        d="M8 1.75 15 14.25H1L8 1.75Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 6.25v3.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <circle cx="8" cy="11.9" r="0.85" fill="currentColor" />
+    </svg>
+  );
+}
+
 export function Skeleton({ className }: { className?: string }) {
   return <div aria-hidden="true" className={cx("tc-skeleton", className)} />;
 }

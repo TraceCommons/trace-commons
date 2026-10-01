@@ -23,6 +23,16 @@ pub enum Shield {
     Attention,
 }
 
+/// The decision badge hides a known zero and keeps an unavailable count
+/// distinct. Only the daemon's status count belongs here.
+pub fn decision_count_label(decisions_owed: Option<u64>) -> String {
+    match decisions_owed {
+        Some(0) => String::new(),
+        Some(count) => count.to_string(),
+        None => "?".to_string(),
+    }
+}
+
 /// The shield for a queue.
 ///
 /// An empty queue is `Clear` whatever the flags say. `nothing_matched` and
@@ -42,6 +52,18 @@ pub fn state(waiting: usize, nothing_matched: usize, trimmed: usize) -> Shield {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decision_badge_uses_the_status_count_without_reconstructing_a_missing_count() {
+        for (wire, expected) in [
+            (r#"{"queue_depth":12,"decisions_owed":2}"#, "2"),
+            (r#"{"queue_depth":12,"decisions_owed":0}"#, ""),
+            (r#"{"queue_depth":12}"#, "?"),
+        ] {
+            let status: crate::model::Status = serde_json::from_str(wire).unwrap();
+            assert_eq!(decision_count_label(status.decisions_owed), expected);
+        }
+    }
 
     #[test]
     fn an_empty_queue_is_clear() {

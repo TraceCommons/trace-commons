@@ -1,16 +1,18 @@
 # Pilot cutover to main, 2026-09
 
-This runbook moves the pilot from build `5f239be4` at schema V74 to current
-`main`, schema V91. Every server PR the earlier draft listed as landing with
+This runbook moves the pilot from build `5f239be4` at schema V74 to `main` at
+`d8fb248b7`, schema V91. That is the target it was executed against. `main`
+has since moved to V95; V92-V95 are not covered here. Every server PR the earlier draft listed as landing with
 the cutover (#1071, #1073, #1077, #1078, #1084, #1085, #1086, #1087) is now
 on `main`, as are #1095, #1098 (V90), #1100, #1112 and #1114. It records a
 go/no-go for released contributor clients, what was tested and how, and the
 order of operations.
 
-It was written from local rehearsals, not from the pilot. Nothing here was
-run against the pilot or any remote system. The latest rehearsal ran `main`
-at `5888b8bcd`. The target is `main` at `d8fb248b7`. Between the two, the
-server changed in two places only:
+It was written from local rehearsals, then executed on the pilot on
+2026-09-29 with `d8fb248b7` at V91 as the target. The results of that run are
+recorded where they apply: the smoke test, step 7 in particular, and What
+breaks. The latest local rehearsal ran `main` at `5888b8bcd`. Between the
+rehearsal and the target, the server changed in two places only:
 
 - **#1112** writes the file-side tombstone when an account withdraws. See
   item 12 in [What breaks and the mitigation](#what-breaks-and-the-mitigation)
@@ -69,12 +71,12 @@ Where each default is set:
 - **Account admission.** Absent, `false` or `0` is off, and anything else
   refuses boot: `admission.rs` `account_config_from_values`.
 - **Legacy invite link.** Off unless set to `true` or `1`; on without the
-  attestation key refuses boot: `legacy_invite_link.rs:154-182`.
+  attestation key refuses boot: `parse_enabled` and `signer_from_env` in `legacy_invite_link.rs`.
 - **Earned-trust shadow policy.** Both variables absent is off; one without the
   other refuses boot: `account_trust_growth.rs` `shadow_policy_from_values`
   (#1084).
 - **Witness certificate profile.** `default_value = "v1"`:
-  `trace-commons-witness.rs:137`.
+  the `certificate_version` argument in `trace-commons-witness.rs`.
 
 ## Released clients: what changed on the routes they call
 
@@ -101,12 +103,12 @@ envelope field (`source_session`).
 
 | Route / behaviour | Verdict | Evidence |
 |---|---|---|
-| `POST /v1/traces`, new submission | **Breaks without V90** (500). Unchanged with it. | Every submission write takes `FOR UPDATE` on the source-session row (`trace_corpus_pg.rs:1643`, called from `upsert_submission_and_witness_evidence`, `:7150`). V78 grants the runtime nothing; V90 grants it `SELECT` and `UPDATE (withdrawn_at)`. |
-| `POST /v1/traces`, re-POST of an existing submission | **Breaks without V90** (500); 200 with it | `reject_conflicting_witness_retry` (`trace-commons-ingest.rs:13352`) reads `trace_witness_certificate_evidence` (`trace_corpus_pg.rs:2069`). V90 makes the runtime a member of V76's `trace_witness_evidence_runtime`. |
+| `POST /v1/traces`, new submission | **Breaks without V90** (500). Unchanged with it. | Every submission write takes `FOR UPDATE` on the source-session row (`lock_source_session_for_submission` in `trace_corpus_pg.rs`, reached from `upsert_submission_and_witness_evidence`). V78 grants the runtime nothing; V90 grants it `SELECT` and `UPDATE (withdrawn_at)`. |
+| `POST /v1/traces`, re-POST of an existing submission | **Breaks without V90** (500); 200 with it | `reject_conflicting_witness_retry` (`trace-commons-ingest.rs`) reads `trace_witness_certificate_evidence` through `get_verified_witness_evidence` (`trace_corpus_pg.rs`). V90 makes the runtime a member of V76's `trace_witness_evidence_runtime`. |
 | `POST /v1/traces`, re-POST with *different* witness headers | New `409 witness evidence conflict` | Only when the first POST was witnessed and stored by the new build. 0.12.6 caches the certificate with the approved envelope and re-sends the same headers, so it is not expected to hit this. |
 | `POST /v1/traces`, idempotent receipt | Additive | The duplicate's audit event is now mirrored to the DB, not written file-only. |
-| Source-session binding (#1021) with account admission **off** | No requirement | `source_session` is required only in `reserve_account` (`admission.rs:466`, `:649`), which is reached only when account admission is on **and** the tenant is `near-`/`nearai-` (`:316`). |
-| `POST /v1/account/traces/{id}/withdraw` | **Breaks without V90**, including its token-bundle grants, which withdrawal already needs on the current build | `withdraw_trace_source_session` reads `trace_submission_sessions` (`trace_corpus_pg.rs:1748`). The token-bundle step is `pending_token_bundle_deletions` (`trace-commons-ingest.rs:17158`, `db/token_bundles.rs:274`) plus the invoker-rights trigger `trace_revoke_token_bundles` (V65/V66/V68). |
+| Source-session binding (#1021) with account admission **off** | No requirement | `source_session` is required only in `reserve_account` (`admission.rs`), which `reserve` reaches only when account admission is on **and** the tenant is `near-`/`nearai-` (`is_anchored_tenant`). |
+| `POST /v1/account/traces/{id}/withdraw` | **Breaks without V90**, including its token-bundle grants, which withdrawal already needs on the current build | `withdraw_trace_source_session` reads `trace_submission_sessions` (`trace_corpus_pg.rs`). The token-bundle step is `pending_token_bundle_deletions` (called from the withdraw handler in `trace-commons-ingest.rs`, defined in `db/token_bundles.rs`) plus the invoker-rights trigger `trace_revoke_token_bundles` (V65/V66/V68). |
 | Withdraw response `credit_retained` | Semantics changed (#990) | It can now be `false`, when unsettled credit is forfeited. 0.12.6 does not read it. |
 | `submission-status`, `score-attestation`, community, login links, native auth, v1 NEAR provisioning | Unchanged or additive fields | The v1 provisioning contract is unchanged. The `/v2` routes are new, and the new refusal labels (#1085) do not reach the wire. |
 | Issuer `/v1/onboard`, `/v1/trace-upload-claim` | Unchanged for `tenant-…` invites | #1015 refuses invites with a *fixed* tenant in `near-`/`nearai-` (mint, import, and registry lookup). #1086 adds a route. |
@@ -254,6 +256,15 @@ pilot notes on `/proc/<MainPID>/environ`.
    reproduced locally: V90 failed on the second grantor's grant, and applied
    cleanly after the `REVOKE … CASCADE`.
 7. Disk and binary backups are in place, as in `deployment.md`.
+8. **For a target with #1142: the runtime can insert tombstone rows.** From
+   #1142 the account withdraw route writes a `trace_tombstones` row, as an
+   operator revocation already does. If the runtime cannot insert it, every
+   account withdrawal returns 500. As `app`:
+   ```sql
+   SELECT has_table_privilege('trace_ingest_runtime', 'trace_tombstones', 'INSERT');
+   ```
+   It must return `t`. If it returns `f`, grant it as `app` before
+   installing: `GRANT INSERT ON trace_tombstones TO trace_ingest_runtime;`.
 
 ## Backups
 
@@ -305,7 +316,8 @@ first, with rollback.
   ADD COLUMN … CHECK`: an ACCESS EXCLUSIVE lock and one validating scan, with
   no rewrite. V77 and V81 add policies to `device_keys`, `trace_accounts`,
   `trace_account_principals`, `trace_near_provisioned_devices`,
-  `onboarding_invites` and `onboarding_invite_grants`. V90 changes grants on
+  `onboarding_invites` and `onboarding_invite_grants`. V85 adds a policy on
+  `trace_accounts`, and V86 one on `trace_gate_decisions`. V90 changes grants on
   `trace_accounts`, the token tables and the source-session tables. Those are
   brief catalog locks. Everything else, V91 included, creates new, empty
   objects.
@@ -353,8 +365,15 @@ sessions.
 1. `login --invite https://issuer…/onboard#CODE --default` succeeds and prints
    the tenant.
 2. `submit --source trajectory --trajectory t.jsonl --yes` gives
-   `outcome: submitted, status: accepted`.
-3. `status` lists the submission.
+   `outcome: submitted`. On a deployment with the PII backstop, which the pilot
+   runs, the status is `awaiting_pii_backstop`, not `accepted`. The submission
+   is held until the backstop's verdict. The local rehearsals had no backstop,
+   which is why the earlier text said `accepted`. Either status passes this step.
+3. `status` lists the submission. It moves to `accepted` once the backstop
+   clears it. On the live cutover `awaiting_pii_backstop` lasted under 1 minute
+   (observed), and the step 4 re-POST already reported `accepted`. A submission
+   still held well past that is worth a look at the backstop's worker before
+   going on.
 4. Re-POST: move `receipts.jsonl` aside, submit the same file, and restore the
    file. Expect `submitted`, with the same `submission_id`.
 5. `account login --no-browser`. 0.12.6 prints `…/v1/traces/account/login?…`,
@@ -363,12 +382,64 @@ sessions.
    only in clients built from `main`; no release carries it yet.
 6. With `daemon run --dry-run` running, `daemon withdraw <id>` returns
    `withdrawn: true`. The server status becomes `revoked`.
-7. Run the drills. **Gate on `audit-chain`, `rollback` and `postgres-rls`**:
-   each should be `ready`. `audit-chain` counts the pre-cutover rows as a
-   legacy prefix (row 4 of What breaks).
+7. Run the drills. **Gate on `audit-chain`, `rollback` and `postgres-rls`**.
+   `audit-chain` and `postgres-rls` should be `ready` for every tenant.
+   `audit-chain` counts the pre-cutover rows as a legacy prefix (row 4 of What
+   breaks).
+
+   **`rollback` is gated against a recorded baseline, not against `ready`.** A
+   tenant that has been live for a long time can carry file-versus-DB drift
+   from before the cutover. The drill then reports it as `db_*_not_in_file_fallback`
+   and `missing_file_*_in_db` counts (`label=count`), and a cutover cannot
+   clear those. To tell old drift from new:
+   - Drill a **fresh tenant** created by this smoke test. It has only
+     post-cutover data, so any gap there comes from the new build.
+   - For each long-lived tenant, run the rollback drill twice, at least 10
+     minutes apart, **with at least one audited write on that tenant between
+     the runs**: any status read or submit that writes an audit event. Two
+     identical runs with nothing written in between prove nothing, because
+     nothing had the chance to drift. Identical counts after the write are
+     baseline drift: record them. Growing counts mean new writes are reaching
+     only one side, which is a regression. **This rule applies to every gap
+     label except `missing_file_tombstones_in_db`**, below.
+
+   **`missing_file_tombstones_in_db` is not a regression signal on `d8fb248b`.**
+   A **known defect in `d8fb248b`**: an account-route withdrawal (step 6)
+   writes the file tombstone (#1112) but no `trace_tombstones` row, and
+   db-reconciliation does not flag it on that build. So this label counts the
+   account withdrawals made on `d8fb248b` before #1142 is deployed. It is
+   expected to grow with each real account withdrawal until then, so a
+   long-lived tenant's count will rise between two runs and that is not a
+   reason to roll back. It clears through the #1142 tombstone repair after
+   deploy: see row 13 of What breaks and
+   [Withdrawal tombstone repair](#withdrawal-tombstone-repair). The smoke
+   tenant shows `missing_file_tombstones_in_db=1` after step 6. After the
+   repair, a nonzero count here is a finding again.
+
+   On the live cutover, the fresh tenant's submissions and audit events
+   matched on both sides. One long-lived tenant carried stable pre-cutover
+   drift: 1 submission, 142 file-only and 1321 DB-only audit events. The
+   one-submission drift runs in one direction: it is a DB-only submission,
+   where a purge kept the DB row and deleted the file record
+   (`db_submissions_not_in_file_fallback`).
+
+   After the step 6 withdrawal, on a target with #1142, `rollback` reports
+   `file_tombstone_count` equal to `db_tombstone_count`. On `d8fb248b`, which
+   has #1112 but not #1142, it reports `missing_file_tombstones_in_db=1`
+   instead.
+
+   **db-reconciliation can take minutes on a large tenant.** On a tenant with
+   about 1,200 submissions and 7,400 audit events it ran longer than 300 s.
+   Give the drill request a timeout of 900 s or more.
+
+   After the step 6 withdrawal, `rollback` reports `file_tombstone_count`
+   equal to `db_tombstone_count`. On a target with #1112 but without #1142,
+   it reports `missing_file_tombstones_in_db=1` instead: the withdrawal wrote
+   the file tombstone but not its DB row. See row 13 of What breaks and
+   [Withdrawal tombstone repair](#withdrawal-tombstone-repair).
 
    **Do not expect `db-reconciliation` to be `ready` right after the cutover.**
-   Its `blocking_gaps` can carry three expected entries. Anything else in it
+   Its `blocking_gaps` can carry four expected entries. Anything else in it
    is a finding.
    - `audit_reader_sample_parity=failed` and `audit_reader_sample_failures=1`:
      transitional. The reader sample is the tenant's 16 most recent audit
@@ -387,10 +458,17 @@ sessions.
      database but not the file-side record, so the file still says
      `accepted`. See row 12 of What breaks. With #1112, these gaps after a
      withdrawal are a finding.
+   - `missing_tombstone_submission_ids_in_db=<n>` (from #1142): file
+     revocation tombstones with no DB row. After a withdrawal made on a build
+     with #1112 but without #1142, this is expected until the tombstone repair
+     runs; after the repair, it is a finding.
 
    Record the full `blocking_gaps` for each tenant, so a later run can be
-   compared. `scripts/operator/smoke-gate.sh` requires db-reconciliation to be
-   `ready`, so it will not pass until these gaps clear.
+   compared. `scripts/operator/smoke-gate.sh` asserts `ready: true` on every required
+   drill, so it requires db-reconciliation to be `ready` and will not pass until
+   these gaps clear. It also requires `rollback` to report `ready: true`, so a
+   tenant with baseline drift, or with `missing_file_tombstones_in_db`, fails the
+   gate until repaired. That is expected.
 
 ## Switch-on order, after the cutover is stable
 
@@ -420,13 +498,13 @@ the cutover itself.
      users.** Only clients built from `main` after #1021 send it. Every
      released client up to 0.12.6 omits it. Their new uploads on a
      `near-`/`nearai-` tenant would get `422 source_session_invalid`
-     (`admission.rs:649`).
+     (`reserve_account` in `admission.rs`).
    - `GRANT trace_account_admission_runtime TO trace_ingest_runtime;`. V90
      already gave that role `INSERT` on `trace_submission_sessions` and
      `trace_source_sessions`, which the source-session claim
      (`claim_trace_source_session`) needs.
    - **Narrow the runtime's `trace_accounts` UPDATE: done by V90.** The
-     readiness check (`admission_ledger.rs:646`) refuses a runtime that can
+     readiness check (`account_admission_runtime_ready` in `admission_ledger.rs`) refuses a runtime that can
      UPDATE `trace_accounts.account_id`. The pilot's table-wide grant failed
      it with `account_admission_permissions_or_linkage_not_ready`, as
      reproduced. V90 revokes that grant and grants back
@@ -446,35 +524,133 @@ the cutover itself.
 ## Rollback
 
 - **What works.** Reinstall the `5f239be4` binaries. Released clients kept
-  submitting and reading status against the V89 schema (tested). The schema
-  stays at V89; the old build ignores the new tables.
-- **Rolling forward again needs one repair per affected tenant** (#1100 in
-  the roll-forward build). While the old build runs, it appends file audit
-  events whose DB mirrors carry no chain hash, or whose events are file-only.
+  submitting and reading status against the V91 schema (tested in the
+  `5888b8bcd` rehearsal). The schema stays at V91; the old build ignores the
+  new tables.
+- **Rolling forward again needs one repair per affected tenant** (#1100 and
+  its follow-up in the roll-forward build). While the old build runs, it
+  appends file audit events whose DB mirrors carry no chain hash, or whose
+  events are file-only.
   - The new build then chains from the file head. The DB's latest hashed row
     is older, so every mirrored append is refused as stale. Under
     `REQUIRE_DB_MIRROR_WRITES`, every audited write fails for each tenant that
     was active during the rollback.
-  - For each such tenant, run `POST /v1/admin/audit-chain-repair` as that
+  - A submission refused in that state still stores its submission, but not
+    its `submitted` audit event. Its retry after the repair is recorded as an
+    `idempotent_submit`. Repair each tenant before it takes traffic.
+  - Find the affected tenants with the repair dry run, run for every tenant:
+    an affected tenant reports `file_ahead_through_legacy_rows`, and any
+    other reports `clean`. The audit-chain drill also flags them, with
+    `audit_chain_file_head_not_db_head=1`. A roll-forward build without the
+    #1100 follow-up reports those tenants `ready: true`, so there, use the
+    dry run only.
+  - For each affected tenant, run `POST /v1/admin/audit-chain-repair` as that
     tenant's admin:
     1. Dry run (the default). Expect `divergence:
        "file_ahead_through_legacy_rows"`, and segment counts that fit the
-       traffic the rollback served. A tenant that was not active reports
-       `clean`.
+       traffic the rollback served. The rehearsal served two submissions, one
+       re-POST and one status read on the old build, and saw
+       `legacy_segment_file_events: 4`, `legacy_segment_unhashed_db_rows: 3`
+       and `legacy_segment_file_only_events: 3`. Check that
+       `legacy_segment_earliest_at` and `legacy_segment_latest_at` both fall
+       inside the rollback window.
     2. `{"dry_run": false, "accept_legacy_segment": true}`. Without
        `accept_legacy_segment` the repair refuses
        `legacy_segment_not_accepted` and writes nothing. Expect
        `chain_resumed: true`.
-    3. Run it once more: `clean`. Then confirm one submission succeeds, and
-       run the audit-chain and db-reconciliation drills.
-  - Any other refusal label (`db_head_not_in_file`,
-    `file_chain_break_after_db_head`, `legacy_row_mismatch`,
-    `file_head_not_in_db`) is not a rollback. Stop and treat it as chain drift.
-    The procedure and labels are in `audit-trail-forensics.md`, "Rolling
-    forward after a binary rollback".
+    3. Run the dry run once more: `clean`. Then confirm one submission
+       succeeds, and run the audit-chain, db-reconciliation and rollback
+       drills. The audit-chain drill reports `db_legacy_segment_resume_count:
+       1`. The old build's file-only events are counted apart
+       (`db_audit_legacy_segment_file_only_event_count`), not as missing
+       events or reader-parity gaps.
+  - A non-dry run on a clean chain, with or without `accept_legacy_segment`,
+    still writes one `audit_chain_repair` audit event, as every non-dry run
+    does. It is harmless, but repeat step 3 as a dry run.
+  - A dry run reporting `legacy_segment_resume_interrupted: true` means an
+    earlier repair's file line went in but its DB row did not commit. Run
+    step 2: it completes that event and writes no second one.
+  - Any other refusal label is not a rollback. That includes
+    `db_head_not_in_file`, `file_chain_break_after_db_head`,
+    `legacy_row_mismatch`, any other `legacy_…` label, and
+    `file_head_not_in_db`. So is a segment whose times fall outside the
+    rollback window. Stop and treat it as chain drift. The procedure and
+    every label are in `audit-trail-forensics.md`, "Rolling forward after a
+    binary rollback".
   - Without #1100 in the roll-forward build, treat a rollback as final.
 - **Schema.** Schema rollback is a Cloud SQL restore. It loses every write
   since the backup.
+
+## Withdrawal tombstone repair
+
+A withdrawal made through the account route on a build with #1112 but
+without #1142 (on the pilot, from 2026-09-29 11:41Z until #1142 is deployed)
+wrote the file revocation tombstone and no `trace_tombstones` row. The
+submission is `revoked` on both sides and its content is deleted; only the DB
+tombstone row is missing, so the file and DB tombstone records disagree. The
+rollback drill reports it as `missing_file_tombstones_in_db`, and
+db-reconciliation as `missing_tombstone_submission_ids_in_db`.
+
+`POST /v1/admin/tombstone-repair` writes each missing row from the file
+tombstone itself: the same reason (`contributor_withdrawal`), redaction and
+summary hashes, and time, under the deterministic tombstone id the revocation
+mirror uses. It is tenant-scoped (the admin token's tenant only), dry-run by
+default, and idempotent. It needs no migration: `trace_tombstones` is a V1
+table that the operator revocation path already writes on the same runtime
+pool. Run pre-check 8 before installing #1142.
+
+**Run it after #1142 is deployed**, for each tenant the rollback drill reports
+`missing_file_tombstones_in_db` for, starting with the smoke tenant:
+
+```bash
+# 1. Dry run (the default): counts, writes nothing.
+curl -sS -X POST "$INGEST/v1/admin/tombstone-repair" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"purpose": "withdrawal tombstone rows after the 2026-09 cutover"}'
+
+# 2. Apply, after reviewing the dry run.
+curl -sS -X POST "$INGEST/v1/admin/tombstone-repair" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"dry_run": false, "purpose": "withdrawal tombstone rows after the 2026-09 cutover"}'
+```
+
+Read the dry run before applying:
+
+- `file_tombstones_missing_in_db` should equal the rollback drill's
+  `missing_file_tombstones_in_db`, and `withdrawal_tombstones_missing_in_db`
+  should equal it too. A missing row whose tombstone is not a withdrawal is
+  not what this runbook covers: stop and investigate it before applying.
+- `repairable` is how many rows the apply will write: those whose DB
+  submission is already `revoked`.
+- `skipped_db_submission_missing` and `skipped_db_submission_not_revoked`
+  should be 0. The repair never writes a tombstone row the DB submission
+  would disagree with, and never changes a submission's status. A non-zero
+  count here is a status difference; read it with db-reconciliation's
+  `status_mismatches`.
+
+Rows written by the repair record the repairing admin as
+`created_by_principal_ref`, not the account that withdrew. Rows written by
+the withdraw route itself (on a build with #1142) record that account's
+audit principal ref.
+
+The response is hash-only: counts and `purpose_hash`, with no submission ids
+and no revocation reasons. The log line (`Trace Commons tombstone repair`)
+carries the same counts and the tenant's `tenant_storage_ref`. An apply
+records its own `tombstone_repair` audit event, mirrored to the DB, with the
+counts and the purpose's hash only, and returns its id as
+`repair_audit_event_id`.
+
+Then:
+
+1. Run the repair once more with `"dry_run": false`. Expect
+   `file_tombstones_missing_in_db: 0` and `db_tombstones_written: 0`.
+2. Run the rollback drill: `ready: true`, with `file_tombstone_count` equal
+   to `db_tombstone_count`.
+3. Run db-reconciliation: no `missing_tombstone_submission_ids_in_db` or
+   `missing_tombstone_submission_ids_in_files` gap.
+
+A request with a field the repair does not know (for example `dryrun`) is
+refused with 422 rather than read as a dry run.
 
 ## What breaks and the mitigation
 
@@ -491,7 +667,8 @@ the cutover itself.
 | 9 | 0.12.6 `account login` prints a URL that 404s | clients withdrawing | Strip `/v1/traces` from the printed URL. #1096 fixes the client, but it is merged, not released. |
 | 10 | Drill responses: `purpose` became `purpose_hash` (#1044); rollback drill adds `legacy_submit_audit_row_count` | anyone parsing drill JSON | No in-repo script reads `purpose`. `smoke-gate.sh` and `rotate-kek.sh` read only `ready`, `blocking_gaps`, `success` and `required_checks`. Update any out-of-repo parser. |
 | 11 | Out-of-repo deploy scripts are pinned to `5f239be4` / `EXPECT_MAX_MIGRATION=74` | operators | Re-pin to the target, with the maximum at 91 |
-| 12 | After a withdrawal, the file-side submission record still says `accepted`, so db-reconciliation reports `status_mismatches` and reader-parity failures for that tenant | operators | Present on `5f239be4`, and on `main` up to #1112, which writes the file tombstone and marks the file records revoked. With #1112 in the target, new withdrawals leave no such gap. A withdrawal made before it keeps the gap: read it as that withdrawal, and check that the DB says `revoked`. |
+| 12 | After a withdrawal, the file-side submission record still says `accepted`, so db-reconciliation reports `status_mismatches` and reader-parity failures for that tenant | operators | Present on `5f239be4`, and on `main` up to #1112, which writes the file tombstone and marks the file records revoked. With #1112 in the target, new withdrawals leave no such status gap. A withdrawal made before it keeps the gap: read it as that withdrawal, and check that the DB says `revoked`. |
+| 13 | After a withdrawal, the rollback drill reports `missing_file_tombstones_in_db=1` (`file_tombstone_count` one above `db_tombstone_count`) | operators | Present on `main` from #1112 up to #1142: the account route wrote the file tombstone and not its `trace_tombstones` row. #1142 writes both, and db-reconciliation now reports the same difference as `missing_tombstone_submission_ids_in_db`. Withdrawals made in between keep the difference until the [tombstone repair](#withdrawal-tombstone-repair) runs for their tenant. The pilot has at least one: the smoke tenant from the `d8fb248b` cutover smoke test. |
 
 ## Evidence
 
@@ -573,7 +750,7 @@ Not covered locally:
   upload was run.
 - **A `near-` tenant.** NEAR provisioning needs a wallet or NEAR AI ceremony.
   The account-admission refusal for 0.12.x NEAR clients comes from code
-  reading (`admission.rs:640-651`) and the fact that no released client
+  reading (`reserve_account` in `admission.rs`) and the fact that no released client
   carries `source_session`.
 - **PG15.** The migrator's PG15 behaviour was emulated through the schema
   shape.

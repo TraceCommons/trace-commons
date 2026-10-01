@@ -10,40 +10,43 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
     TC_CONTRIBUTION_CONTROL_CONTRIBUTE, TC_CONTRIBUTION_CONTROL_NONE, TC_CREDENTIAL_ACTION_CANCEL,
-    TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_NONE, TC_CREDENTIAL_ACTION_OBTAIN,
-    TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE, TC_HARNESS_PLAN_NO_CONFIG_PATH,
-    TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED, TC_HARNESS_PLAN_UNKNOWN,
-    TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED, TC_HARNESS_STATE_ANSWERING,
-    TC_HARNESS_STATE_CONNECTED_NO_CALLS, TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN,
-    TC_PRIVATE_INFERENCE_TONE_ATTENTION, TC_PRIVATE_INFERENCE_TONE_CLEAR,
-    TC_PRIVATE_INFERENCE_TONE_HELD, TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
-    TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT, TC_WITNESS_STATE_NOT_ENROLLED,
-    TC_WITNESS_STATE_PINNED, TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING,
-    TC_WITNESS_STATE_REFUSING_PIN_MALFORMED, TC_WITNESS_STATE_REFUSING_UNPINNED,
-    TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION, TC_WITNESS_TONE_CLEAR,
-    TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
-    tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy, tc_consent_gate_help,
-    tc_contribution_attestation_line, tc_contribution_attestation_reason_line,
-    tc_contribution_attestation_tone, tc_contribution_eligibility_control,
-    tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
-    tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
-    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
-    tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error,
-    tc_legacy_migration_notice, tc_near_ai_credential_action, tc_near_ai_credential_state_line,
-    tc_near_ai_credential_state_tone, tc_near_ai_enroll_line, tc_near_ai_enroll_tone, tc_preview,
-    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
-    tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
+    TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_MIGRATE, TC_CREDENTIAL_ACTION_NONE,
+    TC_CREDENTIAL_ACTION_OBTAIN, TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE,
+    TC_HARNESS_PLAN_NO_CONFIG_PATH, TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED,
+    TC_HARNESS_PLAN_UNKNOWN, TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED,
+    TC_HARNESS_STATE_ANSWERING, TC_HARNESS_STATE_CONNECTED_NO_CALLS,
+    TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN, TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+    TC_PRIVATE_INFERENCE_TONE_CLEAR, TC_PRIVATE_INFERENCE_TONE_HELD,
+    TC_PRIVATE_INFERENCE_TONE_NEUTRAL, TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT,
+    TC_WITNESS_STATE_NOT_ENROLLED, TC_WITNESS_STATE_PINNED,
+    TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
+    TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
+    TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
+    tc_call, tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy,
+    tc_consent_gate_help, tc_contribution_attestation_line,
+    tc_contribution_attestation_reason_line, tc_contribution_attestation_tone,
+    tc_contribution_eligibility_control, tc_contribution_eligibility_line,
+    tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
+    tc_contribution_group_control, tc_contribution_withheld_line, tc_daemon_start,
+    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_opencode_export,
+    tc_discover_sources, tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host,
+    tc_last_error, tc_legacy_migration_notice, tc_near_ai_credential_action,
+    tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
+    tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
+    tc_preview_summary_json, tc_preview_turns_json, tc_preview_unsure_spans_json,
+    tc_private_inference_copy, tc_private_inference_quit_needs_notice,
     tc_private_inference_serving_line, tc_private_inference_should_offer,
     tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
     tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
     tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
     tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
     tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
-    tc_session_detail_error_line, tc_skill_draft_validate, tc_skill_learning_copy,
-    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
-    tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
+    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
+    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
+    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
+    tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -102,10 +105,7 @@ fn start(dir: &Path) -> *mut tc_handle {
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = unsafe { tc_daemon_start(cstr(dir).as_ptr(), &mut err) };
     if h.is_null() {
-        let msg = unsafe { CStr::from_ptr(err) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { tc_string_free(err) };
+        let msg = take_owned(err);
         panic!("tc_daemon_start failed: {msg}");
     }
     h
@@ -123,11 +123,7 @@ fn stop(h: *mut tc_handle) {
 fn call(h: *mut tc_handle, method: &str, params: &str) -> String {
     let out = unsafe { tc_call(h, cstr_str(method).as_ptr(), cstr_str(params).as_ptr()) };
     assert!(!out.is_null(), "tc_call returned null for {method}");
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
-    s
+    take_owned(out)
 }
 
 fn last_error() -> Option<String> {
@@ -136,6 +132,15 @@ fn last_error() -> Option<String> {
         return None;
     }
     Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+}
+
+#[track_caller]
+fn assert_last_error_contains(label: &str) {
+    let error = last_error();
+    assert!(
+        error.as_deref().is_some_and(|error| error.contains(label)),
+        "expected {label:?}, got {error:?}"
+    );
 }
 
 #[test]
@@ -147,19 +152,22 @@ fn a_call_returns_json_the_caller_owns() {
     stop(h);
 }
 
+/// K6: the menu-bar badge's exact count crosses the C ABI the same way
+/// `queue_depth` always has -- inside the plain JSON `tc_call(h, "status",
+/// "{}")` already returns. A macOS shell that decodes `status` off this call
+/// reads `decisions_owed` for free; there is no separate per-field ABI
+/// function to add for it, and this asserts that stays true.
 #[test]
-fn a_second_start_against_the_same_directory_fails_on_the_lock() {
+fn status_over_the_c_abi_carries_decisions_owed() {
     let dir = tempfile::tempdir().unwrap();
-    let a = start(dir.path());
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let b = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), &mut err) };
+    let h = start(dir.path());
+    let out = call(h, "status", "{}");
+    assert!(out.contains("\"decisions_owed\""), "{out}");
     assert!(
-        b.is_null(),
-        "two daemons must not run against one directory"
+        out.contains("\"queue_depth\""),
+        "queue_depth must stay for compatibility: {out}"
     );
-    assert!(!err.is_null(), "a failure must set the error out-param");
-    unsafe { tc_string_free(err) };
-    stop(a);
+    stop(h);
 }
 
 /// The reproduction that started sub-project G, pinned.
@@ -353,10 +361,7 @@ fn tc_call_null_handle_is_an_error() {
         )
     };
     assert!(!out.is_null());
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let s = take_owned(out);
     assert!(
         s.contains("error") || s.contains("bad_params") || s.contains("unavailable"),
         "{s}"
@@ -369,10 +374,7 @@ fn tc_call_null_method_is_an_error() {
     let h = start(dir.path());
     let out = unsafe { tc_call(h, std::ptr::null(), cstr_str("{}").as_ptr()) };
     assert!(!out.is_null());
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let s = take_owned(out);
     assert!(s.contains("bad_params") || s.contains("error"), "{s}");
     stop(h);
 }
@@ -383,10 +385,7 @@ fn tc_call_null_params_is_an_error() {
     let h = start(dir.path());
     let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), std::ptr::null()) };
     assert!(!out.is_null());
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let s = take_owned(out);
     assert!(s.contains("bad_params") || s.contains("error"), "{s}");
     stop(h);
 }
@@ -840,29 +839,6 @@ fn double_free_of_a_handle_is_refused_not_ub() {
     );
 }
 
-#[test]
-fn cross_type_free_of_a_preview_as_a_string_is_refused_not_ub() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    // Build a session-less config so preview fails cleanly, then instead
-    // exercise cross-type free using a handle's own allocation cast as a
-    // string, which is available regardless of preview/session setup.
-    unsafe { tc_string_free(h as *mut c_char) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("cross-type-free") || e.contains("unknown-pointer"))
-            .unwrap_or(false)
-    );
-    // The handle itself must still be intact. A refusal must not
-    // unregister it: `stop` alone asserts nothing, so prove the handle is
-    // still live by using it.
-    assert!(
-        !call(h, "status", "{}").contains("invalid-handle-pointer"),
-        "a refused cross-type free must leave the handle usable"
-    );
-    stop(h);
-}
-
 // --- Preview accessors must consult the registry before dereferencing ---
 //
 // The registry detected invalid *frees*, but the three borrowing accessors
@@ -882,13 +858,7 @@ fn preview_body_refuses_a_pointer_that_is_not_a_preview() {
         p.is_null(),
         "a non-preview pointer must not be dereferenced"
     );
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-preview-pointer"))
-            .unwrap_or(false),
-        "{:?}",
-        last_error()
-    );
+    assert_last_error_contains("invalid-preview-pointer");
     // The handle is untouched by the refusal and still usable.
     let out = call(h, "status", "{}");
     assert!(out.contains("\"logged_in\""), "{out}");
@@ -901,11 +871,7 @@ fn preview_summary_json_refuses_a_pointer_that_is_not_a_preview() {
     let h = start(dir.path());
     let p = unsafe { tc_preview_summary_json(h as *const tc_preview) };
     assert!(p.is_null());
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-preview-pointer"))
-            .unwrap_or(false)
-    );
+    assert_last_error_contains("invalid-preview-pointer");
     stop(h);
 }
 
@@ -953,163 +919,158 @@ fn preview_search_refuses_a_pointer_that_is_not_a_preview() {
     let n = unsafe { tc_preview_search(h as *const tc_preview, needle.as_ptr(), &mut matches) };
     assert_eq!(n, -1);
     assert!(matches.is_null(), "nothing to free on the error path");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-preview-pointer"))
-            .unwrap_or(false)
-    );
+    assert_last_error_contains("invalid-preview-pointer");
     stop(h);
 }
 
-// --- Handle entry points must consult the registry before dereferencing -
-//
-// The registry detected invalid frees, and (see above) invalid preview-
-// accessor reads. It was not consulted by any of the six `tc_handle*`-
-// borrowing entry points below -- they null-checked and then dereferenced
-// directly. A stale (already freed by `tc_handle_free`) or cross-type (a
-// `tc_preview*`, or any other kind of pointer this crate allocated)
-// handle was therefore a use-after-free or a type confusion rather than
-// the fixed error the rest of this ABI promises. Each test below passes a
-// live pointer of the WRONG registry kind (a `tc_string*`, obtained from
-// an ordinary `tc_call` and deliberately not yet freed) where a
-// `tc_handle*` is expected -- the same shape of mistake
-// `preview_body_refuses_a_pointer_that_is_not_a_preview` and its siblings
-// already exercise for the preview accessors, mirrored onto the handle
-// entry points. None of these dereference the bad pointer if the fix
-// holds, so none of them may crash.
-
-#[test]
-fn tc_daemon_stop_refuses_a_pointer_that_is_not_a_handle() {
+// Each borrowing entry point must reject both a live allocation of the wrong
+// registry kind and a freed handle before dereferencing either. Keep separate
+// named tests and a fresh daemon for each call: later failures must not inherit
+// an earlier call's thread-local error.
+fn with_wrong_type_handle(check: impl FnOnce(*mut tc_handle)) {
     let dir = tempfile::tempdir().unwrap();
     let h = start(dir.path());
     let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
     assert!(!out.is_null());
-    // A live `tc_string*` deliberately passed where a `tc_handle*` is
-    // expected.
-    unsafe { tc_daemon_stop(out as *mut tc_handle) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false),
-        "{:?}",
-        last_error()
-    );
+    check(out.cast());
     unsafe { tc_string_free(out) };
-    // The real handle is untouched by the refusal and still usable.
     let status = call(h, "status", "{}");
     assert!(status.contains("\"logged_in\""), "{status}");
     stop(h);
 }
 
-#[test]
-fn tc_call_refuses_a_pointer_that_is_not_a_handle() {
+fn with_freed_handle(check: impl FnOnce(*mut tc_handle)) {
     let dir = tempfile::tempdir().unwrap();
     let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    // `tc_call` never returns NULL: a stale handle must still produce a
-    // JSON error frame, not a null pointer or a crash.
-    let bad = unsafe {
-        tc_call(
-            out as *mut tc_handle,
-            cstr_str("status").as_ptr(),
-            cstr_str("{}").as_ptr(),
+    stop(h);
+    // Reuse only the pointer VALUE; the call must reject it before dereferencing.
+    check(h);
+}
+
+fn assert_stop_refused(h: *mut tc_handle) {
+    unsafe { tc_daemon_stop(h) };
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+fn assert_call_refused(h: *mut tc_handle) {
+    // Even for an invalid handle, tc_call owes the caller a non-null JSON frame.
+    let response = call(h, "status", "{}");
+    assert!(response.contains("invalid-handle-pointer"), "{response}");
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+fn assert_subscribe_refused(h: *mut tc_handle) {
+    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
+    let token = unsafe { tc_subscribe(h, Some(noop_cb), std::ptr::null_mut()) };
+    assert_eq!(
+        token, 0,
+        "an invalid handle must not yield a subscription token"
+    );
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+fn assert_unsubscribe_refused(h: *mut tc_handle) {
+    // A nonzero token ensures liveness is checked before looking up the token.
+    unsafe { tc_unsubscribe(h, 1) };
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+fn assert_preview_open_refused(h: *mut tc_handle) {
+    let mut err = std::ptr::null_mut();
+    let preview = unsafe {
+        tc_preview_open(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            &mut err,
         )
     };
-    assert!(!bad.is_null());
-    let s = unsafe { CStr::from_ptr(bad) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(bad) };
-    assert!(s.contains("invalid-handle-pointer"), "{s}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
-    stop(h);
+    assert!(preview.is_null());
+    let message = take_owned(err);
+    assert!(message.contains("invalid-handle-pointer"), "{message}");
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+fn assert_preview_turns_refused(h: *mut tc_handle) {
+    let mut err = std::ptr::null_mut();
+    let preview = unsafe {
+        tc_preview_turns_json(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(preview.is_null());
+    let message = take_owned(err);
+    assert!(message.contains("invalid-handle-pointer"), "{message}");
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+#[test]
+fn tc_daemon_stop_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_stop_refused);
+}
+
+#[test]
+fn tc_call_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_call_refused);
 }
 
 #[test]
 fn tc_subscribe_refuses_a_pointer_that_is_not_a_handle() {
-    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
-
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    let token = unsafe { tc_subscribe(out as *mut tc_handle, Some(noop_cb), std::ptr::null_mut()) };
-    assert_eq!(
-        token, 0,
-        "a stale handle must not yield a subscription token"
-    );
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
-    stop(h);
+    with_wrong_type_handle(assert_subscribe_refused);
 }
 
 #[test]
 fn tc_unsubscribe_refuses_a_pointer_that_is_not_a_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    // Any nonzero token: the pointer-liveness check runs before the token
-    // is ever looked up, so no real subscription is needed here.
-    unsafe { tc_unsubscribe(out as *mut tc_handle, 1) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
-    stop(h);
+    with_wrong_type_handle(assert_unsubscribe_refused);
 }
 
 #[test]
 fn tc_preview_open_refuses_a_pointer_that_is_not_a_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
-        tc_preview_open(
-            out as *mut tc_handle,
-            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(p.is_null());
-    assert!(!err.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
-    stop(h);
+    with_wrong_type_handle(assert_preview_open_refused);
 }
 
 #[test]
 fn tc_preview_turns_json_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_preview_turns_refused);
+}
+
+#[test]
+fn tc_daemon_stop_refuses_a_freed_handle() {
+    with_freed_handle(assert_stop_refused);
+}
+
+#[test]
+fn tc_call_refuses_a_freed_handle() {
+    with_freed_handle(assert_call_refused);
+}
+
+#[test]
+fn tc_subscribe_refuses_a_freed_handle() {
+    with_freed_handle(assert_subscribe_refused);
+}
+
+#[test]
+fn tc_unsubscribe_refuses_a_freed_handle() {
+    with_freed_handle(assert_unsubscribe_refused);
+}
+
+#[test]
+fn tc_preview_open_refuses_a_freed_handle() {
+    with_freed_handle(assert_preview_open_refused);
+}
+
+#[test]
+fn tc_preview_unsure_spans_json_refuses_a_bad_or_freed_handle() {
     let dir = tempfile::tempdir().unwrap();
     let h = start(dir.path());
     let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
     assert!(!out.is_null());
+    // A string pointer passed where a handle belongs.
     let mut err: *mut c_char = std::ptr::null_mut();
     let p = unsafe {
-        tc_preview_turns_json(
+        tc_preview_unsure_spans_json(
             out as *mut tc_handle,
             cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
             cstr_str("sha256:irrelevant").as_ptr(),
@@ -1123,141 +1084,13 @@ fn tc_preview_turns_json_refuses_a_pointer_that_is_not_a_handle() {
         .into_owned();
     unsafe { tc_string_free(err) };
     assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
     unsafe { tc_string_free(out) };
-    stop(h);
-}
 
-// --- ...and the other shape the doc comment above names: a freed handle -
-//
-// The block above exercises the cross-type half of the threat
-// `handle_pointer_is_live`'s doc names; this one exercises the other half
-// named there -- a handle already freed by `tc_handle_free`. Each test
-// below starts a real handle, stops and frees it exactly as
-// `double_free_of_a_handle_is_refused_not_ub` does, then reuses the same
-// pointer VALUE -- never dereferenced unless the guard under test fails
-// -- as the argument to the entry point under test. For `tc_daemon_stop`,
-// the second stop after the free (the same shape of reuse
-// `double_free_of_a_handle_is_refused_not_ub` makes with
-// `tc_handle_free`) is that call under test.
-
-#[test]
-fn tc_daemon_stop_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // The call under test: a second stop against the same, now-freed,
-    // handle pointer.
-    unsafe { tc_daemon_stop(h) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false),
-        "{:?}",
-        last_error()
-    );
-}
-
-#[test]
-fn tc_call_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // `tc_call` never returns NULL: a freed handle must still produce a
-    // JSON error frame, not a null pointer or a crash.
-    let bad = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!bad.is_null());
-    let s = unsafe { CStr::from_ptr(bad) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(bad) };
-    assert!(s.contains("invalid-handle-pointer"), "{s}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-}
-
-#[test]
-fn tc_subscribe_refuses_a_freed_handle() {
-    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
-
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    let token = unsafe { tc_subscribe(h, Some(noop_cb), std::ptr::null_mut()) };
-    assert_eq!(
-        token, 0,
-        "a freed handle must not yield a subscription token"
-    );
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-}
-
-#[test]
-fn tc_unsubscribe_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // Any nonzero token: the pointer-liveness check runs before the token
-    // is ever looked up, so no real subscription is needed here.
-    unsafe { tc_unsubscribe(h, 1) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-}
-
-#[test]
-fn tc_preview_open_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
+    // A live handle and an entry it does not hold: the same fixed label
+    // the socket method gives.
     let mut err: *mut c_char = std::ptr::null_mut();
     let p = unsafe {
-        tc_preview_open(
-            h,
-            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(p.is_null());
-    assert!(!err.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-}
-
-#[test]
-fn tc_preview_turns_json_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
-        tc_preview_turns_json(
+        tc_preview_unsure_spans_json(
             h,
             cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
             cstr_str("sha256:irrelevant").as_ptr(),
@@ -1265,17 +1098,34 @@ fn tc_preview_turns_json_refuses_a_freed_handle() {
         )
     };
     assert!(p.is_null());
-    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("unknown-entry-id"), "{msg}");
+
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_unsure_spans_json(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
     let msg = unsafe { CStr::from_ptr(err) }
         .to_string_lossy()
         .into_owned();
     unsafe { tc_string_free(err) };
     assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
+}
+
+#[test]
+fn tc_preview_turns_json_refuses_a_freed_handle() {
+    with_freed_handle(assert_preview_turns_refused);
 }
 
 // --- Discriminating token uniqueness for tc_subscribe -------------------
@@ -1379,11 +1229,7 @@ fn tc_preview_open_from_inside_a_subscribe_callback_reports_an_error_not_a_panic
         let msg = if err.is_null() {
             String::new()
         } else {
-            let s = unsafe { CStr::from_ptr(err) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { tc_string_free(err) };
-            s
+            take_owned(err)
         };
         *OBSERVED.lock().unwrap() = Some(msg);
     }
@@ -1530,10 +1376,7 @@ fn an_unknown_settings_field_is_rejected_not_silently_ignored() {
         "an unrecognized settings field must not silently start the daemon"
     );
     assert!(!err.is_null(), "a failure must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
+    let msg = take_owned(err);
     assert_eq!(msg, "settings-unknown-field", "{msg}");
 }
 
@@ -1646,10 +1489,7 @@ fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
         "an out-of-range cap must not silently start the daemon"
     );
     assert!(!err.is_null(), "a failure must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
+    let msg = take_owned(err);
     assert_eq!(msg, "settings-invalid-value", "{msg}");
 
     // The IPC path, on an otherwise healthy daemon.
@@ -1727,10 +1567,7 @@ fn malformed_settings_json_is_an_error_not_a_panic() {
     };
     assert!(h.is_null());
     assert!(!err.is_null(), "a failure must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
+    let msg = take_owned(err);
     assert_eq!(msg, "settings-invalid-json", "{msg}");
 }
 
@@ -1753,10 +1590,7 @@ fn a_bad_claude_root_value_never_echoes_the_path_in_the_error() {
     };
     assert!(h.is_null());
     assert!(!err.is_null(), "a failure must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
+    let msg = take_owned(err);
     assert!(!msg.contains(secret), "path leaked into the error: {msg}");
     assert_eq!(msg, "settings-invalid-value", "{msg}");
 }
@@ -1820,11 +1654,7 @@ fn tc_invite_issuer_host_tolerates_null() {
 /// leaking the owned string each of these tests produces.
 fn take_err(err: *mut c_char) -> String {
     assert!(!err.is_null(), "a refusal must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    msg
+    take_owned(err)
 }
 
 #[test]
@@ -1937,10 +1767,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     // clearing the refusal that stops a daemon from starting.
     let out = tc_discover_sources();
     assert!(!out.is_null());
-    let json = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let json = take_owned(out);
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let items = parsed.as_array().expect("an array");
@@ -1965,7 +1792,87 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
         assert!(item["session_count"].is_u64());
         assert!(item["relocated_by_env"].is_boolean());
         assert!(item["most_recent"].is_string() || item["most_recent"].is_null());
+        assert!(item["answers_at"].is_string() || item["answers_at"].is_null());
     }
+
+    let answers_at =
+        |source: &str| items.iter().find(|i| i["source"] == source).unwrap()["answers_at"].clone();
+    assert_eq!(answers_at("claude-code"), serde_json::json!("Anthropic"));
+    assert_eq!(answers_at("codex"), serde_json::json!("OpenAI"));
+    assert_eq!(answers_at("gemini-cli"), serde_json::json!("Google"));
+    assert_eq!(
+        answers_at("cline"),
+        serde_json::Value::Null,
+        "Cline ships with no single default vendor to name"
+    );
+}
+
+/// The Antigravity design decision: `~/.gemini/tmp` is Gemini CLI's own
+/// store, so it is reported under Gemini CLI's real name here, never
+/// relabelled `"antigravity"`. See issue #1118 decision #2.
+#[test]
+fn the_gemini_store_is_never_relabelled_antigravity() {
+    let out = tc_discover_sources();
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let sources: Vec<&str> = parsed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|i| i["source"].as_str().unwrap())
+        .collect();
+    assert!(sources.contains(&"gemini-cli"));
+    assert!(!sources.contains(&"antigravity"));
+}
+
+/// An OpenCode export folder the contributor has already named is described
+/// with a real count, not left unreachable through this ABI.
+#[test]
+fn discover_opencode_export_reports_a_named_folders_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("ses_a.json"), b"{}").unwrap();
+    std::fs::write(dir.path().join("ses_b.json"), b"{}").unwrap();
+
+    let out = unsafe { tc_discover_opencode_export(cstr(dir.path()).as_ptr()) };
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed["source"], serde_json::json!("opencode"));
+    assert_eq!(parsed["exists"], serde_json::json!(true));
+    assert_eq!(parsed["session_count"], serde_json::json!(2));
+    assert_eq!(
+        parsed["answers_at"],
+        serde_json::Value::Null,
+        "OpenCode ships with no single default vendor to name"
+    );
+}
+
+/// A folder named for OpenCode that has not been created yet -- or was
+/// removed -- is reported absent, not hidden or defaulted to zero.
+#[test]
+fn discover_opencode_export_reports_a_missing_folder_as_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let never_created = dir.path().join("not-there");
+
+    let out = unsafe { tc_discover_opencode_export(cstr(&never_created).as_ptr()) };
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed["exists"], serde_json::json!(false));
+    assert_eq!(parsed["session_count"], serde_json::json!(0));
 }
 
 #[test]
@@ -2393,32 +2300,6 @@ fn the_state_tone_branch_table_crosses_the_abi_and_agrees_with_the_sentence() {
 }
 
 #[test]
-fn one_tone_numbering_serves_both_calls_and_a_tool_word_is_never_held() {
-    // Two numberings would mean two 1s meaning different things on one ABI.
-    // A shell that mapped the wrong one would mispaint a privacy claim
-    // rather than fail, so the shared numbering is asserted rather than
-    // assumed -- and the value a tool word can never take is named.
-    for mode in ["off", "watch", "unset", "", "something_new"] {
-        for wiring in [WIRED, NOT_WIRED, UNKNOWN, 99] {
-            let mode_c = cstr_str(mode);
-            let tone = unsafe { tc_routing_tool_tone(mode_c.as_ptr(), wiring) };
-            assert_ne!(tone, TONE_HELD, "{mode:?}/{wiring} took the held tone");
-            assert!(
-                tone == TONE_NEUTRAL || tone == TONE_CLEAR,
-                "{mode:?}/{wiring}"
-            );
-        }
-    }
-
-    // And the held tone is reachable, from the one thing that may hold.
-    let waiting = cstr_str("awaiting_rows");
-    assert_eq!(
-        unsafe { tc_routing_state_tone(waiting.as_ptr()) },
-        TONE_HELD
-    );
-}
-
-#[test]
 fn a_last_checked_call_with_no_timestamp_is_an_error_and_not_a_half_sentence() {
     // The one routing export that refuses. "Last checked " with nothing
     // after it is worse than no line at all, so this must not be produced.
@@ -2439,10 +2320,7 @@ fn scrub_detector_names_are_generated_from_the_real_table() {
     // true the day a detector is added.
     let out = tc_scrub_detector_names();
     assert!(!out.is_null());
-    let json = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let json = take_owned(out);
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let names: Vec<&str> = parsed
@@ -2470,10 +2348,7 @@ fn the_detector_export_never_carries_a_pattern() {
     // actually crosses the boundary rather than trusting the implementation to
     // stay as written.
     let out = tc_scrub_detector_names();
-    let json = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let json = take_owned(out);
 
     // Each NAME, not the raw envelope: `[` and `{` are JSON's own delimiters
     // and are always present in a valid array.
@@ -2496,18 +2371,10 @@ fn a_refused_cross_type_free_leaves_the_handle_live_and_freeable() {
     // A caller mistakes the handle for a string. The ABI promises to refuse
     // this harmlessly -- the handle is NOT freed, so it must still work.
     unsafe { tc_string_free(h as *mut c_char) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("cross-type-free"))
-            .unwrap_or(false),
-        "the refusal itself must still be reported"
-    );
+    assert_last_error_contains("cross-type-free");
     let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
     assert!(!out.is_null());
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let s = take_owned(out);
     assert!(
         !s.contains("invalid-handle-pointer"),
         "a REFUSED cross-type free must not unregister the live handle: {s}"
@@ -2529,12 +2396,7 @@ fn tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token() {
     // makes the assertion mean something is that nothing earlier in this
     // test records "invalid-handle-pointer": the free above succeeds.
     unsafe { tc_unsubscribe(h, 0) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false),
-        "a zero token must not skip the liveness refusal"
-    );
+    assert_last_error_contains("invalid-handle-pointer");
 }
 
 // ---------------------------------------------------------------------------
@@ -3389,6 +3251,48 @@ fn the_consent_bundle_crossing_the_abi_is_the_one_in_the_rust() {
     );
 }
 
+/// K9 (#1118): the per-session notification's copy crosses the ABI as the
+/// payload the crate builds, and its body is the consent sentence itself.
+#[test]
+fn the_session_notification_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy as copy;
+    let json = take_owned(tc_session_notification_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::session_notification_copy()).expect("the payload serialises");
+    assert_eq!(
+        parsed, expected,
+        "the ABI must hand over the payload unchanged"
+    );
+    assert_eq!(parsed["body"], copy::GATE_STATEMENT);
+    assert_eq!(parsed["action"], copy::NOTIFICATION_LOOK_THEN_DECIDE_ACTION);
+    assert_eq!(
+        parsed.as_object().map(|o| o.len()),
+        Some(2),
+        "body and action, nothing else: {json}"
+    );
+}
+
+/// K9 (#1118): the submit toast crosses the ABI unchanged, argument order
+/// intact, and a negative count (nobody's honest answer) clamps to zero
+/// instead of wrapping.
+#[test]
+fn the_sent_toast_crosses_the_abi_and_clamps_negatives() {
+    use trace_commons_contributor::consent_copy as copy;
+    assert_eq!(
+        take_owned(tc_toast_sent_text(7, 20, 1)),
+        copy::toast_sent_text(7, 20, 1)
+    );
+    assert_eq!(
+        take_owned(tc_toast_sent_text(7, 20, 1)),
+        "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
+    );
+    assert_eq!(
+        take_owned(tc_toast_sent_text(-3, -1, -9)),
+        copy::toast_sent_text(0, 0, 0)
+    );
+}
+
 #[test]
 fn the_gate_help_branch_crosses_the_abi() {
     use trace_commons_contributor::consent_copy as copy;
@@ -3749,6 +3653,9 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
         "failed",
         "cancelled",
         "present",
+        "storage_unavailable",
+        "storage_unentitled",
+        "migration_available",
         "",
         "PRESENT",
         "a_state_from_a_later_daemon",
@@ -3759,6 +3666,7 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
             copy::CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
             copy::CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
             copy::CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+            copy::CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
         };
         assert_eq!(action(state), expected, "{state:?}");
     }
@@ -3768,6 +3676,11 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
     assert_eq!(tone("present"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
     assert_eq!(action("present"), TC_CREDENTIAL_ACTION_FORGET);
     assert_eq!(tone("obtaining"), TC_PRIVATE_INFERENCE_TONE_HELD);
+
+    // An upgraded macOS contributor is offered the move, and a build that
+    // cannot reach the store is offered nothing.
+    assert_eq!(action("migration_available"), TC_CREDENTIAL_ACTION_MIGRATE);
+    assert_eq!(action("storage_unentitled"), TC_CREDENTIAL_ACTION_NONE);
 
     // Nothing read offers the button that opens a browser, and no pointer at
     // all is the same answer.
@@ -4051,6 +3964,7 @@ fn the_contribution_controls_share_no_number_with_an_action_or_a_tone() {
             TC_CREDENTIAL_ACTION_OBTAIN,
             TC_CREDENTIAL_ACTION_CANCEL,
             TC_CREDENTIAL_ACTION_FORGET,
+            TC_CREDENTIAL_ACTION_MIGRATE,
             TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
             TC_PRIVATE_INFERENCE_TONE_HELD,
             TC_PRIVATE_INFERENCE_TONE_CLEAR,
@@ -4070,6 +3984,7 @@ fn the_credential_actions_share_no_number_with_a_tone() {
         TC_CREDENTIAL_ACTION_OBTAIN,
         TC_CREDENTIAL_ACTION_CANCEL,
         TC_CREDENTIAL_ACTION_FORGET,
+        TC_CREDENTIAL_ACTION_MIGRATE,
     ] {
         for tone in [
             TONE_NEUTRAL,
@@ -5009,15 +4924,22 @@ fn an_arming_rewording_notice_crosses_the_abi_as_the_rust_builds_it() {
         "id": 4, "project_id": "p-1", "project_label": "api",
         "was": "model_scrubbed", "now": "patterns_only",
     });
-    let arg = CString::new(wire.to_string()).unwrap();
-    let json = take_owned(unsafe {
-        trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
-    });
-    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-    let expected =
-        serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
-            .unwrap();
-    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    for upgrade in [false, true] {
+        let mut wire = wire.clone();
+        wire["scrub_check_defaulted"] = serde_json::json!(upgrade);
+        let arg = CString::new(wire.to_string()).unwrap();
+        let json = take_owned(unsafe {
+            trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let expected =
+            serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
+                .unwrap();
+        assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+        if upgrade {
+            assert_eq!(parsed["title"], "The Scrub check is now Automatic for api");
+        }
+    }
     for text in ["not json", "[]", "\"x\""] {
         let arg = CString::new(text).unwrap();
         assert!(

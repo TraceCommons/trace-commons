@@ -226,6 +226,8 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             issued_by_label: None,
             credential_binding_hash: None,
             note_label: None,
+            issuer_display_name: None,
+            credit_range: None,
         })
         .await
         .unwrap();
@@ -1812,6 +1814,8 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
         issued_by_label: None,
         credential_binding_hash: None,
         note_label: None,
+        issuer_display_name: None,
+        credit_range: None,
     })
     .await
     .unwrap();
@@ -1983,5 +1987,154 @@ async fn rejected_foreign_session_claim_preserves_victim_bytes_after_sibling_wit
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// Kristi's #1021 edge: both accounts held one source session and only the
+/// absorbed account had withdrawn it. The merge joins the survivor's accepted
+/// version to a withdrawn session, and the withdrawal must win exactly as a
+/// withdrawal does: the version is revoked and tombstoned, its bytes are
+/// deleted, and it gets its own hash-only revoke audit event.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn merge_completes_a_withdrawal_the_absorbed_account_made() {
+    use trace_commons_server::trace_corpus_storage::{TraceCorpusStore, TraceSourceSessionStatus};
+
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let session_headers = account_session_headers(&state, token).await;
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let survivor: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = $1 AND principal_ref = $2",
+            &[&tenant, &principal_for(token)],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let absorbed = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &absorbed],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref)
+             VALUES($1,$2,'principal:merge-absorbed')",
+            &[&tenant, &absorbed],
+        )
+        .await
+        .unwrap();
+
+    let digest = [0x5du8; 32];
+    let absorbed_version = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        "principal:merge-absorbed",
+        StorageTraceCorpusStatus::Accepted,
+    )
+    .await;
+    assert_eq!(
+        db.claim_trace_source_session(&tenant, absorbed, &digest, absorbed_version)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+    db.withdraw_trace_source_session(&tenant, absorbed, absorbed_version, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let survivor_version = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        &principal_for(token),
+        StorageTraceCorpusStatus::Accepted,
+    )
+    .await;
+    let survivor_object = stage_trace_object_file(
+        &state,
+        &tenant,
+        TraceCorpusStatus::Accepted,
+        survivor_version,
+    );
+    assert_eq!(
+        db.claim_trace_source_session(&tenant, survivor, &digest, survivor_version)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+
+    let code_hash = format!(
+        "sha256:{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    client
+        .execute(
+            "INSERT INTO trace_login_links (tenant_id, link_id, account_id, code_hash,
+                created_principal_ref, created_at, expires_at, consumed_at)
+             VALUES ($1, $2, $3, $4, 'principal:merge-link', now(), now() + interval '1 hour', NULL)",
+            &[&tenant, &Uuid::new_v4(), &absorbed, &code_hash],
+        )
+        .await
+        .unwrap();
+    let staged = db
+        .stage_merge_proposal(&tenant, survivor, &code_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut confirm = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/account/merge/confirm")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "proposal_id": staged.proposal_id })).unwrap(),
+        ))
+        .unwrap();
+    confirm.headers_mut().extend(session_headers);
+    require_ok(app(state.clone()).oneshot(confirm).await.unwrap()).await;
+
+    assert_eq!(
+        db.get_trace_submission(&tenant, survivor_version)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        StorageTraceCorpusStatus::Revoked,
+        "the survivor's version of the withdrawn session is withdrawn at merge"
+    );
+    assert!(
+        db.get_trace_withdrawal(&tenant, survivor_version)
+            .await
+            .unwrap()
+            .is_some(),
+        "it carries its own withdrawal tombstone"
+    );
+    assert!(!survivor_object.exists(), "its bytes are deleted");
+    let revoke_events: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_audit_events
+              WHERE submission_id = $1 AND action = 'revoke'",
+            &[&survivor_version],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        revoke_events, 1,
+        "it records one hash-only revoke event, as a withdrawal does"
+    );
+    assert!(
+        db.list_incomplete_source_session_withdrawals(&tenant, Some(survivor), &[], 100)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }

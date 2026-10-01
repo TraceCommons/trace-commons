@@ -35,6 +35,7 @@ pub(crate) mod cloud_credential_lifecycle;
 mod cloud_credential_lifecycle_tests;
 #[cfg(test)]
 pub(crate) mod cloud_credential_test_support;
+pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
 pub(crate) mod credential_store;
@@ -45,6 +46,7 @@ pub mod harness;
 pub mod health;
 pub mod history;
 pub mod inference_connection;
+pub mod inference_map;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
@@ -67,6 +69,7 @@ pub mod profile;
 pub mod project_key;
 pub mod public_run;
 pub mod queue;
+pub mod second_look;
 pub mod settings;
 pub mod skill_loop;
 pub mod state;
@@ -77,6 +80,7 @@ pub(crate) mod test_paths;
 pub(crate) mod test_support;
 pub(crate) mod token_capture;
 mod token_cleanup;
+pub mod unsure_spans;
 pub mod uploader;
 pub mod watcher;
 #[cfg(windows)]
@@ -696,6 +700,20 @@ async fn drain_approved(
         let mut returned = Vec::new();
         for e in candidates.iter().filter(|e| e.approved_unattended) {
             match policy.resolve(&e.project_key) {
+                // A session that must wait for a person although its
+                // project is armed -- on disk at the automatic grant in a
+                // project the grant armed, or on disk when the project was
+                // armed from now (K5) -- waits for the contributor, as it
+                // would in an ask-first folder. The watcher never approves
+                // one of these unattended; this covers an approval made
+                // before the hold applied that was in flight when it began,
+                // and came back `Approved`.
+                policy::ProjectMode::AutoUpload
+                    if policy
+                        .waits_for_a_person_at_send(&e.project_key, &e.path.to_string_lossy()) =>
+                {
+                    returned.push(e.entry_id)
+                }
                 policy::ProjectMode::AutoUpload => {}
                 policy::ProjectMode::Ignore => ignored.push(e.entry_id),
                 policy::ProjectMode::NotifyOnly => returned.push(e.entry_id),
@@ -1066,6 +1084,29 @@ async fn drain_approved(
                 // `REASONS_NEEDING_A_PERSON`.
                 q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference);
             }
+            uploader::UploadDecision::HeldForSecondLook {
+                reason_label,
+                reasons,
+                pin,
+            } => {
+                // The Scrub check (K4 of #1118). Under Automatic the reason
+                // is one of `REASONS_NEEDING_A_PERSON`, so nothing
+                // re-approves it. The envelope the hold was decided on is
+                // pinned with its counts beside the digest
+                // (`QueueEntry::scrub`), like a preview's. Labels only.
+                tracing::info!(
+                    reason = reason_label.as_str(),
+                    second_look = ?reasons,
+                    "held a session approved on the contributor's behalf for a person"
+                );
+                q.hold_with_scrub_pin_at(
+                    entry.entry_id,
+                    &reason_label,
+                    pin.as_ref()
+                        .map(|(digest, counts)| (digest.as_str(), *counts)),
+                    now,
+                );
+            }
             uploader::UploadDecision::Failed { reason_label } => {
                 // Same rule on the failure side: `submit_one` can report an
                 // admission refusal either way round depending on where in
@@ -1078,7 +1119,19 @@ async fn drain_approved(
                 if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
                     q.record_attestation(entry.entry_id, mark.state, mark.reason);
                 }
-                if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
+                if reason_label == crate::submit::REASON_TRANSIENT_REDACTION
+                    && q.record_transient_redaction_failure(entry.entry_id)
+                        >= MAX_TRANSIENT_REDACTION_FAILURES
+                {
+                    // The budget is spent. Stop re-sending the session to
+                    // the classifier and put it in front of a person, held
+                    // so a standing opt-in does not simply re-approve it.
+                    q.record_attempt(entry.entry_id, None);
+                    q.revoke_approval(
+                        entry.entry_id,
+                        crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
+                    );
+                } else if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
                     let attempt = q
                         .get(entry.entry_id)
                         .map(|e| e.attempts.saturating_add(1))
@@ -1228,8 +1281,16 @@ fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chron
     chrono::Duration::seconds((entry_id.as_u128() % span) as i64)
 }
 
-/// One minute, doubling per failed attempt and capped at one hour. There is
-/// no per-session attempt limit: an upstream outage must not consume a trace.
+/// How many transient classifier failures in a row an approval survives.
+///
+/// With [`transient_redaction_retry_delay`] that is about nineteen hours of
+/// retrying. After it the approval is revoked and the session is held for a
+/// person ([`crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED`]), not
+/// refused: an outage longer than that still does not consume the trace, but
+/// a failure that only looks transient stops being re-sent to the classifier.
+const MAX_TRANSIENT_REDACTION_FAILURES: u32 = 24;
+
+/// One minute, doubling per failed attempt and capped at one hour.
 fn transient_redaction_retry_delay(attempts: u32) -> chrono::Duration {
     let exponent = attempts.saturating_sub(1).min(6);
     chrono::Duration::seconds((60_i64 * (1_i64 << exponent)).min(3_600))
@@ -1302,6 +1363,39 @@ pub async fn drain_approved_for_test(
     now: chrono::DateTime<Utc>,
 ) -> Result<()> {
     drain_approved(shared, now, std::time::Instant::now()).await
+}
+
+/// Can this process reach the Cloud credential store?
+///
+/// The FFI crate cannot reach `cloud_credential_lifecycle` directly -- that
+/// module is `pub(crate)` here -- so this is the public wrapper it calls
+/// through. The probe is the same shape as
+/// [`cloud_credential_lifecycle::CloudCredentialLifecycle::probe`]: a read of
+/// a reference that was never stored, which answers without writing anything.
+///
+/// The two map their errors **differently, on purpose**. `probe` guards a
+/// sign-in, so it treats everything that is not `Unentitled` as go -- a
+/// transient store error must not stop a contributor signing in. This one
+/// gates a release, where the same leniency reports PASS against a store that
+/// is failing for any reason at all. So only `NoEntry` is reachable here: it
+/// means the store answered and nothing was stored, which is exactly the
+/// question. Every other error is 2.
+///
+/// Returns 0 reachable, 1 unentitled, 2 for a backend that could not be
+/// constructed or a read that failed for any other reason.
+pub fn credential_store_self_check() -> i32 {
+    use credential_store::{CredentialError, CredentialReference, CredentialStore};
+
+    let backend = match os_secret_store::OsSecretBackend::new() {
+        Ok(backend) => backend,
+        Err(CredentialError::Unentitled) => return 1,
+        Err(_) => return 2,
+    };
+    match CredentialStore::new(backend).load_bytes(&CredentialReference::allocate()) {
+        Err(CredentialError::Unentitled) => 1,
+        Err(CredentialError::NoEntry) | Ok(_) => 0,
+        Err(_) => 2,
+    }
 }
 
 /// Find the adapter and session reference matching a queue entry's path.
@@ -1455,7 +1549,10 @@ async fn refresh_history(
         }
         m
     };
-    let records = history::join(&receipts, &updates, &labels, now);
+    // The cache being replaced carries local withdrawals that neither the
+    // receipts nor the server's read-back know about yet; `join` keeps them.
+    let previous = run_blocking(|| history::HistoryCache::load(&shared.store).unwrap_or_default());
+    let records = history::join(&receipts, &updates, &labels, &previous, now);
     history::HistoryCache::save(&shared.store, &records)?;
     let mut state = shared.state.lock().expect("state lock");
     state.last_history_poll_at = Some(now);
@@ -1530,14 +1627,21 @@ async fn refresh_community(
 
 /// Age out undecided entries, then decide whether a digest is due.
 fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) {
-    let (ttl_days, digest_interval_secs, local_notifications) = {
+    let (ttl_days, digest_interval_secs, digest_schedule, local_notifications) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.queue_ttl_days,
             s.digest_interval_secs,
+            s.digest_schedule,
             s.local_notifications,
         )
     };
+    // The contributor's own local timezone, read fresh on every call so a
+    // laptop that travels (or a DST transition) is reflected immediately --
+    // never cached alongside `digest_schedule`, which would go stale exactly
+    // when it matters most. Ignored entirely under `Interval`, which the
+    // generic `Tz` parameter never touches.
+    let local_tz = chrono::Local;
     let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
     let (queue_changed, pending_count, digest) = {
@@ -1572,20 +1676,29 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // file before the clock is even close is work whose result is discarded.
     // `interval_elapsed` is the same expression `digest_due` applies, not a
     // second opinion about it.
-    let contributed = if notify::interval_elapsed(last_digest_at, now, digest_interval_secs) {
+    let contributed = if notify::schedule_elapsed(
+        digest_schedule,
+        last_digest_at,
+        now,
+        digest_interval_secs,
+        &local_tz,
+    ) {
         history::contributed_since(
             &history::HistoryCache::load(&shared.store).unwrap_or_default(),
             last_digest_at,
         )
     } else {
-        // Only reachable when `digest_due` is about to be false anyway: the
-        // interval has not elapsed, so neither half of the digest can fire.
+        // Only reachable when `digest_due_for_schedule` is about to be false
+        // anyway: the schedule's window has not elapsed, so neither half of
+        // the digest can fire.
         history::ContributedSince::default()
     };
-    if notify::digest_due(
+    if notify::digest_due_for_schedule(
+        digest_schedule,
         last_digest_at,
         now,
         digest_interval_secs,
+        &local_tz,
         pending_count,
         contributed.count,
     ) {
@@ -1877,7 +1990,7 @@ mod tests {
                     "{}\n",
                     serde_json::json!({
                         "type": "user",
-                        "message": {"role": "user", "content": "fix the parser please"},
+                        "message": {"role": "user", "content": "fix the parser please, then mail alice.smith@example.org"},
                         "cwd": project_cwd,
                         "timestamp": "2026-08-08T10:00:00Z",
                         "version": "2.0.1",
@@ -2592,6 +2705,60 @@ mod tests {
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
     }
 
+    /// The Automatic Scrub check (K4 of #1118), which is the default, through
+    /// a real upload pass. This harness's own session carries an address the
+    /// scrubber removes, so it passes the check (the other tests here rely on
+    /// that). A second armed session the scrubber removes nothing from is,
+    /// with nothing chosen, held for a person with `nothing-matched` and
+    /// nothing is uploaded for it, while the marked one still goes.
+    #[tokio::test]
+    async fn by_default_an_armed_session_where_nothing_matched_is_held() {
+        let h = TransientRetryHarness::new().await;
+        let marked = h.entry().entry_id;
+        assert_eq!(
+            h.shared.settings.lock().unwrap().scrub_check,
+            settings::ScrubCheck::Automatic,
+            "the default is Automatic"
+        );
+        h.add_session("9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e", "tidy the lexer")
+            .await;
+        let unmarked = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id != marked)
+            .expect("the session with nothing in it to remove");
+        assert_eq!(unmarked.state, queue::QueueState::Approved, "armed");
+        assert!(unmarked.approved_unattended);
+
+        h.pass(TransientRetryHarness::now()).await;
+
+        let held = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id == unmarked.entry_id)
+            .unwrap();
+        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+        assert!(held.held_for_review());
+        assert!(
+            matches!(held.scrub(), second_look::Scrub::Scrubbed(_)),
+            "the held envelope is pinned with its counts: {held:?}"
+        );
+        assert_eq!(
+            held.second_look_reasons(),
+            vec![second_look::REASON_NOTHING_MATCHED]
+        );
+        assert_eq!(
+            h.shared.queue.lock().unwrap().get(marked).unwrap().state,
+            queue::QueueState::Uploaded,
+            "the session with a mark still goes"
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "only that one");
+    }
+
     /// Z5, end to end through a real witness exchange: a witness at capacity
     /// holds every session that needs it, is asked once rather than once per
     /// session, is not asked again before its `Retry-After`, and the sessions
@@ -2600,8 +2767,11 @@ mod tests {
     #[tokio::test]
     async fn a_saturated_witness_holds_sessions_and_is_asked_again_only_when_due() {
         let h = TransientRetryHarness::with_witness().await;
-        h.add_session("8d8d8d8d-8d8d-8d8d-8d8d-8d8d8d8d8d8d", "tidy the lexer too")
-            .await;
+        h.add_session(
+            "8d8d8d8d-8d8d-8d8d-8d8d-8d8d8d8d8d8d",
+            "tidy the lexer too, then mail alice.smith@example.org",
+        )
+        .await;
         assert_eq!(h.entries().len(), 2);
         assert!(
             h.entries()
@@ -2821,6 +2991,80 @@ mod tests {
                 "attempt {attempts}"
             );
         }
+    }
+
+    /// A failure the classifier reports as transient is not always passing:
+    /// an over-limit window can come back as a 502 every time. Without a cap
+    /// the session stayed approved forever and was re-sent in full to the
+    /// classifier every hour. After the cap it goes back to a person instead,
+    /// held so no standing opt-in re-approves it, and is left alone until
+    /// someone does; their approval starts a fresh budget.
+    #[tokio::test]
+    async fn transient_retries_return_the_session_to_a_person_after_the_cap() {
+        let h = TransientRetryHarness::new().await;
+        let original = h.entry();
+        h.classifier_status.store(500, Ordering::SeqCst);
+
+        // Two real failed passes, and the rest of the run counted directly:
+        // each pass spends the adapter's own in-client retries, and a whole
+        // day of them would cost this test most of a minute.
+        let mut now = TransientRetryHarness::now();
+        for _ in 0..2 {
+            h.pass(now).await;
+            let waiting = h.entry();
+            assert_eq!(waiting.state, queue::QueueState::Approved);
+            assert_eq!(
+                waiting.reason_label.as_deref(),
+                Some(crate::submit::REASON_TRANSIENT_REDACTION)
+            );
+            now = waiting.retry_after.expect("a scheduled retry");
+        }
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            for _ in 2..MAX_TRANSIENT_REDACTION_FAILURES - 1 {
+                q.record_transient_redaction_failure(original.entry_id);
+            }
+        }
+        h.pass(now).await;
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED)
+        );
+        assert!(held.retry_after.is_none());
+        assert!(held.approved_scopes.is_none(), "the approval is revoked");
+        assert!(
+            held.held_for_review(),
+            "a standing opt-in must not re-approve it on the next poll"
+        );
+        assert_eq!(held.attempts, 3, "three real failed passes");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        // Nothing tries it again on its own, however long it waits.
+        h.pass(now + chrono::Duration::days(2)).await;
+        assert_eq!(h.entry().attempts, 3);
+        assert_eq!(h.entry().state, queue::QueueState::Pending);
+
+        // A person approving it again gets a whole budget, not one attempt.
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            assert!(q.approve(
+                original.entry_id,
+                original.approved_scopes.as_deref().unwrap(),
+                original.approved_inputs.as_deref(),
+                None,
+                None,
+                None,
+            ));
+        }
+        h.pass(now + chrono::Duration::days(2)).await;
+        let retried = h.entry();
+        assert_eq!(retried.state, queue::QueueState::Approved, "{retried:?}");
+        assert_eq!(
+            retried.reason_label.as_deref(),
+            Some(crate::submit::REASON_TRANSIENT_REDACTION)
+        );
     }
 
     #[tokio::test]

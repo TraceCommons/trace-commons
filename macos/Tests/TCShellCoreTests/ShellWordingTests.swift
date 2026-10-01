@@ -40,7 +40,6 @@ final class ShellWordingTests: XCTestCase {
         "TCShellCore/ContributorVerdict.swift": 4,
         "TCShellCore/CorrectionCopy.swift": 4,
         "TCShellCore/DailyBudgetCopy.swift": 6,
-        "TCShellCore/DigestCopy.swift": 1,
         "TCShellCore/MenuBarStatus.swift": 4,
         "TCShellCore/OriginalSearchOutcome.swift": 4,
         "TCShellCore/ProjectArmingCopy.swift": 4,

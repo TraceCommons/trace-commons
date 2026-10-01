@@ -313,13 +313,13 @@ struct MainWindowView: View {
 
     private func navRow(_ item: Section) -> some View {
         let selected = section == item
-        let count = item == .queue ? model.decisionsOwed : 0
+        let count: Int? = item == .queue ? model.decisionsOwed : 0
         // Beside the count, never instead of it: an icon meaning "some" is a
         // downgrade at exactly the scale that prompted the request. See
         // `QueueShieldState`.
         let shield: QueueShieldState = item == .queue
             ? QueueShieldState.state(
-                waiting: model.decisionsOwed,
+                waiting: model.awaitingDecision.count,
                 nothingMatched: model.nothingMatchedCount,
                 trimmed: model.awaitingDecision.filter(\.wasTrimmed).count
             )
@@ -337,7 +337,7 @@ struct MainWindowView: View {
                     .font(.system(size: 13, weight: selected ? .medium : .regular))
                     .foregroundStyle(TC.inkPrimary)
                 Spacer(minLength: TC.Space.s)
-                if count > 0 {
+                if let count, count > 0 {
                     Text("\(count)")
                         .font(.system(size: 11, weight: .semibold))
                         .monospacedDigit()
@@ -369,9 +369,14 @@ struct MainWindowView: View {
         }
     }
 
-    private static func navLabel(_ name: String, count: Int, shield: QueueShieldState) -> String {
-        guard count > 0 else { return name }
-        let waiting = "\(name), \(count) waiting"
+    private static func navLabel(_ name: String, count: Int?, shield: QueueShieldState) -> String {
+        let waiting: String
+        if let count {
+            guard count > 0 else { return name }
+            waiting = "\(name), \(count) waiting"
+        } else {
+            waiting = name + ", decision count unavailable"
+        }
         return shield == .attention ? waiting + ", some worth a second look" : waiting
     }
 

@@ -40,12 +40,11 @@ pub const RESERVED_ACCOUNT_TENANT_PREFIXES: [&str; 2] =
     trace_commons_protocol::admission::ANCHOR_NAMESPACES;
 
 /// Fixed invite grants must not claim a provisioned account tenant namespace.
+///
+/// The shared protocol rule, so the server and the contributor daemon match
+/// the reserved list the same way.
 pub fn fixed_invite_tenant_uses_reserved_namespace(tenant_id: &str) -> bool {
-    RESERVED_ACCOUNT_TENANT_PREFIXES.iter().any(|prefix| {
-        tenant_id
-            .get(..prefix.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-    })
+    trace_commons_protocol::admission::uses_anchor_namespace(tenant_id)
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +63,11 @@ pub struct InviteEntry {
     pub issued_by_label: Option<String>,
     pub credential_binding_hash: Option<String>,
     pub note_label: Option<String>,
+    /// Public issuer name shown to contributors before they join. Distinct
+    /// from the operator-only `issued_by_label`.
+    pub issuer_display_name: Option<String>,
+    /// Operator-set credit per accepted trace, `(min, max)` in whole points.
+    pub credit_range: Option<(i64, i64)>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
@@ -345,6 +349,8 @@ pub async fn import_file_invites(
             issued_by_label: None,
             credential_binding_hash: None,
             note_label: entry.note_label,
+            issuer_display_name: None,
+            credit_range: None,
         };
         match backend.insert_invite_grant(write).await {
             Ok(InviteGrantInsertOutcome::Inserted) => summary.imported += 1,
@@ -503,6 +509,8 @@ mod tests {
             issued_by_label: None,
             credential_binding_hash: None,
             note_label: None,
+            issuer_display_name: None,
+            credit_range: None,
             revoked_at: None,
         }
     }

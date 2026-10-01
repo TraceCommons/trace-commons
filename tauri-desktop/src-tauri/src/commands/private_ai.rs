@@ -41,21 +41,51 @@ pub(crate) async fn private_ai_credential_status(
                 trace_commons_contributor::private_inference_copy::CredentialAction::Forget => {
                     "forget"
                 }
+                trace_commons_contributor::private_inference_copy::CredentialAction::Migrate => {
+                    "migrate"
+                }
                 trace_commons_contributor::private_inference_copy::CredentialAction::None => "none",
             };
-        value["view"] = serde_json::json!({
+        let mut view = serde_json::json!({
             "state_line": trace_commons_contributor::private_inference_copy::credential_state_line(label),
             "action": action,
         });
+        // The move's button and the sentence beside it come from the core
+        // copy module, like every other shell's, rather than being spelled in
+        // the frontend: it is the one action that can raise a macOS password
+        // prompt, and the sentence that warns about that must not drift.
+        if action == "migrate" {
+            view["action_label"] = serde_json::Value::String(
+                trace_commons_contributor::private_inference_copy::CREDENTIAL_MIGRATE.to_owned(),
+            );
+            view["action_explains"] = serde_json::Value::String(
+                trace_commons_contributor::private_inference_copy::CREDENTIAL_MIGRATE_EXPLAINS
+                    .to_owned(),
+            );
+        }
+        value["view"] = view;
     }
     let store = ConfigStore::open(state_directory(&state)?)
         .map_err(|_| "credential-storage-unavailable".to_owned())?;
-    let settings = tauri::async_runtime::spawn_blocking(move || {
+    let loaded = tauri::async_runtime::spawn_blocking(move || {
         DaemonSettings::load_with_cloud_credentials(&store)
     })
     .await
-    .map_err(|_| "credential-storage-unavailable".to_owned())?
     .map_err(|_| "credential-storage-unavailable".to_owned())?;
+    // A credential this process cannot load is a state the daemon's own
+    // answer above already names (`migration_available`,
+    // `storage_unentitled`, `storage_unavailable`), with the action that goes
+    // with it. Failing the whole call here threw that answer away, so the
+    // contributor saw an error instead of the button that fixes it.
+    let Ok(settings) = loaded else {
+        value["keychain"] = serde_json::json!({
+            "state": "unavailable",
+            "inference_present": false,
+            "session_present": false,
+            "migration": "none",
+        });
+        return Ok(value);
+    };
     let mut keychain = serde_json::json!({
         "state": if settings.cloud_storage_unavailable { "unavailable" } else if settings.cloud_credentials.is_some() { "present" } else { "empty" },
         "inference_present": settings.near_ai_inference.is_some(),
@@ -220,6 +250,21 @@ pub(crate) async fn cancel_private_ai_credential(
     call_daemon(
         shared_state(&state)?,
         "near_ai_credential_cancel",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+/// Copy a sign-in an earlier macOS build kept in the login keychain into the
+/// store this build uses. Contributor-initiated: the daemon's legacy read may
+/// raise a macOS password prompt, and this button is the only way to cause it.
+#[tauri::command]
+pub(crate) async fn migrate_private_ai_credential(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "near_ai_credential_migrate",
         serde_json::json!({}),
     )
     .await

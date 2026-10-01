@@ -1,5 +1,12 @@
-import type { RouteDisclosure } from "../lib/tauri/route-disclosure";
-import { useRouteDisclosure } from "../lib/tauri/use-contributor-copy";
+import { Spinner, WarningGlyph } from "../design-system";
+import {
+  type RouteDisclosure,
+  routeDisclosureView,
+} from "../lib/tauri/route-disclosure";
+import {
+  useRouteDisclosure,
+  useRouteDisclosureUnreadableCopy,
+} from "../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
 
 // K11: the raw send, both enclaves, and where the witness came from. Every
@@ -54,31 +61,59 @@ export function RouteDisclosureBody({
 }
 
 /**
+ * The unreadable state. Marked by a glyph as well as colour, and drawn even
+ * when the core's sentence for it failed to load, so the section is never
+ * simply empty -- as macOS's `RouteDisclosureUnreadableLine`.
+ */
+export function RouteDisclosureUnreadableLine({
+  line,
+  className,
+}: {
+  line: string | undefined;
+  className: string;
+}) {
+  return (
+    <p
+      className={`m-0 flex items-baseline gap-2 text-tc-outside ${className}`}
+      role="alert"
+    >
+      <WarningGlyph
+        className="shrink-0 self-center"
+        label={line === undefined ? "Warning" : undefined}
+      />
+      {line}
+    </p>
+  );
+}
+
+/**
  * A settings section that reads the disclosure itself. Unreadable is said as
- * such and never drawn as some other route.
+ * such and never drawn as some other route. The title and the unreadable
+ * line are the core's (`route_disclosure_unreadable_copy`); a spinner shows
+ * while the disclosure is still being read, as on macOS.
  */
 export function RouteDisclosurePanel() {
   const core = useCoreStatus();
   const disclosure = useRouteDisclosure(core.scope, core.isSuccess);
+  const unreadable = useRouteDisclosureUnreadableCopy();
+  const view = routeDisclosureView(disclosure, core);
+  const title = disclosure.data?.copy.title ?? unreadable.data?.title;
   return (
     <section className="tc-card">
-      <span className="mb-1.5 block tc-eyebrow">
-        WHERE SESSIONS GO
-      </span>
-      {disclosure.data ? (
-        <>
-          <h2>{disclosure.data.copy.title}</h2>
-          <RouteDisclosureBody disclosure={disclosure.data} />
-        </>
-      ) : (
-        <p
-          className={`m-0 text-[12px] ${disclosure.isError ? "text-tc-outside" : "text-tc-secondary"}`}
-          role={disclosure.isError ? "alert" : "status"}
-        >
-          {disclosure.isError
-            ? "Where sessions go could not be read."
-            : "Reading where sessions go…"}
-        </p>
+      {title && (
+        <h2 className="m-0 mb-1.5 block tc-eyebrow uppercase">
+          {title}
+        </h2>
+      )}
+      {view === "shown" && disclosure.data && (
+        <RouteDisclosureBody disclosure={disclosure.data} />
+      )}
+      {view === "loading" && <Spinner />}
+      {view === "unreadable" && (
+        <RouteDisclosureUnreadableLine
+          line={unreadable.data?.panel}
+          className="text-[12px]"
+        />
       )}
     </section>
   );

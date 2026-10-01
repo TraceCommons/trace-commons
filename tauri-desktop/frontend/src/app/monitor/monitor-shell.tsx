@@ -111,7 +111,15 @@ export function MonitorShell({
           onInspector={setInspectorOpen}
           onSettings={() => setSettings({ section: null })}
         />
-        <MonitorTabs view={view} queueDepth={core.data?.daemon.queue_depth} onGo={go} />
+        <MonitorTabs
+          view={view}
+          decisionsOwed={
+            core.state === "ready"
+              ? (core.data?.daemon.decisions_owed ?? null)
+              : null
+          }
+          onGo={go}
+        />
         <div
           className={`min-h-0 flex-1 overflow-auto ${view === "traces" ? "px-2" : "px-3 pb-3"}`}
         >
@@ -161,11 +169,12 @@ export function MonitorShell({
 /** Home · Inference · Traces, and the breadcrumb for Home's sub-views. */
 function MonitorTabs({
   view,
-  queueDepth,
+  decisionsOwed,
   onGo,
 }: {
   view: MonitorView;
-  queueDepth: number | undefined;
+  /** The core's count; `null` when unavailable (older daemon, not ready). */
+  decisionsOwed: number | null;
   onGo: (view: MonitorView) => void;
 }) {
   const workspace = useTracesWorkspace();
@@ -190,8 +199,12 @@ function MonitorTabs({
           {
             value: "traces",
             label: "Traces",
-            // Decisions owed: the sessions waiting for an answer.
-            badge: queueDepth ?? workspace.entries.length,
+            // Decisions owed, never the upload queue: `null` draws a dash.
+            badge: decisionsOwed,
+            badgeLabel:
+              decisionsOwed === null
+                ? "Decisions owed unavailable"
+                : `${decisionsOwed} decisions owed`,
           },
         ]}
       />

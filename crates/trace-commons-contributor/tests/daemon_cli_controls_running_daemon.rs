@@ -219,7 +219,7 @@ async fn disarming_auto_upload_from_the_cli_takes_effect_immediately() {
     let store = h.cli_store();
     let path = project.path().to_path_buf();
     tokio::task::spawn_blocking(move || {
-        commands::daemon_set_project(&store, &path, "ignore", true).unwrap()
+        commands::daemon_set_project(&store, &path, "ignore", false, true).unwrap()
     })
     .await
     .unwrap();
@@ -316,7 +316,7 @@ async fn with_no_daemon_running_commands_still_work_against_the_files() {
 
     // Arming records the terms in force, so it needs a config.
     store.save_config(&test_config("sha256:aa".into())).unwrap();
-    commands::daemon_set_project(&store, project.path(), "auto", true).unwrap();
+    commands::daemon_set_project(&store, project.path(), "auto", false, true).unwrap();
 
     let policy = trace_commons_contributor::daemon::policy::ProjectPolicy::load(&store).unwrap();
     assert_eq!(policy.resolve(&key), ProjectMode::AutoUpload);

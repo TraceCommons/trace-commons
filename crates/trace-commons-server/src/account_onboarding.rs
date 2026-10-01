@@ -212,6 +212,24 @@ pub enum NearAiBindOutcome {
 pub const BIND_REFUSED_ANCHOR_CLAIMED_STRONG: &str = "anchor_claimed_strong";
 pub const BIND_REFUSED_ANCHOR_CLAIMED: &str = "anchor_claimed";
 
+/// The device key is already registered under a different tenant.
+///
+/// `device_keys.device_key_id` is a global primary key, so provisioning (and
+/// bind, which enrols the same daemon key) cannot place the key under this
+/// tenant, and the key would go on authenticating into the tenant that holds
+/// it. Named, so it is not one more `near_provisioning_refused`; label-only,
+/// because which tenant holds the key is exactly what must not be disclosed.
+/// Carried as `DatabaseError::Pool(DEVICE_KEY_REGISTERED_ELSEWHERE)`; test it
+/// with [`is_device_key_registered_elsewhere`].
+pub const DEVICE_KEY_REGISTERED_ELSEWHERE: &str =
+    "near_provisioning_device_key_registered_elsewhere";
+
+/// Whether a provisioning or bind error is the named
+/// [`DEVICE_KEY_REGISTERED_ELSEWHERE`] refusal.
+pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -> bool {
+    matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REGISTERED_ELSEWHERE)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProvisionedNearAccount {
     pub tenant_id: String,

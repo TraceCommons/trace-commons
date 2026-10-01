@@ -845,9 +845,12 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
 
         RefillRecentSearches();
 
-        await FillSessionDisclosureAsync(summary).ConfigureAwait(true);
-
         IsLoading = false;
+
+        // After the sheet is shown, as the macOS and GTK sheets do: the
+        // disclosure is two more daemon calls (route_disclosure, then
+        // certificate_detail), and the transcript and gate need neither.
+        await FillSessionDisclosureAsync(summary).ConfigureAwait(true);
     }
 
     /// <summary>
