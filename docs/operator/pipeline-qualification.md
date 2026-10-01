@@ -307,21 +307,24 @@ The production path is `PipelineQualificationStore::qualify_bundle`
 (`crates/trace-commons-server/src/versioned_pipeline_qualification.rs`), a
 Rust API this repository exposes today with no admin HTTP route in front of
 it. It takes a signed package, a trust store, qualification metadata, a
-`ProductionDependencyProfile`, and the `evaluate_promotion` decision over the
-evidence the metadata records. It fails closed on an untrusted or tampered
-package, a non-production or development package, a profile built for a
-different bundle, a configuration or dependency-digest mismatch, any
-blocked dependency (a compatibility configuration that is not qualifiable,
-such as all three floors zero, blocks as
-`bundle_configuration_not_qualifiable`), a decision that does not back the
-metadata, or a second
-call for the same bundle with different metadata. The decision must be
+`ProductionDependencyProfile`, and the check results (`DrillEvidence`) the
+metadata records. It fails closed on an untrusted or tampered package, a
+non-production or development package, a package whose own configuration
+is not qualifiable (`bundle_configuration_not_qualifiable`, read from the
+signed package, not from the profile), a profile built for a different
+bundle, a configuration or dependency-digest mismatch, any blocked
+dependency, evidence that does not back the metadata, or a second call for
+the same bundle with different metadata. It evaluates the evidence itself
+(`evaluate_promotion`, at the time of the call, so stale evidence blocks and
+a malformed result is refused with its own label). The decision must be
 ready (`bundle_qualification_promotion_not_ready`), its evidence hash must
 be the metadata's (`bundle_qualification_evidence_mismatch`), its one code
 revision the metadata's (`bundle_qualification_code_revision_mismatch`),
 and its one package the signed package
-(`bundle_qualification_package_mismatch`). A successful call records one
-append-only row per `(tenant_id, bundle_id)` in
+(`bundle_qualification_package_mismatch`). A caller computes the evidence
+hash it records with `evaluate_promotion` over the same results; the hash
+leaves out the evaluation time, so the two agree. A successful call records
+one append-only row per `(tenant_id, bundle_id)` in
 `pipeline_bundle_qualifications` (migration V107).
 
 Calling `qualify_bundle` over HTTP, and using its record to activate a

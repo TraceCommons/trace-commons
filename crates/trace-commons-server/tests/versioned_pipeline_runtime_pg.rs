@@ -26263,26 +26263,27 @@ fn all_production_infrastructure() -> ProductionInfrastructureProfile {
     }
 }
 
-/// Wave 2 (Zaki's review of #1166, Z6): `qualify_bundle` takes the
-/// promotion decision over the evidence it records. No check run emits
-/// results for these tests' package, so this builds that input from real
-/// check results: `PipelineCheckEmitter` writes one passing result for each
-/// of `PROMOTION_REQUIRED_CHECKS`, under one run id and `code_revision_hash`
-/// and naming `package`, and `evaluate_promotion` reads them back from their
-/// files. `required` limits the checks written (all of them when `None`), so
-/// a caller can build a decision that is not ready.
-fn promotion_from_check_results(
+/// Wave 2 (Zaki's review of #1166, Z6; fix round 1, review I1):
+/// `qualify_bundle` takes the check results the qualification records and
+/// evaluates them itself. No check run emits results for these tests'
+/// package, so this builds them as real check results:
+/// `PipelineCheckEmitter` writes one passing result for each of
+/// `PROMOTION_REQUIRED_CHECKS`, under one run id and `code_revision_hash` and
+/// naming `package`, and each is read back from its file. `required` limits
+/// the checks written (all of them when `None`), for evidence that is not
+/// ready.
+fn evidence_from_check_results(
     package: &BundlePackage,
     code_revision_hash: &str,
     required: Option<usize>,
-) -> PromotionDecision {
+) -> Vec<DrillEvidence> {
     let dir = tempfile::tempdir().unwrap();
     let emitter =
         PipelineCheckEmitter::new(dir.path().to_path_buf(), "qpromotion", code_revision_hash)
             .expect("the emitter's run id and revision are valid");
     let check_ids =
         &PROMOTION_REQUIRED_CHECKS[..required.unwrap_or(PROMOTION_REQUIRED_CHECKS.len())];
-    let evidence = check_ids
+    check_ids
         .iter()
         .map(|check_id| {
             emitter
@@ -26301,8 +26302,13 @@ fn promotion_from_check_results(
                 maximum_age_seconds: 3_600,
             }
         })
-        .collect::<Vec<_>>();
-    evaluate_promotion(&evidence, chrono::Utc::now()).expect("the evidence evaluates")
+        .collect()
+}
+
+/// The promotion decision over `evidence` now, as a caller computes the
+/// evidence hash it records.
+fn promotion_now(evidence: &[DrillEvidence]) -> PromotionDecision {
+    evaluate_promotion(evidence, chrono::Utc::now()).expect("the evidence evaluates")
 }
 
 /// Task 6: with qualified doubles for every bundle dependency and an
@@ -26344,8 +26350,8 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
     .expect("trusted key builds")])
     .unwrap();
 
-    let promotion =
-        promotion_from_check_results(&package, &sha256_prefixed(b"code-revision"), None);
+    let evidence = evidence_from_check_results(&package, &sha256_prefixed(b"code-revision"), None);
+    let promotion = promotion_now(&evidence);
     assert!(promotion.ready, "{:?}", promotion.safe_blockers);
     let metadata = BundleQualificationMetadata {
         corpus_digest: sha256_prefixed(b"corpus"),
@@ -26364,7 +26370,7 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
     let tenant_a = format!("qualify-bundle-{}", uuid::Uuid::new_v4());
 
     let record = store
-        .qualify_bundle(&tenant_a, &signed, &trust, &metadata, &profile, &promotion)
+        .qualify_bundle(&tenant_a, &signed, &trust, &metadata, &profile, &evidence)
         .await
         .expect("a fully qualified, trusted, production package qualifies");
     assert_eq!(record.bundle_id, package.bundle_id);
@@ -26377,7 +26383,7 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
     assert_eq!(record.metadata, metadata);
 
     let repeat = store
-        .qualify_bundle(&tenant_a, &signed, &trust, &metadata, &profile, &promotion)
+        .qualify_bundle(&tenant_a, &signed, &trust, &metadata, &profile, &evidence)
         .await
         .expect("a repeat call with identical inputs answers the existing row");
     assert_eq!(repeat, record);
@@ -26391,7 +26397,7 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
             &trust,
             &different_metadata,
             &profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("a repeat call with different metadata for the same bundle is refused");
@@ -26511,8 +26517,8 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
     )
     .expect("trusted key builds")])
     .unwrap();
-    let promotion =
-        promotion_from_check_results(&package, &sha256_prefixed(b"code-revision"), None);
+    let evidence = evidence_from_check_results(&package, &sha256_prefixed(b"code-revision"), None);
+    let promotion = promotion_now(&evidence);
     assert!(promotion.ready, "{:?}", promotion.safe_blockers);
     let metadata = BundleQualificationMetadata {
         corpus_digest: sha256_prefixed(b"corpus"),
@@ -26539,7 +26545,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &empty_trust,
             &metadata,
             &profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("an untrusted signer is refused");
@@ -26558,7 +26564,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
         .expect("package has artifacts")
         .push(0);
     let tampered_error = store
-        .qualify_bundle(&tenant, &tampered, &trust, &metadata, &profile, &promotion)
+        .qualify_bundle(&tenant, &tampered, &trust, &metadata, &profile, &evidence)
         .await
         .expect_err("a tampered package is refused");
     assert!(
@@ -26591,7 +26597,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &trust,
             &metadata,
             &profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("a development-dependency package is refused");
@@ -26619,7 +26625,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &trust,
             &metadata,
             &profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("a non-compatibility package is refused");
@@ -26638,7 +26644,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &trust,
             &invalid_metadata,
             &profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("malformed metadata is refused");
@@ -26673,7 +26679,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &trust,
             &metadata,
             &profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("a profile built for a different package is refused");
@@ -26694,7 +26700,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &trust,
             &configuration_mismatched_metadata,
             &profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("a configuration digest that does not match the package is refused");
@@ -26714,7 +26720,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &trust,
             &mismatched_metadata,
             &profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("a runtime dependency digest that does not match the profile is refused");
@@ -26744,7 +26750,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &trust,
             &metadata,
             &blocked_profile,
-            &promotion,
+            &evidence,
         )
         .await
         .expect_err("a profile with a blocker is refused");
@@ -26753,24 +26759,40 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
         "unexpected blocked error: {blocked_error:?}, expected {first_blocker}"
     );
 
-    // Wave 2 (Zaki's review of #1166, Z6): the promotion decision must back
-    // what the row records. A decision that is not ready (one required
-    // check has no result), metadata whose evidence hash or code revision
-    // is not the decision's, and a ready decision over another package's
-    // results are each refused.
-    let not_ready = promotion_from_check_results(
+    // Wave 2 (Zaki's review of #1166, Z6; fix round 1, review I1): the
+    // evidence must back what the row records, and `qualify_bundle`
+    // evaluates it itself. Evidence that is not ready (one required check
+    // has no result), evidence that was ready once but is stale now,
+    // malformed evidence, metadata whose evidence hash or code revision is
+    // not the evidence's, and ready evidence over another package are each
+    // refused.
+    let missing_one = evidence_from_check_results(
         &package,
         &sha256_prefixed(b"code-revision"),
         Some(PROMOTION_REQUIRED_CHECKS.len() - 1),
     );
-    assert!(!not_ready.ready);
-    let mut not_ready_metadata = metadata.clone();
-    not_ready_metadata.evidence_hash = not_ready.evidence_hash.clone();
+    let mut missing_one_metadata = metadata.clone();
+    missing_one_metadata.evidence_hash = promotion_now(&missing_one).evidence_hash;
+    // The same results, observed two hours ago: a decision over them made
+    // then was ready, and one made now is not.
+    let mut stale = evidence.clone();
+    for item in &mut stale {
+        item.check.observed_at -= chrono::Duration::hours(2);
+    }
+    assert!(
+        evaluate_promotion(&stale, chrono::Utc::now() - chrono::Duration::hours(2))
+            .unwrap()
+            .ready
+    );
+    let mut stale_metadata = metadata.clone();
+    stale_metadata.evidence_hash = promotion_now(&stale).evidence_hash;
     let mut other_evidence_metadata = metadata.clone();
     other_evidence_metadata.evidence_hash = sha256_prefixed(b"evidence");
     let other_revision =
-        promotion_from_check_results(&package, &sha256_prefixed(b"other-revision"), None);
-    assert!(other_revision.ready);
+        evidence_from_check_results(&package, &sha256_prefixed(b"other-revision"), None);
+    assert!(promotion_now(&other_revision).ready);
+    let mut revision_metadata = metadata.clone();
+    revision_metadata.evidence_hash = promotion_now(&other_revision).evidence_hash;
     let mut decision_package_config = production_compatible_config();
     decision_package_config.projection_id = "qualified_production_projection_three.v1".to_string();
     let decision_package = MinimalPolicyBundle::compatibility_package(
@@ -26780,63 +26802,60 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
     )
     .expect("third production-compatible package builds");
     let other_package =
-        promotion_from_check_results(&decision_package, &sha256_prefixed(b"code-revision"), None);
-    assert!(other_package.ready);
+        evidence_from_check_results(&decision_package, &sha256_prefixed(b"code-revision"), None);
+    assert!(promotion_now(&other_package).ready);
     let mut other_package_metadata = metadata.clone();
-    other_package_metadata.evidence_hash = other_package.evidence_hash.clone();
-    for (decision, decision_metadata, label) in [
+    other_package_metadata.evidence_hash = promotion_now(&other_package).evidence_hash;
+    let mut malformed = evidence.clone();
+    malformed[3].check.code_revision_hash = "not-a-hash".to_string();
+    let malformed_label = format!(
+        "qualification_evidence_invalid:{}",
+        PROMOTION_REQUIRED_CHECKS[3]
+    );
+    for (refused_evidence, refused_metadata, label) in [
         (
-            &not_ready,
-            &not_ready_metadata,
+            &missing_one,
+            &missing_one_metadata,
             "bundle_qualification_promotion_not_ready",
         ),
         (
-            &promotion,
+            &stale,
+            &stale_metadata,
+            "bundle_qualification_promotion_not_ready",
+        ),
+        (
+            &evidence,
             &other_evidence_metadata,
             "bundle_qualification_evidence_mismatch",
+        ),
+        (
+            &other_revision,
+            &revision_metadata,
+            "bundle_qualification_code_revision_mismatch",
         ),
         (
             &other_package,
             &other_package_metadata,
             "bundle_qualification_package_mismatch",
         ),
+        (&malformed, &metadata, malformed_label.as_str()),
     ] {
         let error = store
             .qualify_bundle(
                 &tenant,
                 &signed,
                 &trust,
-                decision_metadata,
+                refused_metadata,
                 &profile,
-                decision,
+                refused_evidence,
             )
             .await
-            .expect_err("a promotion decision that does not back the metadata is refused");
+            .expect_err("evidence that does not back the metadata is refused");
         assert!(
             matches!(error, DatabaseError::Constraint(ref refused) if refused == label),
             "unexpected promotion error: {error:?}, expected {label}"
         );
     }
-    // The decision's own revision must be the metadata's: the decision over
-    // `other-revision` results, with metadata naming `code-revision`.
-    let mut revision_metadata = metadata.clone();
-    revision_metadata.evidence_hash = other_revision.evidence_hash.clone();
-    revision_metadata.code_revision_hash = sha256_prefixed(b"code-revision");
-    let revision_error = store
-        .qualify_bundle(
-            &tenant,
-            &signed,
-            &trust,
-            &revision_metadata,
-            &profile,
-            &other_revision,
-        )
-        .await
-        .expect_err("a decision over another code revision is refused");
-    assert!(
-        matches!(revision_error, DatabaseError::Constraint(ref label) if label == "bundle_qualification_code_revision_mismatch"),
-        "unexpected revision error: {revision_error:?}"
-    );
 
     assert_eq!(
         count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
@@ -26927,7 +26946,8 @@ async fn qualify_bundle_refuses_a_package_whose_configuration_is_not_qualifiable
     )
     .expect("trusted key builds")])
     .unwrap();
-    let promotion = promotion_from_check_results(&zero, &sha256_prefixed(b"code-revision"), None);
+    let evidence = evidence_from_check_results(&zero, &sha256_prefixed(b"code-revision"), None);
+    let promotion = promotion_now(&evidence);
     assert!(promotion.ready);
     let metadata = BundleQualificationMetadata {
         corpus_digest: sha256_prefixed(b"corpus"),
@@ -26942,14 +26962,24 @@ async fn qualify_bundle_refuses_a_package_whose_configuration_is_not_qualifiable
         evidence_hash: promotion.evidence_hash.clone(),
     };
     let tenant = format!("qualify-bundle-configuration-{}", uuid::Uuid::new_v4());
-    let error = PipelineQualificationStore::new(backend.clone())
-        .qualify_bundle(&tenant, &signed, &trust, &metadata, &profile, &promotion)
-        .await
-        .expect_err("a package whose configuration is not qualifiable is refused");
-    assert!(
-        matches!(error, DatabaseError::Constraint(ref label) if label == PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL),
-        "unexpected error: {error:?}"
-    );
+    // Fix round 1, review I1: `qualify_bundle` reads the term from the
+    // signed package itself, so a profile a caller builds by hand claiming
+    // the configuration qualifiable (and so with no blocker) is refused the
+    // same way.
+    let mut claimed = qualification.clone();
+    claimed.configuration_qualifiable = true;
+    let hand_built = ProductionDependencyProfile::new(claimed, all_production_infrastructure());
+    assert!(hand_built.blockers().is_empty());
+    for (profile, case) in [(&profile, "derived"), (&hand_built, "hand-built")] {
+        let error = PipelineQualificationStore::new(backend.clone())
+            .qualify_bundle(&tenant, &signed, &trust, &metadata, profile, &evidence)
+            .await
+            .expect_err("a package whose configuration is not qualifiable is refused");
+        assert!(
+            matches!(error, DatabaseError::Constraint(ref label) if label == PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL),
+            "{case} profile: unexpected error: {error:?}"
+        );
+    }
     assert_eq!(
         count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
         0

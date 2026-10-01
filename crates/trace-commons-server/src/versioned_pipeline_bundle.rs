@@ -797,6 +797,17 @@ pub fn package_compatibility_config(package: &BundlePackage) -> Option<Compatibi
     serde_json::from_slice(config_bytes).ok()
 }
 
+/// Whether `package`'s own configuration may be qualified for production:
+/// a compatibility package's configuration must be qualifiable
+/// (`CompatibilityBundleConfig::is_qualifiable`); a package of another
+/// family carries no such configuration. Both the per-bundle qualification
+/// (`PipelineService::bundle_qualification`, which startup reads) and
+/// `PipelineQualificationStore::qualify_bundle` read it from the package
+/// itself.
+pub fn package_configuration_is_qualifiable(package: &BundlePackage) -> bool {
+    package_compatibility_config(package).is_none_or(|config| config.is_qualifiable())
+}
+
 /// Requires that `package`'s Score policy ref names `descriptor` by content
 /// hash and stores exactly those bytes as an artifact.
 fn require_named_dependency(package: &BundlePackage, descriptor: &[u8]) -> anyhow::Result<()> {

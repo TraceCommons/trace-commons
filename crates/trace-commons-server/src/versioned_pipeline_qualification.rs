@@ -22,8 +22,10 @@ use uuid::Uuid;
 use crate::db::postgres::PgBackend;
 use crate::error::DatabaseError;
 use crate::versioned_pipeline::{
-    PgPipelineStore, PipelineBundleQualification, PipelineService, sha256_prefixed,
+    PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL, PgPipelineStore,
+    PipelineBundleQualification, PipelineService, sha256_prefixed,
 };
+use crate::versioned_pipeline_bundle::package_configuration_is_qualifiable;
 use crate::versioned_pipeline_compat::{
     COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
     COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
@@ -412,11 +414,15 @@ pub struct PromotionDecision {
 /// (a package is its three digests together).
 ///
 /// `evidence_hash` covers, for each check id, the result's run id, code
-/// revision, package digests and evidence hash, with the blockers and the
-/// evaluation time, as canonical JSON (`to_canonical_vec`). The decision
-/// names its one revision and package (`code_revision_hash`, `package`),
-/// which [`PipelineQualificationStore::qualify_bundle`] holds a
-/// qualification to.
+/// revision, package digests and evidence hash, with the blockers, as
+/// canonical JSON (`to_canonical_vec`). It leaves out the evaluation time
+/// (`evaluated_at` is a field of the decision): a ready decision's hash then
+/// names exactly the evidence it rests on, so a caller can record it in
+/// [`BundleQualificationMetadata::evidence_hash`] and
+/// [`PipelineQualificationStore::qualify_bundle`], which evaluates the same
+/// evidence again at its own time, finds the same hash. The decision names
+/// its one revision and package (`code_revision_hash`, `package`), which
+/// `qualify_bundle` holds a qualification to.
 ///
 /// Malformed input is an error, not a blocker: a check id outside
 /// [`PROMOTION_REQUIRED_CHECKS`] is `qualification_evidence_invalid`, a
@@ -502,7 +508,6 @@ pub fn evaluate_promotion(
         .collect::<BTreeMap<_, _>>();
     let canonical = serde_json::json!({
         "schema": "trace_commons.pipeline_promotion.v2",
-        "evaluated_at": now.timestamp(),
         "blockers": blockers.clone(),
         "checks": checks,
     });
@@ -918,21 +923,27 @@ impl PipelineQualificationStore {
     /// (`bundle_qualification_configuration_mismatch`), a metadata dependency
     /// digest that does not match `dependencies`
     /// (`runtime_dependency_identity_mismatch`), any blocked dependency or
-    /// infrastructure control (`dependencies.blockers()`'s first label), a
-    /// `promotion` decision that does not back this qualification (below),
-    /// or a second call for the same bundle with different metadata
+    /// infrastructure control (`dependencies.blockers()`'s first label),
+    /// evidence that does not back this qualification (below), or a second
+    /// call for the same bundle with different metadata
     /// (`bundle_qualification_identity_conflict`). No row is left behind by a
     /// failed call.
     ///
-    /// `promotion` is the [`evaluate_promotion`] decision over the evidence
-    /// the metadata records (wave 2; Zaki's review of #1166, Z6): the
-    /// caller no longer supplies the evidence and revision hashes alone. It
-    /// must be ready (`bundle_qualification_promotion_not_ready`), its
-    /// evidence hash must be the metadata's
-    /// (`bundle_qualification_evidence_mismatch`), its one code revision the
-    /// metadata's (`bundle_qualification_code_revision_mismatch`), and its
-    /// one package `signed.package`
-    /// (`bundle_qualification_package_mismatch`).
+    /// Two terms are derived here, never taken from the caller (wave 2,
+    /// fix round 1; review I1):
+    /// - The package's own configuration: `signed.package` must be
+    ///   qualifiable (`package_configuration_is_qualifiable`,
+    ///   `bundle_configuration_not_qualifiable`), whatever `dependencies`
+    ///   says.
+    /// - The promotion decision (Zaki's review of #1166, Z6): `evidence` is
+    ///   the check results the metadata records, and this evaluates them
+    ///   itself ([`evaluate_promotion`] at the current time, so stale
+    ///   evidence blocks; a malformed result is refused with its own label).
+    ///   The decision must be ready (`bundle_qualification_promotion_not_ready`),
+    ///   its evidence hash must be the metadata's
+    ///   (`bundle_qualification_evidence_mismatch`), its one code revision the
+    ///   metadata's (`bundle_qualification_code_revision_mismatch`), and its
+    ///   one package `signed.package` (`bundle_qualification_package_mismatch`).
     pub async fn qualify_bundle(
         &self,
         tenant_id: &str,
@@ -940,10 +951,15 @@ impl PipelineQualificationStore {
         trust: &BundlePackageTrustStore,
         metadata: &BundleQualificationMetadata,
         dependencies: &ProductionDependencyProfile,
-        promotion: &PromotionDecision,
+        evidence: &[DrillEvidence],
     ) -> Result<BundleQualificationRecord, DatabaseError> {
         trust.verify(signed).map_err(DatabaseError::Constraint)?;
         validate_production_package(&signed.package).map_err(DatabaseError::Constraint)?;
+        if !package_configuration_is_qualifiable(&signed.package) {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string(),
+            ));
+        }
         metadata.validate().map_err(DatabaseError::Constraint)?;
         let digests = package_digests(&signed.package).map_err(DatabaseError::Constraint)?;
         if dependencies.bundle.bundle_id != signed.package.bundle_id
@@ -971,7 +987,9 @@ impl PipelineQualificationStore {
         if !blockers.is_empty() {
             return Err(DatabaseError::Constraint(blockers[0].clone()));
         }
-        require_promotion_backs(promotion, metadata, &digests)
+        let promotion =
+            evaluate_promotion(evidence, Utc::now()).map_err(DatabaseError::Constraint)?;
+        require_promotion_backs(&promotion, metadata, &digests)
             .map_err(|label| DatabaseError::Constraint(label.to_string()))?;
         self.packages
             .register_bundle(tenant_id, &signed.package)

@@ -7173,8 +7173,7 @@ impl PipelineService {
                 .is_some_and(|privacy| privacy.production_qualified()),
             payout,
             configuration_qualifiable:
-                crate::versioned_pipeline_bundle::package_compatibility_config(package)
-                    .is_none_or(|config| config.is_qualifiable()),
+                crate::versioned_pipeline_bundle::package_configuration_is_qualifiable(package),
             dependency_digest: digests.dependency_digest,
         })
     }
