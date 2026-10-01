@@ -2,6 +2,7 @@
 
 > Amended 2026-10-01: main took V101 to V104 and PR 3 moved to V105 and V106, so PR 4's migrations are V107 (qualification) and V108 (attempt artifacts). The text below keeps the numbers it was written with.
 > Amended 2026-10-01: after PR 3's df1550dd, the required check pipeline_orphan_sweep is emitted by a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes.
+> Amended 2026-10-01 (owner option D): a compatibility Score stages its `pipeline_attempt_artifacts` rows without a hash before PR 3's tenant Score lock, and its commit sets the hash; V108's grant is `UPDATE (state, committed_at, ciphertext_sha256)`; the sweep deletes a no-hash row's object at the key it recomputes from the row's artifact, run and lease token, and only when the row names that key; a compatibility Score publishes nothing past four Score leases after its rows are staged. This replaces the staging and the grant P4-D10 describes for those rows.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
