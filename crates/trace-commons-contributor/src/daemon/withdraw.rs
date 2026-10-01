@@ -464,6 +464,7 @@ mod tests {
                 withdrawn_at: None,
                 approved_unattended: None,
                 approved_verdict: None,
+                title: None,
             })
             .collect();
         HistoryCache::save(&s.store, &records).unwrap();

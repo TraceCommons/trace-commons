@@ -705,6 +705,10 @@ impl Uploader<'_, '_> {
         // apply to a submission this context runs later.
         self.ctx
             .set_upload_provenance(entry.approved_unattended, entry.approved_verdict.clone());
+        // K9: the same one-shot rule, for the same reason -- the receipt
+        // this call produces, and the history row built from it, carry the
+        // title the queue showed for this session.
+        self.ctx.set_upload_title(entry.title.clone());
         let outcome = match self.ctx.submit_loaded(transcript).await {
             Ok(o) => o,
             Err(e) => {
@@ -1829,6 +1833,92 @@ mod tests {
             receipts[0].approved_unattended,
             Some(true),
             "the entry was sent by an armed folder, not a person"
+        );
+    }
+
+    /// K9: `upload_entry` must hand the queue entry's own title to the
+    /// submit pipeline before it uploads, so the receipt this real (not
+    /// dry-run) upload writes -- and from it, the history row -- carries
+    /// the same title the queue showed for this session. Removing the
+    /// `set_upload_title` call in `upload_entry` makes this fail: the
+    /// receipt would read `title: None` for an entry that in fact had one.
+    #[tokio::test]
+    async fn upload_entry_records_the_entrys_own_title_on_the_receipt() {
+        let issuer = spawn_stub(stub_claim_issuer()).await;
+        let ingest = spawn_stub(stub_ingest_accepts()).await;
+        // An address the scrubber removes, so the default (Automatic) Scrub
+        // check lets this armed session through to the receipt.
+        let session = session_saying(ONE_EMAIL);
+        let (_d, store) = temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = crate::config::ContributorConfig {
+            inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
+            inference_receipt_check_attestation: false,
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+            issuer_url: issuer,
+            ingest_url: ingest,
+            audience: "trace-commons-upload".into(),
+            tenant_id: "tenant-abc".into(),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: device.device_key_id.clone(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
+            witness: None,
+        };
+        store.save_config(&cfg).unwrap();
+
+        let mut entry = session.entry_for(&session.current_hash(), &cfg);
+        entry.approved_unattended = true;
+        entry.title = Some("fix the leak".to_string());
+
+        let opts = crate::submit::SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].title.as_deref(),
+            Some("fix the leak"),
+            "the receipt must carry the queued title"
         );
     }
 

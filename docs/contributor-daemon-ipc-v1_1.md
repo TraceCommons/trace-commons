@@ -109,6 +109,14 @@ old behaviour, because no application has shipped against `v1` yet. See
     `GET /v1/account/credit-summary` with the account session. The daemon
     never read either before this. See
     ["`commons_credit_summary`"](#commons_credit_summary).
+- **K9 (titles on the queue and in history).** `title` -- previously served
+  only on a `preview` summary -- is now also on every queue entry
+  (`list_pending`, the `snapshot` event) and on every `list_history` row.
+  The watcher computes it synchronously when it queues the session, from
+  the same opening prompt and the same cut/truncate rule `preview`'s own
+  `title` uses, but through the deterministic redaction pass alone rather
+  than a full preview build. See ["`title`"](#title) and
+  ["A session's title on history rows (K9)"](#a-sessions-title-on-history-rows-k9).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -502,7 +510,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended` and `approved_verdict` | see "History provenance (K7)" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, and `title` | see "History provenance (K7)" and "A session's title on history rows (K9)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -930,12 +938,37 @@ other would be a claim this daemon cannot verify.
 above for why this one field is allowed to be, and what that permission does
 not extend to.
 
+#### `title`
+
 `title` is a short name for the session, for a row or a sheet header: the
 first non-empty line of the redacted `opening_prompt`, cut at a word boundary
 to 60 characters with an ellipsis when cut, and `null` when there is no task
-description. It is the same redacted content as `opening_prompt`, under the
-same boundary, so it is served only where `opening_prompt` is -- in a preview
-summary, never in `list_pending`. A list that wants titles schedules previews
+description.
+
+**K9**: `title` is no longer confined to a `preview` summary. It is also on
+every queue entry (`list_pending`, the `snapshot` event) and, carried from
+there, on every `list_history` row -- see
+["A session's title on history rows (K9)"](#a-sessions-title-on-history-rows-k9).
+The watcher builds it once, synchronously, at the moment it queues the
+session, from the same opening prompt and the same cut/truncate rule this
+`preview` field uses -- but through the deterministic redaction pass alone
+(secret-leak patterns, known and generic local paths, private emails, PEM
+blocks), never a configured prose privacy filter. The watcher's poll loop is
+synchronous and runs on every discovered session; it cannot pay for that
+filter's network call there the way a `preview` build can. That deterministic
+pass is the floor every `preview`'s own redaction starts from and an
+unenrolled contributor's `preview.title` never goes past, so the queued
+`title` is never LESS redacted than an equivalent `preview.title` -- an
+enrolled contributor's `preview` may additionally scrub prose PII that only a
+configured filter catches, which the queued `title` cannot. `preview.title`
+itself is unchanged: same field, same rule, independently computed on that
+path.
+
+`title` on a queue entry is `null` on an entry queued before this existed --
+it is not backfilled, exactly like `shape` (see below): the entry gets a
+title the next time its session is loaded (it grows, or is re-offered) --
+and whenever the task named no description. A client that wants the
+preview's fully-filtered title regardless of either still schedules previews
 (`preview_request`, `preview_visible`) and fills each row in as its
 `preview_ready` arrives.
 
@@ -957,6 +990,10 @@ every event of the redacted envelope. `ended_at` spans the delegated work
 too, since it is part of the session. An entry queued before these fields
 existed has them all `null`; it is not backfilled, and gains a shape when its
 session is next loaded (it grows, or is re-offered).
+
+Every entry also carries `title` (K9) -- unlike the fields above, redacted
+*content*, not metadata, so it is documented on its own: see
+["`title`"](#title).
 
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are
@@ -3832,6 +3869,34 @@ Render both as fixed labels, never as prose composed from anything else on
 the row -- "you approved" and "armed" are not synonyms for any existing
 status, and mean nothing about whether the submission was later accepted,
 quarantined, or withdrawn.
+
+### A session's title on history rows (K9)
+
+`list_history` rows (`HistoryRecord`) carry one more field, so a history
+list can show the same title the queue showed for this session without a
+second request:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "title": "add a rate limiter"
+}
+```
+
+- **`title`** -- the queued title for the session this row reports, or
+  `null`. Carried from the receipt minted at upload time
+  (`daemon::uploader`, via `SubmitContext::set_upload_title`), itself
+  carried from the queue entry's own `title` (see ["`title`"](#title)) --
+  not derived after the fact, since the queue entry itself is gone by the
+  time a client asks.
+
+`null` in three distinct cases, none of them an error: the task named no
+description, the receipt predates this field, or the session was never
+queued at all (a direct CLI submission, which carries no queue entry to
+take a title from). `#[serde(default)]` on the wire, like
+`approved_unattended` and `approved_verdict` above, so an older cached row
+still loads.
 
 ### `history_rollup`
 

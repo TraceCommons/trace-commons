@@ -2060,6 +2060,7 @@ mod tests {
             status: "accepted".into(),
             approved_unattended: None,
             approved_verdict: None,
+            title: None,
         };
         assert_eq!(
             submitted_marker(&src, &r, std::slice::from_ref(&receipt)),
@@ -4649,6 +4650,7 @@ mod logout_tests {
                     status: "accepted".to_string(),
                     approved_unattended: None,
                     approved_verdict: None,
+                    title: None,
                 })
                 .unwrap();
         }

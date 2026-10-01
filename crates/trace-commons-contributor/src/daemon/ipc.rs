@@ -2109,6 +2109,10 @@ pub fn entry_value(
         "ended_at": e.shape.as_ref().and_then(|s| s.ended_at),
         "duration_secs": e.shape.as_ref().and_then(super::queue::SessionShape::duration_secs),
         "user_turns": e.shape.as_ref().map(|s| s.user_turns),
+        // K9: the redacted opening prompt, cut at a word to 60 chars. Null
+        // for an entry queued before this existed, or whose task named no
+        // description.
+        "title": e.title,
     });
     // ABSENT, NOT `unknown`, WHENEVER THE SIGNUP FLAG IS OFF.
     //
@@ -10814,6 +10818,28 @@ mod tests {
         assert!(body.contains("secret-client-project"));
     }
 
+    /// K9: `list_pending` carries the queued title, and says `null` rather
+    /// than omitting the field for an entry that has none.
+    #[test]
+    fn entry_value_reports_the_queued_title() {
+        use crate::daemon::queue::{QueueEntry, entry_id_for};
+        let e = QueueEntry {
+            entry_id: entry_id_for("sha256:aa"),
+            session_hash: "sha256:aa".into(),
+            source: "claude-code".into(),
+            project_key: "/Users/z/code/proj".into(),
+            project_label: "proj".into(),
+            path: "/Users/z/.claude/projects/x/s.jsonl".into(),
+            size_bytes: 10,
+            discovered_at: Utc::now(),
+            title: Some("add a rate limiter".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(entry_value(&e, None)["title"], "add a rate limiter");
+        let untitled = QueueEntry { title: None, ..e };
+        assert!(entry_value(&untitled, None)["title"].is_null());
+    }
+
     #[test]
     fn the_upgrade_retires_entries_that_stand_for_a_lone_subagent_transcript() {
         // Discovery no longer yields a `subagents/` path, so these entries
@@ -11284,6 +11310,7 @@ mod tests {
             withdrawn_at: None,
             approved_unattended: None,
             approved_verdict: None,
+            title: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(
