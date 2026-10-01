@@ -7,7 +7,8 @@ Status: draft for review. Nothing here is implemented.
   purple accent, appearance, and the near.ai alignment.
 - Open: the rest of "Decisions needed".
 Visual source: #1146, "Adopt the WYSIWYG UX and Glass design system" (open,
-changes requested), at `a15fa6addf`
+changes requested), at `a15fa6addf`, plus the 2026-09-30 screen recording
+indexed below.
 Decided context: the native macOS app is kept and built to match the WYSIWYG
 design (2026-09-28, in the #1118 review)
 Scope: `macos/` (the `TraceCommonsApp` target), one new token source, and the
@@ -49,6 +50,40 @@ the component inventory. It is not a build spec on its own:
 
 This spec takes the look from #1146, takes the behaviour from `main`, and
 fills in what a native build needs.
+
+## Screen recording reference (2026-09-30)
+
+The user supplied `Screen Recording 2026-09-30 at 4.14.23 PM.mov` from
+`~/Documents` (the filename uses a narrow no-break space before `PM`). It is
+2:49 long, 2864×1744, with SHA-256
+`1d86ef5329bff2166a2fa25ca63c0ed97b4c5835fd0d80e7026bb0b7278a979b`.
+The recording remains local; it contains real project names and paths.
+Use synthetic data for committed screenshots and implementation fixtures.
+
+This is a visual and interaction reference, not evidence that the native
+app implements these screens. Its build revision is not established by
+the recording. #1146 remains the source for exact token values; do not
+sample colours or infer point sizes from the scaled video. The observed
+states below supplement that source. The native adaptations and behaviour
+exceptions in this spec take precedence over the recording.
+
+| Time | Observed reference | Requirement carried into this spec |
+|---|---|---|
+| 00:00–00:20 | Centred onboarding pane, horizontal step progress, grouped choices, then a completion card | Keep progress and action hierarchy consistent across steps; retain the core's consent choices, disclosures and completion state. The clip begins partway through onboarding. |
+| 00:25–00:38 | Home cards beside a large flow map and a Summary inspector; the map also has a Private AI mode | Keep the left tab selection separate from the map's Traces / Private AI selector. Preserve the summary's hierarchy of counts, decisions, statistics and runtime cards. |
+| 00:45 | Map hidden; the main pane expands beside the inspector while the window is resized | Define the two-pane layout explicitly, with no empty map-width reservation. |
+| 00:55 | Missions inside Home, with Back and a breadcrumb above stacked cards | Keep sub-navigation inside the main pane; retain the inspector alongside it. |
+| 01:08 | Inference content scrolls while its Private AI inspector remains visible | Scroll each pane independently; use the core's status and credential copy. |
+| 01:15–01:44 | Hierarchical trace rows, a stationary chart footer, selected-project details and a separate approval/Undo card | Selection, scrolling and approval feedback have separate state; do not turn row selection into submission. |
+| 02:00 | Map and inspector hidden; the trace tree and chart span the main pane | Define the one-pane layout and preserve a way to reopen either pane. |
+| 02:05–02:15 | Chart date hover and range change (11 to 42 days); checked “Show ignored folders” menu item | Specify chart inspection and range controls; keep the view filter separate from watch/consent settings. |
+| 02:26–02:35 | Settings with a persistent section list and a scrolling detail area | Carry the navigation and grouped content into the native Settings scene, not the recorded modal presentation. |
+| 02:46 | Return to the trace tree with the inspector and the wider chart range | Preserve presentation state when opening and closing Settings. |
+
+The recording does not settle the provisional brand/typeface decisions,
+light appearance, accessibility fallbacks or the minimum OS. Its painted
+blue/green/purple scene illustrates depth and hierarchy; it does not
+replace the desktop-backed material decision for macOS 26.
 
 ## Non-goals
 
@@ -316,17 +351,31 @@ These are exact, from `tauri-desktop/frontend/src/design-system/tokens/` at
   - An `HStack` of three panes, with 10pt window padding and 10pt gaps.
   - Left pane: width `min(400, max(320, 0.34 × window width))`, the same
     formula as `monitor-shell.tsx:97`. It fills the window when the map is
-    hidden.
+    hidden, less the inspector width and gap when the inspector is open.
   - Map: the remaining width.
-  - Inspector: 300pt, through `.inspector(isPresented:)` (macOS 14 and
-    later).
-- **Toolbar.** A capsule of four toggles (view menu, graph, map, inspector)
-  and a round Settings button, starting 78pt from the leading edge to clear
-  the traffic lights. Tabs: Home, Inference, Traces.
+  - Inspector: 300pt. Its presentation must participate in the same pane
+    layout; use `.inspector(isPresented:)` only if it preserves the specified
+    width, gap and independent visibility, otherwise compose the third pane
+    directly in the `HStack`.
+  - Supported compositions: main + map + inspector, main + map, main +
+    inspector (00:45), and main alone (02:00). Hidden panes reserve no space.
+    As a native compact-layout rule, temporarily hide the map below 1100pt
+    window width. Keep the user's preferred visibility separately so widening
+    restores it; an explicit hide stays hidden. This breakpoint is a design
+    requirement, not a size measured from the recording.
+- **Toolbar.** A trailing-aligned capsule above the main pane's tabs, as in
+  the recording, with a view menu and graph, map and inspector toggles,
+  followed by a separate round Settings button. Reserve at least 78pt at the
+  leading edge for the real traffic lights; this is a clearance, not a fixed
+  origin for the capsule. Tabs: Home, Inference, Traces. Preserve the Traces
+  count badge and the Inference status dot, with accessible text equivalents.
+  Every icon has a tooltip and accessible name; toggles expose their state.
 - **Opening state and restoration.** #1146 decides pane visibility once at
   launch (the map if the window is at least 1100 wide, the inspector if at
   least 900). The macOS app restores the user's last choice per window
-  (`@SceneStorage`), and uses those widths only on first launch.
+  (`@SceneStorage`), and uses those widths to seed first-launch preferences.
+  The compact-layout rule above affects rendered visibility, not the saved
+  preference.
 - **Behaviour that must not depend on the inspector.** In #1146, the undo
   window, the arming offer and the review exist only while the inspector is
   open. The macOS app shows the undo bar and consent offers regardless of
@@ -334,6 +383,58 @@ These are exact, from `tauri-desktop/frontend/src/design-system/tokens/` at
   inspector is closed.
 - **Settings.** A `Settings` scene, subject to Decision 4. Its sections are
   the ones #1146's modal lists, plus Compute (see Screens).
+
+### Recorded content and interaction details
+
+- **Independent scrolling.** Tabs and toolbar remain above the main content.
+  The trace tree scrolls within that pane; its visible chart footer stays
+  below the tree (01:15). The inspector scrolls independently. At the minimum
+  window size and larger text sizes, all controls remain reachable without
+  text or buttons overlapping; the graph toggle can reclaim vertical space.
+- **Trace rows.** Preserve tool → project → session indentation, disclosure
+  controls, tool/folder glyphs, primary name and secondary state/count line.
+  Align trailing actions across rows. A selected row has a full-width
+  highlight distinct from hover, keyboard focus and contribution status.
+  Clicking a disclosure or an action must not also trigger the row's other
+  actions. Empty projects retain their row and an unavailable Submit action.
+  The recorded binary switches do not replace the three contribution modes
+  specified in Non-goals.
+- **Inspector context.** With no selection, show Summary; a project/session
+  selection shows its details, and Inference shows Private AI details. Keep
+  headings, paired shared/kept count wells, disclosure sections and quiet
+  runtime cards in that order where applicable. Clearing selection returns
+  to the tab's overview. Pane toggles and resizing retain selection and scroll
+  position. Approval feedback is a separate region above the current details,
+  so changing selection cannot dismiss an active undo opportunity. Keep the
+  existing core deadline and result handling; the recorded countdown is not
+  a new duration or a guarantee that an upload can still be cancelled.
+- **Flow map.** Put the Traces / Private AI segmented selector at the map's
+  upper trailing edge. It changes the map view, not the main tab, consent or
+  routing configuration. Retain its choice while the map is hidden. Use the
+  same node/arc hierarchy in both modes, with labels and an accessible
+  alternative to pointer-only node inspection. The recorded credential
+  shield and hand-written routing copy remain excluded by Non-goals.
+- **Chart footer.** Paired shared/kept count wells sit above day columns;
+  period navigation, range controls and a central date/range label sit below.
+  Match the purple/blue series distinction and the recorded blue kept bars
+  below the baseline, with values supplied by the core. Hovering a day shows its
+  date and counts (02:05); keyboard focus provides the same information.
+  Leaving the day restores the range summary. Changing the range recomputes
+  column spacing and date-label density, including the recorded 11- and
+  42-day states, without changing the underlying contribution state. Keep
+  the chart range through pane changes and Settings. Colours alone never
+  distinguish the series, and zero values are not missing data.
+- **View menu.** “Show ignored folders” is a checked visibility option
+  (02:15). Showing a folder never resumes watching or changes its rule.
+- **Settings navigation.** Inside the native Settings scene, retain the
+  section list and grouped, independently scrolling content from 02:26:
+  Connection, Startup & notifications, Watching, How traces may be used,
+  Public profile, Watched folders, Tools, Private AI, Redaction witness,
+  Projects, and Changes on this machine, plus Compute. The selected section
+  must match the displayed content. Opening or closing Settings preserves
+  the main window's tab, selection, pane visibility and chart range. This
+  adapts the reference's organisation without adopting its scrim or close
+  button inside the main window.
 
 ## Components
 
@@ -454,10 +555,11 @@ brand decisions. Step 1 does not depend on them, because it seeds only
 4. **Materials and components.** The tier modifiers for both OS paths, and
    the component catalogue, with a SwiftUI preview gallery equivalent to
    #1146's Storybook page.
-5. **Window shell.** Three panes, the toolbar, tabs, restoration, and the
-   Settings scene.
+5. **Window shell.** Three panes, the toolbar, tabs, restoration, all four
+   pane compositions, independent scrolling, and the Settings scene.
 6. **Screens.** Move screens one at a time, keeping `main`'s behaviour and
-   the core's copy.
+   the core's copy. Include the recorded inspector contexts, map modes,
+   trace-tree selection, chart footer and Settings section navigation.
 7. **Menu-bar popover.**
 8. **Light and high-contrast values.** Reviewed by the brand owner.
 
@@ -468,6 +570,22 @@ brand decisions. Step 1 does not depend on them, because it seeds only
 - At 1320×760 in dark mode on macOS 26, screenshots match #1146's monitor
   window in layout, radii and colours. They are not expected to match the
   painted scene, because real glass shows the desktop.
+- Replay the recording's presentation sequence with synthetic data: partial
+  onboarding → Home and both map modes → main + inspector → Missions →
+  Inference → Traces and project/session selection → main alone → chart
+  inspection and range change → view filter → Settings → restored Traces.
+  Exercise main + map as well, though that composition is not established
+  by the sampled recording states. Verify all four pane preferences at the
+  default size, then resize to the minimum and back: the map collapses below
+  1100pt and returns only when the saved preference calls for it.
+- During that replay, tree scrolling leaves the visible chart footer in
+  place; selection updates inspector context without submitting anything;
+  chart and ignored-folder controls do not mutate contribution settings;
+  Settings round trips preserve presentation state. Long synthetic names
+  and larger text sizes do not cover trailing row actions.
+- Repeat the approval/Undo flow with the inspector closed and while changing
+  tabs and pane visibility. Core disclosures and the active undo opportunity
+  remain reachable, and the deadline is not restarted by a layout change.
 - On macOS 14, the same screens render with the material fallback, with no
   missing panes or controls.
 - CI runs the Swift suite on both sides of the branch: the existing
