@@ -2590,6 +2590,51 @@ default either. Like `family`, this is a fixed fact about the tool's own
 released default, never something this daemon checked against the copy
 actually installed.
 
+#### Gemini CLI and Antigravity are not rows here (K13)
+
+`harness_list` is deliberately narrower than "every coding tool this daemon
+knows about". `found` above is `ironwire_agents::tools::all(catalog)`, and
+with no catalog loaded (`catalog_present: false`, the only state this build
+ships in today) that is **exactly** `claude` and `codex` -- the two tools
+IronWire's embedded proxy can redirect, because `Facade::url` only speaks
+the Anthropic and OpenAI wire shapes. Gemini CLI speaks neither, so it has
+never had a row here, and Antigravity -- which is not even a watched
+source; see below -- cannot either. Adding either would mean writing our
+loopback URL into a config key that does not actually redirect that tool's
+calls, which is the exact hazard `owned_agents`'s doc comment refuses to
+guess at. Nothing in K13 changes this list; "Gemini CLI keeps its row"
+refers to its row in `tc_discover_sources` (a watched session store, not a
+redirectable harness), not to this one.
+
+Antigravity's own `answers_at` is `"Google"`, from the same
+`source::source_default_family` table as `gemini-cli`'s -- see `tools` under
+`list_projects` above, and "Antigravity" under `tc_discover_sources`-shaped
+discovery, below.
+
+#### Antigravity has no `tc_discover_sources` row either, and that is also deliberate
+
+Antigravity is not a `TraceSource`: there is no conventional, watchable
+per-user store for it to probe blind, the way `claude-code`, `codex`,
+`gemini-cli` and `cline` are probed. It ships as a one-shot
+`import-antigravity` command that reads the running IDE's local API and
+stages what it finds as `trajectory` files -- see
+`crates/trace-commons-contributor/src/antigravity/mod.rs`'s own doc comment.
+Nothing it stages shares a folder with Gemini CLI's `~/.gemini/tmp` adapter,
+and the two were never actually merged in the shipped code: an earlier,
+abandoned design (`docs/superpowers/specs/2026-08-29-antigravity-source-design.md`)
+would have read Antigravity's own SQLite files from under `~/.gemini/`, but
+it was superseded before it shipped by the API-import design actually in
+place (`docs/superpowers/specs/2026-08-31-antigravity-import-command-design.md`).
+
+What an imported conversation DOES carry, and has carried since that design
+landed, is its own declared source: `meta.source: "antigravity"` on the
+staged file, read back as `SessionRef::declared_source` and shown as
+`"Antigravity"` by every shell's agent label -- never as `"trajectory"`,
+and never merged with a real Gemini CLI session. K11's `tools` field and
+K13's `source_default_family` entry read that same string, so a project
+mixing an Antigravity import with a real Gemini CLI session reports two
+distinct tool rows, not one.
+
 `spend` is what the calls answered **on this computer** have cost since the
 most recent local midnight, in millionths of a dollar. It comes from the
 proxy's own status object, which is why it is metered-only: the ledger rows
