@@ -52,7 +52,7 @@ final class ShellWordingTests: XCTestCase {
 
         // The app model and its non-view surfaces.
         "TraceCommonsApp/AppModel.swift": 8,
-        "TraceCommonsApp/HealthCopy.swift": 23,
+        "TraceCommonsApp/HealthCopy.swift": 20,
         "TraceCommonsApp/Notifier.swift": 2,
         "TraceCommonsApp/SelfTest.swift": 15,
 
