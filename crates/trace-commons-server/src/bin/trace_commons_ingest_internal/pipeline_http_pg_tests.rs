@@ -5020,7 +5020,7 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
 
 /// The pipeline credit issuer the compatibility HTTP tests configure
 /// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`).
-const TEST_PIPELINE_CREDIT_ISSUER: &str =
+pub(super) const TEST_PIPELINE_CREDIT_ISSUER: &str =
     "principal_sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
 /// `assemble_test_pipeline_service` for `CompatibilityTestAssembler`: the

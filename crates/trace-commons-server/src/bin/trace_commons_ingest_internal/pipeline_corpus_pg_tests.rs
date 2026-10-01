@@ -30,10 +30,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::pipeline_http_pg_tests::{
-    PassThroughPipelinePrivacyBoundary, account_owner_backend, allow_all_test_authority,
-    compatibility_reference_package, join_within, mains_database, minimal_storage_rebate_package,
-    post_submission_status, post_trace, runtime_backend, send_http, serve_pipeline_app,
-    wait_for_pipeline_ready,
+    PassThroughPipelinePrivacyBoundary, TEST_PIPELINE_CREDIT_ISSUER, account_owner_backend,
+    allow_all_test_authority, compatibility_reference_package, join_within, mains_database,
+    minimal_storage_rebate_package, post_submission_status, post_trace, runtime_backend, send_http,
+    serve_pipeline_app, wait_for_pipeline_ready,
 };
 use trace_commons_gate_api::pipeline::{
     AtomicUnits, BundlePackage, InstrumentId, ReasonCode, ReviewRecommendation,
@@ -556,7 +556,10 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
 }
 
 /// The service comes out of `assemble_ingest_pipeline_runtime`, the seam
-/// ingest's real boot uses, exactly as the other HTTP tests' services do.
+/// ingest's real boot uses, exactly as the other HTTP tests' services do,
+/// with the pipeline's credit issuer configured, which a runtime that
+/// routes the compatibility bundle needs (PR 3: Zaki review 1, round 2,
+/// finding 15); the minimal bundle ignores it.
 fn assemble_corpus_service(
     backend: Arc<PgBackend>,
     artifacts: Arc<LocalEncryptedTraceArtifactStore>,
@@ -579,7 +582,10 @@ fn assemble_corpus_service(
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
-        &PipelineNoveltyUtilityChecks::default(),
+        &PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
         TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .expect("assemble the injected corpus pipeline runtime")
