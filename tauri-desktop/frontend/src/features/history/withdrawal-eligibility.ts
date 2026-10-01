@@ -9,8 +9,18 @@ const withdrawableStatuses = new Set([
   "awaiting_pii_backstop",
 ]);
 
+// `processing` is the versioned pipeline's receipt status: uploaded, no
+// verdict yet, which is what `submitted` means here. Every history surface
+// reads a status through this one mapping -- the label, the withdraw option,
+// the count and the filter -- so `processing` cannot get a different answer
+// from any of them. A history refresh that reads the server's status for the
+// row replaces it.
+export function historyStatusBucket(status: string) {
+  return status === "processing" ? "submitted" : status;
+}
+
 export function canWithdrawStatus(status: string) {
-  return withdrawableStatuses.has(status);
+  return withdrawableStatuses.has(historyStatusBucket(status));
 }
 
 export type SharedHistoryStatusCopy = {
@@ -33,5 +43,5 @@ export function historyStatusLabel(
   if (status === "awaiting_pii_backstop" && shared) {
     return shared.status_awaiting_pii_backstop;
   }
-  return labels[status] ?? "Status unavailable";
+  return labels[historyStatusBucket(status)] ?? "Status unavailable";
 }
