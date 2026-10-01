@@ -6793,3 +6793,351 @@ async fn the_pipeline_http_harness_sets_up_its_database() {
     let _ = mains_database().await;
     drop(runtime);
 }
+
+// ---------------------------------------------------------------------------
+// `main`'s side paths and submissions with a pipeline run (Zaki review 1,
+// round 2, finding 18).
+// ---------------------------------------------------------------------------
+
+/// Moves `submission_id`'s expiry date two days into the past, as time
+/// would.
+async fn age_submission_past_expiry(owner: &Arc<PgBackend>, tenant_id: &str, submission_id: Uuid) {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let updated = tx
+        .execute(
+            "UPDATE trace_submissions SET expires_at = NOW() - INTERVAL '2 days'
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(updated, 1);
+}
+
+/// The pipeline follow-up queued for a retention change of `run`'s
+/// submission: `(index invalidations of the run under reason_code,
+/// delete_object_payload items for the submission under reason, the
+/// submission's object refs not yet invalidated)`.
+async fn retention_follow_up(
+    owner: &Arc<PgBackend>,
+    tenant_id: &str,
+    run: &trace_commons_server::versioned_pipeline::PipelineRunRecord,
+    reason_code: &str,
+    reason: &str,
+) -> (i64, i64, i64) {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND run_id = $2 AND reason_code = $4),
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items
+                      WHERE tenant_id = $1 AND source_submission_id = $3
+                        AND action = 'delete_object_payload' AND reason = $5),
+                    (SELECT COUNT(*) FROM trace_object_refs
+                      WHERE tenant_id = $1 AND submission_id = $3 AND invalidated_at IS NULL)",
+            &[
+                &tenant_id,
+                &run.run_id,
+                &run.submission_id,
+                &reason_code,
+                &reason,
+            ],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1), row.get(2))
+}
+
+/// Ruling RB-30 (Zaki review 1, round 2, finding 18): `main`'s retention
+/// maintenance expires and purges a submission with a pipeline run, which
+/// is in the database only, by its own rules and request, with no pipeline
+/// runtime injected. A legal hold on its retention policy keeps it; a dry
+/// run counts the expiry and changes nothing; the expiry marks the row
+/// `expired` through `main`'s mirror (which invalidates its object refs, as
+/// for a legacy row) and queues the index invalidation of the run's
+/// revision, deleting no payload; the purge, under the request's
+/// cutoff, marks it `purged` and queues one payload deletion per live
+/// object ref for `main`'s revocation-propagation worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_retention_maintenance_expires_and_purges_a_pipeline_submission() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let admin_token = format!("{}-admin", fixture.token);
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let mut state = fixture.state.clone();
+    {
+        let state = Arc::make_mut(&mut state);
+        let mut tokens = (*state.tokens).clone();
+        insert_token(&mut tokens, tenant, &admin_token, TokenRole::Admin);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_service = None;
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+    age_submission_past_expiry(&fixture.owner, tenant, run.submission_id).await;
+    let submission = || async {
+        fixture
+            .owner
+            .get_trace_submission(tenant, run.submission_id)
+            .await
+            .unwrap()
+            .expect("the submission row")
+    };
+    let live_object_refs = retention_follow_up(&fixture.owner, tenant, &run, "-", "-")
+        .await
+        .2;
+    assert!(live_object_refs > 0, "the run stored objects");
+    let maintain = |state: Arc<AppState>, dry_run: bool, purge: bool| {
+        let admin_token = admin_token.clone();
+        async move {
+            let Json(response) = maintenance_handler(
+                State(state),
+                auth_headers(&admin_token),
+                Json(TraceMaintenanceRequest {
+                    purpose: Some("pipeline retention test".to_string()),
+                    dry_run,
+                    prune_export_cache: false,
+                    purge_expired_before: purge.then(Utc::now),
+                    ..test_maintenance_request()
+                }),
+            )
+            .await
+            .expect("the maintenance runs");
+            (
+                response.records_marked_expired,
+                response.records_marked_purged,
+            )
+        }
+    };
+
+    let mut held = state.clone();
+    Arc::make_mut(&mut held).legal_hold_retention_policy_ids =
+        Arc::new(BTreeSet::from([submission().await.retention_policy_id]));
+    assert_eq!(
+        maintain(held, false, true).await,
+        (0, 0),
+        "a legal hold keeps it"
+    );
+    assert_eq!(
+        submission().await.status,
+        StorageTraceCorpusStatus::Accepted
+    );
+
+    assert_eq!(
+        maintain(state.clone(), true, true).await,
+        (1, 0),
+        "a dry run counts"
+    );
+    assert_eq!(
+        submission().await.status,
+        StorageTraceCorpusStatus::Accepted
+    );
+    assert_eq!(
+        retention_follow_up(
+            &fixture.owner,
+            tenant,
+            &run,
+            "retention_expired",
+            "pipeline_retention_purge"
+        )
+        .await,
+        (0, 0, live_object_refs),
+        "a dry run queues nothing"
+    );
+
+    assert_eq!(maintain(state.clone(), false, false).await, (1, 0));
+    assert_eq!(submission().await.status, StorageTraceCorpusStatus::Expired);
+    assert_eq!(
+        retention_follow_up(
+            &fixture.owner,
+            tenant,
+            &run,
+            "retention_expired",
+            "pipeline_retention_purge"
+        )
+        .await,
+        (1, 0, 0),
+        "the expiry queues the revision's invalidation, and main's expiry \
+         invalidates the object refs and deletes no payload"
+    );
+
+    assert_eq!(maintain(state.clone(), false, true).await, (0, 1));
+    let purged = submission().await;
+    assert_eq!(purged.status, StorageTraceCorpusStatus::Purged);
+    assert!(purged.purged_at.is_some());
+    assert_eq!(
+        retention_follow_up(
+            &fixture.owner,
+            tenant,
+            &run,
+            "retention_expired",
+            "pipeline_retention_purge"
+        )
+        .await,
+        (1, live_object_refs, 0),
+        "the purge queues one payload deletion per live object ref"
+    );
+    assert_eq!(
+        maintain(state, false, true).await,
+        (0, 0),
+        "a purged submission is done"
+    );
+}
+
+/// Finding 18: `main`'s rollback-flag drill leaves the database-only rows
+/// of submissions with a pipeline run (the submissions and their
+/// tombstones) out of its blocking gaps, as the DB reconciliation does, and
+/// counts them on their own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_rollback_drill_counts_database_only_pipeline_rows_apart() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let withdrawn = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    fixture
+        .base
+        .service
+        .withdraw_submission(tenant, withdrawn.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the second run");
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/admin/rollback-drill",
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({ "purpose": "pipeline rollback drill test" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["blocking_gaps"], serde_json::json!([]), "{body}");
+    assert_eq!(body["ready"], true);
+    assert_eq!(body["pipeline_db_only_submission_count"], 2);
+    assert_eq!(body["pipeline_db_only_tombstone_count"], 1);
+}
+
+/// Finding 18 and its addendum: `main`'s operational summary reads `main`'s
+/// NEAR outbox lines only, as `main`'s outbox listing does, so a pipeline
+/// payout line that failed for good neither counts in its NEAR summary nor
+/// holds its promotion gates (and the rollout-smoke readiness built from
+/// them). `main`'s reads run on the database, the only store that holds
+/// pipeline lines.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_operational_summary_leaves_a_failed_pipeline_payout_line_out() {
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let admin_token = format!("{}-admin", fixture.token);
+    let mut state = fixture.state.clone();
+    let mut tokens = (*state.tokens).clone();
+    insert_token(&mut tokens, tenant, &admin_token, TokenRole::Admin);
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    let principal = static_token_principal_ref(&fixture.token);
+    completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    assert_eq!(
+        fixture.service.process_payouts(tenant, 32).await.unwrap(),
+        1
+    );
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let failed = tx
+        .execute(
+            "UPDATE trace_near_credit_outbox SET status = 'failed'
+              WHERE tenant_id = $1 AND instrument_id IS NOT NULL",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(failed, 1, "the pipeline's payout line fails for good");
+
+    let (status, body) = route_request(
+        state,
+        "GET",
+        "/v1/admin/operational-summary",
+        auth_headers(&admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["near_credit"]["item_count"], 0, "{body}");
+    assert_eq!(body["near_credit"]["failed_count"], 0, "{body}");
+    let gates = body["promotion_gates"]["blocking_gates"]
+        .as_array()
+        .expect("the blocking gates")
+        .iter()
+        .map(|gate| gate.as_str().expect("a gate label").to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        gates
+            .iter()
+            .all(|gate| !gate.starts_with("near_credit_outbox")),
+        "{gates:?}"
+    );
+}
+
+/// Finding 18: `main`'s replay export with database replay reads leaves the
+/// submissions with a pipeline run out of its source selection (they are
+/// exported through pipeline snapshots, and their stored bodies are
+/// pipeline artifacts): the export runs, and a legacy submission is still
+/// exported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_database_replay_export_leaves_pipeline_submissions_out() {
+    let Some(mut fixture) = product_fixture().await else {
+        return;
+    };
+    {
+        let state = Arc::make_mut(&mut fixture.base.state);
+        state.db_replay_export_reads = true;
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.base.runtime.clone())));
+    }
+    let state = fixture.base.state.clone();
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let mut legacy = sample_envelope().await;
+    make_metadata_only_low_risk(&mut legacy);
+    let legacy_id = legacy.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&fixture.base.token),
+        submit_body(legacy),
+    )
+    .await
+    .expect("the legacy submission mirrors to the database");
+
+    let (status, replay) = pipeline_product_request(
+        state,
+        "POST",
+        "/v1/workers/replay-export",
+        Some(fixture.export_token.as_str()),
+        None,
+        Some(serde_json::json!({"purpose": "trace_commons_worker_replay_dataset"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    let exported = replay["items"]
+        .as_array()
+        .expect("the exported items")
+        .iter()
+        .map(|item| item["submission_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(exported, vec![serde_json::json!(legacy_id)], "{replay}");
+    assert_ne!(exported, vec![serde_json::json!(run.submission_id)]);
+}

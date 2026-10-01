@@ -139,6 +139,36 @@ const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
 /// The reason code of an index invalidation `main`'s revocation queues (Zaki
 /// review 1, round 2, finding 5).
 const PIPELINE_REVOCATION_INVALIDATION_REASON: &str = "revoked";
+
+/// What `main`'s retention maintenance did to a submission with a pipeline
+/// run (ruling RB-30; Zaki review 1, round 2, finding 18): the pipeline's
+/// half of it is `PgPipelineStore::follow_up_retention`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineRetentionAction {
+    /// `main` marks the submission `expired`, as for its expiry date.
+    Expired,
+    /// `main` marks an expired submission `purged`, as for its purge cutoff.
+    Purged,
+}
+
+impl PipelineRetentionAction {
+    /// The reason code of the index invalidation and of the end of the
+    /// submission's runs, `main`'s own lifecycle reason.
+    fn reason_code(self) -> &'static str {
+        match self {
+            Self::Expired => "retention_expired",
+            Self::Purged => "retention_purged",
+        }
+    }
+
+    /// The `pipeline_export_snapshot_items.invalidation_reason` (V106).
+    fn export_invalidation_reason(self) -> &'static str {
+        match self {
+            Self::Expired => "expired",
+            Self::Purged => "purged",
+        }
+    }
+}
 /// An index invalidation attempt that did not remove the revision, while
 /// the invalidation stays `pending` and is retried: an index outage (the
 /// index answered `Failed` or `Uncertain`; uncharged), or a charged failure
@@ -3183,6 +3213,112 @@ impl PgPipelineStore {
         Ok(invalidation_pending)
     }
 
+    /// The pipeline's half of `main`'s retention maintenance for
+    /// `submission_id` (ruling RB-30; Zaki review 1, round 2, finding 18),
+    /// in one tenant transaction, run before `main` marks the row
+    /// (`mirror_expiration_to_db` / `mirror_purge_to_db`), so a pass that
+    /// fails after it marks nothing and the next pass repeats it. For a
+    /// submission with a pipeline run, it invalidates the pipeline export
+    /// snapshots and items that hold it, under the action's reason; for a
+    /// purge, it invalidates the submission's object refs and queues one
+    /// payload deletion per live one (`delete_object_payload`, done by
+    /// `main`'s revocation-propagation worker, as for a pipeline
+    /// withdrawal); and it ends its runs' work
+    /// (`end_runs_of_inoperable_submission_on_tx`: a written or partly
+    /// written index revision is queued for invalidation, a run parked for
+    /// review is released). An expiry deletes no payload, as `main`'s
+    /// expiry deletes none. `main`'s own rows (derived records, vector
+    /// entries, export manifests) are `main`'s mirror functions' to mark.
+    /// Every write is idempotent. Lock order as the withdrawal's: the run
+    /// rows, then the submission row. Returns whether an index invalidation
+    /// of the submission's runs is pending afterwards; `false`, with nothing
+    /// written, for a submission with no pipeline run.
+    pub async fn follow_up_retention(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        action: PipelineRetentionAction,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let runs = tx
+            .query(
+                "SELECT * FROM pipeline_runs
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  ORDER BY run_id
+                  FOR UPDATE",
+                &[&tenant_id, &submission_id],
+            )
+            .await?
+            .iter()
+            .map(pipeline_run_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if runs.is_empty() {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let submission = tx
+            .query_opt(
+                "SELECT trace_id FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  FOR UPDATE",
+                &[&tenant_id, &submission_id],
+            )
+            .await?;
+        if let Some(submission) = submission.as_ref() {
+            invalidate_pipeline_exports_on_tx(
+                &tx,
+                tenant_id,
+                &[submission_id],
+                action.export_invalidation_reason(),
+            )
+            .await?;
+            if action == PipelineRetentionAction::Purged {
+                queue_pipeline_payload_deletions_on_tx(
+                    &tx,
+                    tenant_id,
+                    &BTreeMap::from([(submission_id, submission.get::<_, Uuid>("trace_id"))]),
+                    PipelinePayloadDeletion::RetentionPurge,
+                )
+                .await?;
+            }
+        }
+        Self::end_runs_of_inoperable_submission_on_tx(&tx, tenant_id, &runs, action.reason_code())
+            .await?;
+        let run_ids = runs.iter().map(|run| run.run_id).collect::<Vec<_>>();
+        let invalidation_pending: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pipeline_index_invalidations
+                     WHERE tenant_id = $1 AND run_id = ANY($2) AND state = 'pending'
+                 )",
+                &[&tenant_id, &run_ids],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(invalidation_pending)
+    }
+
+    /// The submissions of `tenant_id` that have a pipeline run: the ones
+    /// `main`'s file-driven side paths never see, since the pipeline writes
+    /// them to the database only.
+    pub async fn pipeline_submission_ids(
+        &self,
+        tenant_id: &str,
+    ) -> Result<std::collections::BTreeSet<Uuid>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT DISTINCT submission_id FROM pipeline_runs WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get::<_, Uuid>(0)).collect())
+    }
+
     /// Whether `submission_id` of `tenant_id` has a pipeline run. `main`'s
     /// gate evaluate route refuses such a submission, so the gate path never
     /// credits a trace the pipeline credits (Zaki review 1, minor item M-f).
@@ -4637,13 +4773,38 @@ async fn withdraw_pipeline_content_on_tx(
         &[&tenant_id, &submission_ids],
     )
     .await?;
+    invalidate_pipeline_exports_on_tx(tx, tenant_id, &submission_ids, "withdrawn").await?;
+    let trace_id_of = submission_ids
+        .iter()
+        .copied()
+        .zip(trace_ids.iter().copied())
+        .collect::<BTreeMap<_, _>>();
+    queue_payload_deletions_of_rows_on_tx(
+        tx,
+        tenant_id,
+        &object_rows,
+        &trace_id_of,
+        PipelinePayloadDeletion::Withdrawal,
+    )
+    .await
+}
+
+/// Invalidates the pipeline export snapshot items of `submission_ids`, under
+/// `reason` (a `pipeline_export_snapshot_items.invalidation_reason`), and
+/// every snapshot that holds one. Idempotent.
+async fn invalidate_pipeline_exports_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_ids: &[Uuid],
+    reason: &str,
+) -> Result<(), DatabaseError> {
     tx.execute(
         "UPDATE pipeline_export_snapshot_items
             SET invalidated_at = COALESCE(invalidated_at, NOW()),
-                invalidation_reason = 'withdrawn'
+                invalidation_reason = $3
           WHERE tenant_id = $1 AND submission_id = ANY($2)
             AND invalidated_at IS NULL",
-        &[&tenant_id, &submission_ids],
+        &[&tenant_id, &submission_ids, &reason],
     )
     .await?;
     tx.execute(
@@ -4662,25 +4823,90 @@ async fn withdraw_pipeline_content_on_tx(
         &[&tenant_id, &submission_ids],
     )
     .await?;
+    Ok(())
+}
+
+/// Why the pipeline queues a submission's payload deletions: each names its
+/// own idempotency key and propagation reason, so a withdrawal and a purge
+/// of one object never collapse into one item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipelinePayloadDeletion {
+    Withdrawal,
+    RetentionPurge,
+}
+
+impl PipelinePayloadDeletion {
+    fn idempotency_label(self) -> &'static str {
+        match self {
+            Self::Withdrawal => "pipeline-withdrawal-object-delete:v1",
+            Self::RetentionPurge => "pipeline-retention-purge-object-delete:v1",
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Withdrawal => "pipeline_withdrawal",
+            Self::RetentionPurge => "pipeline_retention_purge",
+        }
+    }
+}
+
+/// Invalidates the object refs of the submissions in `trace_id_of` (each
+/// mapped to its trace id) and queues one payload deletion per live one
+/// (`queue_payload_deletions_of_rows_on_tx`).
+async fn queue_pipeline_payload_deletions_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    trace_id_of: &BTreeMap<Uuid, Uuid>,
+    deletion: PipelinePayloadDeletion,
+) -> Result<(), DatabaseError> {
+    let submission_ids = trace_id_of.keys().copied().collect::<Vec<_>>();
+    let object_rows = tx
+        .query(
+            "SELECT submission_id, object_ref_id
+               FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = ANY($2)
+                AND deleted_at IS NULL
+              ORDER BY submission_id, object_ref_id",
+            &[&tenant_id, &submission_ids],
+        )
+        .await?;
+    tx.execute(
+        "UPDATE trace_object_refs
+            SET invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = ANY($2) AND invalidated_at IS NULL",
+        &[&tenant_id, &submission_ids],
+    )
+    .await?;
+    queue_payload_deletions_of_rows_on_tx(tx, tenant_id, &object_rows, trace_id_of, deletion).await
+}
+
+/// Queues one `delete_object_payload` propagation item per row of
+/// `object_rows` (`submission_id`, `object_ref_id`), done by `main`'s
+/// revocation-propagation worker. Idempotent: each item's key is derived
+/// from the deletion's kind, the submission and the object ref.
+async fn queue_payload_deletions_of_rows_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    object_rows: &[Row],
+    trace_id_of: &BTreeMap<Uuid, Uuid>,
+    deletion: PipelinePayloadDeletion,
+) -> Result<(), DatabaseError> {
     if object_rows.is_empty() {
         return Ok(());
     }
-    let trace_id_of = submission_ids
-        .iter()
-        .copied()
-        .zip(trace_ids.iter().copied())
-        .collect::<BTreeMap<_, _>>();
     let mut propagation_item_ids = Vec::with_capacity(object_rows.len());
     let mut source_submission_ids = Vec::with_capacity(object_rows.len());
     let mut item_trace_ids = Vec::with_capacity(object_rows.len());
     let mut target_jsons = Vec::with_capacity(object_rows.len());
     let mut idempotency_keys = Vec::with_capacity(object_rows.len());
-    for row in &object_rows {
+    for row in object_rows {
         let submission_id: Uuid = row.get("submission_id");
         let object_ref_id: Uuid = row.get("object_ref_id");
         let idempotency_key = sha256_prefixed(
             format!(
-                "pipeline-withdrawal-object-delete:v1:{tenant_id}:{submission_id}:{object_ref_id}"
+                "{}:{tenant_id}:{submission_id}:{object_ref_id}",
+                deletion.idempotency_label()
             )
             .as_bytes(),
         );
@@ -4705,7 +4931,7 @@ async fn withdraw_pipeline_content_on_tx(
          )
          SELECT $1, item.propagation_item_id, item.source_submission_id, item.trace_id,
                 'object_ref', item.target_json, 'delete_object_payload', 'pending',
-                item.idempotency_key, 'pipeline_withdrawal', 0, $7
+                item.idempotency_key, $8, 0, $7
            FROM unnest($2::UUID[], $3::UUID[], $4::UUID[], $5::JSONB[], $6::TEXT[])
                 AS item(
                     propagation_item_id, source_submission_id, trace_id, target_json,
@@ -4720,6 +4946,7 @@ async fn withdraw_pipeline_content_on_tx(
             &target_jsons,
             &idempotency_keys,
             &metadata_json,
+            &deletion.reason(),
         ],
     )
     .await?;

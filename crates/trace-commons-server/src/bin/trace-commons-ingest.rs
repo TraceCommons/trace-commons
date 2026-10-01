@@ -260,12 +260,12 @@ use trace_commons_server::trace_score_attestation::{
     sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore,
     PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNearPayoutControls,
     PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
-    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineReviewClaim,
-    PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome,
-    is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
+    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
+    PipelineReviewClaim, PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState,
+    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
@@ -1658,6 +1658,12 @@ struct AppState {
     /// score attestation, exports, and the administrator summaries. Present
     /// exactly when `pipeline_service` is, on the same PostgreSQL backend.
     pipeline_product: Option<Arc<PipelineProductStore>>,
+    /// The pipeline's own records on the DB mirror's PostgreSQL backend,
+    /// present whenever the DB mirror is, whether a pipeline runtime is
+    /// injected or not: `main`'s side paths that reach submissions with a
+    /// pipeline run (retention maintenance, ruling RB-30) queue the
+    /// pipeline's follow-up through it, for a runtime to process.
+    pipeline_store: Option<Arc<PgPipelineStore>>,
     /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
     /// / `pipeline_runtime_required_but_not_injected`) instead of silently
     /// running ingest without a pipeline runtime. See
@@ -3952,6 +3958,9 @@ impl AppState {
             .as_ref()
             .and(db_connections.as_ref())
             .map(|connections| Arc::new(PipelineProductStore::new(connections.postgres.clone())));
+        let pipeline_store = db_connections
+            .as_ref()
+            .map(|connections| Arc::new(PgPipelineStore::new(connections.postgres.clone())));
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
@@ -4449,6 +4458,7 @@ impl AppState {
             db_mirror,
             pipeline_service,
             pipeline_product,
+            pipeline_store,
             pipeline_runtime_required,
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
@@ -45801,7 +45811,12 @@ async fn read_trace_operational_summary(
         list_benchmark_conversion_artifacts_for_worker(state, tenant.auth()).await?;
     let benchmark_registry_outbox =
         read_benchmark_registry_outbox_items_for_admin(state, tenant.auth()).await?;
-    let near_credit_outbox = read_near_credit_outbox_items_for_admin(state, tenant.auth()).await?;
+    // Zaki review 1, round 2, finding 18: the pipeline's payout lines are
+    // the pipeline's to submit, confirm and report (its own operational
+    // summary), so `main`'s summary, and the rollout-smoke readiness built
+    // from it, read `main`'s lines only, as `main`'s outbox listing does: a
+    // failed pipeline line never holds `main`'s gates.
+    let near_credit_outbox = read_mains_near_credit_outbox_items(state, tenant.auth()).await?;
     let rollout_smoke_evidence =
         read_rollout_smoke_evidence_for_admin(state, tenant.auth()).await?;
     let revocation_propagation =
@@ -46191,6 +46206,14 @@ struct TraceRollbackDrillResponse {
     /// Submit audit rows in the pre-file-event shape, left out of the audit
     /// gap counts. Not blocking.
     legacy_submit_audit_row_count: usize,
+    /// Database submissions with a pipeline run, which the pipeline writes to
+    /// the database only, left out of `db_submissions_not_in_file_fallback`
+    /// as the DB reconciliation leaves them out (Zaki review 1, round 2,
+    /// finding 18). Not blocking.
+    pipeline_db_only_submission_count: usize,
+    /// Database tombstones of those submissions, left out of
+    /// `db_tombstones_not_in_file_fallback` the same way. Not blocking.
+    pipeline_db_only_tombstone_count: usize,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -48845,6 +48868,30 @@ async fn run_rollback_drill(
         .iter()
         .map(|record| record.submission_id)
         .collect::<BTreeSet<_>>();
+    // Zaki review 1, round 2, finding 18: the submissions with a pipeline
+    // run, and their tombstones, are in the database only, by design (Ruling
+    // F-M10). As in the DB reconciliation, they are found through their runs,
+    // left out of the two database-versus-file gaps they would fail, and
+    // counted on their own; with no pipeline runtime injected none is found,
+    // so they stay gaps (fail closed).
+    let pipeline_submission_ids = match state.pipeline_product.as_ref() {
+        Some(product) => {
+            product
+                .reconciliation_rows(&tenant.tenant_id)
+                .await
+                .context("failed to list pipeline rows for rollback drill")?
+                .submission_ids
+        }
+        None => BTreeSet::new(),
+    };
+    let pipeline_db_only_submission_count = db_submission_ids
+        .difference(&file_submission_ids)
+        .filter(|submission_id| pipeline_submission_ids.contains(submission_id))
+        .count();
+    let pipeline_db_only_tombstone_count = db_tombstone_submission_ids
+        .difference(&file_tombstone_submission_ids)
+        .filter(|submission_id| pipeline_submission_ids.contains(submission_id))
+        .count();
 
     let mut blocking_gaps = Vec::new();
     push_rollback_gap_count(
@@ -48855,7 +48902,8 @@ async fn run_rollback_drill(
     push_rollback_gap_count(
         &mut blocking_gaps,
         "db_submissions_not_in_file_fallback",
-        db_submission_ids.difference(&file_submission_ids).count(),
+        db_submission_ids.difference(&file_submission_ids).count()
+            - pipeline_db_only_submission_count,
     );
     push_rollback_gap_count(
         &mut blocking_gaps,
@@ -48879,7 +48927,8 @@ async fn run_rollback_drill(
         "db_tombstones_not_in_file_fallback",
         db_tombstone_submission_ids
             .difference(&file_tombstone_submission_ids)
-            .count(),
+            .count()
+            - pipeline_db_only_tombstone_count,
     );
 
     let active_rollout_flags = active_rollout_flags_for_rollback_drill(state, &tenant.tenant_id);
@@ -48909,6 +48958,8 @@ async fn run_rollback_drill(
         file_tombstone_count: file_tombstones.len(),
         db_tombstone_count: db_tombstones.len(),
         legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
+        pipeline_db_only_submission_count,
+        pipeline_db_only_tombstone_count,
         blocking_gaps,
         recorded_evidence: None,
     };
@@ -60648,7 +60699,22 @@ async fn read_replay_export_metadata_view(
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceCommonsMetadataView> {
     if state.db_replay_export_reads_for_tenant(&tenant.tenant_id) {
-        return read_reviewer_metadata_view_from_db(state, tenant).await;
+        // Zaki review 1, round 2, finding 18: a submission with a pipeline
+        // run is exported through pipeline snapshots, and its stored body is
+        // a pipeline artifact `main`'s replay export does not read, so it is
+        // not a replay export source.
+        let mut view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+        if let Some(store) = state.pipeline_store.as_ref() {
+            let pipeline_submission_ids = store
+                .pipeline_submission_ids(&tenant.tenant_id)
+                .await
+                .context("failed to list pipeline submissions for replay export")?;
+            view.records
+                .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+            view.derived
+                .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+        }
+        return Ok(view);
     }
 
     Ok(TraceCommonsMetadataView {
@@ -71686,6 +71752,59 @@ fn ensure_export_provenance_tenant(
     Ok(())
 }
 
+/// The submissions of `tenant` with a pipeline run, from the database, as
+/// `main`'s retention maintenance reads its file records (ruling RB-30): the
+/// ones not among `file_records`, converted the way `main`'s DB reads
+/// convert a row. Empty with no DB mirror or no pipeline store.
+async fn read_pipeline_retention_records(
+    state: &AppState,
+    tenant: &TenantAuth,
+    file_records: &[TraceCommonsSubmissionRecord],
+) -> anyhow::Result<Vec<TraceCommonsSubmissionRecord>> {
+    let (Some(db), Some(store)) = (state.db_mirror.as_ref(), state.pipeline_store.as_ref()) else {
+        return Ok(Vec::new());
+    };
+    let pipeline_submission_ids = store
+        .pipeline_submission_ids(&tenant.tenant_id)
+        .await
+        .context("failed to list pipeline submissions for retention maintenance")?;
+    if pipeline_submission_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let file_submission_ids = file_records
+        .iter()
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    db.list_trace_submissions(&tenant.tenant_id)
+        .await
+        .context("failed to read pipeline submissions for retention maintenance")?
+        .into_iter()
+        .filter(|record| {
+            pipeline_submission_ids.contains(&record.submission_id)
+                && !file_submission_ids.contains(&record.submission_id)
+        })
+        .filter_map(trace_commons_record_from_storage_submission)
+        .collect()
+}
+
+/// The pipeline's half of a retention change to a submission with a
+/// pipeline run (`PgPipelineStore::follow_up_retention`). With no pipeline
+/// store there is no pipeline row to follow up.
+async fn follow_up_pipeline_retention(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    action: PipelineRetentionAction,
+) -> anyhow::Result<()> {
+    if let Some(store) = state.pipeline_store.as_ref() {
+        store
+            .follow_up_retention(&tenant.tenant_id, submission_id, action)
+            .await
+            .context("failed to queue the pipeline follow-up of retention maintenance")?;
+    }
+    Ok(())
+}
+
 fn export_artifact_dir(root: &Path, tenant_id: &str, export_id: Uuid) -> PathBuf {
     let tenant_key = tenant_storage_key(tenant_id);
     root.join("tenants")
@@ -71804,6 +71923,54 @@ async fn run_maintenance(
         }
     }
 
+    // Ruling RB-30 (Zaki review 1, round 2, finding 18): the submissions
+    // with a pipeline run are in the database only, so the file records
+    // above never hold them. They are expired and purged here by the same
+    // rules and the same request (dry run, purge cutoff, legal holds), and
+    // marked through the same mirror functions, so every trigger of this
+    // maintenance covers them. The pipeline's own half of each change runs
+    // first (`PgPipelineStore::follow_up_retention`): it is idempotent, and a
+    // pass that fails after it has marked nothing, so the next pass repeats
+    // it. A backfill-only request is about the file records and skips them.
+    let mut pipeline_records = if backfill_only_request {
+        Vec::new()
+    } else {
+        read_pipeline_retention_records(state, tenant, &records).await?
+    };
+    for record in &mut pipeline_records {
+        ensure_retention_metadata_within_server_policy(record)?;
+        if record.is_revoked() {
+            // A revocation or a withdrawal runs the pipeline's follow-up on
+            // its own path.
+            continue;
+        }
+        if record.status == TraceCorpusStatus::Expired {
+            expired_submission_ids.insert(record.submission_id);
+            continue;
+        }
+        if record.is_expired_at(now) && !retention_policy_is_on_legal_hold(state, record)? {
+            records_marked_expired += 1;
+            expired_submission_ids.insert(record.submission_id);
+            if !request.dry_run {
+                follow_up_pipeline_retention(
+                    state,
+                    tenant,
+                    record.submission_id,
+                    PipelineRetentionAction::Expired,
+                )
+                .await?;
+                record.status = TraceCorpusStatus::Expired;
+                mirror_expiration_to_db(
+                    state,
+                    tenant,
+                    record.submission_id,
+                    Some(&mut retention_ledger),
+                )
+                .await?;
+            }
+        }
+    }
+
     let mut derived = if backfill_only_request {
         let read = read_all_derived_records_for_backfill(&state.root, &tenant.tenant_id)?;
         db_mirror_backfill_input_failures.extend(read.failures);
@@ -71866,6 +72033,43 @@ async fn run_maintenance(
                 tenant,
                 record.submission_id,
                 &deletion_counts.deleted_targets,
+                Some(&mut retention_ledger),
+            )
+            .await?;
+        }
+        // Ruling RB-30: a pipeline submission's payloads are deleted through
+        // the pipeline's follow-up (queued `delete_object_payload` items,
+        // which mark each object ref deleted when done), so `main`'s purge
+        // marks no object ref deleted here and counts no deleted file.
+        for record in &mut pipeline_records {
+            if retention_policy_is_on_legal_hold(state, record)? {
+                continue;
+            }
+            if record.status != TraceCorpusStatus::Expired
+                || record
+                    .expires_at
+                    .is_none_or(|expires_at| expires_at > purge_cutoff)
+            {
+                continue;
+            }
+            records_marked_purged += 1;
+            if request.dry_run {
+                continue;
+            }
+            follow_up_pipeline_retention(
+                state,
+                tenant,
+                record.submission_id,
+                PipelineRetentionAction::Purged,
+            )
+            .await?;
+            record.status = TraceCorpusStatus::Purged;
+            record.purged_at = Some(now);
+            mirror_purge_to_db(
+                state,
+                tenant,
+                record.submission_id,
+                &[],
                 Some(&mut retention_ledger),
             )
             .await?;

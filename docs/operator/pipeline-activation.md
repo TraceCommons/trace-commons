@@ -558,8 +558,12 @@ to NEAR.
   sees the leg's payout as `failed` with its label (for example
   `near_submit_failed`) in the run's forensic trace
   (`GET /v1/admin/pipeline/runs/{run_id}/forensic`) and in the contributor
-  status, the outbox line as `failed` in the operational summary's NEAR
-  outbox counts, and the settled credit itself unchanged. The payout stays
+  status, the outbox line as `failed` in the pipeline operational summary's
+  `near_outbox_by_state` (`GET /v1/admin/pipeline/operational-summary`), and
+  the settled credit itself unchanged. `main`'s operational summary, its
+  promotion gates, and the rollout-smoke readiness built from them read
+  `main`'s outbox lines only, as `main`'s outbox listing does, so a failed
+  pipeline line never holds them. The payout stays
   `failed`: nothing in this release takes it up again. A later release adds
   an operator retry route. A failed submit may still have reached NEAR, so
   until then check a `failed` payout's outbox line against NEAR by hand.
@@ -706,6 +710,50 @@ equal that variable times 1,000,000 (a points delta of `2.5` is
 `2500000`). The default is `0` in both places: no award, no settlement leg,
 and no ledger event. A different delta is a different package, with its own
 bundle id, and it applies only to runs bound to that package.
+
+## Retention of pipeline submissions
+
+`main`'s retention maintenance covers the submissions with a pipeline run,
+which are in the database only. Every trigger of it does: the retention
+scheduler (`TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_*`), the retention
+worker route (`POST /v1/workers/retention-maintenance`), and the admin
+maintenance route (`POST /v1/admin/maintenance`). Each run reads the tenant's
+pipeline submissions from the database and applies `main`'s rules with the
+same request:
+
+- A submission whose expiry date has passed is marked `expired`, unless its
+  retention policy is on a legal hold
+  (`TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES`). An expired submission is
+  marked `purged` only by a run with a purge cutoff (`purge_expired_before`,
+  from the request or the scheduler's setting) later than its expiry date,
+  and not while it is on a legal hold.
+- A dry run counts what it would change and changes nothing.
+- The rows are marked through `main`'s own expiry and purge writes, with
+  `main`'s lifecycle audit, invalidations, and retention ledger items, and
+  are counted in the maintenance response as `main`'s are.
+
+Before `main` marks a row, the pipeline's follow-up is queued in the
+database, in one transaction: the export snapshots that hold the submission
+are invalidated (reason `expired` or `purged`), the index invalidation of its
+runs' revisions is queued (reason `retention_expired` or `retention_purged`)
+for the pipeline worker, and a run parked in `awaiting_review` is released.
+An expiry deletes no payload, as `main`'s does not. A purge also invalidates
+the submission's object refs and queues one payload deletion per live object
+(reason `pipeline_retention_purge`) for `main`'s revocation-propagation
+worker, as a pipeline withdrawal does; the maintenance response counts no
+deleted file for it. This works with no pipeline runtime injected: a runtime
+processes the queued invalidations when it runs.
+
+`main`'s rollback-flag drill (`POST /v1/admin/rollback-drill`) leaves the
+database-only rows of pipeline submissions (the submissions and their
+tombstones) out of `db_submissions_not_in_file_fallback` and
+`db_tombstones_not_in_file_fallback`, as the DB reconciliation below does,
+and reports them as `pipeline_db_only_submission_count` and
+`pipeline_db_only_tombstone_count`, which never block. As there, they are
+found only while a pipeline runtime is injected. `main`'s replay export with
+database replay reads (`TRACE_COMMONS_DB_REPLAY_EXPORT_READS`) leaves the
+pipeline submissions out of its sources: they are exported through pipeline
+snapshots.
 
 ## DB reconciliation of a pipeline tenant
 
