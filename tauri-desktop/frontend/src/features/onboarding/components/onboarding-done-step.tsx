@@ -85,14 +85,12 @@ export function OnboardingDoneStep({
               : `Shared onboarding copy unavailable${disclosure.error ? ` (${disclosure.error.message})` : ""}. Retry loading it.`}
           </span>
           {disclosure.isPending ? null : (
-            <Button
-              type="button"
-              variant="outline"
+            <GlassButton
               disabled={disclosure.isFetching}
               onClick={() => void disclosure.refetch()}
             >
               {disclosure.isFetching ? "Retrying…" : "Retry"}
-            </Button>
+            </GlassButton>
           )}
         </div>
       )}
