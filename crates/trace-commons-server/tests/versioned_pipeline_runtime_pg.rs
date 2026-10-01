@@ -628,12 +628,12 @@ async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
 
     let observer = PgPipelineStore::new(backend.clone());
     let claim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
+    let score_claim = loop {
         let current = observer.get_run(&tenant, run_id).await.unwrap();
         if let Some(current) = current {
             if current.state == PipelineRunState::Leased && current.next_phase == Some(Phase::Score)
             {
-                break;
+                break current;
             }
         }
         assert!(
@@ -641,7 +641,15 @@ async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
             "A never claimed the Score phase"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    };
+    // PR 3's 02644027 gives each phase its own attempt budget, so the Score
+    // commit resets the count: the one attempt A's Score claim charged is
+    // read here, while A holds the lease.
+    assert_eq!(
+        score_claim.attempt_count,
+        attempt_count_before_score + 1,
+        "A's Score claim charged one attempt"
+    );
 
     // B: a second worker on the same database and tenant, polling the queue
     // the whole time A scores. It must never claim the run *for Score* while
@@ -681,10 +689,12 @@ async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
         scored.last_error_label.as_deref(),
         Some(PIPELINE_LEASE_EXPIRED_LABEL)
     );
+    // The Score phase cost exactly one charged attempt: A's claim above,
+    // with no competing claim (below) and one Score outcome. Its commit
+    // leaves Settle the whole budget.
     assert_eq!(
-        scored.attempt_count,
-        attempt_count_before_score + 1,
-        "the Score phase cost exactly one charged attempt"
+        scored.attempt_count, 0,
+        "the Score commit resets the count for Settle (PR 3, 02644027)"
     );
 
     stop_tx.send(true).ok();
