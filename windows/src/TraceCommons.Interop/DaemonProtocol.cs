@@ -667,9 +667,13 @@ public sealed class DaemonStatus
     [JsonPropertyName("paused")]
     public bool Paused { get; set; }
 
-    /// <summary>Decisions owed: the daemon's own count of pending entries.</summary>
+    /// <summary>All pending entries, whether or not a contributor decision is required.</summary>
     [JsonPropertyName("queue_depth")]
     public int QueueDepth { get; set; }
+
+    /// <summary>Unresolved decisions reported by the daemon; absent on older daemons.</summary>
+    [JsonPropertyName("decisions_owed")]
+    public int? DecisionsOwed { get; set; }
 
     /// <summary>The scopes currently granted by this contributor.</summary>
     [JsonPropertyName("consent_scopes")]

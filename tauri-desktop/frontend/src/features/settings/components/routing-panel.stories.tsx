@@ -28,6 +28,7 @@ export const Connected: Story = {
         consent_scopes: [],
         paused: false,
         queue_depth: 0,
+        decisions_owed: 0,
         routing: {
           state: "rows_seen",
           derived: false,

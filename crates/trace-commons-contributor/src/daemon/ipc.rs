@@ -1480,16 +1480,14 @@ impl DaemonShared {
         (previous != has_rows).then_some(has_rows)
     }
 
-    /// Publish `status_changed` when a policy change moved
+    /// Publish `status_changed` when a policy or Scrub check change moved
     /// `status.decisions_owed` away from `before` (K6).
     ///
     /// A policy change -- `set_project_mode`, the watcher arming a new
-    /// project under the grant or recording what was on disk at an arming,
-    /// a switch of the Scrub check -- can change the badge without touching
-    /// the queue, so no `queue_changed` follows it, and a shell that refreshes
+    /// project under the grant -- can change the badge without touching the
+    /// queue, so no `queue_changed` follows it, and a shell that refreshes
     /// status only on `queue_changed` would keep drawing the old count.
-    /// Takes the settings lock, then the policy lock, then the queue lock,
-    /// one at a time for settings: call it with none of them held.
+    /// Reads settings, then takes policy and queue: call with none held.
     pub(crate) fn publish_if_decisions_owed_changed(&self, before: usize) {
         if self.decisions_owed_value() != before {
             self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
@@ -1611,10 +1609,8 @@ impl DaemonShared {
         let automatic_contribution_held = self.gate_held_value();
         // Before the queue lock: it takes the queue lock itself.
         let witness_capacity = self.witness_capacity();
-        // Before the policy and queue locks, and released straight away: the
-        // Manual Scrub check moves `decisions_owed`, and no settings guard
-        // is ever held across the two below.
-        let scrub_check = self.scrub_check();
+        // Snapshot settings without nesting its lock under policy or queue.
+        let scrub_check = self.settings.lock().expect("settings lock").scrub_check;
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -1636,10 +1632,9 @@ impl DaemonShared {
             // need a decision from this person. Unlike `queue_depth`, this
             // excludes armed folders' `Pending` entries that will go out
             // unattended once they settle or the gate clears -- "armed
-            // folders never move it" -- except the kinds that still need a
-            // person: `held_for_review`, everything under the Manual Scrub
-            // check, `returned_from_keep`, and a grant's or an arming from
-            // now's hold-back. See `queue::decisions_owed`. `queue_depth` is kept unchanged
+            // folders never move it" -- unless Manual Scrub check, a review
+            // hold, undo Keep, or a backlog hold still requires a person.
+            // See `queue::decisions_owed`. `queue_depth` is kept unchanged
             // for compatibility; do not derive it from this field.
             "decisions_owed": decisions_owed,
             "next_digest_at": self.next_digest_at(now),
@@ -1743,20 +1738,13 @@ impl DaemonShared {
     /// The `decisions_owed` count of [`Self::status_value`] (K6), on its own.
     /// See [`super::queue::decisions_owed`] for the exact rule; this only
     /// takes the locks in the order every other status helper above does:
-    /// policy, then queue. For a caller comparing the count across a policy
+    /// settings (released), then policy and queue. For a caller comparing the count across a policy
     /// change (see [`Self::publish_if_decisions_owed_changed`]).
     pub(crate) fn decisions_owed_value(&self) -> usize {
-        let scrub_check = self.scrub_check();
+        let scrub_check = self.settings.lock().expect("settings lock").scrub_check;
         let policy = self.policy.lock().expect("policy lock");
         let queue = self.queue.lock().expect("queue lock");
         super::queue::decisions_owed(&queue, &policy, scrub_check)
-    }
-
-    /// The Scrub check in force, read under a settings guard that is
-    /// released before this returns, so a caller can go on to take the
-    /// policy and queue locks with no settings guard held.
-    fn scrub_check(&self) -> super::settings::ScrubCheck {
-        self.settings.lock().expect("settings lock").scrub_check
     }
 
     /// The `automatic_contribution_held` object of [`Self::status_value`].
@@ -3178,9 +3166,9 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     //   about, and including it would inflate "27" with sessions no
     //   preview-then-decide flow has touched.
     //
-    // Deliberately not yet shared with K6's `queue::decisions_owed` (#1132),
-    // which is not on main: once both land, the two should share one
-    // predicate. Tracked as a follow-up on #1129.
+    // This is not K6's decisions-owed badge: its copy promises previewed
+    // Ask-me sessions only, while the badge also includes unpreviewed and
+    // armed-but-human-held sessions. Keep the two contracts distinct.
     let unpurposed_traces = queue
         .pending()
         .iter()
@@ -3919,10 +3907,6 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(persisted) = crate::daemon::settings::DaemonSettings::load(&shared.store) else {
         return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
     };
-    // The badge before the change, taken before the settings lock below
-    // (it reads the setting itself): a switch of the Scrub check moves it
-    // with or without a queue change -- under Manual an armed folder's
-    // waiting sessions all need a person -- so compare across it (K6).
     let decisions_owed_before = shared.decisions_owed_value();
     let mut settings = shared.settings.lock().expect("settings lock");
     // Advance lifecycle consent only after this candidate is persisted.
@@ -3998,6 +3982,9 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
                 }
                 value["scrub_check_returned_to_waiting"] = serde_json::Value::from(returned);
             }
+            // Manual can make already-pending armed sessions require a
+            // person without changing a queue row. Switching back can remove
+            // that obligation too. Neither transition may leave badges stale.
             shared.publish_if_decisions_owed_changed(decisions_owed_before);
             add_admission_setting(shared, &mut value);
             Response::ok(req.id, value)
@@ -9212,116 +9199,114 @@ mod tests {
         );
     }
 
-    /// K6 review: arming a folder with an entry waiting moves the badge
+    #[test]
+    fn manual_scrub_check_counts_armed_pending_decisions_without_changing_queue_depth() {
+        let s = shared();
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/k6manual", ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        let pending = seed_entry(&s, "/tmp/k6manual");
+        let kept = seed_entry(&s, "/tmp/k6manual");
+        s.queue.lock().unwrap().keep(kept).unwrap();
+        s.settings.lock().unwrap().scrub_check = super::super::settings::ScrubCheck::Manual;
+
+        let status = s.status_value();
+        assert_eq!(status["queue_depth"], 1);
+        assert_eq!(
+            status["decisions_owed"], 1,
+            "Manual requires a person even in an armed folder"
+        );
+        assert_eq!(s.decisions_owed_value(), 1);
+        assert!(
+            s.queue
+                .lock()
+                .unwrap()
+                .get(pending)
+                .unwrap()
+                .reason_label
+                .is_none(),
+            "new Manual-mode pending sessions have no hold label"
+        );
+    }
+
+    #[test]
+    fn switching_scrub_check_publishes_badge_changes_even_without_a_queue_transition() {
+        let s = shared();
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/k6toggle", ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        seed_entry(&s, "/tmp/k6toggle");
+        assert_eq!(s.decisions_owed_value(), 0);
+        let mut rx = s.events.subscribe();
+
+        for (mode, expected) in [("manual", 1), ("automatic", 0)] {
+            let response = handle_set_settings(
+                &s,
+                &req("set_settings", serde_json::json!({"scrub_check": mode})),
+            );
+            assert!(response.error.is_none(), "{:?}", response.error);
+            let mut saw_status = false;
+            while let Ok(event) = rx.try_recv() {
+                saw_status |= event.event == EVENT_STATUS_CHANGED;
+                assert_ne!(
+                    event.event, EVENT_QUEUE_CHANGED,
+                    "the row was already pending"
+                );
+            }
+            assert!(
+                saw_status,
+                "{mode} changes the badge without changing the queue"
+            );
+            assert_eq!(s.status_value()["decisions_owed"], expected);
+            assert_eq!(s.decisions_owed_value(), expected);
+        }
+    }
+
+    /// K6 review: explicitly arming a folder including backlog moves the badge
     /// (1 -> 0) without any queue change, so `status_changed` must follow,
     /// or a shell refreshing status only on `queue_changed` keeps the old
     /// count.
-    ///
-    /// Armed with `include_backlog`, so the waiting entry is the folder's to
-    /// send. The default arming is from now (#1134), which leaves that entry
-    /// waiting for the contributor: see
-    /// `arming_from_now_leaves_the_waiting_backlog_on_the_badge`.
     #[test]
     fn arming_a_folder_with_a_waiting_entry_publishes_status_changed() {
         let key = "/tmp/k6arm-publishes";
         let s = enrolled_shared();
         seed_entry_with_eligibility(&s, key, None);
         assert_eq!(s.decisions_owed_value(), 1);
-        let mut rx = s.events.subscribe();
-
-        let r = handle_set_project_mode(
-            &s,
-            &req(
-                "set_project_mode",
-                serde_json::json!({
-                    "project_key": key,
-                    "mode": "auto_upload",
-                    "include_backlog": true,
-                }),
-            ),
-        );
-        assert!(r.error.is_none(), "{:?}", r.error);
-        assert_eq!(s.decisions_owed_value(), 0);
-        let mut saw_status = false;
-        while let Ok(event) = rx.try_recv() {
-            saw_status |= event.event == EVENT_STATUS_CHANGED;
-        }
-        assert!(saw_status, "the badge moved; status_changed must say so");
-    }
-
-    /// The K6 follow-up for #1134: arming from now (the default) does not
-    /// send what was already waiting -- that backlog waits for the
-    /// contributor -- so it stays on the badge rather than vanishing from it
-    /// while nothing will ever send it on its own.
-    #[test]
-    fn arming_from_now_leaves_the_waiting_backlog_on_the_badge() {
-        let key = "/tmp/k6arm-from-now";
-        let s = enrolled_shared();
-        seed_entry_with_eligibility(&s, key, None);
-        assert_eq!(s.decisions_owed_value(), 1);
-
-        let r = handle_set_project_mode(
+        let from_now = handle_set_project_mode(
             &s,
             &req(
                 "set_project_mode",
                 serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
             ),
         );
-        assert!(r.error.is_none(), "{:?}", r.error);
-        assert_eq!(r.result.as_ref().unwrap()["from_now"], true);
+        assert!(from_now.error.is_none(), "{:?}", from_now.error);
+        assert_eq!(from_now.result.unwrap()["from_now"], true);
         assert_eq!(
             s.decisions_owed_value(),
             1,
-            "the backlog still waits for a person"
+            "default arming preserves the backlog decision"
         );
-    }
+        let mut rx = s.events.subscribe();
 
-    /// The Manual Scrub check moves the badge with no queue change (K6
-    /// follow-up of #1132): an armed folder's waiting session asks nobody
-    /// under Automatic, and needs a person under Manual. `status` reports it,
-    /// and the switch each way publishes `status_changed`, since a shell
-    /// that refreshes only on `queue_changed` would otherwise keep the old
-    /// count.
-    #[test]
-    fn switching_the_scrub_check_moves_decisions_owed_and_publishes_status_changed() {
-        let key = "/tmp/k6-scrub-check";
-        let s = enrolled_shared();
-        seed_entry_with_eligibility(&s, key, None);
-        // With its backlog, so the waiting entry is the folder's to send
-        // under Automatic.
         let r = handle_set_project_mode(
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({
-                    "project_key": key,
-                    "mode": "auto_upload",
-                    "include_backlog": true,
-                }),
+                serde_json::json!({ "project_key": key, "mode": "auto_upload", "include_backlog": true }),
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
-        assert_eq!(s.status_value()["decisions_owed"], 0, "armed: asks nobody");
-
-        for (mode, owed) in [("manual", 1), ("automatic", 0)] {
-            let mut rx = s.events.subscribe();
-            let r = handle_request(
-                &s,
-                &req("set_settings", serde_json::json!({ "scrub_check": mode })),
-            );
-            assert!(r.error.is_none(), "{:?}", r.error);
-            let status = s.status_value();
-            assert_eq!(status["decisions_owed"], owed, "{mode}: {status}");
-            assert_eq!(status["queue_depth"], 1, "{mode}");
-            let mut saw_status = false;
-            while let Ok(event) = rx.try_recv() {
-                saw_status |= event.event == EVENT_STATUS_CHANGED;
-            }
-            assert!(
-                saw_status,
-                "{mode}: the badge moved; status_changed must say so"
-            );
+        assert_eq!(r.result.unwrap()["from_now"], false);
+        assert_eq!(s.decisions_owed_value(), 0);
+        let mut saw_status = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_status |= event.event == EVENT_STATUS_CHANGED;
         }
+        assert!(saw_status, "the badge moved; status_changed must say so");
     }
 
     /// And a policy change that leaves the badge where it was publishes no

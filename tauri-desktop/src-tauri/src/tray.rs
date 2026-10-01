@@ -27,7 +27,7 @@ struct WeeklySummary {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TraySnapshot {
-    decisions_owed: usize,
+    decisions_owed: Option<usize>,
     paused: bool,
     projects: Vec<ProjectSummary>,
     private_inference_state: Option<String>,
@@ -66,45 +66,35 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// The tray's count: the daemon's `status.decisions_owed` (K6), never the
-/// length of `list_pending`, which also lists an armed folder's sessions
-/// that will go out on their own. Only the daemon knows which pending
-/// entries need a person (`queue::decisions_owed`). A daemon that predates
-/// the field falls back to the pending list, as before.
-fn decisions_owed(status: &Value, pending_len: usize) -> usize {
-    status
-        .get("decisions_owed")
-        .and_then(Value::as_u64)
-        .and_then(|count| usize::try_from(count).ok())
-        .unwrap_or(pending_len)
-}
-
 fn read_snapshot(state: &AppState) -> Option<TraySnapshot> {
     let daemon = state.optional_daemon().ok().flatten()?;
-    let status = call_daemon_blocking(daemon.clone(), "status", serde_json::json!({})).ok()?;
-    let pending =
-        call_daemon_blocking(daemon.clone(), "list_pending", serde_json::json!({})).ok()?;
+    read_snapshot_with(|method| {
+        call_daemon_blocking(daemon.clone(), method, serde_json::json!({})).ok()
+    })
+}
+
+fn read_snapshot_with(mut call: impl FnMut(&str) -> Option<Value>) -> Option<TraySnapshot> {
+    let status = call("status")?;
+    let pending = call("list_pending")?;
     let entries = pending.get("pending")?.as_array()?;
-    let weekly = call_daemon_blocking(daemon, "history_rollup", serde_json::json!({}))
-        .ok()
-        .and_then(|rollup| {
-            let week = rollup.get("week")?;
-            Some(WeeklySummary {
-                // submitted is the macOS menu's "contributed" count: it
-                // records bytes sent while a final acceptance verdict may
-                // still be pending.
-                contributed: week
-                    .get("submitted")
-                    .and_then(Value::as_u64)
-                    .and_then(|count| usize::try_from(count).ok())
-                    .unwrap_or_default(),
-                held: week
-                    .get("quarantined")
-                    .and_then(Value::as_u64)
-                    .and_then(|count| usize::try_from(count).ok())
-                    .unwrap_or_default(),
-            })
-        });
+    let weekly = call("history_rollup").and_then(|rollup| {
+        let week = rollup.get("week")?;
+        Some(WeeklySummary {
+            // submitted is the macOS menu's "contributed" count: it
+            // records bytes sent while a final acceptance verdict may
+            // still be pending.
+            contributed: week
+                .get("submitted")
+                .and_then(Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok())
+                .unwrap_or_default(),
+            held: week
+                .get("quarantined")
+                .and_then(Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok())
+                .unwrap_or_default(),
+        })
+    });
     let mut grouped = BTreeMap::<String, (usize, u64)>::new();
     for entry in entries {
         let label = safe_label(entry.get("project_label"));
@@ -125,7 +115,10 @@ fn read_snapshot(state: &AppState) -> Option<TraySnapshot> {
         })
         .collect();
     Some(TraySnapshot {
-        decisions_owed: decisions_owed(&status, entries.len()),
+        decisions_owed: status
+            .get("decisions_owed")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok()),
         paused: status
             .get("paused")
             .and_then(Value::as_bool)
@@ -140,17 +133,21 @@ fn read_snapshot(state: &AppState) -> Option<TraySnapshot> {
     })
 }
 
+fn decisions_label(snapshot: &TraySnapshot) -> String {
+    match (snapshot.paused, snapshot.decisions_owed) {
+        (true, Some(count)) => format!("Watcher paused · {count} waiting"),
+        (true, None) => "Watcher paused · decisions unavailable".to_owned(),
+        (false, Some(0)) => "Nothing waiting".to_owned(),
+        (false, Some(count)) => format!("{count} decisions waiting"),
+        (false, None) => "Decisions unavailable".to_owned(),
+    }
+}
+
 fn tray_menu<R: TauriRuntime, M: Manager<R>>(
     manager: &M,
     snapshot: &TraySnapshot,
 ) -> tauri::Result<Menu<R>> {
-    let queue_label = if snapshot.paused {
-        format!("Watcher paused · {} waiting", snapshot.decisions_owed)
-    } else if snapshot.decisions_owed == 0 {
-        "Nothing waiting".to_owned()
-    } else {
-        format!("{} decisions waiting", snapshot.decisions_owed)
-    };
+    let queue_label = decisions_label(snapshot);
     let mut builder = MenuBuilder::new(manager).text("review", queue_label);
     for (index, project) in snapshot.projects.iter().take(8).enumerate() {
         builder = builder.text(
@@ -336,10 +333,10 @@ pub(crate) fn start_tray_refresh<R: TauriRuntime>(app: AppHandle<R>) {
                 if let (Some(tray), Ok(menu)) = (app.tray_by_id("main"), tray_menu(&app, &snapshot))
                 {
                     let _ = tray.set_menu(Some(menu));
-                    let tooltip = if snapshot.decisions_owed == 0 {
-                        "Trace Commons · nothing waiting"
-                    } else {
-                        "Trace Commons · review waiting sessions"
+                    let tooltip = match snapshot.decisions_owed {
+                        Some(0) => "Trace Commons · nothing waiting",
+                        Some(_) => "Trace Commons · review waiting sessions",
+                        None => "Trace Commons · decisions unavailable",
                     };
                     let _ = tray.set_tooltip(Some(tooltip));
                 }
@@ -354,14 +351,58 @@ pub(crate) fn start_tray_refresh<R: TauriRuntime>(app: AppHandle<R>) {
 mod tests {
     use trace_commons_contributor::private_inference_copy::{DESTINATION, TRAY_TURN_OFF};
 
-    use super::{decisions_owed, private_ai_tray_items};
+    use super::{TraySnapshot, decisions_label, private_ai_tray_items, read_snapshot_with};
+
+    fn snapshot(status: serde_json::Value) -> super::TraySnapshot {
+        read_snapshot_with(|method| match method {
+            "status" => Some(status.clone()),
+            "list_pending" => Some(serde_json::json!({ "pending": [
+                {"project_label": "Project", "size_bytes": 12},
+                {"project_label": "Project", "size_bytes": 8}
+            ] })),
+            "history_rollup" => None,
+            _ => panic!("unexpected daemon read"),
+        })
+        .unwrap()
+    }
 
     #[test]
-    fn tray_counts_the_daemons_decisions_owed_not_the_pending_list() {
-        let status = serde_json::json!({ "queue_depth": 3, "decisions_owed": 1 });
-        assert_eq!(decisions_owed(&status, 3), 1);
-        let older = serde_json::json!({ "queue_depth": 3 });
-        assert_eq!(decisions_owed(&older, 3), 3, "an older daemon: the list");
+    fn tray_uses_daemon_decisions_without_changing_reviewable_project_counts() {
+        let value = snapshot(serde_json::json!({"decisions_owed": 4}));
+        assert_eq!(value.decisions_owed, Some(4));
+        assert_eq!(value.projects[0].count, 2);
+        assert_eq!(value.projects[0].size_bytes, 20);
+        assert_eq!(
+            snapshot(serde_json::json!({"decisions_owed": 0})).decisions_owed,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn tray_does_not_substitute_reviewable_rows_for_an_unavailable_count() {
+        for status in [
+            serde_json::json!({}),
+            serde_json::json!({"decisions_owed": null}),
+            serde_json::json!({"decisions_owed": -1}),
+            serde_json::json!({"decisions_owed": "4"}),
+        ] {
+            assert_eq!(snapshot(status).decisions_owed, None);
+        }
+    }
+
+    #[test]
+    fn tray_names_missing_decisions_as_unavailable_even_while_paused() {
+        let mut snapshot = TraySnapshot::default();
+        assert_eq!(decisions_label(&snapshot), "Decisions unavailable");
+        snapshot.paused = true;
+        assert_eq!(
+            decisions_label(&snapshot),
+            "Watcher paused · decisions unavailable"
+        );
+        snapshot.decisions_owed = Some(0);
+        assert_eq!(decisions_label(&snapshot), "Watcher paused · 0 waiting");
+        snapshot.paused = false;
+        assert_eq!(decisions_label(&snapshot), "Nothing waiting");
     }
 
     #[test]

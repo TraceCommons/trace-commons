@@ -251,14 +251,8 @@ struct DaemonStatus: Decodable, Equatable {
     var consentScopes: [String]
     let paused: Bool
     let queueDepth: Int
-    /// `status.decisions_owed` (K6): the badge's count, the `Pending`
-    /// entries that actually need this person -- not `queueDepth`, which
-    /// also counts an armed folder's sessions that will go on their own.
-    /// The daemon's rule (`queue::decisions_owed`) knows the Scrub check
-    /// setting and the holds a shell cannot see from a row.
-    ///
-    /// `nil` from a daemon that predates the field; `AppModel.decisionsOwed`
-    /// falls back to the waiting list then.
+    /// The daemon's K6 count, never inferred from a pending list or queue
+    /// depth. Older daemons omit it, which means unavailable, not zero.
     let decisionsOwed: Int?
     let nextDigestAt: Date?
     let health: DaemonHealth

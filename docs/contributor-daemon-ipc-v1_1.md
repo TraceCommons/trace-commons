@@ -743,62 +743,54 @@ credit," and "armed folders never move it."
 
 `queue_depth` is `list_pending`'s length, unchanged for compatibility: every
 `Pending` entry, whatever folder it is in. `decisions_owed` excludes a
-`Pending` entry sitting in an armed (`auto_upload`) folder, because that
+`Pending` entry sitting in an armed (`auto_upload`) folder with Automatic
+Scrub check, because that
 entry is going to be sent unattended once it settles (see
 `eligibility::ARMED_SETTLE_SECS`) or once the automatic-contribution gate
 clears (`automatic_contribution_held` above) -- the design never asks about
 either, so armed folders must not move the badge whether they are merely
 unsettled or gate-held.
 
-The rule is "would anything move this entry without a person?", asked the
-way the watcher's unattended approval asks it, so the badge and the watcher
-cannot disagree. These count even inside an armed folder, because they do
-need a person:
+These entries count even inside an armed folder, because they do need a
+person:
 
+- every pending entry when Scrub check is **Manual**, including newly
+  discovered entries with no hold label;
 - an entry `held_for_review` -- revoked for a reason in
-  `REASONS_NEEDING_A_PERSON` that no unattended re-approval can satisfy,
-  including the Automatic Scrub check's `second-look-review-required` hold;
-- every `Pending` entry while `scrub_check` is `manual`: the watcher approves
-  nothing on anyone's behalf then, so each waits for a person -- the ones it
-  left `Pending`, and the unattended approvals the switch to Manual returned
-  to waiting under `scrub-check-manual`. Under `automatic`, an entry still
-  labelled `scrub-check-manual` does not count: the watcher re-approves it
-  and it goes back through the Automatic check;
-- an entry `returned-from-keep` (#1134): the contributor undid a "Keep on
-  this Mac", and that is never approved on their behalf;
-- a session held back from unattended approval in the folder: a pre-grant
-  session the automatic grant is holding back (`holds_back_unattended`), or
-  one on disk when the contributor armed the folder from now
-  (`holds_back_from_arming_at_send`, #1134). Until a full pass has recorded
-  what was on disk for an arming from now, that hold covers every session in
-  the folder, so they all count until the next full pass records it.
+  `REASONS_NEEDING_A_PERSON` that no unattended re-approval can satisfy;
+- an entry returned by undoing **Keep on this Mac**: undo restores a
+  personal decision, never unattended approval;
+- a session held back by the automatic grant or **arm from now**
+  (`waits_for_a_person_at_send`): backlog waits for a person rather than
+  being swept into the arming. A kept entry itself is not pending and does
+  not count.
 
 A `Pending` entry in an `ignore` folder does not count (setting `ignore`
 refuses what was waiting, so one there is only a transient, and the
 contributor has already said "never offer these"), unless it is
-`held_for_review`. Only `notify_only` ("Ask me") counts every `Pending`
-entry.
+`held_for_review` or returned from Keep. Manual Scrub check does not override
+Ignore. `notify_only` ("Ask me") counts every `Pending` entry.
 
 Computed fresh on every `status` (and therefore on `snapshot`, since
-`subscribe` sends `status` inside it) from the queue and the policy file, the
+`subscribe` sends `status` inside it) from the queue, policy and Scrub check
+setting, the
 same way `witness_capacity` is: never a second stored counter that could
 disagree with the rows it counts. `decisions_owed` and `queue_depth` are read
 under the same queue lock, so one `status` never pairs two different queues.
-The single function behind it, `queue::decisions_owed(queue, policy,
-scrub_check)`, is written around one small predicate for exactly this
-reason: a later state that must also count, or must not, extends that
-predicate rather than growing a second badge-counting path elsewhere.
+The single function behind it, `queue::decisions_owed(queue, policy, scrub_check)`, is
+written around one small predicate for exactly this reason: a later state
+that must also count, or must not, extends that predicate rather than
+growing a second badge-counting path elsewhere. Desktop shells consume this
+field directly, never `queue_depth` or `list_pending` length. When connecting
+to an older daemon that omits it, they show an unavailable count rather than
+inventing a zero or reconstructing the daemon's policy locally.
 
-A policy or settings change can move this count without changing the queue:
-arming a folder with entries waiting (`set_project_mode`), the watcher arming
-a newly discovered project under the automatic grant or recording what was
-on disk for an arming from now, or switching `scrub_check` in
-`set_settings`. When one does, the daemon publishes `status_changed`, so a
-shell that refreshes status only on `queue_changed` does not keep the old
-badge.
-
-Shells draw their badge from this field, not from `list_pending`'s length
-or `queue_depth`: only the daemon knows which pending entries need a person.
+A policy change can move this count without changing the queue: arming a
+folder with entries waiting (`set_project_mode`), or the watcher arming a
+newly discovered project under the automatic grant. Switching Scrub check
+can also move it without changing an already-pending entry. When one does, the daemon
+publishes `status_changed`, so a shell that refreshes status only on
+`queue_changed` does not keep the old badge.
 
 #### `routing`
 
@@ -1886,9 +1878,9 @@ decided." It is the number of queue entries that are, all three:
   entry) -- "scrubbed", in the design's word. An entry nobody has opened a
   preview for has not been through the redaction pass this count is about.
 
-A follow-up will share one predicate between this count and K6's
-`status.decisions_owed` (#1132) once both have landed; they differ today
-(this one is Ask-me only and requires a preview), and neither changes the
+This differs intentionally from K6's `status.decisions_owed`: the upsell
+promises previewed Ask-me sessions only, while the badge includes unpreviewed
+sessions and armed sessions that require a person. Neither changes the
 other's number.
 
 Like `pending_count` and `contributable_count`, this is a plain count with no
