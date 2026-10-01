@@ -10254,6 +10254,36 @@ fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
     unsafe { std::env::remove_var(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS) };
 }
 
+/// Ruling F-I2 and multi-lens review L5-1: startup reads
+/// `TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS` for the pipeline only when
+/// a pipeline runtime is assembled. With no pipeline, a value `main` would
+/// refuse does not stop startup (`main` reads it only in its feature-gated
+/// enclave gate builders), and `main`'s default stands in. With a pipeline,
+/// the same value is refused, and a valid one is the threshold handed to
+/// the runtime.
+#[test]
+fn the_embed_insert_threshold_is_read_only_for_an_assembled_pipeline() {
+    // SAFETY: env mutation in tests is OK here -- no other test in this
+    // suite reads this variable (only startup and `main`'s feature-gated
+    // gate builders do, and no test calls either).
+    unsafe { std::env::set_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS, "0.05") };
+    assert_eq!(
+        pipeline_embed_insert_novelty_micros_from_env(false)
+            .expect("no pipeline: the threshold is not read"),
+        TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS as u64
+    );
+    pipeline_embed_insert_novelty_micros_from_env(true)
+        .expect_err("a pipeline runtime refuses a threshold that is not an integer");
+
+    unsafe { std::env::set_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS, "120000") };
+    assert_eq!(
+        pipeline_embed_insert_novelty_micros_from_env(true).expect("an integer is read"),
+        120_000
+    );
+
+    unsafe { std::env::remove_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS) };
+}
+
 #[test]
 fn pipeline_receipt_tenants_require_an_injected_runtime() {
     let gates = TraceTenantRolloutGates::for_feature(

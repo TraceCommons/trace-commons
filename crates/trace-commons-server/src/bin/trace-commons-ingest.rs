@@ -3927,10 +3927,8 @@ impl AppState {
             env_truthy(TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH);
         // Zaki review 1, round 2, finding 14: `main`'s own index-insert
         // threshold, with `main`'s default.
-        let pipeline_embed_insert_novelty_micros = parse_usize_env(
-            TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS,
-            TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS,
-        )? as u64;
+        let pipeline_embed_insert_novelty_micros =
+            pipeline_embed_insert_novelty_micros_from_env(pipeline_runtime_assembler.is_some())?;
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
@@ -6681,6 +6679,25 @@ fn pipeline_near_confirmation_interval_from_env(
         ));
     }
     parse_near_credit_outbox_scheduler_interval_from_env()
+}
+
+/// `main`'s index-insert threshold for an assembled pipeline runtime's
+/// compatibility bundle (Zaki review 1, round 2, finding 14). `main` reads
+/// `TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS` only in its feature-gated
+/// enclave gate builders, so it is read here only when a pipeline runtime is
+/// assembled (Ruling F-I2, multi-lens review L5-1): with no pipeline, a value
+/// `main` would refuse does not stop startup, and `main`'s default stands in
+/// for it.
+fn pipeline_embed_insert_novelty_micros_from_env(
+    pipeline_runtime_assembled: bool,
+) -> anyhow::Result<u64> {
+    if !pipeline_runtime_assembled {
+        return Ok(TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS as u64);
+    }
+    Ok(parse_usize_env(
+        TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS,
+        TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS,
+    )? as u64)
 }
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()
