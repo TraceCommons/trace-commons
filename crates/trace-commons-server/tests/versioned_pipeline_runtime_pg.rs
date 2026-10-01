@@ -27779,6 +27779,144 @@ async fn the_sweep_keeps_a_no_hash_row_whose_key_names_another_object() {
     );
 }
 
+/// Inserts `kept` due, no-hash attempt rows for `run_id` whose keys name no
+/// object the store derives for them (so the sweep keeps each, as
+/// `pipeline_attempt_sweep_key_mismatch`), oldest first, then one due
+/// no-hash row at its own derived key, with its object stored there, behind
+/// them (a later `cleanup_after`). Returns that object's receipt.
+async fn kept_rows_then_a_deletable_one(
+    backend: &Arc<PgBackend>,
+    artifacts: &Arc<dyn TraceArtifactStore>,
+    tenant: &str,
+    run_id: uuid::Uuid,
+    kept: usize,
+) -> EncryptedTraceArtifactReceipt {
+    let tenant_ref = pipeline_tenant_storage_ref(tenant);
+    let lease_token = uuid::Uuid::new_v4();
+    let deletable = artifacts
+        .put_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &pipeline_attempt_object_id("index-command", run_id, lease_token),
+            &serde_json::to_vec(&serde_json::json!({ "sweep_paging_test": true })).unwrap(),
+        )
+        .unwrap();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    for index in 0..kept {
+        let key = format!("kept-object-{index}");
+        let age_seconds = 600 - index as i32;
+        tx.execute(
+            "INSERT INTO pipeline_attempt_artifacts (
+                 tenant_id, run_id, lease_token, artifact, object_key,
+                 ciphertext_sha256, cleanup_after
+             ) VALUES ($1, $2, $3, 'index-command', $4, NULL,
+                       NOW() - make_interval(secs => $5))",
+            &[
+                &tenant,
+                &run_id,
+                &uuid::Uuid::new_v4(),
+                &key,
+                &f64::from(age_seconds),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    tx.execute(
+        "INSERT INTO pipeline_attempt_artifacts (
+             tenant_id, run_id, lease_token, artifact, object_key,
+             ciphertext_sha256, cleanup_after
+         ) VALUES ($1, $2, $3, 'index-command', $4, NULL, NOW() - INTERVAL '1 second')",
+        &[&tenant, &run_id, &lease_token, &deletable.object_key],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    deletable
+}
+
+/// How many of `run_id`'s `staged` attempt rows remain, and whether the
+/// object of `receipt` is still stored.
+async fn staged_rows_and_presence(
+    backend: &Arc<PgBackend>,
+    artifacts: &Arc<dyn TraceArtifactStore>,
+    tenant: &str,
+    run_id: uuid::Uuid,
+    receipt: &EncryptedTraceArtifactReceipt,
+) -> (usize, Option<bool>) {
+    let staged = attempt_artifact_rows_with_hashes(backend, tenant, run_id)
+        .await
+        .into_iter()
+        .filter(|(_, state, ..)| state == "staged")
+        .count();
+    let present = artifacts
+        .artifact_present_by_object_key(
+            pipeline_tenant_storage_ref(tenant).as_str(),
+            TraceArtifactKind::VectorPayload,
+            &receipt.object_key,
+            &receipt.ciphertext_sha256,
+        )
+        .unwrap();
+    (staged, present)
+}
+
+/// Wave 2 (follow-up review, m2): rows the sweep keeps no longer hold the
+/// head of a tenant's queue. With a limit of 2, three kept rows come first
+/// and a deletable row comes behind them; one pass goes on past the kept
+/// rows (a keyset cursor, a page at a time) and deletes the row behind
+/// them, with its object. A pass examines at most
+/// `PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times its limit: with a
+/// limit of 1 and four kept rows ahead, it reaches the bound first.
+#[tokio::test]
+async fn the_sweep_goes_on_past_rows_it_keeps() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(true),
+        None,
+    )
+    .await;
+
+    let tenant = format!("sweep-paging-{}", uuid::Uuid::new_v4());
+    let run_id = run_past_review(&service, &tenant).await.run_id;
+    let deletable = kept_rows_then_a_deletable_one(&backend, &artifacts, &tenant, run_id, 3).await;
+    assert_eq!(
+        staged_rows_and_presence(&backend, &artifacts, &tenant, run_id, &deletable).await,
+        (4, Some(true))
+    );
+    assert_eq!(
+        service.sweep_attempt_artifacts(&tenant, 2).await.unwrap(),
+        1,
+        "the pass goes on past the three kept rows to the one behind them"
+    );
+    assert_eq!(
+        staged_rows_and_presence(&backend, &artifacts, &tenant, run_id, &deletable).await,
+        (3, Some(false)),
+        "the row behind the kept rows is deleted, with its object; the kept rows stay"
+    );
+
+    assert_eq!(PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL, 4);
+    let bounded = format!("sweep-paging-bound-{}", uuid::Uuid::new_v4());
+    let bounded_run = run_past_review(&service, &bounded).await.run_id;
+    let behind =
+        kept_rows_then_a_deletable_one(&backend, &artifacts, &bounded, bounded_run, 4).await;
+    assert_eq!(
+        service.sweep_attempt_artifacts(&bounded, 1).await.unwrap(),
+        0,
+        "a pass with a limit of 1 examines four rows, all kept"
+    );
+    assert_eq!(
+        staged_rows_and_presence(&backend, &artifacts, &bounded, bounded_run, &behind).await,
+        (5, Some(true))
+    );
+}
+
 /// How `ObjectKeyGapStore` breaks the key derivation a compatibility Score
 /// needs before its tenant lock (rebase 10, option D).
 #[derive(Clone, Copy)]

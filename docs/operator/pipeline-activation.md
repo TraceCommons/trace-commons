@@ -933,19 +933,21 @@ deleting which row is a fixed split (controller ruling R2-1):
 - A `staged` row's object is named by no object ref yet, so no withdrawal
   can ever reach it. `PipelineService::sweep_attempt_artifacts` owns it: on
   each pass, for up to 32 of the tenant's `staged` rows whose
-  `cleanup_after` has passed, it deletes the object (skipping the delete
-  only when the store confirms the object is already absent) and then the
-  row. `cleanup_after` is set when the row is staged, to
+  `cleanup_after` has passed, oldest first, it deletes the object (skipping
+  the delete only when the store confirms the object is already absent) and
+  then the row. `cleanup_after` is set when the row is staged, to
   `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times that phase's configured lease
   plus one hour of margin for the commit to land -- the same bound a live
   lease renewal is capped at, so an attempt that is still legitimately
   renewing its lease never has its own object swept out from under it. A
   delete failure logs `pipeline_attempt_sweep_delete_failed` (with the
   store's own refusal label beside it, `store_label`, when the store gave
-  one) and keeps the row for the next pass. A kept row keeps its place:
-  the 32 rows a pass takes are the tenant's oldest due rows, so once 32
-  kept rows are due, every pass takes the same 32 and the tenant's sweep
-  reaches no later row, hashed rows included, until the cause is fixed.
+  one) and keeps the row for the next pass. A kept row keeps its
+  `cleanup_after`, so every pass meets it again, but it does not stop the
+  pass: the pass goes on to the next due rows, a page at a time, until it
+  has removed 32 rows or examined 128 (four for each row it may remove).
+  So kept rows hold back later rows only once more than 128 of them are
+  due ahead of those rows.
 - A `committed` row's object is an object ref of the submission, recorded
   by the same phase commit that committed the row. Deleting it belongs to
   the withdrawal, not this sweep: a withdrawal invalidates the object ref
@@ -1019,10 +1021,11 @@ is not. Those rows are staged with no hash:
   The sweep is affected in each case: for a due row with no hash, the store
   refuses with that label, and the sweep keeps the row and logs
   `pipeline_attempt_sweep_delete_failed`, with that label as `store_label`,
-  on each pass until the store is fixed. Rows the sweep keeps hold their
-  tenant's queue, so the tenant's sweep stalls once 32 such rows are due:
-  it deletes no later row of that tenant, hashed rows included, until the
-  store is fixed. For the last two labels, a Score itself is not affected.
+  on each pass until the store is fixed. The pass goes on past such rows to
+  later ones, up to 128 rows examined, so the tenant's other due rows,
+  hashed rows included, are still swept while no more than 128 kept rows
+  are due ahead of them. For the last two labels, a Score itself is not
+  affected.
 
 Score's withdrawal rule follows from the same split: withdrawing a
 submission whose run already committed Score deletes the index command and
