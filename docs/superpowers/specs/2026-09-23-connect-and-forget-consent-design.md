@@ -904,6 +904,64 @@ Three further sentences are required and not yet written:
 Separately, each receipt fetch tells the provider that an exchange is being
 contributed, and no sentence covers that.
 
+## Missions
+
+> **Added 2026-10-01** (Kristi, for the native app's Missions tab, #1173).
+> Missions follow the mechanism draft from Michael: a daily mission with a
+> bonus factor, Trace Activity that accrues monthly, levels, streaks and
+> badges, and missions matched to vendor requests from what a contributor
+> works on. Those mechanics are still open. These rules are not, and every
+> shell and server change for Missions must meet them.
+
+### M1. Matching stays on this Mac
+
+Choosing which missions fit a contributor reads local sessions, tools and
+folders. **That matching runs only on the device.**
+
+- The server publishes a mission catalogue, the vendor requests. The daemon
+  downloads it and decides which missions match, locally.
+- No activity profile, match result, folder or tool list, or "missions shown"
+  record leaves the Mac because of matching.
+- A catalogue request carries no per-contributor matching input. It is the
+  same request for every contributor of the commons.
+- Matching may read sessions in folders that are not armed and not shared.
+  That is allowed only because nothing from the read leaves the device.
+
+### M2. A mission sends nothing by itself
+
+Accepting, starting or completing a mission **never arms a folder, never
+approves a session and never widens a scope**. A session counts toward a
+mission only when it is contributed through the existing paths: Ask me, an
+armed folder, or the review. The consent and holds it went through are the
+ones it would have gone through anyway.
+
+- A mission may *suggest* arming or reviewing. The suggestion is an offer
+  with the usual disclosure, never a default.
+- Completion is worked out from what was actually contributed, which the
+  server already has. It is never worked out from a separate report of local
+  activity.
+
+### M3. Mission credit is pending credit
+
+A mission bonus, level multiplier or streak is shown as **pending credit**,
+in `credit_points_pending`. It follows the same rule as all credit: pending
+until the commons settles, never "earned" before then. A shell may show
+what a mission is worth only as pending, with the condition attached (for
+example, "+20 pending credit when the commons accepts it"). Standing and
+ranking ("Top 8%") show only settled or pending credit already recorded,
+never a projection.
+
+### M4. The disclosure says so
+
+The first time Missions is opened, and in Settings, the core's copy states
+three things:
+- matching happens on this Mac;
+- nothing is sent because of a mission;
+- mission credit is pending.
+
+Like every consent string, this copy lives in Rust (`consent_copy.rs`) and
+is pinned by the shell copy tests.
+
 ## Open
 
 Settled since rev 7 and removed from this list: where the earned-trust
@@ -938,6 +996,9 @@ approving").
   enforcement switch-on list; and the migration notice is part of the client
   migration step (R6). What is open is the wording and which PR carries each
   shell's notice.
+- **Missions mechanics.** One mission a day, or missions generated from the
+  kind of work. The bonus factor, level thresholds and badge set. Everything
+  under "Missions" M1-M4 is settled; the mechanics are not.
 - **Legal posture**, unchanged: a one-time grant is a different consent basis,
   and review established that withdrawing it is currently much harder than
   giving it.
