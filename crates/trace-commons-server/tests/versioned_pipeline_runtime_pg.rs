@@ -2772,6 +2772,12 @@ async fn qualification_fails_closed_for_a_substituted_or_missing_dependency() {
 /// complete runs of every bundle -- so it counts toward a bundle's
 /// qualification whenever payout is enabled, whether or not the package
 /// pins the Trace Credit instrument, and never while payout is disabled.
+///
+/// Under every one of `main`'s NEAR settlement modes (PR 3): an enabled
+/// payout's adapter counts in `disabled` and `dry_run` too, though neither
+/// calls it, since an operator can switch the mode to `http` without
+/// building another service, and a qualification record outlives the
+/// mode it was made under.
 #[tokio::test]
 async fn qualification_reports_payout_only_when_it_applies() {
     let Some(backend) = runtime_backend(4).await else {
@@ -2803,14 +2809,20 @@ async fn qualification_reports_payout_only_when_it_applies() {
     )
     .expect("build a package pinning trace_credit");
 
-    let payout_config = |enabled: bool| PipelinePayoutConfig {
-        enabled,
-        require_confirmation_evidence: true,
-        near_contract_id: Some("trace-credits.testnet".to_string()),
-        confirmation_interval: std::time::Duration::from_secs(60),
-        controls: HTTP_NEAR_PAYOUT_CONTROLS,
-    };
-    let build = |enabled: bool, near_adapter: Arc<dyn NearPayoutAdapter>| {
+    let payout_config =
+        |enabled: bool, settlement_mode: PipelineNearSettlementMode| PipelinePayoutConfig {
+            enabled,
+            require_confirmation_evidence: true,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            confirmation_interval: std::time::Duration::from_secs(60),
+            controls: PipelineNearPayoutControls {
+                settlement_mode,
+                ..HTTP_NEAR_PAYOUT_CONTROLS
+            },
+        };
+    let build = |enabled: bool,
+                 settlement_mode: PipelineNearSettlementMode,
+                 near_adapter: Arc<dyn NearPayoutAdapter>| {
         let trace_credit_adapter: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
             InstrumentId::trace_credit(),
             "recording_trace_credit_test_only",
@@ -2833,41 +2845,55 @@ async fn qualification_reports_payout_only_when_it_applies() {
         .with_embedder(embedder.clone())
         .with_authority(allow_all_authority())
         .with_privacy(default_privacy_boundary())
-        .with_payout(near_adapter, payout_config(enabled))
+        .with_payout(near_adapter, payout_config(enabled, settlement_mode))
         .build()
         .expect("build pipeline service")
     };
 
-    let disabled_service = build(false, Arc::new(RecordingNearAdapter::new()));
-    let disabled_qualification = disabled_service
-        .bundle_qualification(&trace_credit_package)
-        .expect("qualify a package pinning trace_credit");
-    assert_eq!(disabled_qualification.payout, None);
+    for settlement_mode in [
+        PipelineNearSettlementMode::Disabled,
+        PipelineNearSettlementMode::DryRun,
+        PipelineNearSettlementMode::Http,
+    ] {
+        let mode = settlement_mode.as_label();
+        let disabled_service = build(
+            false,
+            settlement_mode,
+            Arc::new(RecordingNearAdapter::new()),
+        );
+        let disabled_qualification = disabled_service
+            .bundle_qualification(&trace_credit_package)
+            .expect("qualify a package pinning trace_credit");
+        assert_eq!(disabled_qualification.payout, None, "{mode}");
 
-    let unqualified_near = Arc::new(RecordingNearAdapter::new());
-    let enabled_service = build(true, unqualified_near.clone());
-    let pinned_qualification = enabled_service
-        .bundle_qualification(&trace_credit_package)
-        .expect("qualify a package pinning trace_credit");
-    assert_eq!(
-        pinned_qualification.payout,
-        Some(unqualified_near.production_qualified())
-    );
+        let unqualified_near = Arc::new(RecordingNearAdapter::new());
+        let enabled_service = build(true, settlement_mode, unqualified_near.clone());
+        let pinned_qualification = enabled_service
+            .bundle_qualification(&trace_credit_package)
+            .expect("qualify a package pinning trace_credit");
+        assert_eq!(
+            pinned_qualification.payout,
+            Some(unqualified_near.production_qualified()),
+            "{mode}"
+        );
 
-    // Final review M5 (ruling FR-6, reversing the payout part of P4-D7):
-    // payout pays the complete runs of every bundle, so an enabled payout's
-    // adapter counts for a package that does not pin trace_credit too, and
-    // startup (`pipeline_runtime_is_production_qualified`, which reads this
-    // qualification for the default package) refuses it unqualified.
-    let unpinned_qualification = enabled_service
-        .bundle_qualification(&default_package)
-        .expect("qualify a package that does not pin trace_credit");
-    assert_eq!(unpinned_qualification.payout, Some(false));
-    assert!(
-        unpinned_qualification
-            .blockers()
-            .contains(&"runtime_payout_not_production")
-    );
+        // Final review M5 (ruling FR-6, reversing the payout part of
+        // P4-D7): payout pays the complete runs of every bundle, so an
+        // enabled payout's adapter counts for a package that does not pin
+        // trace_credit too, and startup
+        // (`pipeline_runtime_is_production_qualified`, which reads this
+        // qualification for the default package) refuses it unqualified.
+        let unpinned_qualification = enabled_service
+            .bundle_qualification(&default_package)
+            .expect("qualify a package that does not pin trace_credit");
+        assert_eq!(unpinned_qualification.payout, Some(false), "{mode}");
+        assert!(
+            unpinned_qualification
+                .blockers()
+                .contains(&"runtime_payout_not_production"),
+            "{mode}"
+        );
+    }
 }
 
 /// P5: an embedder that fails its first 7 `embed` calls and then delegates
