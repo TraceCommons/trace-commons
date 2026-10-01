@@ -4374,30 +4374,22 @@ async fn review_submission_is_operable(
     tenant_id: &str,
     submission_id: Uuid,
 ) -> Result<bool, DatabaseError> {
-    let submission_row = tx
+    // Expiry is judged on the database clock (`NOW()`), as the review
+    // queue, the submission guard and `settle_internal_credit` judge it, so
+    // the claim and the assessment never disagree with them about a
+    // submission that expires near now (Zaki review 1, round 2, finding 20).
+    let operable = tx
         .query_opt(
-            "SELECT status, revoked_at, purged_at, withdrawn_at, expires_at
+            "SELECT status IN ('received', 'quarantined')
+                    AND revoked_at IS NULL AND purged_at IS NULL AND withdrawn_at IS NULL
+                    AND (expires_at IS NULL OR expires_at > NOW())
                FROM trace_submissions
               WHERE tenant_id = $1 AND submission_id = $2
               FOR UPDATE",
             &[&tenant_id, &submission_id],
         )
-        .await?;
-    let operable = match &submission_row {
-        None => false,
-        Some(row) => {
-            let status: String = row.get("status");
-            let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
-            let purged_at: Option<DateTime<Utc>> = row.get("purged_at");
-            let withdrawn_at: Option<DateTime<Utc>> = row.get("withdrawn_at");
-            let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
-            matches!(status.as_str(), "received" | "quarantined")
-                && revoked_at.is_none()
-                && purged_at.is_none()
-                && withdrawn_at.is_none()
-                && expires_at.is_none_or(|expires_at| expires_at > Utc::now())
-        }
-    };
+        .await?
+        .is_some_and(|row| row.get::<_, bool>(0));
     if !operable {
         return Ok(false);
     }
