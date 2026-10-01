@@ -2172,14 +2172,6 @@ impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         Ok(Vec::new())
     }
-
-    fn dependency_identity(&self) -> &str {
-        "pass_through_privacy_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
-    }
 }
 
 /// The Task 2 privacy boundary every harness service below defaults to: see
@@ -4168,6 +4160,7 @@ async fn quarantined_run_completes_after_an_approving_assessment() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the queued run is claimable");
     assert_eq!(claim.run_id, parked.run_id);
     assert_eq!(claim.reviewer_principal_ref, reviewer);
@@ -4261,6 +4254,7 @@ async fn rejecting_assessment_ends_the_run() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the queued run is claimable");
     let reason = ReasonCode::new("reviewer_declined").unwrap();
     store
@@ -4317,6 +4311,7 @@ async fn approval_without_resolving_the_reason_is_refused() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the queued run is claimable");
     let reason = ReasonCode::new("privacy_review_required").unwrap();
     let error = store
@@ -4366,6 +4361,7 @@ async fn claim_is_exclusive_until_expiry() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the first reviewer claims the parked run");
 
     let second = store
@@ -4377,7 +4373,11 @@ async fn claim_is_exclusive_until_expiry() {
         )
         .await
         .unwrap();
-    assert!(second.is_none(), "a live claim blocks a second reviewer");
+    assert_eq!(
+        second,
+        PipelineReviewClaimOutcome::HeldByAnotherReviewer,
+        "a live claim blocks a second reviewer"
+    );
 
     expire_review_claim(&backend, &tenant, parked.run_id).await;
 
@@ -4390,6 +4390,7 @@ async fn claim_is_exclusive_until_expiry() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the second reviewer claims it once the first lease has expired");
     assert_eq!(claim_b.reviewer_principal_ref, reviewer_b);
     assert_ne!(claim_a.lease_token, claim_b.lease_token);
@@ -4424,6 +4425,7 @@ async fn assessment_after_withdrawal_is_refused() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the queued run is claimable");
 
     withdraw_submission(&backend, &tenant, parked.submission_id).await;
@@ -4580,6 +4582,7 @@ async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("a pending, quarantined, unassessed run is claimable");
 
     let leased = store
@@ -4599,8 +4602,9 @@ async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
         )
         .await
         .unwrap();
-    assert!(
-        blocked.is_none(),
+    assert_eq!(
+        blocked,
+        PipelineReviewClaimOutcome::Ineligible,
         "a run a worker holds leased is not claimable"
     );
 
@@ -4679,8 +4683,9 @@ async fn claim_refuses_a_run_that_already_failed_at_review() {
         )
         .await
         .unwrap();
-    assert!(
-        claimed.is_none(),
+    assert_eq!(
+        claimed,
+        PipelineReviewClaimOutcome::Ineligible,
         "a run that already failed at Review is never claimable for review"
     );
 }
@@ -4715,6 +4720,7 @@ async fn claim_refuses_a_run_that_already_has_an_assessment() {
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the parked run is claimable");
     let reason = ReasonCode::new("reviewer_declined").unwrap();
     store
@@ -4743,8 +4749,9 @@ async fn claim_refuses_a_run_that_already_has_an_assessment() {
         )
         .await
         .unwrap();
-    assert!(
-        reclaimed.is_none(),
+    assert_eq!(
+        reclaimed,
+        PipelineReviewClaimOutcome::Ineligible,
         "a run that already has an assessment is never claimable again"
     );
 }
@@ -4908,14 +4915,6 @@ impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         anyhow::bail!("privacy classifier unavailable (test double)")
     }
-
-    fn dependency_identity(&self) -> &str {
-        "failing_privacy_boundary_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
-    }
 }
 
 /// Task 2: a rescrub failure fails the receipt closed -- no run, no staged
@@ -4965,14 +4964,6 @@ impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
         let text = serde_json::to_string(envelope)?;
         *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
         Ok(Vec::new())
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "marker_redacting_boundary_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
     }
 }
 
@@ -10519,7 +10510,8 @@ async fn index_dispatch_never_holds_two_pooled_connections() {
 }
 
 /// The run's `pipeline_index_invalidations` rows, as `(registry_revision_id,
-/// reason_code, state, due now)`, and its `index_invalidation_state`.
+/// reason_code, state, due now)`, and its invalidation state (`none` with no
+/// row).
 async fn index_invalidation_rows(
     backend: &PgBackend,
     tenant_id: &str,
@@ -10541,8 +10533,11 @@ async fn index_invalidation_rows(
         .collect();
     let run_state: String = tx
         .query_one(
-            "SELECT index_invalidation_state FROM pipeline_runs
-              WHERE tenant_id = $1 AND run_id = $2",
+            "SELECT COALESCE((SELECT x.state FROM pipeline_index_invalidations x
+                                WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id),
+                             'none')
+               FROM pipeline_runs r
+              WHERE r.tenant_id = $1 AND r.run_id = $2",
             &[&tenant_id, &run_id],
         )
         .await
@@ -15368,8 +15363,8 @@ async fn insert_export_snapshot_and_item(
     tx.execute(
         "INSERT INTO pipeline_export_snapshots (
             tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
-            allowed_use, purpose_hash, selection_policy_id, source_list_hash, item_count
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         &[
             &tenant,
             &snapshot_id,
@@ -15379,7 +15374,6 @@ async fn insert_export_snapshot_and_item(
             &format!("sha256:{}", "e".repeat(64)),
             &"policy-test-v1",
             &format!("sha256:{}", "f".repeat(64)),
-            &1_i32,
         ],
     )
     .await
@@ -16790,8 +16784,6 @@ fn compatibility_test_builder(
         Some(near) => service.with_payout(
             near,
             PipelinePayoutConfig {
-                enabled: true,
-                require_confirmation_evidence: true,
                 near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
                 confirmation_interval: std::time::Duration::ZERO,
                 controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -17445,10 +17437,6 @@ struct SwitchableAuthority(std::sync::Mutex<SubmissionAuthority>);
 impl PipelineAuthorityProvider for SwitchableAuthority {
     fn authority_for_tenant(&self, _tenant_id: &str) -> Option<SubmissionAuthority> {
         Some(self.0.lock().unwrap().clone())
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "switchable_authority_test_only"
     }
 }
 
@@ -18682,10 +18670,10 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
     tx.execute(
         "INSERT INTO pipeline_export_snapshots (
             tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
-            allowed_use, purpose_hash, selection_policy_id, source_list_hash, item_count,
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash,
             state, export_manifest_id, completed_at
          ) VALUES ($1,$2,$3,'exporter_sha256:test','model_training',$4,'pipeline_export_v1',
-                   $5,1,$6,$7,$8)",
+                   $5,$6,$7,$8)",
         &[
             &run.tenant_id,
             &snapshot_id,
@@ -19429,8 +19417,8 @@ fn visible_revision_entries(
     visible
 }
 
-/// A run's `pipeline_index_invalidations` row and the run's
-/// `index_invalidation_state`.
+/// A run's `pipeline_index_invalidations` row; `run_state` is that row's
+/// state, the run's invalidation state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InvalidationDetail {
     state: String,
@@ -19454,7 +19442,7 @@ async fn invalidation_detail(
         .query_one(
             "SELECT i.state, i.attempt_count, i.max_attempts, i.last_error_label,
                     i.next_attempt_at, i.completed_at IS NOT NULL,
-                    r.index_invalidation_state, i.requested_at
+                    i.state, i.requested_at
                FROM pipeline_index_invalidations i
                JOIN pipeline_runs r ON r.tenant_id = i.tenant_id AND r.run_id = i.run_id
               WHERE i.tenant_id = $1 AND i.run_id = $2",
@@ -19493,7 +19481,7 @@ async fn make_invalidation_due(tenant_id: &str, run_id: uuid::Uuid) {
 /// entries; the submission is withdrawn, which queues an invalidation; one
 /// pass of `process_index_invalidations` processes it, and after that no
 /// `nearest` query returns any entry of the revision. The invalidation and
-/// the run's `index_invalidation_state` are `complete`, and a second pass
+/// the run's invalidation state are `complete`, and a second pass
 /// finds nothing to do.
 #[tokio::test]
 async fn invalidation_removes_the_revision_after_withdrawal() {
@@ -19590,7 +19578,7 @@ async fn age_invalidation(tenant_id: &str, run_id: uuid::Uuid, hours: i32) {
 /// backoff: the invalidation's age, at least one second (the first outage)
 /// and at most one hour (the last outage, on an invalidation aged three
 /// hours), each wait ending later than the one before; the run's
-/// `index_invalidation_state` stays `pending` and every entry stays where
+/// invalidation state stays `pending` and every entry stays where
 /// it was. When the index answers again, the invalidation completes and the
 /// revision's entries are gone.
 ///
@@ -19812,7 +19800,7 @@ async fn tamper_stored_score_index_id_away(tenant_id: &str, run_id: uuid::Uuid) 
 /// no longer names the index its Settle wrote to (only corrupted stored data
 /// can do this). Each attempt is charged one attempt; each but the last
 /// leaves the invalidation `pending` under `index_invalidation_unavailable`;
-/// the last leaves it, and the run's `index_invalidation_state`, `failed`
+/// the last leaves it, and the run's invalidation state, `failed`
 /// under `index_invalidation_failed`. Nothing was removed, so the entries
 /// stay, and the failure is on record for an operator. A failed
 /// invalidation is never claimed again, even when due.
@@ -19908,20 +19896,12 @@ async fn fail_invalidation_as_owner(tenant_id: &str, run_id: uuid::Uuid) {
         )
         .await
         .expect("fail the invalidation");
-    owner
-        .execute(
-            "UPDATE pipeline_runs SET index_invalidation_state = 'failed'
-              WHERE tenant_id = $1 AND run_id = $2",
-            &[&tenant_id, &run_id],
-        )
-        .await
-        .expect("mark the run's invalidation failed");
 }
 
 /// Zaki review 1, item 6: a `failed` invalidation is not terminal. Queuing
 /// the revision's invalidation again (here, a second withdrawal) resets it
 /// to `pending`, with no attempt charged and due at once, and the run's
-/// `index_invalidation_state` with it; the next pass removes the revision.
+/// invalidation state with it; the next pass removes the revision.
 #[tokio::test]
 async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
     let Some(backend) = runtime_backend(4).await else {
@@ -19976,16 +19956,15 @@ async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
     );
 }
 
-/// Zaki review 1, fix round, item 3: the re-enqueue locks each run row
-/// before its invalidation row, the order the withdrawal, Settle's cancel
-/// and the invalidation worker all take. A transaction holds the run row (as
-/// a second withdrawal would); the re-enqueue waits for it without having
-/// touched the invalidation row, which another session can still lock at
-/// once. Taking the rows in the other order would hold the invalidation row
-/// while it waits, and a withdrawal that then reaches the invalidation row
-/// would deadlock with it.
+/// Zaki review 1, fix round, item 3, after the round 2 simplification that
+/// removed the run's copy of the invalidation state: the re-enqueue writes
+/// only invalidation rows, so it takes no run lock and cannot wait in the
+/// opposite order to a withdrawal, Settle's cancel or the invalidation
+/// worker (each takes the run row, then the invalidation row). With a
+/// transaction holding the run row (as a second withdrawal would), the
+/// re-enqueue still finishes at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn requeue_locks_the_run_row_before_the_invalidation_row() {
+async fn requeue_takes_no_run_row_lock() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -20011,48 +19990,21 @@ async fn requeue_locks_the_run_row_before_the_invalidation_row() {
         )
         .await
         .unwrap();
-    let xid: String = holder
-        .query_one(
-            "SELECT backend_xid::text FROM pg_stat_activity WHERE pid = pg_backend_pid()",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    let requeue = tokio::spawn({
-        let service = service.clone();
-        let tenant = tenant.clone();
-        async move {
-            service
-                .store()
-                .requeue_failed_index_invalidations(&tenant)
-                .await
-        }
-    });
-    wait_for_a_waiter_on(&backend, &xid, &requeue).await;
-
-    let mut probe_client = owner_client().await;
-    let probe = owner_tenant_tx(&mut probe_client, &tenant).await;
-    let invalidation_free = probe
-        .query_opt(
-            "SELECT 1 FROM pipeline_index_invalidations
-              WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE NOWAIT",
-            &[&tenant, &run.run_id],
-        )
-        .await
-        .is_ok();
-    probe.rollback().await.ok();
+    let requeued = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.store().requeue_failed_index_invalidations(&tenant),
+    )
+    .await
+    .expect("the re-enqueue does not wait for the run row")
+    .unwrap();
     holder.rollback().await.unwrap();
-    let requeued = tokio::time::timeout(HELD_CALL_BOUND, requeue)
-        .await
-        .expect("the re-enqueue finishes once the run row is free")
-        .unwrap()
-        .unwrap();
-    assert!(
-        invalidation_free,
-        "the re-enqueue held the invalidation row while it waited for the run row"
-    );
     assert_eq!(requeued, 1);
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "pending"
+    );
 }
 
 /// Zaki review 1, item 6: the operator's re-enqueue resets every `failed`
@@ -20239,14 +20191,12 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
     assert_ne!(second.lease_expires_at, first.lease_expires_at);
     let reclaimed = invalidation_detail(&backend, &tenant, run.run_id).await;
 
-    assert_eq!(
-        store.fail_index_invalidation(&first).await.unwrap(),
-        None,
+    assert!(
+        !store.fail_index_invalidation(&first).await.unwrap(),
         "the first claim no longer holds the invalidation"
     );
-    assert_eq!(
-        store.retry_index_invalidation(&first).await.unwrap(),
-        None,
+    assert!(
+        !store.retry_index_invalidation(&first).await.unwrap(),
         "nor can it record an outage"
     );
     assert_eq!(
@@ -20254,18 +20204,15 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
         reclaimed,
         "the stale failure and outage changed nothing"
     );
-    let failed = store
-        .fail_index_invalidation(&second)
-        .await
-        .unwrap()
-        .expect("the current claim records its failure");
-    assert_eq!(failed.run_id, run.run_id);
+    assert!(
+        store.fail_index_invalidation(&second).await.unwrap(),
+        "the current claim records its failure"
+    );
     let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
     assert_eq!(detail.state, "pending");
     assert_eq!(detail.attempt_count, 1);
-    assert_eq!(
-        store.fail_index_invalidation(&second).await.unwrap(),
-        None,
+    assert!(
+        !store.fail_index_invalidation(&second).await.unwrap(),
         "one claim records one result"
     );
 }
@@ -20314,6 +20261,7 @@ async fn one_claim_takes_the_tenants_due_invalidations_up_to_its_limit() {
         PipelineFollowUps {
             index_invalidations: true,
             payouts: false,
+            credit_audits: false,
         },
         "the withdrawals woke the invalidation step"
     );
@@ -21391,8 +21339,6 @@ async fn payout_test_service_on_contract(
         near,
         crash_point,
         PipelinePayoutConfig {
-            enabled: true,
-            require_confirmation_evidence: true,
             near_contract_id: Some(near_contract_id.to_string()),
             confirmation_interval: std::time::Duration::ZERO,
             controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -21419,14 +21365,15 @@ async fn payout_test_service_with_config(
             adapters,
             near,
             crash_point,
-            payout,
+            Some(payout),
         )
         .build()
         .expect("build pipeline service"),
     )
 }
 
-/// The builder `payout_test_service_with_config` builds.
+/// The builder `payout_test_service_with_config` builds; with no `payout`,
+/// the service has no payout at all, the one way to leave it off.
 fn payout_test_builder(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -21434,7 +21381,7 @@ fn payout_test_builder(
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     near: Arc<dyn NearPayoutAdapter>,
     crash_point: Option<PipelineCrashPoint>,
-    payout: PipelinePayoutConfig,
+    payout: Option<PipelinePayoutConfig>,
 ) -> PipelineServiceBuilder {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
@@ -21455,8 +21402,10 @@ fn payout_test_builder(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
-    .with_privacy(default_privacy_boundary())
-    .with_payout(near, payout);
+    .with_privacy(default_privacy_boundary());
+    if let Some(payout) = payout {
+        builder = builder.with_payout(near, payout);
+    }
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -21474,8 +21423,6 @@ const HTTP_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayout
 /// `PAYOUT_TEST_NEAR_CONTRACT`, polling a `submitted` payout on every pass.
 fn enabled_test_payout() -> PipelinePayoutConfig {
     PipelinePayoutConfig {
-        enabled: true,
-        require_confirmation_evidence: true,
         near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
         confirmation_interval: std::time::Duration::ZERO,
         controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -21509,7 +21456,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
         vec![near_rail_trace_credit_adapter()],
         near.clone(),
         None,
-        enabled_test_payout(),
+        Some(enabled_test_payout()),
     )
     .with_novelty_utility_checks(checks.clone())
     .build()
@@ -21524,10 +21471,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
         vec![near_rail_trace_credit_adapter()],
         near,
         None,
-        PipelinePayoutConfig {
-            enabled: false,
-            ..enabled_test_payout()
-        },
+        None,
     )
     .with_novelty_utility_checks(checks)
     .build();
@@ -21572,7 +21516,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_smoke_readiness_or_an_
             vec![near_rail_trace_credit_adapter()],
             near.clone(),
             None,
-            enabled_test_payout(),
+            Some(enabled_test_payout()),
         )
         .with_novelty_utility_checks(checks.clone())
         .build()
@@ -21587,10 +21531,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_smoke_readiness_or_an_
             vec![near_rail_trace_credit_adapter()],
             near,
             None,
-            PipelinePayoutConfig {
-                enabled: false,
-                ..enabled_test_payout()
-            },
+            None,
         )
         .with_novelty_utility_checks(checks)
         .build();
@@ -21628,10 +21569,7 @@ async fn an_enabled_payout_is_refused_when_mains_allowlists_leave_the_pipeline_o
             vec![near_rail_trace_credit_adapter()],
             Arc::new(RecordingNearAdapter::new()),
             None,
-            PipelinePayoutConfig {
-                enabled,
-                ..enabled_test_payout()
-            },
+            enabled.then(enabled_test_payout),
         )
         .with_novelty_utility_checks(checks)
         .build()
@@ -22067,10 +22005,6 @@ impl CountingNearAdapter {
 
 #[async_trait::async_trait]
 impl NearPayoutAdapter for CountingNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "counting_near_test_only"
-    }
-
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,
@@ -22682,8 +22616,6 @@ async fn payout_calls_name_the_configured_near_contract() {
     .with_payout(
         near,
         PipelinePayoutConfig {
-            enabled: true,
-            require_confirmation_evidence: true,
             near_contract_id: None,
             confirmation_interval: std::time::Duration::ZERO,
             controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -22705,10 +22637,6 @@ struct BadEvidenceNearAdapter {
 
 #[async_trait::async_trait]
 impl NearPayoutAdapter for BadEvidenceNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "bad_evidence_near_test_only"
-    }
-
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,
@@ -22926,10 +22854,6 @@ impl HoldingNearAdapter {
 
 #[async_trait::async_trait]
 impl NearPayoutAdapter for HoldingNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "holding_near_test_only"
-    }
-
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,
@@ -23056,10 +22980,6 @@ impl ConfirmationHoldingNearAdapter {
 
 #[async_trait::async_trait]
 impl NearPayoutAdapter for ConfirmationHoldingNearAdapter {
-    fn dependency_identity(&self) -> &str {
-        "confirmation_holding_near_test_only"
-    }
-
     async fn submit(
         &self,
         call: &trace_commons_server::near_credit::NearCreditReceiptCall,
@@ -23583,8 +23503,6 @@ async fn a_submitted_payout_is_polled_once_per_confirmation_interval() {
         near.clone(),
         None,
         PipelinePayoutConfig {
-            enabled: true,
-            require_confirmation_evidence: true,
             near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
             confirmation_interval: std::time::Duration::from_secs(60),
             controls: HTTP_NEAR_PAYOUT_CONTROLS,
@@ -24027,13 +23945,13 @@ async fn an_enabled_payout_needs_an_authenticated_adapter_when_main_requires_one
             vec![near_rail_trace_credit_adapter()],
             Arc::new(near),
             None,
-            PipelinePayoutConfig {
+            Some(PipelinePayoutConfig {
                 controls: PipelineNearPayoutControls {
                     settlement_mode: mode,
                     require_adapter_auth,
                 },
                 ..enabled_test_payout()
-            },
+            }),
         )
         .build()
     };
@@ -24446,6 +24364,7 @@ async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarant
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the parked run is claimable");
     store
         .record_review_assessment(
@@ -24480,6 +24399,7 @@ async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarant
         )
         .await
         .unwrap()
+        .claimed()
         .expect("the parked run is claimable");
     store
         .record_review_assessment(
@@ -24592,7 +24512,7 @@ async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
 
     assert_eq!(
         claim.await.unwrap().unwrap(),
-        None,
+        PipelineReviewClaimOutcome::Ineligible,
         "a claim on a run assessed while it waited is refused"
     );
     assert_eq!(
@@ -27384,4 +27304,399 @@ async fn a_compatibility_score_waiting_past_its_lease_cap_stops_uncharged() {
             "no {artifact} object was written"
         );
     }
+}
+
+/// Zaki review 1, round 2, N-6: a store whose every call made on a Tokio
+/// runtime worker fails, so a pipeline object-store call that was not moved
+/// to the blocking pool shows as a failed phase.
+struct BlockingPoolOnlyArtifactStore {
+    inner: Arc<dyn TraceArtifactStore>,
+}
+
+impl BlockingPoolOnlyArtifactStore {
+    fn refuse_runtime_workers() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "object store called on a runtime worker"
+        );
+        Ok(())
+    }
+}
+
+impl TraceArtifactStore for BlockingPoolOnlyArtifactStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        Self::refuse_runtime_workers()?;
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::refuse_runtime_workers()?;
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::refuse_runtime_workers()?;
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        Self::refuse_runtime_workers()?;
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::refuse_runtime_workers()?;
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::refuse_runtime_workers()?;
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        Self::refuse_runtime_workers()?;
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// The reference scorer, failing every call made on a runtime worker (N-6).
+struct BlockingPoolOnlyScorer(ReferencePerplexityScorer);
+
+impl trace_commons_gate_api::PerplexityScorer for BlockingPoolOnlyScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "scorer called on a runtime worker"
+        );
+        trace_commons_gate_api::PerplexityScorer::score(&self.0, plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<trace_commons_gate_api::ChunkPerplexity> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "scorer called on a runtime worker"
+        );
+        trace_commons_gate_api::PerplexityScorer::score_chunk(&self.0, chunk)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for BlockingPoolOnlyScorer {
+    fn dependency_identity(&self) -> &str {
+        "blocking_pool_only_scorer_test_only"
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"blocking-pool-only-scorer-test-only.v1".to_vec()
+    }
+}
+
+/// The reference embedder, failing every call made on a runtime worker.
+struct BlockingPoolOnlyEmbedder(ReferenceEmbedder);
+
+impl Embedder for BlockingPoolOnlyEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "embedder called on a runtime worker"
+        );
+        self.0.embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for BlockingPoolOnlyEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "blocking_pool_only_embedder_test_only"
+    }
+    fn model_id(&self) -> &str {
+        self.0.model_id()
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"blocking-pool-only-embedder-test-only.v1".to_vec()
+    }
+}
+
+/// Zaki review 1, round 2, N-6: the pipeline calls none of its synchronous
+/// dependencies on a Tokio runtime worker, on any phase or follow-up: the
+/// scorer, the embedder and the index reader in Score, the index writes in
+/// Settle and in the invalidation pass, and every object-store call (the
+/// receipt, Review's approved object, Score's objects and their reads,
+/// Settle's read of the index command). Each double fails a call made on a
+/// worker, so a call left on one fails its phase. A compatibility run
+/// completes with its index write applied and its credit written, and its
+/// withdrawal's invalidation removes the revision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    index.refuse_calls_on_runtime_workers();
+    let scorer = Arc::new(BlockingPoolOnlyScorer(ReferencePerplexityScorer::new()));
+    let embedder = Arc::new(BlockingPoolOnlyEmbedder(ReferenceEmbedder::new()));
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(BlockingPoolOnlyArtifactStore {
+        inner: artifact_store(&dir),
+    });
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .build()
+    .expect("build pipeline service");
+    let tenant = format!("compat-blocking-pool-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-blocking-pool";
+    let envelope = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, &tenant, principal, &envelope).await;
+    process_until_idle(&service, &tenant).await;
+    let run = service
+        .store()
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert_eq!(run.index_write_state, "complete");
+    assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        1
+    );
+
+    service
+        .withdraw_submission(&tenant, envelope.submission_id, principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    service
+        .process_index_invalidations(&tenant, 8)
+        .await
+        .expect("the invalidation pass runs");
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        0,
+        "the invalidation pass removed the revision off the runtime workers"
+    );
+}
+
+/// Owner ruling on Zaki review 1, round 2, N-7: the index holds only
+/// revisions of runs that completed. A Settle that crashes after its index
+/// write on the run's last attempt leaves the write `pending` and the run
+/// `leased`; the claim's sweep then fails the run for good
+/// (`attempts_exhausted`), and with it queues the invalidation of the
+/// run's revision through the queue a withdrawal uses (reason
+/// `run_failed`). The invalidation pass removes the revision.
+#[tokio::test]
+async fn a_run_that_fails_for_good_after_its_index_write_has_its_revision_removed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterIndexApply),
+    )
+    .await;
+    let tenant = format!("failed-run-invalidation-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET attempt_count = max_attempts - 1
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let crashed = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .expect_err("Settle crashes after its index write");
+    assert_eq!(crashed.to_string(), INJECTED_PIPELINE_CRASH);
+    assert!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
+        "the crashed Settle wrote the revision's entries"
+    );
+    expire_lease(&backend, &tenant, run.run_id).await;
+    assert!(
+        service.process_one(&tenant).await.unwrap().is_none(),
+        "the run has no attempt left"
+    );
+    let failed = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let queued: i64 = {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let count = tx
+            .query_one(
+                "SELECT COUNT(*) FROM pipeline_index_invalidations
+                  WHERE tenant_id = $1 AND run_id = $2 AND reason_code = 'run_failed'",
+                &[&tenant, &run.run_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    assert_eq!(queued, 1, "the failed run's revision is queued for removal");
+    service
+        .process_index_invalidations(&tenant, 8)
+        .await
+        .expect("the invalidation pass runs");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "the failed run's revision left the index"
+    );
+}
+
+/// Zaki review 1, round 2, simplification: every pipeline operability check
+/// reads one definition of a live submission, which counts `withdrawn_at`
+/// as the credit leg's check always did. A submission whose row records a
+/// withdrawal time but has no `trace_withdrawals` row is no longer operable
+/// for Score either: its approved-bytes read refuses it, and the run never
+/// reaches Settle.
+#[tokio::test]
+async fn a_submission_with_a_withdrawal_time_is_not_operable_for_score() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdrawn-at-operability-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "UPDATE trace_submissions SET withdrawn_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &env.submission_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert_eq!(scored.next_phase, Some(Phase::Score), "{scored:?}");
+    assert_eq!(
+        scored.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
 }

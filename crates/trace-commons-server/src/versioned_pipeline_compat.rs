@@ -54,11 +54,6 @@ pub const COMPATIBILITY_ADMISSION_IMPLEMENTATION: &str = "trace_commons.admissio
 pub const COMPATIBILITY_REVIEW_IMPLEMENTATION: &str = "trace_commons.review.compatibility.v1";
 pub const COMPATIBILITY_SCORE_IMPLEMENTATION: &str = "trace_commons.score.compatibility.v1";
 pub const COMPATIBILITY_SETTLE_IMPLEMENTATION: &str = "trace_commons.settle.compatibility.v1";
-/// Safe label for a scorer, embedder, or index dependency call that failed.
-/// The Score policy itself reports a more specific label per dependency
-/// (`scorer_unavailable`, `embedder_unavailable`, `index_unavailable`); this
-/// stays for callers that only need one generic dependency-failure label.
-pub const PIPELINE_SCORE_DEPENDENCY_LABEL: &str = "score_dependency_failed";
 pub const COMPATIBILITY_SCORE_RULE: &str = "compatibility_quality_novelty_v1";
 pub const COMPATIBILITY_SETTLE_RULE: &str = "compatibility_membership_from_score_v1";
 pub const COMPATIBILITY_EXCLUDE_REASON: &str = "compatibility_not_eligible";
@@ -226,6 +221,7 @@ impl CompatibilityBundleConfig {
 /// embedder, or index type), and holds the bundle manifest it was
 /// constructed under so every decision it builds is proven pinned
 /// (`ScoreDecision::for_bundle`).
+#[derive(Clone)]
 pub struct CompatibilityScorePolicy {
     manifest: BundleManifest,
     config: CompatibilityBundleConfig,
@@ -287,7 +283,24 @@ fn settle_invalid<E>(_: E) -> PolicyError {
 
 #[async_trait]
 impl ScorePolicy for CompatibilityScorePolicy {
+    /// The scorer, the embedder and the index reader are synchronous, and a
+    /// production scorer makes network calls (the NEAR AI scorer uses a
+    /// blocking HTTP client), so the whole evaluation runs on the blocking
+    /// pool, never on a runtime worker, as `main` runs the same scorer class
+    /// (Zaki review 1, round 2, N-6). A task that panicked or was cancelled
+    /// is `score_task_failed`.
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
+        let policy = self.clone();
+        let input = input.clone();
+        tokio::task::spawn_blocking(move || policy.evaluate(&input))
+            .await
+            .map_err(|_| permanent("score_task_failed"))?
+    }
+}
+
+impl CompatibilityScorePolicy {
+    /// The evaluation `execute` runs on the blocking pool.
+    fn evaluate(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
         let now = (self.clock)();
         if input.reviewed_artifact.is_empty() {
             return Err(permanent("score_input_empty"));
@@ -1041,6 +1054,37 @@ mod tests {
         }
     }
 
+    /// The reference scorer, failing every call made on a Tokio runtime
+    /// worker (N-6).
+    struct BlockingPoolOnlyScorer(ReferencePerplexityScorer);
+
+    impl PerplexityScorer for BlockingPoolOnlyScorer {
+        fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            anyhow::ensure!(
+                !crate::versioned_pipeline_index::called_on_a_runtime_worker(),
+                "called on a runtime worker"
+            );
+            self.0.score(plaintext)
+        }
+
+        fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+            anyhow::ensure!(
+                !crate::versioned_pipeline_index::called_on_a_runtime_worker(),
+                "called on a runtime worker"
+            );
+            self.0.score_chunk(chunk)
+        }
+    }
+
+    impl IdentifiedPerplexityScorer for BlockingPoolOnlyScorer {
+        fn dependency_identity(&self) -> &str {
+            "blocking_pool_only_scorer_test_only"
+        }
+        fn content_descriptor(&self) -> Vec<u8> {
+            b"blocking-pool-only-scorer-test-only.v1".to_vec()
+        }
+    }
+
     /// Always fails, for the `embedder_unavailable` dependency case.
     struct FailingEmbedder;
 
@@ -1525,6 +1569,32 @@ mod tests {
             .unwrap_err();
         assert!(error.is_transient());
         assert_eq!(error.label(), "index_unavailable");
+    }
+
+    /// Zaki review 1, round 2, N-6: the scorer, the embedder and the index
+    /// reader are synchronous, and a production scorer makes network calls,
+    /// so a Score runs them on the blocking pool, never on a runtime worker:
+    /// a scorer and an index that fail every call made on a worker do not
+    /// stop the Score.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn score_runs_its_synchronous_dependencies_on_the_blocking_pool() {
+        let config = CompatibilityBundleConfig::local_reference();
+        let index = IsolatedPipelineIndex::new();
+        index.refuse_calls_on_runtime_workers();
+        let policy = CompatibilityScorePolicy::new(
+            manifest_pinning_trace_credit(&config),
+            config.clone(),
+            Arc::new(BlockingPoolOnlyScorer(ReferencePerplexityScorer::new())),
+            Arc::new(ReferenceEmbedder::new()),
+            index,
+        )
+        .unwrap();
+        let output = policy
+            .execute(&score_input(b"hello world, this is a compatibility trace"))
+            .await
+            .expect("the Score runs its dependencies off the runtime workers");
+        let (result, _, _) = output.into_parts();
+        assert_eq!(result.evidence.quality_passed, Some(true));
     }
 
     /// Finding 12: the reader a compatibility Score uses counts an

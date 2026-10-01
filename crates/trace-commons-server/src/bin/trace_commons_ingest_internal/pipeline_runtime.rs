@@ -463,11 +463,23 @@ const PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT: usize = 32;
 /// claim whose lease passed.
 const PIPELINE_WORKER_INDEX_INVALIDATION_INTERVAL: StdDuration = StdDuration::from_secs(10);
 
+/// How often the worker runs a tenant's credit audit step when nothing woke
+/// it (Zaki review 1, round 2, N-5). A Trace Credit leg that writes a
+/// credit event wakes the step at once in the process that settled it; the
+/// interval bounds the wait for one another replica settled, and for a pass
+/// that failed to append.
+const PIPELINE_WORKER_CREDIT_AUDIT_INTERVAL: StdDuration = StdDuration::from_secs(10);
+
+/// The most `CreditMutate` audit events the worker appends for one tenant
+/// in one pass.
+const PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT: usize = 32;
+
 /// A follow-up step of a tenant's drain, after its runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PipelineFollowUpStep {
     IndexInvalidations,
     Payouts,
+    CreditAudits,
 }
 
 /// When the worker last ran each tenant's follow-up steps, so an idle
@@ -512,6 +524,13 @@ impl PipelineFollowUpCadence {
                     now,
                 )
             }),
+            credit_audits: self.take_due(
+                tenant_id,
+                PipelineFollowUpStep::CreditAudits,
+                woken.credit_audits,
+                PIPELINE_WORKER_CREDIT_AUDIT_INTERVAL,
+                now,
+            ),
         }
     }
 
@@ -653,6 +672,7 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// step. All of it runs in the pass's supervised task for the tenant
 /// (`run_pipeline_worker_pass`).
 pub(crate) async fn drain_pipeline_tenant(
+    state: Arc<AppState>,
     service: Arc<PipelineService>,
     tenant_id: String,
     cadence: Arc<std::sync::Mutex<PipelineFollowUpCadence>>,
@@ -717,6 +737,30 @@ pub(crate) async fn drain_pipeline_tenant(
             }
         }
     }
+    if due.credit_audits {
+        match append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant_id,
+            PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT,
+        )
+        .await
+        {
+            Ok(appended) => {
+                if appended >= PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::CreditAudits);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_credit_audit_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker credit audit failed"
+                );
+            }
+        }
+    }
     if due.payouts {
         match service
             .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
@@ -763,6 +807,94 @@ pub(crate) async fn drain_pipeline_tenant(
         );
     }
 }
+
+/// Zaki review 1, round 2, N-5: appends `main`'s hash-only `CreditMutate`
+/// audit event for each credit event the tenant's Trace Credit legs wrote
+/// to `main`'s ledger (`PgPipelineStore::list_unaudited_credit_events`), up
+/// to `limit`, through `main`'s mirrored audit log, as `main`'s credit paths
+/// append one after each credit event they write
+/// (`append_automatic_utility_credit_events_once_with_counts`), and then
+/// marks each leg audited. The event carries the credit event's id, so a
+/// pass that stopped after the append and before the mark finds the event
+/// already in the database and only marks the leg. Its actor is the ledger
+/// row's: for a `NoveltyUtility` event the pipeline's issuer, in the role
+/// `main` records for its gate worker; an actor whose role is not a token
+/// role (a minimal-family `accepted` event's `pipeline_worker`) is recorded
+/// as the in-process pipeline worker, role `system`. Returns how many legs
+/// it handled.
+pub(crate) async fn append_pipeline_credit_audit_events(
+    state: &AppState,
+    service: &PipelineService,
+    tenant_id: &str,
+    limit: usize,
+) -> anyhow::Result<usize> {
+    let items = service
+        .store()
+        .list_unaudited_credit_events(tenant_id, limit)
+        .await?;
+    for item in &items {
+        let already_appended = match state.db_mirror.as_ref() {
+            Some(db) => db
+                .get_trace_audit_event_by_id(tenant_id, item.credit_event_id)
+                .await?
+                .is_some(),
+            None => false,
+        };
+        if !already_appended {
+            let points = item
+                .points_delta
+                .parse::<f32>()
+                .map_err(|_| anyhow::anyhow!("pipeline_credit_points_invalid"))?;
+            let (actor, actor_role_label) = match serde_json::from_value::<TokenRole>(
+                serde_json::Value::String(item.actor_role.clone()),
+            ) {
+                Ok(role) => (
+                    TenantAuth {
+                        role,
+                        principal_ref: item.actor_principal_ref.clone(),
+                        ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
+                    },
+                    None,
+                ),
+                Err(_) => (
+                    system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF),
+                    Some("system"),
+                ),
+            };
+            let mut event = TraceCommonsAuditEvent::credit_mutation(
+                &actor,
+                item.submission_id,
+                points,
+                item.reason.as_deref(),
+            );
+            event.event_id = item.credit_event_id;
+            append_audit_event_mirrored(
+                state,
+                &actor,
+                event,
+                AuditRowMirror {
+                    action: StorageTraceAuditAction::CreditMutate,
+                    metadata: StorageTraceAuditSafeMetadata::CreditMutation {
+                        event_type: item.event_type,
+                        credit_points_delta_micros: credit_delta_micros(points),
+                        reason_hash: sha256_prefixed(item.reason.as_deref().unwrap_or_default()),
+                        external_ref_hash: item.external_ref.as_deref().map(sha256_prefixed),
+                    },
+                    object_ref_id: None,
+                    actor_role_label,
+                },
+                "pipeline credit audit event",
+            )
+            .await?;
+        }
+        service.store().mark_credit_audited(tenant_id, item).await?;
+    }
+    Ok(items.len())
+}
+
+/// The actor label of an audit event the pipeline worker appends as an
+/// in-process driver (`system_audit_tenant`).
+const PIPELINE_WORKER_AUDIT_ACTOR_REF: &str = "pipeline_worker";
 
 /// Whether the pipeline worker processes any tenant: one routed to the
 /// pipeline (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) or on the drain
@@ -816,7 +948,12 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
                 async move { probe_service.readiness().await },
                 tenant_ids.clone(),
                 |tenant_id| {
-                    drain_pipeline_tenant(drain_service.clone(), tenant_id, cadence.clone())
+                    drain_pipeline_tenant(
+                        state.clone(),
+                        drain_service.clone(),
+                        tenant_id,
+                        cadence.clone(),
+                    )
                 },
                 &worker_ready,
                 &stop_rx,

@@ -50,9 +50,15 @@ refuses to start with `pipeline_runtime_dependencies_not_production_qualified`
 (unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set).
 `GET /v1/pipeline/readiness` reports the drain list's size as
 `drain_tenant_count` (a count, no tenant ids). A retried upload from a drain
-tenant that completed admission on the pipeline path replays its pipeline
-receipt, as it did while the tenant was routed; a new upload takes the
-legacy path.
+tenant of a submission id a pipeline run owns replays its pipeline receipt,
+as it did while the tenant was routed, with or without account admission
+(a static-token tenant too); a new upload takes the legacy path. An upload
+of a submission id a pipeline run owns never reaches the legacy record: the
+same body from the recorded principal replays the receipt, a different body
+is refused with `409` (`receipt id reused with different content`), another
+principal with `409` as `main` refuses one, and a tenant on neither list, or
+a build with no pipeline runtime, answers `409`
+(`submission_owned_by_pipeline_run`).
 
 To roll a tenant back from the pipeline, move it from
 `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` to
@@ -148,6 +154,12 @@ long that phase can actually run rather than one fixed lease every phase
 shared. Score, in particular, runs the injected scorer and embedder inside
 the lease -- a chunked NEAR AI perplexity scorer or a CPU-bound embedder can
 exceed a short lease on the pilot.
+
+The scorer, the embedder, the index, and the object store are synchronous,
+so the worker calls them on the blocking thread pool, never on a runtime
+worker thread that ingest's HTTP routes share: Score's whole evaluation,
+Settle's index writes (with the run and submission rows still locked), the
+invalidation pass, and every object read, write, and delete of a phase.
 
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` -- whole seconds, default 300
   (5 minutes).
@@ -316,6 +328,15 @@ not the trace's fault:
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
 
+The index holds only revisions of runs that completed. A run that fails for
+good at Settle after its index write may have written entries (the write is
+`pending`, `complete`, `failed`, or `cancelled`) -- a crash after the write on
+its last attempt, or legs that exhaust its attempts -- queues the
+invalidation of its revision in the transaction that fails it, through the
+queue a withdrawal uses (reason `run_failed`); a `pending` write is
+cancelled and the run excluded. The worker's invalidation pass removes the
+entries.
+
 Settle reads whether the submission is still operable once, before its legs.
 Only the Trace Credit leg checks it again, under the submission's row lock,
 in the transaction that writes its ledger row. Any other leg's adapter call
@@ -412,7 +433,12 @@ Both need an account session, never a device key, and both answer the same
 - `POST /v1/account/traces/{submission_id}/withdraw`, `main`'s route, uses
   the pipeline withdrawal when a pipeline runtime is injected and the
   requested submission, or another submission of its source session, has a
-  pipeline run. Otherwise it takes `main`'s path, unchanged.
+  pipeline run. Otherwise it takes `main`'s path. On a build with no
+  runtime injected, that path still queues the pipeline's follow-up for
+  each withdrawn submission with a pipeline run, through the database,
+  after the tombstones and before the bytes: the revision's invalidation
+  (reason `withdrawn`), a payload deletion per live object, and the end of
+  its runs' work. A runtime processes them when it runs.
 
 An upload whose source session is withdrawn while the pipeline receipt is
 still in progress is not recorded. The receipt's final transaction locks the
@@ -450,9 +476,9 @@ settlement adapter is missing), deletes the objects it wrote.
 
 `main`'s revocation routes (`DELETE /v1/traces/{id}`,
 `POST /v1/traces/{id}/revoke`, `DELETE /v1/traces`) mark the submission
-revoked as before, and, when a pipeline runtime is injected and the
-submission has a pipeline run, then make the pipeline's follow-up in one
-transaction: the export snapshot invalidations and payload deletions above,
+revoked as before, and, when the submission has a pipeline run, then make
+the pipeline's follow-up in one transaction (with no runtime injected,
+through the database, for a later runtime to process): the export snapshot invalidations and payload deletions above,
 the run's index invalidation (reason `revoked`), and the release of a run
 parked in `awaiting_review`. Settle reads the revoked status and forfeits
 every leg it has not completed. `main`'s completion of a source-session
@@ -498,8 +524,10 @@ withdrawal, for example) resets it in the same way.
 
 Payout is a separate step after Settle. It never changes a Settle outcome,
 and it is **disabled by default**: the injected runtime turns it on
-(`PipelinePayoutConfig.enabled`). With payout disabled, nothing is submitted
-to NEAR.
+by building the service with a payout (`PipelineServiceBuilder::with_payout`),
+and a service built without one has payout disabled; the payout
+configuration has no other switch (`main`'s settlement mode still applies,
+below). With payout disabled, nothing is submitted to NEAR.
 
 - Payout takes only a complete run's `trace_credit` legs that have the
   `near` payout rail and a settlement batch. A compatibility bundle's
@@ -672,6 +700,18 @@ that issuer (`pipeline_credit_issuer_principal_missing`). That event type
 does not settle on `main`, so the pipeline never batches or pays it, and the
 contributor status reports the leg as `not_settlement_eligible`.
 
+Every credit event a Trace Credit leg writes records the witness provenance
+label `main` records (`unattested` when the submission has no verified
+witness evidence; nothing when the evidence cannot be read, as on `main`).
+The worker then appends `main`'s hash-only `CreditMutate` audit event for it
+through `main`'s audit log, at once on the replica that settled the leg and
+within 10 seconds on any other: the event's id is the credit event's, its
+actor is the issuer in the role `vector_worker` (for a minimal-family
+`accepted` event, the pipeline worker, role `system`), and its metadata
+holds the event type, the delta, and hashes of the reason and the source
+key. The leg is marked audited (`credit_audited_at`) once the event is
+appended.
+
 A credit hold on the contributor does not stop this event, as it does not on
 `main`: holds gate settlement batches and payouts only.
 
@@ -720,7 +760,9 @@ status reads `accepted`, the `NoveltyUtility` event counts as ledger credit
 gate's credit-quality figure and "Credit reflects the gate's scoring" line,
 the document shows the Score evidence's shadow credit quality with the same
 line. The pipeline block comes with it. A minimal-family run keeps its own
-document under file reads.
+document with contributor reads from files and from the database alike, so
+its Trace Credit award reads as points in both (`main` keeps no ledger event
+of the `accepted` type its leg writes).
 
 A submission only the pipeline knows (its own document) reports `status` in
 `main`'s vocabulary, so the contributor daemon's history counts and its

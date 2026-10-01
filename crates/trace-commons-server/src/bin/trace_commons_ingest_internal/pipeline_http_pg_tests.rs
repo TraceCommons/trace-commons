@@ -30,7 +30,7 @@ use std::sync::Arc;
 use axum::body::to_bytes;
 use axum::extract::State;
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind, Microcredits,
+    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind, Microcredits, Phase,
 };
 use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer, SettlementAdapter};
 use trace_commons_protocol::admission::{AdmissionBinding, REQUEST_METADATA_KEY, hash_hex};
@@ -41,7 +41,8 @@ use trace_commons_server::admission_evidence::AdmissionProviderTrust;
 use trace_commons_server::admission_ledger::AdmissionLimits;
 use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::versioned_pipeline::{
-    PipelineCaps, PipelineCrashPoint, PipelinePayoutConfig, PipelineServiceBuilder,
+    PipelineCaps, PipelineCrashPoint, PipelinePayoutConfig, PipelineRunState,
+    PipelineServiceBuilder,
 };
 use trace_commons_server::versioned_pipeline_authority::{
     PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
@@ -212,14 +213,6 @@ impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         Ok(Vec::new())
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "pass_through_privacy_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
     }
 }
 
@@ -2241,7 +2234,7 @@ async fn completed_run_of(
     run
 }
 
-/// `(queued invalidations for the run, its index_invalidation_state)`.
+/// `(queued invalidations for the run, its invalidation's state, `none` without one)`.
 async fn queued_index_invalidation(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
@@ -2254,7 +2247,7 @@ async fn queued_index_invalidation(
             "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations i
                       WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
                         AND i.state = 'pending' AND i.reason_code = 'withdrawn'),
-                    r.index_invalidation_state
+                    COALESCE((SELECT x.state FROM pipeline_index_invalidations x WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id), 'none')
                FROM pipeline_runs r WHERE r.tenant_id = $1 AND r.run_id = $2",
             &[&tenant_id, &run_id],
         )
@@ -2870,7 +2863,22 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
     let cadence = Arc::new(std::sync::Mutex::new(
         pipeline_runtime::PipelineFollowUpCadence::default(),
     ));
-    pipeline_runtime::drain_pipeline_tenant(service.clone(), tenant.clone(), cadence.clone()).await;
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence.clone(),
+    )
+    .await;
     service
         .withdraw_submission(&tenant, run.submission_id, &principal, None)
         .await
@@ -2880,7 +2888,7 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
         (1, "pending".to_string())
     );
 
-    pipeline_runtime::drain_pipeline_tenant(service.clone(), tenant.clone(), cadence).await;
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
 
     assert_eq!(
         index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
@@ -3388,7 +3396,7 @@ async fn product_fixture() -> Option<ProductFixture> {
     })
 }
 
-/// `(state, attempt_count, the run's index_invalidation_state)` of the run's
+/// `(state, attempt_count, the run's invalidation state)` of the run's
 /// index invalidation.
 async fn invalidation_state(
     backend: &Arc<PgBackend>,
@@ -3399,7 +3407,7 @@ async fn invalidation_state(
     let tx = tenant_tx(&mut client, tenant_id).await;
     let row = tx
         .query_one(
-            "SELECT i.state, i.attempt_count, r.index_invalidation_state
+            "SELECT i.state, i.attempt_count, COALESCE((SELECT x.state FROM pipeline_index_invalidations x WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id), 'none')
                FROM pipeline_index_invalidations i
                JOIN pipeline_runs r ON r.tenant_id = i.tenant_id AND r.run_id = i.run_id
               WHERE i.tenant_id = $1 AND i.run_id = $2",
@@ -3443,13 +3451,6 @@ async fn the_operator_route_requeues_the_tenants_failed_invalidations() {
         "UPDATE pipeline_index_invalidations
             SET state = 'failed', attempt_count = max_attempts,
                 last_error_label = 'index_invalidation_failed'
-          WHERE tenant_id = $1 AND run_id = $2",
-        &[&tenant, &run.run_id],
-    )
-    .await
-    .unwrap();
-    tx.execute(
-        "UPDATE pipeline_runs SET index_invalidation_state = 'failed'
           WHERE tenant_id = $1 AND run_id = $2",
         &[&tenant, &run.run_id],
     )
@@ -4753,8 +4754,6 @@ fn trace_credit_payout_service(
         .with_payout(
             near,
             PipelinePayoutConfig {
-                enabled: true,
-                require_confirmation_evidence: true,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 confirmation_interval: std::time::Duration::ZERO,
                 controls: TEST_NEAR_PAYOUT_CONTROLS,
@@ -5678,14 +5677,6 @@ impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
         *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
         Ok(Vec::new())
     }
-
-    fn dependency_identity(&self) -> &str {
-        "marker_redacting_boundary_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
-    }
 }
 
 /// A privacy boundary whose rescrub always fails: the classifier outage a
@@ -5700,14 +5691,6 @@ impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         anyhow::bail!("privacy classifier unavailable (test double)")
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "failing_privacy_boundary_test_only"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
     }
 }
 
@@ -6964,7 +6947,7 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
     );
 }
 
-/// `(pending invalidations of the run, the run's index_invalidation_state,
+/// `(pending invalidations of the run, the run's invalidation state,
 /// pending payload deletions the pipeline queued for the submission, live
 /// pipeline export snapshot items of the submission)`, for the revocation
 /// tests below.
@@ -6980,7 +6963,7 @@ async fn pipeline_revocation_follow_up(
             "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations i
                       WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
                         AND i.state = 'pending' AND i.reason_code = 'revoked'),
-                    r.index_invalidation_state,
+                    COALESCE((SELECT x.state FROM pipeline_index_invalidations x WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id), 'none'),
                     (SELECT COUNT(*) FROM trace_revocation_propagation_items p
                       WHERE p.tenant_id = r.tenant_id AND p.source_submission_id = r.submission_id
                         AND p.action = 'delete_object_payload' AND p.status = 'pending'
@@ -7683,4 +7666,396 @@ async fn a_maintenance_purge_applies_the_consent_check_to_pipeline_submissions()
     assert_eq!(status().await, StorageTraceCorpusStatus::Accepted);
     assert_eq!(purge(state).await.expect("the purge runs"), 1);
     assert_eq!(status().await, StorageTraceCorpusStatus::Purged);
+}
+
+/// Zaki review 1, round 2, N-3: a retried upload of a submission id that a
+/// pipeline run owns never reaches `main`'s legacy upsert, on the path with
+/// no account admission (a static-token tenant) as well. On a drain tenant
+/// the same body from the same principal replays the pipeline receipt; a
+/// different body under the same id is refused as the pipeline refuses it,
+/// and another principal as `main` refuses it. A tenant on neither list,
+/// and a build with no pipeline runtime injected, refuse it with a label.
+/// The run is parked for review on a Medium-risk receipt, and the
+/// deployment accepts Medium risk, so a legacy upsert would accept it with
+/// no assessment: the pipeline's row stays as the receipt wrote it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retried_upload_of_a_pipeline_submission_never_reaches_mains_upsert() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    fixture
+        .service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = fixture
+        .service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    assert_eq!(created.admission_decision, "quarantine");
+    let row = || async {
+        let row = fixture
+            .owner
+            .get_trace_submission(&tenant, envelope.submission_id)
+            .await
+            .unwrap()
+            .expect("the pipeline's submission row");
+        (row.status, row.auth_principal_ref)
+    };
+    let receipt_row = row().await;
+
+    let mut drain = fixture.state.clone();
+    {
+        let drain = Arc::make_mut(&mut drain);
+        drain.accept_medium_risk_submissions = true;
+        drain.tenant_rollout_gates = TraceTenantRolloutGates::default();
+        drain.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+        drain.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+    let Json(replayed) = test_submit(drain.clone(), &fixture.token, envelope.clone())
+        .await
+        .expect("the drain tenant's retry replays");
+    assert_eq!(replayed.status, "processing");
+
+    let mut changed = envelope.clone();
+    changed.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let refused = test_submit(drain.clone(), &fixture.token, changed)
+        .await
+        .expect_err("a different body under the same id is refused");
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert_eq!(
+        refused.1.0.error,
+        "receipt id reused with different content"
+    );
+
+    let refused = test_submit(drain.clone(), &fixture.other_token, envelope.clone())
+        .await
+        .expect_err("another principal is refused");
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert_eq!(
+        refused.1.0.error,
+        "submission id already belongs to another principal"
+    );
+
+    let mut unlisted = drain.clone();
+    Arc::make_mut(&mut unlisted).pipeline_drain_tenant_ids = Arc::new(BTreeSet::new());
+    let mut runtime_less = unlisted.clone();
+    Arc::make_mut(&mut runtime_less).pipeline_service = None;
+    for (state, case) in [(unlisted, "neither list"), (runtime_less, "no runtime")] {
+        let refused = test_submit(state, &fixture.token, envelope.clone())
+            .await
+            .expect_err(case);
+        assert_eq!(refused.0, StatusCode::CONFLICT, "{case}");
+        assert_eq!(
+            refused.1.0.error, "submission_owned_by_pipeline_run",
+            "{case}"
+        );
+    }
+    assert_eq!(row().await, receipt_row, "the pipeline's row is unchanged");
+}
+
+/// Zaki review 1, round 2, N-5: a compatibility run's `NoveltyUtility`
+/// ledger row records the witness provenance label `main` records on a
+/// credit event (`unattested` for a submission with no witness evidence),
+/// and the worker appends `main`'s hash-only `CreditMutate` audit event for
+/// it through `main`'s mirrored audit log: the event carries the credit
+/// event's id, the pipeline's issuer in the role `main` records for its gate
+/// worker, and only the event type, the delta and hashes in its metadata.
+/// The leg is then marked audited, and a second pass appends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pipeline_credit_event_carries_its_witness_label_and_mains_audit_event() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-{suffix}");
+    let token = format!("token-compat-audit-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.pipeline_service = Some(service.clone());
+    let principal = static_token_principal_ref(&token);
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let ledger = tx
+        .query_one(
+            "SELECT credit_event_id, witness_provenance_class, reason FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    let credit_event_id: Uuid = ledger.get(0);
+    assert_eq!(
+        ledger.get::<_, Option<String>>(1).as_deref(),
+        Some("unattested")
+    );
+    let reason: String = ledger.get(2);
+
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence,
+    )
+    .await;
+    let audit_rows = || async {
+        let mut client = owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let rows = tx
+            .query(
+                "SELECT audit_event_id, action, actor_principal_ref, actor_role, metadata_json
+                   FROM trace_audit_events
+                  WHERE tenant_id = $1 AND submission_id = $2 AND action = 'credit_mutate'",
+                &[&tenant, &run.submission_id],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        rows
+    };
+    let rows = audit_rows().await;
+    assert_eq!(rows.len(), 1, "one CreditMutate audit event");
+    let row = &rows[0];
+    assert_eq!(row.get::<_, Uuid>("audit_event_id"), credit_event_id);
+    assert_eq!(
+        row.get::<_, String>("actor_principal_ref"),
+        TEST_PIPELINE_CREDIT_ISSUER
+    );
+    assert_eq!(row.get::<_, String>("actor_role"), "vector_worker");
+    let metadata: serde_json::Value = row.get("metadata_json");
+    assert_eq!(metadata["event_type"], "novelty_utility", "{metadata}");
+    assert_eq!(
+        metadata["credit_points_delta_micros"], 2_500_000,
+        "{metadata}"
+    );
+    assert_eq!(
+        metadata["reason_hash"],
+        serde_json::json!(sha256_prefixed(&reason)),
+        "{metadata}"
+    );
+    assert!(
+        !metadata.to_string().contains(&reason),
+        "the reason is recorded as a hash only: {metadata}"
+    );
+
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let audited: bool = tx
+        .query_one(
+            "SELECT credit_audited_at IS NOT NULL FROM pipeline_run_settlements
+              WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'trace_credit'",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert!(audited, "the leg is marked audited");
+    assert_eq!(
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(audit_rows().await.len(), 1, "a second pass appends nothing");
+}
+
+/// Zaki review 1, round 2, N-8: under `main`'s database contributor reads,
+/// a minimal-family run's Trace Credit award is reported with its points,
+/// as under file reads and in the pipeline block: the status route answers
+/// the same document in both read modes, where database reads used to
+/// describe the run from `main`'s row, whose credit is 0 (`main` keeps no
+/// ledger event of the `accepted` type).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_minimal_family_award_reads_with_its_points_under_database_reads() {
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    {
+        let state = Arc::make_mut(&mut fixture.state);
+        state.pipeline_product = Some(Arc::new(PipelineProductStore::new(fixture.runtime.clone())));
+        state.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+    }
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let status = |db_reads: bool| {
+        let mut state = fixture.state.clone();
+        Arc::make_mut(&mut state).db_contributor_reads = db_reads;
+        route_request(
+            state,
+            "POST",
+            "/v1/contributors/me/submission-status",
+            auth_headers(&fixture.token),
+            Some(serde_json::json!({ "submission_ids": [run.submission_id] })),
+        )
+    };
+    let (code, file_reads) = status(false).await;
+    assert_eq!(code, StatusCode::OK, "{file_reads}");
+    let (code, database_reads) = status(true).await;
+    assert_eq!(code, StatusCode::OK, "{database_reads}");
+    assert_eq!(
+        file_reads[0]["credit_points_pending"],
+        serde_json::json!(1.0),
+        "{file_reads}"
+    );
+    assert_eq!(
+        database_reads, file_reads,
+        "database reads report the award as file reads do"
+    );
+}
+
+/// Zaki review 1, round 2, N-9: on a build with no pipeline runtime
+/// injected, `main`'s account withdrawal of a submission with a pipeline run
+/// still queues the pipeline's follow-up through the database
+/// (`AppState::pipeline_store`), for a later runtime to process: the run's
+/// revision is queued for removal from the pipeline index (reason
+/// `withdrawn`) and a payload deletion is queued per live object. The
+/// withdrawal succeeds with `main`'s response. `main`'s revocation route
+/// does the same, under reason `revoked`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runtime_less_build_queues_the_pipeline_follow_up_through_the_database() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.token);
+    let session = account_session_headers(&fixture.state, &fixture.token).await;
+    let withdrawn = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let revoked = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let ext = account_ctx_ext(&fixture.state, &session).await;
+    let mut runtime_less = fixture.state.clone();
+    {
+        let state = Arc::make_mut(&mut runtime_less);
+        state.pipeline_service = None;
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+
+    let Json(response) = account_trace_withdraw_handler(
+        State(runtime_less.clone()),
+        ext,
+        AxumPath(withdrawn.submission_id),
+    )
+    .await
+    .expect("the withdrawal succeeds with no runtime injected");
+    assert_eq!(response.submission_id, withdrawn.submission_id);
+    assert_eq!(
+        queued_index_invalidation(&fixture.runtime, tenant, withdrawn.run_id).await,
+        (1, "pending".to_string()),
+        "the revision is queued for removal"
+    );
+    let deletions: i64 = {
+        let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, tenant).await;
+        let count = tx
+            .query_one(
+                "SELECT COUNT(*) FROM trace_revocation_propagation_items
+                  WHERE tenant_id = $1 AND source_submission_id = $2
+                    AND action = 'delete_object_payload' AND reason = 'pipeline_withdrawal'",
+                &[&tenant, &withdrawn.submission_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    assert!(
+        deletions >= 2,
+        "a payload deletion per live object ({deletions})"
+    );
+
+    let (status, body) = route_request(
+        runtime_less,
+        "DELETE",
+        &format!("/v1/traces/{}", revoked.submission_id),
+        auth_headers(&fixture.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (invalidations, run_state, deletions) =
+        pipeline_revocation_follow_up(&fixture.runtime, tenant, &revoked).await;
+    assert_eq!(
+        (invalidations, run_state.as_str()),
+        (1, "pending"),
+        "the revoked revision is queued for removal"
+    );
+    assert!(
+        deletions >= 2,
+        "a payload deletion per live object ({deletions})"
+    );
 }

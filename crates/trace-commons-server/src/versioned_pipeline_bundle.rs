@@ -331,11 +331,13 @@ pub struct PipelineBundleConfig {
     pub variant: Option<String>,
 }
 
+#[derive(Clone)]
 struct FixedIndexSpec {
     embedder: Arc<dyn IdentifiedEmbedder>,
     index_reader: Arc<dyn IdentifiedIndexReader>,
 }
 
+#[derive(Clone)]
 pub struct FixedScorePolicy {
     decision: ScoreDecision,
     index: Option<FixedIndexSpec>,
@@ -351,7 +353,21 @@ fn settle_invalid<E>(_: E) -> PolicyError {
 
 #[async_trait]
 impl ScorePolicy for FixedScorePolicy {
+    /// The embedder and the index reader are synchronous, so the evaluation
+    /// runs on the blocking pool, never on a runtime worker (Zaki review 1,
+    /// round 2, N-6), as the compatibility Score's does.
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
+        let policy = self.clone();
+        let input = input.clone();
+        tokio::task::spawn_blocking(move || policy.evaluate(&input))
+            .await
+            .map_err(|_| PolicyError::permanent("score_task_failed").expect("static label"))?
+    }
+}
+
+impl FixedScorePolicy {
+    /// The evaluation `execute` runs on the blocking pool.
+    fn evaluate(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
         let mut evidence = ScoreEvidence::fixed(self.decision.awards().clone());
         let command = match &self.index {
             None => None,

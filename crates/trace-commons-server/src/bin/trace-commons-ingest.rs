@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use trace_commons_gate_api::pipeline::{Phase, ReasonCode, ReviewRecommendation};
+use trace_commons_gate_api::pipeline::{ReasonCode, ReviewRecommendation};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
@@ -264,7 +264,7 @@ use trace_commons_server::versioned_pipeline::{
     PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig,
     PipelineNearPayoutControls, PipelineNearSettlementMode, PipelineNoveltyUtilityChecks,
     PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
-    PipelineRetentionAction, PipelineReviewClaim, PipelineRunState, PipelineService,
+    PipelineRetentionAction, PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
     PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
     is_pipeline_score_object_ref,
 };
@@ -14152,6 +14152,77 @@ fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
     )
 }
 
+/// The label a retried upload gets for a submission id that a pipeline run
+/// owns when no pipeline runtime may replay it: the tenant is on neither
+/// pipeline list, or no runtime is injected (Zaki review 1, round 2, N-3).
+const SUBMISSION_OWNED_BY_PIPELINE_RUN: &str = "submission_owned_by_pipeline_run";
+
+/// Zaki review 1, round 2, N-3: an upload of a submission id that a
+/// pipeline run owns never reaches `main`'s legacy upsert, whatever path it
+/// took (with or without account admission, static-token tenants
+/// included). With a runtime that may replay the tenant's receipts (a
+/// routed or drained tenant, `pipeline_runtime_for_replay`), the caller
+/// must be the principal the pipeline recorded, under the same ownership
+/// predicate the legacy path applies (`can_access_submission`, by principal
+/// ref); another principal is refused with `ownership_conflict`, as the
+/// legacy path refuses one. The same body then replays the pipeline
+/// receipt, and a different body is refused as the pipeline refuses it
+/// (`pipeline_content_conflict`). With no such runtime, a run found
+/// through the database (`PgPipelineStore`) refuses the upload with
+/// `SUBMISSION_OWNED_BY_PIPELINE_RUN`. `Ok(None)` when no pipeline run owns
+/// the id: the upload takes `main`'s path.
+async fn pipeline_owned_submission_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    if let Some(pipeline_service) = pipeline_runtime_for_replay(state, tenant) {
+        let idempotency_key = submission_id.to_string();
+        let Some(PipelineReplayReceipt {
+            result,
+            auth_principal_ref,
+        }) = pipeline_service
+            .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
+            .await
+            .map_err(internal_error)?
+        else {
+            return Ok(None);
+        };
+        if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
+            return Err(api_error(StatusCode::CONFLICT, ownership_conflict));
+        }
+        return match result {
+            PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
+            PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
+            // `replay_receipt` only ever builds a `Replayed` or a
+            // `ContentConflict` result (`replay_result`, over a run it
+            // found); any other variant fails closed rather than letting
+            // the upload reach the legacy upsert.
+            PipelineReceiptResult::Created(_)
+            | PipelineReceiptResult::Tombstoned
+            | PipelineReceiptResult::QuotaExceeded(_)
+            | PipelineReceiptResult::SourceSessionWithdrawn => {
+                Err(internal_error("pipeline_replay_result_unexpected"))
+            }
+        };
+    }
+    if let Some(store) = state.pipeline_store.as_ref() {
+        if store
+            .submission_has_pipeline_run(tenant.tenant_id(), submission_id)
+            .await
+            .map_err(internal_error)?
+        {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                SUBMISSION_OWNED_BY_PIPELINE_RUN,
+            ));
+        }
+    }
+    Ok(None)
+}
+
 /// Routes a receipt to the versioned pipeline instead of the legacy corpus
 /// path, for a `PipelineReceipts`-rollout tenant with an injected runtime.
 ///
@@ -14371,57 +14442,23 @@ async fn submit_trace_handler(
         // and the same ownership predicate the legacy fallback below applies
         // (`can_access_submission`, here via its principal-ref form) is
         // applied to it before either pipeline outcome is returned.
-        if let Some(pipeline_service) = pipeline_runtime_for_replay(state.as_ref(), &tenant) {
-            let idempotency_key = envelope.submission_id.to_string();
-            if let Some(PipelineReplayReceipt {
-                result,
-                auth_principal_ref,
-            }) = pipeline_service
-                .replay_receipt(tenant.tenant_id(), &idempotency_key, &raw_body)
-                .await
-                .map_err(internal_error)?
-            {
-                if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
-                    return Err(api_error(
-                        StatusCode::CONFLICT,
-                        "admission_identity_conflict",
-                    ));
-                }
-                match result {
-                    PipelineReceiptResult::Replayed(_) => {
-                        return Ok(Json(pipeline_processing_receipt()));
-                    }
-                    // Defensive, not reachable over HTTP today:
-                    // `admission::reserve`'s own completed-lookup is keyed on
-                    // the request body's hash, so a retry with different
-                    // content for a submission id that is already
-                    // `completed` never reaches this branch as a completed
-                    // retry in the first place -- `reserve` answers it
-                    // first, either refusing a new submission outright (no
-                    // evidence) or with its own identity-conflict decision
-                    // (with evidence). See the third POST in
-                    // `real_http_pipeline_receipt_replays_on_retry`.
-                    PipelineReceiptResult::ContentConflict => {
-                        return Err(pipeline_content_conflict());
-                    }
-                    // `replay_receipt` only ever builds a `Replayed` or a
-                    // `ContentConflict` result (`replay_result`, over a run
-                    // `existing_receipt_run` already found); a read-only
-                    // replay lookup neither creates a run, stages an
-                    // attempt, checks a tombstone or a source session, nor
-                    // counts a quota, so none of these variants can come
-                    // from it. Kept
-                    // only so this match stays exhaustive against the
-                    // shared `PipelineReceiptResult` enum.
-                    PipelineReceiptResult::Created(_)
-                    | PipelineReceiptResult::Tombstoned
-                    | PipelineReceiptResult::QuotaExceeded(_)
-                    | PipelineReceiptResult::SourceSessionWithdrawn => {}
-                }
-            }
-            // No run under this key: a submission that completed admission
-            // on the legacy path before this tenant was routed to the
-            // pipeline. Fall back to the legacy read below, unchanged.
+        // `pipeline_owned_submission_receipt` replays it for a routed or
+        // drained tenant; with no runtime that may replay it, a run found
+        // through the database refuses it with a label rather than reading
+        // the legacy record the pipeline never wrote. With no run under this
+        // key (a submission that completed admission on the legacy path
+        // before this tenant was routed to the pipeline), the legacy read
+        // below runs, unchanged.
+        if let Some(receipt) = pipeline_owned_submission_receipt(
+            state.as_ref(),
+            &tenant,
+            envelope.submission_id,
+            &raw_body,
+            "admission_identity_conflict",
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
         }
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)
@@ -14445,6 +14482,24 @@ async fn submit_trace_handler(
     let result = async {
         if state.account_admission.is_none() {
             validate_envelope(&envelope)?;
+        }
+
+        // Zaki review 1, round 2, N-3: a submission id a pipeline run owns
+        // never reaches the legacy record read or upsert below, on this
+        // path too (no completed admission: a static-token tenant, or an
+        // admission still in progress). It is answered as `main` answers a
+        // retry of an existing record, before the tenant policy and quota
+        // checks.
+        if let Some(receipt) = pipeline_owned_submission_receipt(
+            state.as_ref(),
+            &tenant,
+            envelope.submission_id,
+            &raw_body,
+            "submission id already belongs to another principal",
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
         }
 
         // Idempotency: same submission_id always addresses the same record.
@@ -15085,8 +15140,15 @@ async fn revoke_submission(
     // runs' work ended -- as the pipeline withdrawal does. The submission is
     // marked revoked above, so Settle, which reads the submission guard,
     // forfeits whatever it has not completed.
+    // With no runtime injected, the follow-up is queued through the
+    // database for a later runtime (Zaki review 1, round 2, N-9).
     if let Some(pipeline) = state.pipeline_service.as_ref() {
         pipeline
+            .follow_up_revocation(tenant.tenant_id(), submission_id, tenant.principal_ref())
+            .await
+            .map_err(internal_error)?;
+    } else if let Some(store) = state.pipeline_store.as_ref() {
+        store
             .follow_up_revocation(tenant.tenant_id(), submission_id, tenant.principal_ref())
             .await
             .map_err(internal_error)?;
@@ -16382,7 +16444,16 @@ async fn submission_status_handler(
         // Ruling T15-7: a compatibility run's credit figure is the shadow
         // credit quality its Score recorded, where `main` shows its gate's.
         let compatibility_decision = pipeline.and_then(compatibility_credit_decision);
-        if let Some(record) = visible_by_submission.get(&submission_id) {
+        // Zaki review 1, round 2, N-8: a minimal-family run's document is the
+        // pipeline's in both read modes. Under database reads `main`'s view
+        // also holds the run's submission row, but `main` keeps no ledger
+        // event of the `accepted` type its Trace Credit leg writes, so a
+        // document built from that row would report its award as 0, where
+        // file reads, which never hold the row, report its points.
+        let main_record = visible_by_submission
+            .get(&submission_id)
+            .filter(|_| pipeline.is_none_or(|pipeline| pipeline.compatibility.is_some()));
+        if let Some(record) = main_record {
             let mut status = submission_status_from_record(
                 record,
                 &status_credit_events,
@@ -19105,6 +19176,26 @@ async fn account_trace_withdraw_handler(
             .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
         (tombstone, vec![submission_id])
     };
+
+    // Zaki review 1, round 2, N-9: a build with no runtime injected takes
+    // this path for a submission with a pipeline run too, so each withdrawn
+    // version with one gets the pipeline's follow-up through the database
+    // (its revision queued for removal from the pipeline index, a payload
+    // deletion per live object, its runs' work ended), for a later runtime
+    // to process. After the tombstones and before the bytes, as the
+    // completion reconciler runs it; idempotent, and nothing for a version
+    // with no run.
+    if state.pipeline_service.is_none() {
+        if let Some(store) = state.pipeline_store.as_ref() {
+            let actor = account_audit_tenant(&ctx);
+            for affected_id in &affected_ids {
+                store
+                    .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
+                    .await
+                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+            }
+        }
+    }
 
     // Credit is retained only if it is retained for every withdrawn version.
     let credit_retained = affected_ids.iter().all(|affected_id| {
@@ -21913,6 +22004,15 @@ async fn reconcile_source_session_withdrawals(
             // consumer sweep).
             if let Some(pipeline) = state.pipeline_service.as_ref() {
                 pipeline
+                    .follow_up_withdrawal(
+                        tenant_id,
+                        version.submission_id,
+                        &audit_tenant.principal_ref,
+                    )
+                    .await?;
+            } else if let Some(store) = state.pipeline_store.as_ref() {
+                // With no runtime injected, through the database (N-9).
+                store
                     .follow_up_withdrawal(
                         tenant_id,
                         version.submission_id,
@@ -42443,8 +42543,22 @@ async fn pipeline_review_claim_handler(
         )
         .await
         .map_err(pipeline_review_claim_db_error)?;
-    let Some(claim) = claimed else {
-        return pipeline_review_claim_conflict(pipeline_service, &tenant.tenant_id, run_id).await;
+    let claim = match claimed {
+        PipelineReviewClaimOutcome::Claimed(claim) => claim,
+        // Ruling T3-9(b): `404` for a run that is not waiting for review,
+        // `409` only for one another reviewer holds.
+        PipelineReviewClaimOutcome::Ineligible => {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                "pipeline run is not waiting for review",
+            ));
+        }
+        PipelineReviewClaimOutcome::HeldByAnotherReviewer => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "pipeline review claim is held by another reviewer",
+            ));
+        }
     };
     // Zaki review 1, minor item M-a: the audit row `main`'s review lease
     // claim appends, hash-only and label-only.
@@ -42524,60 +42638,6 @@ async fn pipeline_run_submission_id(
         .await?
         .ok_or_else(|| anyhow::anyhow!("pipeline_run_missing"))?
         .submission_id)
-}
-
-/// `claim_review` returning `Ok(None)` covers two cases a caller cannot tell
-/// apart from that value alone: the run is not currently eligible for a
-/// claim at all (does not exist, is not at Review, is not
-/// `pending`/`retry`/`awaiting_review` -- for example a worker holds it
-/// `leased`, or it already `failed` -- is not a quarantine, or already has
-/// an assessment) -- `404`; or the run is eligible but another reviewer
-/// already holds a live claim on it -- `409` (Ruling T3-9(b)). Reads the run
-/// (and, only once it passes every eligibility check, whether it has an
-/// assessment) back to tell the two apart, mirroring `claim_review`'s own
-/// `WHERE` clause exactly so this can never call an ineligible run
-/// "held by another reviewer". The same shape
-/// `claim_review_lease_handler`'s own `review_lease_claim_conflict` uses for
-/// the legacy lease.
-async fn pipeline_review_claim_conflict(
-    pipeline_service: &PipelineService,
-    tenant_id: &str,
-    run_id: Uuid,
-) -> ApiResult<Json<PipelineReviewClaimResponse>> {
-    let not_waiting = api_error(
-        StatusCode::NOT_FOUND,
-        "pipeline run is not waiting for review",
-    );
-    let run = pipeline_service
-        .store()
-        .get_run(tenant_id, run_id)
-        .await
-        .map_err(internal_error)?;
-    let Some(run) = run else {
-        return Err(not_waiting);
-    };
-    let eligible = run.next_phase == Some(Phase::Review)
-        && matches!(
-            run.state,
-            PipelineRunState::Pending | PipelineRunState::Retry | PipelineRunState::AwaitingReview
-        )
-        && run.admission_decision == "quarantine";
-    if !eligible {
-        return Err(not_waiting);
-    }
-    let assessed = pipeline_service
-        .store()
-        .load_review_assessment(tenant_id, run_id)
-        .await
-        .map_err(internal_error)?
-        .is_some();
-    if assessed {
-        return Err(not_waiting);
-    }
-    Err(api_error(
-        StatusCode::CONFLICT,
-        "pipeline review claim is held by another reviewer",
-    ))
 }
 
 #[derive(Debug, Deserialize)]

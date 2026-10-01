@@ -34,13 +34,14 @@ use crate::db::postgres::{PgBackend, TRACE_COMMONS_RLS_TABLES};
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::TraceObjectArtifactKind;
 use crate::versioned_pipeline::{
-    PIPELINE_SUBMISSION_INOPERABLE_LABEL, PipelineRunState, phase_from_db, sha256_prefixed,
+    PIPELINE_SUBMISSION_INOPERABLE_LABEL, PipelineRunState, accepted_submission_sql,
+    live_submission_sql, phase_from_db, sha256_prefixed,
 };
 use crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_IMPLEMENTATION;
 
 pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
-/// The most items one export snapshot holds. V106 bounds a snapshot's
-/// `item_count` and its items' `ordinal` to the same number.
+/// The most items one export snapshot holds. V106 bounds its items'
+/// `ordinal` to the same number.
 pub const PIPELINE_EXPORT_ITEM_MAX: usize = 500;
 pub const PIPELINE_EXPORT_SELECTION_POLICY_ID: &str = "trace_commons.pipeline_export_selection.v1";
 pub const PIPELINE_AUTHORIZED_VIEW_SCHEMA_ID: &str = "trace_commons.authorized_trace_view.v1";
@@ -316,8 +317,8 @@ pub struct PipelineExportSnapshot {
 }
 
 // Every `u64` field below is checked against the decimal-string amount rule.
-// None of them is an amount -- `PipelineLifecycleSummary`,
-// `PipelineWorkSummary`, and `PipelineOperationalSummary`'s fields are all
+// None of them is an amount -- `PipelineWorkSummary` and
+// `PipelineOperationalSummary`'s fields are all
 // counts or durations (of invalidations, snapshots, errors, commands, credit
 // events, outbox rows -- never a credit or token amount), and
 // `PipelinePhaseTrace`'s are hashes and an outcome version. None gets
@@ -325,14 +326,6 @@ pub struct PipelineExportSnapshot {
 // `instruments: Vec<PipelineInstrumentStatus>`, whose own `atomic_units` is
 // already `AtomicUnits` (decimal-string on its own), so it needs no
 // additional attribute either.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PipelineLifecycleSummary {
-    pub pending_index_invalidations: u64,
-    pub terminal_index_invalidation_failures: u64,
-    pub active_export_snapshots: u64,
-    pub invalidated_export_snapshots: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineWorkSummary {
     pub phase: String,
@@ -444,22 +437,13 @@ const TRACE_CREDIT_LEDGER_JOIN: &str = "
 /// Whether the submission aliased `s` may be exported for the allowed use
 /// bound as `$2`.
 ///
-/// The first four lines are the operability rule of
-/// `PgPipelineStore::submission_guard_on_tx`, the guard Score and Settle
-/// commit under: status `accepted`, not revoked, purged, or expired, and no
-/// `trace_withdrawals` row. They are repeated here in SQL because an export
-/// filters many submissions in one statement; a change to that rule must
-/// change this text too. The last line is `main`'s record-level export
-/// rule (`record_matches_export_policy_abac`): the submission's own
+/// The operability rule of `PgPipelineStore::submission_guard_on_tx`, the
+/// guard Score and Settle commit under, from its one definition
+/// (`accepted_submission_sql!`), then `main`'s record-level export rule
+/// (`record_matches_export_policy_abac`): the submission's own
 /// `allowed_uses` holds the requested use.
-const EXPORTABLE_SUBMISSION_PREDICATE: &str = "
-                        s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                    AND NOT EXISTS (
-                        SELECT 1 FROM trace_withdrawals w
-                         WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
-                    )
-                    AND s.allowed_uses ? $2";
+const EXPORTABLE_SUBMISSION_PREDICATE: &str =
+    concat!(accepted_submission_sql!(), " AND s.allowed_uses ? $2");
 
 /// The export selection: complete runs of tenant `$1` with a committed
 /// Review approved revision whose approved object is live, and whose
@@ -954,15 +938,13 @@ impl PipelineProductStore {
             .await?;
         let snapshot_id = Uuid::new_v4();
         let source_list_hash = source_list_hash(&rows);
-        let item_count = i32::try_from(rows.len())
-            .map_err(|_| DatabaseError::Constraint("export item count overflow".to_string()))?;
         let snapshot_row = tx
             .query_one(
                 "INSERT INTO pipeline_export_snapshots (
                     tenant_id, snapshot_id, request_idempotency_key,
                     requester_principal_ref, allowed_use, purpose_hash,
-                    selection_policy_id, source_list_hash, item_count
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                    selection_policy_id, source_list_hash
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                  RETURNING *",
                 &[
                     &tenant_id,
@@ -973,7 +955,6 @@ impl PipelineProductStore {
                     &purpose_hash,
                     &PIPELINE_EXPORT_SELECTION_POLICY_ID,
                     &source_list_hash,
-                    &item_count,
                 ],
             )
             .await?;
@@ -1272,35 +1253,6 @@ impl PipelineProductStore {
         })
     }
 
-    pub async fn lifecycle_summary(
-        &self,
-        tenant_id: &str,
-    ) -> Result<PipelineLifecycleSummary, DatabaseError> {
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let row = tx
-            .query_one(
-                "SELECT
-                    (SELECT COUNT(*) FROM pipeline_index_invalidations
-                      WHERE tenant_id = $1 AND state = 'pending') AS pending_index,
-                    (SELECT COUNT(*) FROM pipeline_index_invalidations
-                      WHERE tenant_id = $1 AND state = 'failed') AS failed_index,
-                    (SELECT COUNT(*) FROM pipeline_export_snapshots
-                      WHERE tenant_id = $1 AND state IN ('ready','complete')) AS active_exports,
-                    (SELECT COUNT(*) FROM pipeline_export_snapshots
-                      WHERE tenant_id = $1 AND state = 'invalidated') AS invalidated_exports",
-                &[&tenant_id],
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(PipelineLifecycleSummary {
-            pending_index_invalidations: count_from_row(&row, "pending_index")?,
-            terminal_index_invalidation_failures: count_from_row(&row, "failed_index")?,
-            active_export_snapshots: count_from_row(&row, "active_exports")?,
-            invalidated_export_snapshots: count_from_row(&row, "invalidated_exports")?,
-        })
-    }
-
     /// The tenant-isolation and audit-immutability booleans are a live health
     /// signal, not a cache (`pipeline_control_health`).
     pub async fn operational_summary(
@@ -1421,10 +1373,13 @@ impl PipelineProductStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let Some(run) = tx
             .query_opt(
-                "SELECT run_id, submission_id, bundle_id, index_command_hash,
-                        index_write_state, index_invalidation_state
-                   FROM pipeline_runs
-                  WHERE tenant_id = $1 AND run_id = $2",
+                "SELECT r.run_id, r.submission_id, r.bundle_id, r.index_command_hash,
+                        r.index_write_state,
+                        COALESCE(i.state, 'none') AS index_invalidation_state
+                   FROM pipeline_runs r
+                   LEFT JOIN pipeline_index_invalidations i
+                     ON i.tenant_id = r.tenant_id AND i.run_id = r.run_id
+                  WHERE r.tenant_id = $1 AND r.run_id = $2",
                 &[&tenant_id, &run_id],
             )
             .await?

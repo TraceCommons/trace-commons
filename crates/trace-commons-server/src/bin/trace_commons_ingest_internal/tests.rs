@@ -10800,10 +10800,6 @@ impl trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvid
         })
     }
 
-    fn dependency_identity(&self) -> &str {
-        "qualified_test_authority"
-    }
-
     fn production_qualified(&self) -> bool {
         true
     }
@@ -10823,14 +10819,6 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
         Ok(Vec::new())
-    }
-
-    fn dependency_identity(&self) -> &str {
-        "qualified_test_privacy"
-    }
-
-    fn is_production_compatible(&self) -> bool {
-        false
     }
 
     fn production_qualified(&self) -> bool {
@@ -11292,14 +11280,10 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
     let classifier =
         minimal_pipeline_service_builder(backend, test_artifact_store(dir.path()), None)
             .unwrap()
-            .with_privacy(Arc::new(
-                ClassifierRedactorPipelinePrivacyBoundary::new(
-                    Arc::new(NoopPrivacyFilterAdapter),
-                    PiiClassifyPolicy::default(),
-                    "classifier_test",
-                )
-                .unwrap(),
-            ))
+            .with_privacy(Arc::new(ClassifierRedactorPipelinePrivacyBoundary::new(
+                Arc::new(NoopPrivacyFilterAdapter),
+                PiiClassifyPolicy::default(),
+            )))
             .build()
             .unwrap();
     validate_pipeline_privacy_filter_requirement(true, &classifier)
@@ -11811,10 +11795,6 @@ struct QualifiedTestNearAdapter(
 impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
     for QualifiedTestNearAdapter
 {
-    fn dependency_identity(&self) -> &str {
-        "qualified_test_near"
-    }
-
     fn production_qualified(&self) -> bool {
         true
     }
@@ -11858,14 +11838,11 @@ const TEST_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayout
     require_adapter_auth: false,
 };
 
-/// A payout configuration with confirmation evidence required.
+/// A payout configuration on `near_contract_id`.
 fn payout_test_config(
-    enabled: bool,
     near_contract_id: Option<&str>,
 ) -> trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
     trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
-        enabled,
-        require_confirmation_evidence: true,
         near_contract_id: near_contract_id.map(str::to_string),
         confirmation_interval: TEST_NEAR_CONFIRMATION_INTERVAL,
         controls: TEST_NEAR_PAYOUT_CONTROLS,
@@ -11891,7 +11868,7 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
             .near_contract_id
             .map(str::to_string)
             .or(context.near_contract_id);
-        let mut config = payout_test_config(true, near_contract_id.as_deref());
+        let mut config = payout_test_config(near_contract_id.as_deref());
         config.confirmation_interval = self
             .confirmation_interval
             .unwrap_or(context.near_confirmation_interval);
@@ -12183,10 +12160,7 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
             None,
             true,
             true,
-            Some((
-                adapter,
-                payout_test_config(enabled, Some(TEST_PAYOUT_NEAR_CONTRACT)),
-            )),
+            enabled.then(|| (adapter, payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT)))),
             None,
             None,
         )
@@ -12387,81 +12361,110 @@ fn the_worker_runs_a_follow_up_step_when_woken_or_once_its_interval_has_passed()
     let steps = |index_invalidations: bool, payouts: bool| PipelineFollowUps {
         index_invalidations,
         payouts,
+        credit_audits: false,
+    };
+    // The credit audit step has its own clock, checked at the end; the
+    // asserts above it compare the other two steps.
+    let without_audits = |due: PipelineFollowUps| PipelineFollowUps {
+        credit_audits: false,
+        ..due
     };
     let unwoken = PipelineFollowUps::default();
     let mut cadence = PipelineFollowUpCadence::default();
 
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(0)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(0))),
         steps(true, true),
         "a tenant's first pass runs both steps"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(9)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(9))),
         steps(false, false),
         "within both intervals, nothing woken, neither runs"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(10)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(10))),
         steps(true, false),
         "the invalidation step runs every 10 seconds"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", steps(true, false), payout_interval, at(11)),
+        without_audits(cadence.due_steps("tenant-a", steps(true, false), payout_interval, at(11))),
         steps(true, false),
         "a queued invalidation wakes the invalidation step at once"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(20)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(20))),
         steps(false, false),
         "the interval counts from the woken run"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(21)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(21))),
         steps(true, false)
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", steps(false, true), payout_interval, at(22)),
+        without_audits(cadence.due_steps("tenant-a", steps(false, true), payout_interval, at(22))),
         steps(false, true),
         "a completed Trace Credit leg wakes the payout step at once"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(81)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(81))),
         steps(true, false),
         "the payout step waits out the confirmation interval from its last run"
     );
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(82)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(82))),
         steps(false, true)
     );
 
     cadence.run_again("tenant-a", PipelineFollowUpStep::Payouts);
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(83)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(83))),
         steps(false, true),
         "a full payout batch leaves the step due on the next pass"
     );
     cadence.run_again("tenant-a", PipelineFollowUpStep::IndexInvalidations);
     assert_eq!(
-        cadence.due_steps("tenant-a", unwoken, payout_interval, at(84)),
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(84))),
         steps(true, false),
         "and so does a full invalidation batch"
     );
 
     assert_eq!(
-        cadence.due_steps("tenant-b", unwoken, payout_interval, at(84)),
+        without_audits(cadence.due_steps("tenant-b", unwoken, payout_interval, at(84))),
         steps(true, true),
         "each tenant has its own clock"
     );
     assert_eq!(
-        cadence.due_steps("tenant-c", steps(true, true), None, at(0)),
+        without_audits(cadence.due_steps("tenant-c", steps(true, true), None, at(0))),
         steps(true, false),
         "a disabled payout never runs, woken or not"
     );
     assert_eq!(
-        cadence.due_steps("tenant-c", unwoken, None, at(1_000)),
+        without_audits(cadence.due_steps("tenant-c", unwoken, None, at(1_000))),
         steps(true, false)
     );
+
+    // Zaki review 1, round 2, N-5: the credit audit step runs on a tenant's
+    // first pass, every 10 seconds, and at once when a settled Trace Credit
+    // leg woke it.
+    let audits = |woken: bool, seconds: u64, cadence: &mut PipelineFollowUpCadence| {
+        cadence
+            .due_steps(
+                "tenant-d",
+                PipelineFollowUps {
+                    credit_audits: woken,
+                    ..PipelineFollowUps::default()
+                },
+                payout_interval,
+                at(seconds),
+            )
+            .credit_audits
+    };
+    assert!(audits(false, 0, &mut cadence), "the first pass audits");
+    assert!(!audits(false, 9, &mut cadence));
+    assert!(audits(true, 9, &mut cadence), "a settled leg wakes it");
+    assert!(!audits(false, 18, &mut cadence));
+    assert!(audits(false, 19, &mut cadence), "every 10 seconds");
 }
 
 #[tokio::test]
