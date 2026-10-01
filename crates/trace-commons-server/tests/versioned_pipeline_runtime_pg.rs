@@ -13385,12 +13385,23 @@ impl SettlementAdapter for OutageThenRecordingAdapter {
         &self,
         request: &SettlementRequest,
     ) -> Result<SettlementReceipt, SettlementError> {
-        let failing = self
-            .failures_left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                left.checked_sub(1)
-            })
-            .is_ok();
+        // A compare-exchange loop rather than `fetch_update`, which Rust 1.99
+        // deprecates (as `try_update`, absent before 1.99).
+        let mut left = self.failures_left.load(Ordering::SeqCst);
+        let failing = loop {
+            let Some(next) = left.checked_sub(1) else {
+                break false;
+            };
+            match self.failures_left.compare_exchange(
+                left,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break true,
+                Err(actual) => left = actual,
+            }
+        };
         if failing {
             return Err(SettlementError::Unavailable);
         }
