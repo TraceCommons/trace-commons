@@ -178,6 +178,8 @@ Do not port these in PR 4. A task that needs one of them has a defect in this pl
 
 ## Interfaces (the names every task uses)
 
+> Amended 2026-10-01 (wave 2 and its fix round 1; the code is authoritative where this section differs): `evaluate_promotion` adds the blockers `qualification_evidence_mixed_revision` and `qualification_evidence_mixed_package`, and `PromotionDecision` gains `code_revision_hash: Option<String>` and `package: Option<PromotionPackage>`; its `evidence_hash` is canonical JSON under the schema string `trace_commons.pipeline_promotion.v2` over the blockers and, per check id, the run id, code revision, three package digests and evidence hash (not the evaluation time). `qualify_bundle(tenant_id, signed, trust, metadata, dependencies, evidence: &[DrillEvidence])` evaluates the evidence itself at the time of the call and reads the package's configuration term itself (`package_configuration_is_qualifiable`); `PipelineBundleQualification` gains `configuration_qualifiable`, and `PipelineDependencyQualification` loses `bundle`. `PipelineService::sweep_attempt_artifacts_from(tenant_id, limit, resume_after) -> AttemptSweepPass` pages past kept rows and resumes where a pass stopped; `sweep_attempt_artifacts` is its `resume_after = None` form. A missing or mismatched attempt row refuses a commit as `pipeline_attempt_artifact_missing`.
+
 `versioned_pipeline_qualification.rs` (Task 1, Task 6):
 
 ```rust
