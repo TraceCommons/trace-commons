@@ -297,7 +297,7 @@ enum SampleDaemonData {
     static func credit(_ set: Sample) -> String {
         switch set {
         case .normalDay, .busyQueue, .armedFolder, .heldSessions:
-            return #"{"posture_state":"known","commons_settlement":"disabled","commons_settlement_explanation":"Credit is recorded but not settled: on-chain settlement is not enabled on this deployment, so this figure stays pending.","commons_graded":false,"points_state":"known","commons_points_earned_this_period":12,"commons_points_lifetime_earned":45,"commons_pending_review":2,"commons_currency_code":null,"commons_currency_earned_this_period":null,"commons_period_start":"2026-09-01T00:00:00Z","commons_period_end":"2026-10-01T00:00:00Z","observed_at":"2026-09-30T09:17:15Z"}"#
+            return #"{"posture_state":"known","commons_settlement":"disabled","commons_settlement_explanation":"Sample settlement explanation, supplied by the commons","commons_graded":false,"points_state":"known","commons_points_earned_this_period":12,"commons_points_lifetime_earned":45,"commons_pending_review":2,"commons_currency_code":null,"commons_currency_earned_this_period":null,"commons_period_start":"2026-09-01T00:00:00Z","commons_period_end":"2026-10-01T00:00:00Z","observed_at":"2026-09-30T09:17:15Z"}"#
         default:
             return #"{"posture_state":"unknown","commons_settlement":null,"commons_settlement_explanation":null,"commons_graded":null,"points_state":"unknown","commons_points_earned_this_period":null,"commons_points_lifetime_earned":null,"commons_pending_review":null,"commons_currency_code":null,"commons_currency_earned_this_period":null,"commons_period_start":null,"commons_period_end":null,"observed_at":"2026-09-30T09:17:15Z"}"#
         }
@@ -343,13 +343,13 @@ enum SampleDaemonData {
         let unsure = entry.unsureSpans ?? 0
         let reasons = (entry.secondLook ?? []).map { "\"\($0)\"" }.joined(separator: ",")
         let titles = [
-            "Fix the flaky retry test in the upload pass",
-            "Add pagination to the history endpoint",
-            "Why does the watcher re-read unchanged files?",
-            "Refactor the settings validation into one place",
+            "Flaky retry test, upload pass",
+            "History endpoint pagination",
+            "Watcher re-reads unchanged files",
+            "Settings validation refactor",
         ]
         let title = titles[entry.entryId.unicodeScalars.reduce(0) { $0 + Int($1.value) } % titles.count]
-        return #"{"entry":\#(entryJSON),"title":"\#(title)","would_send_bytes":\#((entry.sizeBytes ?? 40000) + 2545),"raw_session_bytes":\#(entry.sizeBytes ?? 40000),"event_count":\#((entry.userTurns ?? 3) * 6),"opening_prompt":"\#(title). It fails about one run in five.","redactions":{"local_path":\#(marks - content),"email":\#(content)},"pii_labels_present":["email"],"consent_scopes":["debugging_evaluation"],"residual_risk":"pattern-based","envelope_digest":"sha256:sample-envelope","input_fingerprint":"sha256:sample-input","enrolled":true,"subagent_count":\#(entry.subagentCount ?? 0),"subagents_dropped":\#(entry.subagentsDropped ?? 0),"scrub":"scrubbed","marks":\#(marks),"content_marks":\#(content),"unsure_spans":\#(unsure),"second_look":[\#(reasons)]}"#
+        return #"{"entry":\#(entryJSON),"title":"\#(title)","would_send_bytes":\#((entry.sizeBytes ?? 40000) + 2545),"raw_session_bytes":\#(entry.sizeBytes ?? 40000),"event_count":\#((entry.userTurns ?? 3) * 6),"opening_prompt":"\#(title)","redactions":{"local_path":\#(marks - content),"email":\#(content)},"pii_labels_present":["email"],"consent_scopes":["debugging_evaluation"],"residual_risk":"pattern-based","envelope_digest":"sha256:sample-envelope","input_fingerprint":"sha256:sample-input","enrolled":true,"subagent_count":\#(entry.subagentCount ?? 0),"subagents_dropped":\#(entry.subagentsDropped ?? 0),"scrub":"scrubbed","marks":\#(marks),"content_marks":\#(content),"unsure_spans":\#(unsure),"second_look":[\#(reasons)]}"#
     }
 
     static func unsureSpans(entryId: String, bodyDigest: String) -> String {
@@ -377,11 +377,11 @@ enum SampleDaemonData {
 
     static func privateAI(_ set: Sample) -> String {
         let on = set == .normalDay || set == .busyQueue
-        return #"{"_sample":"no source yet","on":\#(on),"state":"\#(on ? "running" : "off")","disclosure":"Sample disclosure: the core supplies this sentence."}"#
+        return #"{"_sample":"no source yet","on":\#(on),"state":"\#(on ? "running" : "off")","disclosure":"Sample disclosure text, supplied by the core"}"#
     }
 
     static let missionCatalogue =
-        #"{"_sample":"no source yet","fetched_at":"2026-09-30T06:00:00Z","posture":{"settlement":"disabled","graded":false,"explanation":"Credit is recorded but not settled: on-chain settlement is not enabled on this deployment, so this figure stays pending."},"missions":[{"id":"mission-sample-1","title":"Debug a failing test","summary":"A session where a failing test is found and fixed.","credit_range":{"min":5,"max":20,"unit":"points"}},{"id":"mission-sample-2","title":"Review a pull request","summary":null,"credit_range":null}]}"#
+        #"{"_sample":"no source yet","fetched_at":"2026-09-30T06:00:00Z","posture":{"settlement":"disabled","graded":false,"explanation":"Sample settlement explanation, supplied by the commons"},"missions":[{"id":"mission-sample-1","title":"Debug a failing test","summary":"Failing test found, then fixed","credit_range":{"min":5,"max":20,"unit":"points"}},{"id":"mission-sample-2","title":"Review a pull request","summary":null,"credit_range":null}]}"#
 
     static let inviteLookup =
         #"{"_sample":"no source yet","valid":true,"issuer_display_name":"Sample Labs","credit_range":{"min":10,"max":40,"unit":"points"}}"#
