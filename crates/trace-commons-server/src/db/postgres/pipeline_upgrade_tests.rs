@@ -239,10 +239,12 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_attempt_artifacts", "SELECT", &[]),
     ("pipeline_attempt_artifacts", "INSERT", &[]),
     ("pipeline_attempt_artifacts", "DELETE", &[]),
+    // Rebase 10, option D: the commit sets the hash a compatibility Score's
+    // row was staged without.
     (
         "pipeline_attempt_artifacts",
         "UPDATE",
-        &["state", "committed_at"],
+        &["state", "committed_at", "ciphertext_sha256"],
     ),
 ];
 
@@ -414,6 +416,39 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
             .get(0);
         assert!(enabled, "{table} must carry the enabled trigger {trigger}");
     }
+
+    // Rebase 10, option D: the upgrade installs V108's rule for a row staged
+    // with no hash. The hash column is nullable, a committed row must have
+    // one, and the guard lets only the commit set a missing hash.
+    let attempt_hash = admin
+        .query_one(
+            "SELECT
+                (SELECT is_nullable FROM information_schema.columns
+                  WHERE table_name = 'pipeline_attempt_artifacts'
+                    AND column_name = 'ciphertext_sha256'),
+                pg_get_functiondef('guard_pipeline_attempt_artifact_update()'::regprocedure),
+                (SELECT string_agg(pg_get_constraintdef(oid), ' ')
+                   FROM pg_constraint
+                  WHERE conrelid = 'pipeline_attempt_artifacts'::regclass AND contype = 'c')",
+            &[],
+        )
+        .await
+        .unwrap();
+    let (nullable, guard, checks): (String, String, String) = (
+        attempt_hash.get(0),
+        attempt_hash.get(1),
+        attempt_hash.get(2),
+    );
+    assert_eq!(nullable, "YES", "a staged attempt row may carry no hash");
+    assert!(
+        guard.contains("OLD.ciphertext_sha256 IS NULL")
+            && guard.contains("NEW.ciphertext_sha256 ~ '^[0-9a-f]{64}$'"),
+        "V108's guard lets the commit set a missing hash, and only to a hex value"
+    );
+    assert!(
+        checks.contains("ciphertext_sha256 IS NOT NULL"),
+        "a committed attempt row must have its hash: {checks}"
+    );
 
     let claim_function: bool = admin
         .query_one(

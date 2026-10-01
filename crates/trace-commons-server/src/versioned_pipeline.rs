@@ -413,6 +413,11 @@ const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
 /// still surrenders its claim within a bounded multiple of its own
 /// configured lease, rather than being renewed forever.
 pub const PIPELINE_LEASE_RENEWAL_CAP_FACTOR: i32 = 4;
+/// How long past the latest moment a phase attempt's lease can still be
+/// live (`PipelineService::attempt_artifact_lease_bound`) its staged
+/// objects wait before the sweep may remove them: time for the commit
+/// itself to land once the phase work is done.
+const PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN: Duration = Duration::hours(1);
 
 /// Each pipeline phase gets
 /// its own claim-lease length, sized for how long that phase can actually
@@ -2348,13 +2353,51 @@ impl PgPipelineStore {
         // an object ref of the submission (above); from here on the
         // withdrawal, not the attempt sweep, owns their deletion. A refused
         // commit above already returned without reaching here.
-        tx.execute(
-            "UPDATE pipeline_attempt_artifacts
-                SET state = 'committed', committed_at = NOW()
-              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND state = 'staged'",
-            &[&run.tenant_id, &run.run_id, &lease_token],
-        )
-        .await?;
+        //
+        // Rebase 10, option D: a compatibility Score staged both rows before
+        // its tenant lock, with no hash. The commit sets a written row's
+        // hash from the object ref it records (`object_key#ciphertext_sha256`;
+        // a row staged with its hash keeps it, which V108's guard enforces),
+        // and deletes the row of an artifact this Score did not write, since
+        // no object exists for it. Only a row with no hash is deleted: a row
+        // with a hash was staged just before its object was published.
+        for (artifact, stored) in [("index-command", command), ("score-neighbors", neighbor)] {
+            match stored {
+                Some((stored_ref, _, _)) => {
+                    let ciphertext_sha256 = stored_ref
+                        .rsplit_once('#')
+                        .map(|(_, ciphertext_sha256)| ciphertext_sha256)
+                        .ok_or_else(|| {
+                            DatabaseError::Constraint("score_outcome_invalid".to_string())
+                        })?;
+                    tx.execute(
+                        "UPDATE pipeline_attempt_artifacts
+                            SET ciphertext_sha256 = COALESCE(ciphertext_sha256, $5),
+                                state = 'committed', committed_at = NOW()
+                          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                            AND artifact = $4 AND state = 'staged'",
+                        &[
+                            &run.tenant_id,
+                            &run.run_id,
+                            &lease_token,
+                            &artifact,
+                            &ciphertext_sha256,
+                        ],
+                    )
+                    .await?;
+                }
+                None => {
+                    tx.execute(
+                        "DELETE FROM pipeline_attempt_artifacts
+                          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                            AND artifact = $4 AND state = 'staged'
+                            AND ciphertext_sha256 IS NULL",
+                        &[&run.tenant_id, &run.run_id, &lease_token, &artifact],
+                    )
+                    .await?;
+                }
+            }
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -4273,6 +4316,53 @@ impl PgPipelineStore {
             ],
         )
         .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Stages a compatibility Score attempt's rows before its object
+    /// content exists (rebase 10, option D): one row for each `(artifact,
+    /// object_key)` in `artifacts`, with the key the write will use and
+    /// `ciphertext_sha256` NULL, in one tenant transaction that commits and
+    /// returns its connection to the pool before the Score takes its
+    /// tenant's Score lock. So the Score holds one pooled connection at a
+    /// time while it holds the lock, and every object it later publishes
+    /// already has a committed `staged` row. `commit_score_in` sets each
+    /// written row's hash as it commits it, and deletes the row of an
+    /// artifact the Score did not write; the sweep deletes the object of a
+    /// due row with no hash at its key (`sweep_attempt_artifacts`).
+    ///
+    /// Locks: the foreign key check takes `FOR KEY SHARE` on the run's
+    /// `pipeline_runs` row for this short transaction; it takes no other
+    /// row lock and holds no lock when it ends, before the Score lock is
+    /// requested. `ON CONFLICT DO NOTHING` as `stage_attempt_artifact`.
+    pub async fn stage_unhashed_attempt_artifacts(
+        &self,
+        run: &PipelineRunRecord,
+        artifacts: &[(PipelineAttemptArtifact, String)],
+        cleanup_after: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        for (artifact, object_key) in artifacts {
+            tx.execute(
+                "INSERT INTO pipeline_attempt_artifacts (
+                    tenant_id, run_id, lease_token, artifact, object_key,
+                    ciphertext_sha256, cleanup_after
+                 ) VALUES ($1,$2,$3,$4,$5,NULL,$6)
+                 ON CONFLICT (tenant_id, run_id, lease_token, artifact) DO NOTHING",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &lease_token,
+                    &artifact.as_str(),
+                    object_key,
+                    &cleanup_after,
+                ],
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -7660,10 +7750,19 @@ impl PipelineService {
     /// out from under it -- plus one hour of margin for the commit itself to
     /// land once the phase work is done.
     fn attempt_artifact_cleanup_after(&self, phase: Phase) -> DateTime<Utc> {
+        self.attempt_artifact_lease_bound(phase) + PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN
+    }
+
+    /// Now plus `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times `phase`'s lease:
+    /// no lease claimed before now is still live after it, however often it
+    /// is renewed. A compatibility Score that staged its rows before its
+    /// tenant lock publishes nothing after this bound (rebase 10, option D):
+    /// by then its lease is certainly gone and its commit would be refused,
+    /// and the sweep may remove its rows `PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN`
+    /// later, so a later publish could leave an object no row names.
+    fn attempt_artifact_lease_bound(&self, phase: Phase) -> DateTime<Utc> {
         truncate_to_microseconds(
-            Utc::now()
-                + self.lease_config.for_phase(phase) * PIPELINE_LEASE_RENEWAL_CAP_FACTOR
-                + Duration::hours(1),
+            Utc::now() + self.lease_config.for_phase(phase) * PIPELINE_LEASE_RENEWAL_CAP_FACTOR,
         )
     }
 
@@ -7694,11 +7793,15 @@ impl PipelineService {
     /// when it did not.
     ///
     /// One tenant transaction, `FOR UPDATE SKIP LOCKED`, up to `limit`
-    /// rows. For each row, a store that confirms the object absent
-    /// (`Some(false)`) needs no delete; a store that reports it present, or
-    /// cannot tell (`None`), gets one. A delete failure (or a presence
-    /// check that itself errors) logs `pipeline_attempt_sweep_delete_failed`
-    /// and keeps the row for the next pass; otherwise the row is deleted.
+    /// rows. For each row with a hash, a store that confirms the object
+    /// absent (`Some(false)`) needs no delete; a store that reports it
+    /// present, or cannot tell (`None`), gets one. A row with no hash (a
+    /// compatibility Score staged it before its tenant lock and never
+    /// committed it; rebase 10, option D) gets
+    /// `delete_artifact_at_object_key` at its key. A delete failure (or a
+    /// presence check that itself errors) logs
+    /// `pipeline_attempt_sweep_delete_failed` and keeps the row for the next
+    /// pass; otherwise the row is deleted.
     /// The run's own `pipeline_runs` row, and its committed objects, are
     /// never touched here. Returns how many rows it removed.
     pub async fn sweep_attempt_artifacts(
@@ -7729,7 +7832,7 @@ impl PipelineService {
             let lease_token: Uuid = row.get("lease_token");
             let artifact: String = row.get("artifact");
             let object_key: String = row.get("object_key");
-            let ciphertext_sha256: String = row.get("ciphertext_sha256");
+            let ciphertext_sha256: Option<String> = row.get("ciphertext_sha256");
             // The column is CHECK-constrained to the three known artifacts,
             // so this should never fire; if it ever does (a future migration
             // loosens the constraint, or direct DB tampering), fail this
@@ -7739,35 +7842,57 @@ impl PipelineService {
                 .ok_or_else(|| anyhow::anyhow!("pipeline_attempt_artifact_kind_unrecognized"))?
                 .store_kind();
 
-            let present = self.artifact_store.artifact_present_by_object_key(
-                tenant_storage_ref.as_str(),
-                artifact_kind.clone(),
-                &object_key,
-                &ciphertext_sha256,
-            );
-            // `Some(false)` -- confirmed absent -- is the only answer that
-            // skips the delete outright. `Some(true)` and `None` ("the store
-            // cannot tell", the trait's documented default, and what
-            // `GcsRemoteTraceArtifactProvider` answers today since it does
-            // not override this method) both attempt the delete: a store
-            // that cannot report presence may still hold the object, and a
-            // store whose delete errors on an absent object keeps the row
-            // for the next pass rather than mistaking "unknown" for "gone".
-            let delete_failed = match present {
-                Ok(Some(false)) => false,
-                Ok(Some(true)) | Ok(None) => {
-                    let receipt = EncryptedTraceArtifactReceipt {
-                        tenant_storage_ref: tenant_storage_ref.as_str().to_string(),
+            let delete_failed = match ciphertext_sha256 {
+                // Rebase 10, option D: a row a compatibility Score staged
+                // before its tenant lock and never committed has no hash.
+                // Its object, if the attempt published one, is at the row's
+                // key, which carries the attempt's own lease token, so no
+                // other object is ever stored there: delete whatever is
+                // stored at the key (`Ok(false)` when the attempt published
+                // nothing). No hash comparison is possible, and none is
+                // needed to pick the object.
+                None => self
+                    .artifact_store
+                    .delete_artifact_at_object_key(
+                        tenant_storage_ref.as_str(),
                         artifact_kind,
-                        object_key: object_key.clone(),
-                        ciphertext_sha256: ciphertext_sha256.clone(),
-                        encrypted_at: Utc::now(),
-                    };
-                    self.artifact_store
-                        .delete_artifact(tenant_storage_ref.as_str(), &receipt)
-                        .is_err()
+                        &object_key,
+                    )
+                    .is_err(),
+                Some(ciphertext_sha256) => {
+                    let present = self.artifact_store.artifact_present_by_object_key(
+                        tenant_storage_ref.as_str(),
+                        artifact_kind.clone(),
+                        &object_key,
+                        &ciphertext_sha256,
+                    );
+                    // `Some(false)` -- confirmed absent -- is the only answer
+                    // that skips the delete outright. `Some(true)` and
+                    // `None` ("the store cannot tell", the trait's
+                    // documented default, and what
+                    // `GcsRemoteTraceArtifactProvider` answers today since it
+                    // does not override this method) both attempt the
+                    // delete: a store that cannot report presence may still
+                    // hold the object, and a store whose delete errors on an
+                    // absent object keeps the row for the next pass rather
+                    // than mistaking "unknown" for "gone".
+                    match present {
+                        Ok(Some(false)) => false,
+                        Ok(Some(true)) | Ok(None) => {
+                            let receipt = EncryptedTraceArtifactReceipt {
+                                tenant_storage_ref: tenant_storage_ref.as_str().to_string(),
+                                artifact_kind,
+                                object_key: object_key.clone(),
+                                ciphertext_sha256,
+                                encrypted_at: Utc::now(),
+                            };
+                            self.artifact_store
+                                .delete_artifact(tenant_storage_ref.as_str(), &receipt)
+                                .is_err()
+                        }
+                        Err(_) => true,
+                    }
                 }
-                Err(_) => true,
             };
             if delete_failed {
                 tracing::warn!(
@@ -8740,6 +8865,18 @@ impl PipelineService {
     /// the Score holds one pooled connection at a time. A Score that waited
     /// for the lock past its lease stops before it scores (uncharged, as a
     /// stale lease). Another family's Score (the minimal one) takes no lock.
+    ///
+    /// Rebase 10, option D: a compatibility Score also stages its attempt
+    /// rows (PR 4) before it opens that transaction
+    /// (`stage_score_artifacts_before_lock`): one row for each artifact it
+    /// can write, under the object key the store derives for the attempt's
+    /// lease token before any content exists, with no hash yet, on a short
+    /// transaction of its own that commits and returns its connection
+    /// first. So it still holds one pooled connection at a time, and every
+    /// object it publishes already has a committed `staged` row. That
+    /// transaction takes only the foreign key's `FOR KEY SHARE` on the run
+    /// row and ends before the Score lock is requested, so it adds no
+    /// lock-order pair.
     async fn commit_score_phase(
         &self,
         run: &PipelineRunRecord,
@@ -8752,9 +8889,10 @@ impl PipelineService {
         let reviewed_artifact = self.load_approved_bytes(run).await?;
         if bundle.package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
             return self
-                .score_and_commit(run, bundle, revision_id, reviewed_artifact, None)
+                .score_and_commit(run, bundle, revision_id, reviewed_artifact, None, None)
                 .await;
         }
+        let prestaged = self.stage_score_artifacts_before_lock(run).await?;
         let mut client = self.backend.trace_pool().get().await?;
         let lock = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         lock.execute(
@@ -8793,13 +8931,64 @@ impl PipelineService {
         let bundle = self
             .construct_with_index_reader(bundle.package.clone(), reader)
             .map_err(|label| anyhow::anyhow!(label))?;
-        self.score_and_commit(run, &bundle, revision_id, reviewed_artifact, Some(lock))
-            .await
+        self.score_and_commit(
+            run,
+            &bundle,
+            revision_id,
+            reviewed_artifact,
+            Some(lock),
+            Some(&prestaged),
+        )
+        .await
+    }
+
+    /// Stages a compatibility Score attempt's rows before it takes its
+    /// tenant's Score lock (rebase 10, option D): derives the object key of
+    /// each artifact it can write (`index-command`, `score-neighbors`) from
+    /// the run and its lease token (`pipeline_attempt_object_id`) through
+    /// the store, before any content exists, and stages a row with that key
+    /// and no hash (`PgPipelineStore::stage_unhashed_attempt_artifacts`). A
+    /// store that cannot derive a key refuses
+    /// (`serialized_json_object_key_unavailable`), and the Score fails
+    /// closed before it scores.
+    async fn stage_score_artifacts_before_lock(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> anyhow::Result<PrestagedScoreArtifacts> {
+        let lease_token = required_lease_token(run)?;
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let object_keys = [
+            PipelineAttemptArtifact::IndexCommand,
+            PipelineAttemptArtifact::ScoreNeighbors,
+        ]
+        .into_iter()
+        .map(|artifact| {
+            self.artifact_store
+                .serialized_json_object_key(
+                    tenant.as_str(),
+                    artifact.store_kind(),
+                    &pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token),
+                )
+                .map(|object_key| (artifact, object_key))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+        let publish_deadline = self.attempt_artifact_lease_bound(Phase::Score);
+        let cleanup_after = publish_deadline + PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN;
+        self.store
+            .stage_unhashed_attempt_artifacts(run, &object_keys, cleanup_after)
+            .await?;
+        Ok(PrestagedScoreArtifacts {
+            object_keys,
+            publish_deadline,
+        })
     }
 
     /// `commit_score_phase`'s Score and commit over `reviewed_artifact`.
     /// The commit runs on `lock` when the caller holds the tenant's Score
-    /// lock on it, and on a transaction of its own otherwise.
+    /// lock on it, and on a transaction of its own otherwise. `prestaged`
+    /// is the rows a compatibility Score staged before that lock (rebase 10,
+    /// option D); with none, each object's row is staged here, with its
+    /// hash, just before the object is published.
     async fn score_and_commit(
         &self,
         run: &PipelineRunRecord,
@@ -8807,6 +8996,7 @@ impl PipelineService {
         revision_id: Uuid,
         reviewed_artifact: Vec<u8>,
         lock: Option<Transaction<'_>>,
+        prestaged: Option<&PrestagedScoreArtifacts>,
     ) -> anyhow::Result<PipelineRunRecord> {
         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
         let output = bundle
@@ -8847,11 +9037,14 @@ impl PipelineService {
             }
         };
         // Each stored object is `(artifact, stored ref, hash, object ref,
-        // receipt)`. Each is staged (PR 4) before it is published. A write
-        // that fails deletes the objects stored before it (best effort), as
-        // a refused commit does below; an attempt that crashes before its
-        // commit leaves every object it stored named by a `staged` row that
-        // `sweep_attempt_artifacts` removes once `cleanup_after` passes.
+        // receipt)`. Each has a committed `staged` row (PR 4) before it is
+        // published: staged here, with its hash, for a Score that takes no
+        // tenant lock, or before the lock, with no hash, for a compatibility
+        // Score (`prestaged`). A write that fails deletes the objects stored
+        // before it (best effort), as a refused commit does below; an
+        // attempt that crashes before its commit leaves every object it
+        // stored named by a `staged` row that `sweep_attempt_artifacts`
+        // removes once `cleanup_after` passes.
         let mut written: Vec<(
             &str,
             String,
@@ -8886,15 +9079,36 @@ impl PipelineService {
                     &pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token),
                     &wrapper,
                 )?;
-                self.store
-                    .stage_attempt_artifact(
-                        run,
-                        artifact,
-                        &prepared.receipt().object_key,
-                        &prepared.receipt().ciphertext_sha256,
-                        cleanup_after,
-                    )
-                    .await?;
+                match prestaged {
+                    // Rebase 10, option D: the row was staged before the
+                    // tenant lock, under the key the store derived then. A
+                    // prepared key that differs would publish an object no
+                    // row names, so it fails closed before the publish. Past
+                    // `publish_deadline` the attempt's lease is certainly
+                    // gone and the sweep may soon remove its rows, so it
+                    // publishes nothing and stops as a stale lease.
+                    Some(prestaged) => {
+                        anyhow::ensure!(
+                            prestaged.object_key(artifact)
+                                == Some(prepared.receipt().object_key.as_str()),
+                            "pipeline_attempt_object_key_mismatch"
+                        );
+                        if Utc::now() >= prestaged.publish_deadline {
+                            return Err(stale_lease_error().into());
+                        }
+                    }
+                    None => {
+                        self.store
+                            .stage_attempt_artifact(
+                                run,
+                                artifact,
+                                &prepared.receipt().object_key,
+                                &prepared.receipt().ciphertext_sha256,
+                                cleanup_after,
+                            )
+                            .await?;
+                    }
+                }
                 self.artifact_store.publish_serialized_json(&prepared)
             }
             .await;
@@ -11387,6 +11601,25 @@ impl PipelineAttemptArtifact {
             Self::Approved => TraceArtifactKind::ContributionEnvelope,
             Self::IndexCommand | Self::ScoreNeighbors => TraceArtifactKind::VectorPayload,
         }
+    }
+}
+
+/// The attempt rows a compatibility Score staged before it took its
+/// tenant's Score lock (rebase 10, option D;
+/// `PipelineService::stage_score_artifacts_before_lock`): each artifact's
+/// object key, and the moment after which the attempt publishes nothing
+/// (`PipelineService::attempt_artifact_lease_bound`).
+struct PrestagedScoreArtifacts {
+    object_keys: Vec<(PipelineAttemptArtifact, String)>,
+    publish_deadline: DateTime<Utc>,
+}
+
+impl PrestagedScoreArtifacts {
+    fn object_key(&self, artifact: PipelineAttemptArtifact) -> Option<&str> {
+        self.object_keys
+            .iter()
+            .find(|(staged, _)| *staged == artifact)
+            .map(|(_, object_key)| object_key.as_str())
     }
 }
 

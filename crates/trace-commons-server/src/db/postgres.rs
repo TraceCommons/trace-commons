@@ -8044,7 +8044,11 @@ mod tests {
         for required in [
             "CREATE TABLE pipeline_attempt_artifacts",
             "artifact IN ('approved', 'index-command', 'score-neighbors')",
-            "ciphertext_sha256 TEXT NOT NULL CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            // Rebase 10, option D: a compatibility Score stages its rows
+            // before its tenant lock, with no hash; a committed row always
+            // has one.
+            "ciphertext_sha256 TEXT CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            "OR (state = 'committed' AND committed_at IS NOT NULL AND ciphertext_sha256 IS NOT NULL)",
             "state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed'))",
             "PRIMARY KEY (tenant_id, run_id, lease_token, artifact)",
             "UNIQUE (tenant_id, object_key)",
@@ -8056,10 +8060,12 @@ mod tests {
             "CREATE TRIGGER pipeline_attempt_artifacts_guard_update",
             "BEFORE UPDATE ON pipeline_attempt_artifacts",
             "IF OLD.state = 'staged'\n        AND NEW.state = 'committed'\n        AND NEW.committed_at IS NOT NULL",
+            "(OLD.ciphertext_sha256 IS NOT NULL\n                AND NEW.ciphertext_sha256 = OLD.ciphertext_sha256)",
+            "OR (OLD.ciphertext_sha256 IS NULL\n                AND NEW.ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
             "ALTER TABLE pipeline_attempt_artifacts FORCE ROW LEVEL SECURITY;",
             "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_attempt_artifacts",
             "GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
-            "GRANT UPDATE (state, committed_at) ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
+            "GRANT UPDATE (state, committed_at, ciphertext_sha256) ON pipeline_attempt_artifacts\n    TO trace_ingest_runtime;",
         ] {
             assert!(
                 attempt_artifacts.contains(required),

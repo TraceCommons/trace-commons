@@ -826,20 +826,23 @@ nothing broader, and each refuses to apply if the group does not exist:
 | Table | Grant | Why |
 |---|---|---|
 | `pipeline_bundle_qualifications` | `SELECT, INSERT` | a qualification inserts once per bundle; the worker and API paths read it |
-| `pipeline_attempt_artifacts` | `SELECT, INSERT, DELETE`; `UPDATE` on `state`, `committed_at` | the phase write stages a row (INSERT), the phase commit moves it to `committed` (UPDATE), and the attempt sweep deletes a due `staged` row (DELETE) |
+| `pipeline_attempt_artifacts` | `SELECT, INSERT, DELETE`; `UPDATE` on `state`, `committed_at`, `ciphertext_sha256` | the phase write stages a row (INSERT), the phase commit moves it to `committed` and sets a hash a compatibility Score staged the row without (UPDATE), and the Score commit (for an artifact it did not write) and the attempt sweep delete a `staged` row (DELETE) |
 
 `pipeline_bundle_qualifications` is append-only: a trigger refuses a direct
 `UPDATE` or any `DELETE` that is not a cascade, and a row leaves only when
 its package does, through the foreign key, which runs as the table owner.
 `pipeline_attempt_artifacts`'s guard trigger allows an `UPDATE` only from
-`staged` to `committed`; every other change to a `committed` row, or to a
-`staged` row but its commit, is refused regardless of grant.
+`staged` to `committed`, which may set a missing `ciphertext_sha256` to a
+64-character lowercase hex value but never change one already set; every
+other change to a `committed` row, or to a `staged` row but its commit, is
+refused regardless of grant. A `committed` row must have its hash.
 
 Check before deploying:
 
 ```sql
 SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_bundle_qualifications', 'INSERT');
 SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'INSERT');
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'ciphertext_sha256', 'UPDATE');
 ```
 
 ### Build and install

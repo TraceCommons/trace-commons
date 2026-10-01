@@ -891,6 +891,37 @@ deleting which row is a fixed split (controller ruling R2-1):
   and those kept when the connection was lost during the commit, which
   may have landed, and did not.
 
+Review and the minimal bundle's Score stage each row just before they
+write its object, with the object's ciphertext hash. A compatibility Score
+stages its two rows earlier, before it takes its tenant's Score lock (see
+"Compatibility credit" above), so that it holds one database connection at
+a time while it holds the lock. At that point the object key
+is already fixed -- the store derives it from the tenant, the run, the
+attempt's lease token and the artifact -- but the content, and so its hash,
+is not. Those rows are staged with no hash:
+
+- The Score commit sets each written row's hash, from the object ref it
+  records, as it moves the row to `committed`, and deletes the row of an
+  artifact the Score did not write (a duplicate at Score writes no index
+  command). A `committed` row always has its hash; V108's guard lets only
+  the commit set a missing hash.
+- For a due `staged` row with no hash, the sweep deletes whatever object is
+  stored at the row's key, then the row. It does not compare a hash, and
+  needs none to pick the object: the key carries the attempt's own lease
+  token, so no other object is ever stored there. If the attempt wrote
+  nothing, the store answers that nothing was there and the row goes.
+- A compatibility Score publishes nothing after the latest moment its lease
+  could still be live (four leases after its rows were staged), so an object
+  is never written after its row could have been swept. It stops as an
+  uncharged `lease_expired` instead.
+- The artifact store must be able to derive an object key before the
+  content exists and delete at a key alone. The local store, the
+  filesystem-remote provider and the GCS provider can. A store that cannot
+  refuses with `serialized_json_object_key_unavailable` or
+  `artifact_delete_at_object_key_unavailable`. A compatibility Score on such
+  a store then fails closed before it scores, and the sweep keeps such a
+  row and logs `pipeline_attempt_sweep_delete_failed`.
+
 Score's withdrawal rule follows from the same split: withdrawing a
 submission whose run already committed Score deletes the index command and
 neighbour set through the ordinary object-ref invalidation path above, the

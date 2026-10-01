@@ -5350,6 +5350,29 @@ struct BlockFirstPublishArtifactStore {
 }
 
 impl TraceArtifactStore for BlockFirstPublishArtifactStore {
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
     fn prepare_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -5757,6 +5780,29 @@ impl HookedWriteStore {
 }
 
 impl TraceArtifactStore for HookedWriteStore {
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
     fn put_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -6029,6 +6075,25 @@ struct FailingDeleteArtifactStore {
 }
 
 impl TraceArtifactStore for FailingDeleteArtifactStore {
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _artifact_kind: TraceArtifactKind,
+        _object_key: &str,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("test-injected delete failure")
+    }
+
     fn prepare_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -7826,6 +7891,29 @@ impl WithdrawOnApprovedWriteStore {
 }
 
 impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
     fn put_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -8869,9 +8957,9 @@ fn score_object_ref_write(
 /// artifact rows -- those of `lease_token`, or every `staged` row of the run
 /// when `None` -- so the sweep finds them due: a test-only time shortcut,
 /// never something production code does. `cleanup_after` is not a column
-/// the runtime role may UPDATE (V108's grant is `state, committed_at`
-/// only), and V108's guard trigger refuses every change but `staged` to
-/// `committed`, whoever makes it. So this runs as the database owner, with
+/// the runtime role may UPDATE (V108's grant is `state, committed_at,
+/// ciphertext_sha256` only), and V108's guard trigger refuses every change
+/// but `staged` to `committed`, whoever makes it. So this runs as the database owner, with
 /// that trigger disabled inside the owner's own transaction: `ALTER TABLE`
 /// is transactional, and the lock it takes keeps every other session off
 /// the table until the commit, by which point the trigger is enabled again.
@@ -8960,6 +9048,10 @@ async fn attempt_artifact_rows(
 /// `pipeline_orphan_sweep` is emitted by
 /// `a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes`, the
 /// case where the objects are still stored.
+///
+/// This run's bundle is the compatibility one, so its Score staged both rows
+/// before its tenant lock, with no hash (rebase 10, option D), and the
+/// sweep handles them by their keys alone.
 #[tokio::test]
 async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
     let Some(backend) = runtime_backend(4).await else {
@@ -9014,7 +9106,7 @@ async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
     let staged_rows = || async {
         let mut client = backend.trace_pool_for_test().get().await.unwrap();
         let tx = tenant_tx(&mut client, &tenant).await;
-        let rows: Vec<(String, String, String)> = tx
+        let rows: Vec<(String, String, Option<String>)> = tx
             .query(
                 "SELECT artifact, object_key, ciphertext_sha256 FROM pipeline_attempt_artifacts
                   WHERE tenant_id = $1 AND run_id = $2 AND state = 'staged'
@@ -9044,6 +9136,10 @@ async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
         vec!["index-command", "score-neighbors"],
         "both Score objects are staged, under the refused attempt's lease"
     );
+    assert!(
+        score_objects.iter().all(|(_, _, hash)| hash.is_none()),
+        "a compatibility Score staged both rows before its tenant lock, with no hash"
+    );
     let rows_before = attempt_artifact_rows(&backend, &tenant, created.run_id).await;
     assert_eq!(
         rows_before,
@@ -9054,15 +9150,17 @@ async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
         ],
         "the refused commit committed neither Score row; Review's approved row is committed"
     );
+    // The local store finds an object by its key alone; the expected hash
+    // it takes is not read, and these rows have none.
     let assert_absent = |when: &str| {
-        for (artifact, object_key, ciphertext_sha256) in &score_objects {
+        for (artifact, object_key, _) in &score_objects {
             assert_eq!(
                 artifacts
                     .artifact_present_by_object_key(
                         tenant_ref.as_str(),
                         TraceArtifactKind::VectorPayload,
                         object_key,
-                        ciphertext_sha256,
+                        "",
                     )
                     .unwrap(),
                 Some(false),
@@ -9771,6 +9869,33 @@ struct PresenceUnknownStore {
 }
 
 impl TraceArtifactStore for PresenceUnknownStore {
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.delete_calls.fetch_add(1, Ordering::SeqCst);
+        if self.force_delete_failure {
+            anyhow::bail!("forced delete failure for the unknown-presence test");
+        }
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
     fn put_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -16603,6 +16728,32 @@ async fn compatibility_test_service_on(
     checks: PipelineNoveltyUtilityChecks,
     index: Arc<IsolatedPipelineIndex>,
 ) -> Arc<PipelineService> {
+    Arc::new(
+        compatibility_test_builder(
+            backend,
+            artifact_store,
+            config,
+            near,
+            authority,
+            checks,
+            index,
+        )
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// The builder `compatibility_test_service_on` builds, for a test that sets
+/// more on it first (a crash point, a lease configuration).
+fn compatibility_test_builder(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    near: Option<Arc<dyn NearPayoutAdapter>>,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+    index: Arc<IsolatedPipelineIndex>,
+) -> PipelineServiceBuilder {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package =
@@ -16635,7 +16786,7 @@ async fn compatibility_test_service_on(
     .with_authority(authority)
     .with_privacy(default_privacy_boundary())
     .with_novelty_utility_checks(checks);
-    let service = match near {
+    match near {
         Some(near) => service.with_payout(
             near,
             PipelinePayoutConfig {
@@ -16647,8 +16798,7 @@ async fn compatibility_test_service_on(
             },
         ),
         None => service,
-    };
-    Arc::new(service.build().expect("build pipeline service"))
+    }
 }
 
 /// The `(event_type, points_delta)` of the one `trace_credit_ledger` row for
@@ -23937,6 +24087,29 @@ impl RunOnWriteStore {
 }
 
 impl TraceArtifactStore for RunOnWriteStore {
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
     fn put_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -26368,8 +26541,9 @@ async fn index_rebuild_holds_the_guard_and_skips_a_run_withdrawn_after_listing()
 /// every other change. A committed row cannot go back to `staged`, where
 /// the sweep would delete an object the submission's refs name, and its
 /// `committed_at` cannot move either. The runtime role's column grant
-/// (`state, committed_at`) lets it issue both statements; the trigger
-/// refuses them, and refuses the database owner too.
+/// (`state, committed_at, ciphertext_sha256`) lets it issue both
+/// statements; the trigger refuses them, and refuses the database owner
+/// too.
 #[tokio::test]
 async fn a_committed_attempt_artifact_cannot_return_to_staged() {
     let Some(backend) = runtime_backend(4).await else {
@@ -26434,4 +26608,691 @@ async fn a_committed_attempt_artifact_cannot_return_to_staged() {
         rows_before,
         "every row is still committed"
     );
+}
+
+// Rebase 10, option D: a compatibility Score stages its attempt rows before
+// it takes its tenant's Score lock, with the object key the write will use
+// and no ciphertext hash yet, so it never needs a second pooled connection
+// while it holds the lock (`compatibility_score_never_holds_two_pooled_connections`)
+// and every object it publishes still has a committed `staged` row first.
+
+/// Every `pipeline_attempt_artifacts` row of `run_id`, as `(artifact,
+/// state, object_key, ciphertext_sha256)`, ordered by artifact and state.
+/// The hash is `None` on a row a compatibility Score staged before its
+/// tenant lock and has not committed.
+async fn attempt_artifact_rows_with_hashes(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Vec<(String, String, String, Option<String>)> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT artifact, state, object_key, ciphertext_sha256
+               FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2
+              ORDER BY artifact, state",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    rows.into_iter()
+        .map(|row| {
+            (
+                row.get("artifact"),
+                row.get("state"),
+                row.get("object_key"),
+                row.get("ciphertext_sha256"),
+            )
+        })
+        .collect()
+}
+
+/// `attempt_artifact_rows_with_hashes` without Review's `approved` row.
+async fn score_attempt_rows_with_hashes(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Vec<(String, String, String, Option<String>)> {
+    attempt_artifact_rows_with_hashes(backend, tenant_id, run_id)
+        .await
+        .into_iter()
+        .filter(|(artifact, ..)| artifact != "approved")
+        .collect()
+}
+
+fn is_ciphertext_hash(value: Option<&str>) -> bool {
+    value.is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// One `model_training_envelope` receipt in `tenant`, reviewed, so the
+/// compatibility run waits for Score.
+async fn compatibility_run_past_review(
+    service: &PipelineService,
+    tenant: &str,
+) -> PipelineRunRecord {
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(service, tenant, "principal_sha256:option-d", &env).await;
+    let reviewed = service
+        .process_run(tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    reviewed
+}
+
+/// Takes `tenant_id`'s compatibility Score lock on `tx`, with the call
+/// `commit_score_phase` makes. The lock's name repeats the format of the
+/// private `pipeline_compatibility_score_lock`.
+async fn hold_compatibility_score_lock(tx: &tokio_postgres::Transaction<'_>, tenant_id: &str) {
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))",
+        &[&format!("pipeline-compatibility-score:{tenant_id}")],
+    )
+    .await
+    .expect("take the tenant's compatibility Score lock");
+}
+
+/// Option D, the crash case: a compatibility Score that published its
+/// objects and stopped before its commit (an injected crash at
+/// `AfterScoreArtifactStorage`) leaves the two rows it staged before its
+/// tenant lock, `staged` with no hash. The sweep removes nothing before
+/// `cleanup_after`; after it, it deletes each object at its key and then
+/// the row. The resumed attempt commits its own rows, each with the hash of
+/// the object ref its commit records.
+#[tokio::test]
+async fn a_crashed_compatibility_score_leaves_unhashed_staged_rows_the_sweep_removes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let service = Arc::new(
+        compatibility_test_builder(
+            backend.clone(),
+            artifacts.clone(),
+            near_duplicate_config(),
+            None,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks::default(),
+            IsolatedPipelineIndex::new(),
+        )
+        .with_crash_point(PipelineCrashPoint::AfterScoreArtifactStorage)
+        .build()
+        .expect("build pipeline service"),
+    );
+    let tenant = format!("compat-crashed-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let reviewed = compatibility_run_past_review(&service, &tenant).await;
+    let crashed = service.process_run(&tenant, reviewed.run_id).await;
+    assert_eq!(
+        crashed
+            .expect_err("the injected crash must propagate as an error")
+            .to_string(),
+        INJECTED_PIPELINE_CRASH
+    );
+
+    let rows = score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id).await;
+    assert_eq!(
+        rows.iter()
+            .map(|(artifact, state, _, hash)| (artifact.as_str(), state.as_str(), hash.is_none()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("index-command", "staged", true),
+            ("score-neighbors", "staged", true),
+        ],
+        "the attempt staged both rows before its tenant lock, with no hash: {rows:?}"
+    );
+    // The local store finds an object by its key alone; the expected hash
+    // it takes is not read, and these rows have none.
+    let present = |object_key: &str| {
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                object_key,
+                "",
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        present(&rows[0].2),
+        Some(true),
+        "the crashed attempt published its index command at the staged key"
+    );
+    let published = rows
+        .iter()
+        .map(|(_, _, key, _)| present(key))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        service.sweep_attempt_artifacts(&tenant, 10).await.unwrap(),
+        0,
+        "no staged row is due yet"
+    );
+    assert_eq!(
+        score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id).await,
+        rows,
+        "the sweep left every row untouched"
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|(_, _, key, _)| present(key))
+            .collect::<Vec<_>>(),
+        published,
+        "the sweep deleted no object before cleanup_after"
+    );
+
+    backdate_attempt_artifacts(&tenant, reviewed.run_id, None).await;
+    assert_eq!(
+        service.sweep_attempt_artifacts(&tenant, 10).await.unwrap(),
+        rows.len(),
+        "every due unhashed row is removed"
+    );
+    assert!(
+        score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id)
+            .await
+            .is_empty(),
+        "the staged rows are gone"
+    );
+    for (artifact, _, key, _) in &rows {
+        assert_eq!(
+            present(key),
+            Some(false),
+            "{artifact} was deleted at its key"
+        );
+    }
+    assert!(
+        service.load_approved_bytes(&reviewed).await.is_ok(),
+        "Review's approved object is untouched"
+    );
+
+    expire_lease(&backend, &tenant, reviewed.run_id).await;
+    let scored = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the resumed Score attempt runs");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    let committed = score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id).await;
+    assert!(
+        !committed.is_empty()
+            && committed.iter().all(|(_, state, _, hash)| {
+                state == "committed" && is_ciphertext_hash(hash.as_deref())
+            }),
+        "the resumed attempt committed its rows with their hashes: {committed:?}"
+    );
+    let (command_key, command_hash) = scored
+        .index_command_ref
+        .as_deref()
+        .and_then(|stored| stored.rsplit_once('#'))
+        .expect("the novel trace committed an index command ref");
+    assert!(
+        committed.contains(&(
+            "index-command".to_string(),
+            "committed".to_string(),
+            command_key.to_string(),
+            Some(command_hash.to_string()),
+        )),
+        "the committed row names the object and hash the commit recorded: {committed:?}"
+    );
+    assert_eq!(
+        service.sweep_attempt_artifacts(&tenant, 10).await.unwrap(),
+        0,
+        "a committed row is never swept"
+    );
+}
+
+/// Option D, the commit: a compatibility Score commits each row it wrote
+/// with the hash of the object ref the commit records, and drops the row it
+/// staged for an artifact it did not write. Of two identical traces, the
+/// second is a duplicate at Score and writes no index command, so it keeps
+/// no `index-command` row.
+#[tokio::test]
+async fn a_committed_compatibility_score_commits_hashed_rows_and_drops_unwritten_ones() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:option-d-commit";
+    let first_run = receive_envelope(&service, &tenant, principal, &first).await;
+    let second_run = receive_envelope(&service, &tenant, principal, &second).await;
+    process_until_idle(&service, &tenant).await;
+
+    let store = PgPipelineStore::new(backend.clone());
+    let mut without_command = 0;
+    for run_id in [first_run, second_run] {
+        let run = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+        let rows = score_attempt_rows_with_hashes(&backend, &tenant, run_id).await;
+        assert!(
+            rows.iter()
+                .all(|(_, state, _, hash)| state == "committed"
+                    && is_ciphertext_hash(hash.as_deref())),
+            "every Score row is committed with a hash: {rows:?}"
+        );
+        for (artifact, stored) in [
+            ("index-command", run.index_command_ref.as_deref()),
+            ("score-neighbors", run.score_neighbor_ref.as_deref()),
+        ] {
+            match stored {
+                Some(stored) => {
+                    let (key, hash) = stored.rsplit_once('#').expect("a stored ref");
+                    assert!(
+                        rows.contains(&(
+                            artifact.to_string(),
+                            "committed".to_string(),
+                            key.to_string(),
+                            Some(hash.to_string()),
+                        )),
+                        "the {artifact} row names the committed ref's object and hash: {rows:?}"
+                    );
+                }
+                None => {
+                    if artifact == "index-command" {
+                        without_command += 1;
+                    }
+                    assert!(
+                        rows.iter()
+                            .all(|(row_artifact, ..)| row_artifact != artifact),
+                        "a Score that wrote no {artifact} keeps no row for one: {rows:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        without_command, 1,
+        "the second identical trace is a duplicate at Score and writes no index command"
+    );
+    assert_eq!(
+        service.sweep_attempt_artifacts(&tenant, 10).await.unwrap(),
+        0,
+        "no staged row is left"
+    );
+}
+
+/// Option D, V108's guard: a `staged` row may carry no hash, and the only
+/// change it accepts is its commit, `staged` to `committed` with
+/// `committed_at` set and the hash either unchanged and set or set from
+/// NULL to a 64-character lowercase hex value. Everything else is refused,
+/// for the runtime role (whose grant now covers the hash column) and the
+/// owner alike, and a `committed` row without a hash cannot exist at all.
+#[tokio::test]
+async fn the_attempt_artifact_guard_lets_only_the_commit_set_a_missing_hash() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("attempt-artifact-hash-guard-{}", uuid::Uuid::new_v4());
+    let run_id = run_past_review(&service, &tenant).await.run_id;
+    let lease_token = uuid::Uuid::new_v4();
+    let unhashed_key = format!("option-d-guard-unhashed-{lease_token}");
+    let hashed_key = format!("option-d-guard-hashed-{lease_token}");
+    let (hash_a, hash_b, not_hex) = ("a".repeat(64), "b".repeat(64), "z".repeat(64));
+    const REFUSAL: &str = "pipeline attempt artifacts move only from staged to committed";
+
+    // Runs `sql` as the runtime role in its own tenant transaction, which it
+    // commits on success; an error is its message.
+    let runtime = |sql: &'static str, params: Vec<Option<String>>| {
+        let backend = backend.clone();
+        let tenant = tenant.clone();
+        async move {
+            let mut client = backend.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, &tenant).await;
+            let mut args: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                vec![&tenant, &run_id, &lease_token];
+            for param in &params {
+                args.push(param);
+            }
+            match tx.execute(sql, &args).await {
+                Ok(count) => {
+                    tx.commit().await.unwrap();
+                    Ok(count)
+                }
+                Err(error) => Err(error
+                    .as_db_error()
+                    .map(|db| db.message().to_string())
+                    .unwrap_or_else(|| error.to_string())),
+            }
+        }
+    };
+    let insert = "INSERT INTO pipeline_attempt_artifacts (
+                      tenant_id, run_id, lease_token, artifact, object_key,
+                      ciphertext_sha256, cleanup_after
+                  ) VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 hour')";
+    assert_eq!(
+        runtime(
+            insert,
+            vec![
+                Some("score-neighbors".into()),
+                Some(unhashed_key.clone()),
+                None
+            ],
+        )
+        .await,
+        Ok(1),
+        "a staged row may carry no hash"
+    );
+    assert_eq!(
+        runtime(
+            insert,
+            vec![
+                Some("index-command".into()),
+                Some(hashed_key.clone()),
+                Some(hash_a.clone()),
+            ],
+        )
+        .await,
+        Ok(1),
+        "a staged row may carry its hash"
+    );
+    assert!(
+        runtime(
+            "INSERT INTO pipeline_attempt_artifacts (
+                 tenant_id, run_id, lease_token, artifact, object_key,
+                 ciphertext_sha256, state, committed_at, cleanup_after
+             ) VALUES ($1, $2, $3, 'approved', $4, NULL, 'committed', NOW(), NOW())",
+            vec![Some(format!("option-d-guard-committed-{lease_token}"))],
+        )
+        .await
+        .is_err(),
+        "a committed row without a hash cannot be inserted"
+    );
+
+    for (label, sql, params) in [
+        (
+            "a hash set without the commit",
+            "UPDATE pipeline_attempt_artifacts SET ciphertext_sha256 = $4
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND artifact = 'score-neighbors'",
+            vec![Some(hash_b.clone())],
+        ),
+        (
+            "a commit that leaves the hash missing",
+            "UPDATE pipeline_attempt_artifacts SET state = 'committed', committed_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND artifact = 'score-neighbors'",
+            vec![],
+        ),
+        (
+            "a commit that sets a hash that is not hex",
+            "UPDATE pipeline_attempt_artifacts
+                SET ciphertext_sha256 = $4, state = 'committed', committed_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND artifact = 'score-neighbors'",
+            vec![Some(not_hex.clone())],
+        ),
+        (
+            "a commit that changes a set hash",
+            "UPDATE pipeline_attempt_artifacts
+                SET ciphertext_sha256 = $4, state = 'committed', committed_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND artifact = 'index-command'",
+            vec![Some(hash_b.clone())],
+        ),
+        (
+            "a commit that clears a set hash",
+            "UPDATE pipeline_attempt_artifacts
+                SET ciphertext_sha256 = NULL, state = 'committed', committed_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND artifact = 'index-command'",
+            vec![],
+        ),
+    ] {
+        assert_eq!(
+            runtime(sql, params.clone()).await,
+            Err(REFUSAL.to_string()),
+            "{label}"
+        );
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let mut args: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            vec![&tenant, &run_id, &lease_token];
+        for param in &params {
+            args.push(param);
+        }
+        let error = tx
+            .execute(sql, &args)
+            .await
+            .expect_err("the owner's update is refused too");
+        assert_eq!(
+            error.as_db_error().map(|db| db.message().to_string()),
+            Some(REFUSAL.to_string()),
+            "{label} (owner)"
+        );
+    }
+
+    assert_eq!(
+        runtime(
+            "UPDATE pipeline_attempt_artifacts
+                SET ciphertext_sha256 = COALESCE(ciphertext_sha256, $4),
+                    state = 'committed', committed_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND state = 'staged'",
+            vec![Some(hash_b.clone())],
+        )
+        .await,
+        Ok(2),
+        "the commit sets the missing hash on one row and keeps the set hash on the other"
+    );
+    for (label, sql) in [
+        (
+            "a committed row back to staged",
+            "UPDATE pipeline_attempt_artifacts SET state = 'staged', committed_at = NULL
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3",
+        ),
+        (
+            "a committed row's hash changed",
+            "UPDATE pipeline_attempt_artifacts SET ciphertext_sha256 = repeat('c', 64)
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3",
+        ),
+    ] {
+        assert_eq!(
+            runtime(sql, vec![]).await,
+            Err(REFUSAL.to_string()),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        attempt_artifact_rows_with_hashes(&backend, &tenant, run_id)
+            .await
+            .into_iter()
+            .filter(|(_, _, key, _)| key == &hashed_key || key == &unhashed_key)
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "index-command".to_string(),
+                "committed".to_string(),
+                hashed_key.clone(),
+                Some(hash_a.clone()),
+            ),
+            (
+                "score-neighbors".to_string(),
+                "committed".to_string(),
+                unhashed_key.clone(),
+                Some(hash_b.clone()),
+            ),
+        ]
+    );
+}
+
+/// The cap still holds while a compatibility Score waits for its tenant's
+/// Score lock: with a 1-second Score lease (cap 4 seconds), its lease is
+/// renewed up to the cap and no further. A Score that gets the lock only
+/// after the cap writes no object, records no Score outcome, and is
+/// recorded as the uncharged `lease_expired`; the two rows it staged
+/// before the lock stay `staged` with no hash and no object, for the sweep.
+///
+/// It writes no object because of the publish bound (option D): past the
+/// moment its lease is certainly gone it publishes nothing. The check PR 3
+/// makes once it has the lock, `lease_expires_at > NOW()`, reads `NOW()` on
+/// the lock transaction, which is that transaction's start, before the
+/// wait, so it does not stop such a Score (reported to PR 3 in rebase 10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compatibility_score_waiting_past_its_lease_cap_stops_uncharged() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let writes = Arc::new(AtomicUsize::new(0));
+    let counting: Arc<dyn TraceArtifactStore> = {
+        let writes = writes.clone();
+        Arc::new(HookedWriteStore::new(
+            artifacts.clone(),
+            Box::new(move || {
+                writes.fetch_add(1, Ordering::SeqCst);
+            }),
+        ))
+    };
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s leases are in bounds; the Score's cap is 4s");
+    let service = Arc::new(
+        compatibility_test_builder(
+            backend.clone(),
+            counting,
+            near_duplicate_config(),
+            None,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks::default(),
+            IsolatedPipelineIndex::new(),
+        )
+        .with_lease_config(lease_config)
+        .build()
+        .expect("build pipeline service"),
+    );
+    let tenant = format!("compat-lock-cap-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run_id = compatibility_run_past_review(&service, &tenant)
+        .await
+        .run_id;
+    let writes_after_review = writes.load(Ordering::SeqCst);
+
+    let mut holder = owner_client().await;
+    let lock = holder.transaction().await.unwrap();
+    hold_compatibility_score_lock(&lock, &tenant).await;
+    let scoring = {
+        let service = service.clone();
+        let tenant = tenant.clone();
+        tokio::spawn(async move { service.process_run(&tenant, run_id).await })
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (claimed, claim_time) = loop {
+        let run = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+        if run.state == PipelineRunState::Leased && run.next_phase == Some(Phase::Score) {
+            break (run, chrono::Utc::now());
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Score never claimed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+
+    let mut max_seen = claimed.lease_expires_at.unwrap();
+    let hold_until = std::time::Instant::now() + std::time::Duration::from_millis(5500);
+    while std::time::Instant::now() < hold_until {
+        let run = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+        if run.lease_token == claimed.lease_token {
+            if let Some(expires_at) = run.lease_expires_at {
+                max_seen = max_seen.max(expires_at);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(!scoring.is_finished(), "the Score still waits for the lock");
+    let cap = claim_time + chrono::Duration::seconds(4);
+    let tolerance = chrono::Duration::seconds(1);
+    assert!(
+        max_seen >= cap - tolerance && max_seen <= cap + tolerance,
+        "the waiting Score's lease was renewed up to the cap and no further: {max_seen} vs {cap}"
+    );
+
+    lock.commit().await.unwrap();
+    let stopped = tokio::time::timeout(HELD_CALL_BOUND, scoring)
+        .await
+        .expect("the Score finishes once the lock is free")
+        .expect("the Score task did not panic")
+        .unwrap()
+        .expect("the stale Score records its lease expiry");
+    assert_eq!(stopped.state, PipelineRunState::Retry);
+    assert_eq!(
+        stopped.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+    assert_eq!(
+        stopped.attempt_count,
+        claimed.attempt_count.saturating_sub(1),
+        "the expired attempt is not charged"
+    );
+    assert_eq!(
+        writes.load(Ordering::SeqCst),
+        writes_after_review,
+        "a Score past its publish bound writes no object"
+    );
+    assert!(
+        store
+            .list_outcomes(&tenant, run_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|outcome| outcome.phase != Phase::Score),
+        "no Score outcome is recorded"
+    );
+    let rows = score_attempt_rows_with_hashes(&backend, &tenant, run_id).await;
+    assert_eq!(
+        rows.iter()
+            .map(|(artifact, state, _, hash)| (artifact.as_str(), state.as_str(), hash.is_none()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("index-command", "staged", true),
+            ("score-neighbors", "staged", true),
+        ],
+        "the rows staged before the lock stay for the sweep: {rows:?}"
+    );
+    for (artifact, _, key, _) in &rows {
+        assert_eq!(
+            artifacts
+                .artifact_present_by_object_key(
+                    tenant_ref.as_str(),
+                    TraceArtifactKind::VectorPayload,
+                    key,
+                    "",
+                )
+                .unwrap(),
+            Some(false),
+            "no {artifact} object was written"
+        );
+    }
 }
