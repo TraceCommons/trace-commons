@@ -1707,7 +1707,9 @@ impl PgPipelineStore {
     ///
     /// Liveness is decided only once the run row is held (wave 2; rebase 10
     /// review, M7; fix round 1, review M4): the transaction first locks the
-    /// row (`SELECT ... FOR UPDATE`), waiting out any holder, and the UPDATE
+    /// row (`SELECT ... FOR NO KEY UPDATE`, the mode the UPDATE itself takes,
+    /// so it does not also wait on a child row's foreign-key `FOR KEY SHARE`;
+    /// fix round 2), waiting out any holder, and the UPDATE
     /// that follows compares `lease_expires_at` with `clock_timestamp()`,
     /// the time it runs, not `NOW()`, the transaction's start. A lease that
     /// expired while the renewal waited is then not renewed, whether the
@@ -1728,7 +1730,8 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let extension_ms = extension.num_milliseconds();
         tx.query_opt(
-            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            "SELECT 1 FROM pipeline_runs
+              WHERE tenant_id = $1 AND run_id = $2 FOR NO KEY UPDATE",
             &[&tenant_id, &run_id],
         )
         .await?;

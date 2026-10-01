@@ -1072,7 +1072,7 @@ enum RunRowHolder {
 /// expired lease is not renewed, and its expiry is left as it was. With the
 /// predicate on `NOW()` both cases renewed it; with `clock_timestamp()` in
 /// the UPDATE alone, the lock-only case still did (no re-check), which the
-/// renewal's own `FOR UPDATE` before the UPDATE closes. The probe waits
+/// renewal's own `FOR NO KEY UPDATE` before the UPDATE closes. The probe waits
 /// until the holder's backend is among the renewal's blockers
 /// (`pg_blocking_pids`), so it cannot be satisfied by another test's
 /// session.
