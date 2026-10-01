@@ -953,7 +953,7 @@ fn submitted_marker(
     let transcript = source.load(r).ok()?;
     Some(receipts.iter().any(|rec| {
         rec.session_hash == transcript.session_hash
-            && crate::submit::ALREADY_SUBMITTED_STATUSES.contains(&rec.status.as_str())
+            && crate::submit::is_already_submitted(&rec.status)
     }))
 }
 
@@ -2067,6 +2067,14 @@ mod tests {
         );
         let row = submit_picker_row(0, &r, Some(true));
         assert_eq!(row.last().unwrap(), "yes");
+
+        // The versioned pipeline's receipt status: uploaded, no verdict yet.
+        let mut processing = receipt.clone();
+        processing.status = "processing".into();
+        assert_eq!(
+            submitted_marker(&src, &r, std::slice::from_ref(&processing)),
+            Some(true)
+        );
 
         // Receipt with a non-terminal status does not mark the session.
         let mut rejected = receipt;

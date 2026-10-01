@@ -108,8 +108,24 @@ pub(crate) fn witness_input_for_profile(
 
 /// Statuses that mean a session has already been accepted by the server;
 /// re-encountering a receipt with one of these statuses short-circuits the
-/// per-session flow instead of re-uploading.
-pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted", "quarantined"];
+/// per-session flow instead of re-uploading. Read through
+/// [`is_already_submitted`], never directly.
+const ALREADY_SUBMITTED_STATUSES: [&str; 3] = [
+    crate::daemon::history::STATUS_SUBMITTED,
+    crate::daemon::history::STATUS_ACCEPTED,
+    crate::daemon::history::STATUS_QUARANTINED,
+];
+
+/// Whether a receipt's status means its session is already submitted.
+///
+/// Through [`crate::daemon::history::status_bucket`], so the versioned
+/// pipeline's `processing` receipt counts as `submitted` here exactly as it
+/// does in the history rollup. Receipts are append-only and that receipt is
+/// never rewritten, so without this a re-run would upload again, under the
+/// same submission id with a new `trace_id`, and get a 409.
+pub(crate) fn is_already_submitted(status: &str) -> bool {
+    ALREADY_SUBMITTED_STATUSES.contains(&crate::daemon::history::status_bucket(status))
+}
 
 /// A fail-closed precondition that aborts the whole submit pass rather than
 /// producing an outcome for one session.
@@ -1423,8 +1439,7 @@ impl<'a> SubmitContext<'a> {
             .receipts
             .iter()
             .filter(|r| {
-                r.session_hash == transcript.session_hash
-                    && ALREADY_SUBMITTED_STATUSES.contains(&r.status.as_str())
+                r.session_hash == transcript.session_hash && is_already_submitted(&r.status)
             })
             .max_by_key(|r| r.submitted_at);
         if let Some(prior) = prior
@@ -4113,6 +4128,48 @@ mod tests {
             SubmitOutcome::AlreadySubmitted { .. }
         ));
         assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    /// The versioned pipeline answers with a `processing` receipt, and
+    /// receipts are append-only, so that receipt is never rewritten. A re-run
+    /// must read it as already submitted rather than upload again: the second
+    /// upload builds a new `trace_id` under the same submission id and the
+    /// server answers 409.
+    #[tokio::test]
+    async fn processing_receipt_short_circuits_a_rerun() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            ..Default::default()
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &outcomes[0],
+            SubmitOutcome::Submitted { status, .. } if status == "processing"
+        ));
+        assert_eq!(received.lock().unwrap().len(), 1);
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &rerun[0],
+                SubmitOutcome::AlreadySubmitted { prior_status, .. }
+                    if prior_status == "processing"
+            ),
+            "{:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
     }
 
     #[tokio::test]

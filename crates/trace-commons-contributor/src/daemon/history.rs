@@ -30,6 +30,12 @@ use crate::config::{ConfigStore, DAEMON_HISTORY_FILE, Receipt};
 pub const STATUS_QUARANTINED: &str = "quarantined";
 pub const STATUS_ACCEPTED: &str = "accepted";
 pub const STATUS_SUBMITTED: &str = "submitted";
+/// Receipt status from the versioned pipeline (`route_pipeline_receipt` on
+/// the server): the upload is in and processing runs asynchronously. To a
+/// contributor that is [`STATUS_SUBMITTED`] -- uploaded, no verdict yet --
+/// and every client surface reads it as such through [`status_bucket`].
+/// Receipts are append-only, so a `processing` receipt is never rewritten.
+pub const STATUS_PROCESSING: &str = "processing";
 /// Local status this cache stamps onto a record once `daemon::withdraw` has
 /// had the server confirm a withdrawal. Not a status the server itself ever
 /// returns from submission-status read-back -- `join` only ever writes the
@@ -40,6 +46,18 @@ pub const STATUS_WITHDRAWN: &str = "withdrawn";
 /// server's own read-back of a withdrawal this daemon never saw. Counted as
 /// taken back exactly like a local [`STATUS_WITHDRAWN`] row.
 pub const STATUS_REVOKED: &str = "revoked";
+
+/// The status a row is counted, selected and short-circuited under:
+/// [`STATUS_PROCESSING`] is [`STATUS_SUBMITTED`], and every other status is
+/// itself. The one mapping the rollup, `withdraw_bulk` and the submit
+/// short-circuit all read, so they cannot disagree about a `processing` row.
+pub fn status_bucket(status: &str) -> &str {
+    if status == STATUS_PROCESSING {
+        STATUS_SUBMITTED
+    } else {
+        status
+    }
+}
 
 /// Whether a row has been taken back: withdrawn here (`withdrawn_at`, or the
 /// local [`STATUS_WITHDRAWN`] stamp), or reported `revoked` by the server
@@ -133,7 +151,7 @@ impl HistoryCounts {
             self.withdrawn += 1;
             return;
         }
-        match rec.status.as_str() {
+        match status_bucket(&rec.status) {
             STATUS_ACCEPTED => self.accepted += 1,
             STATUS_QUARANTINED => self.quarantined += 1,
             STATUS_SUBMITTED => self.submitted += 1,
@@ -1091,6 +1109,28 @@ mod tests {
             .find(|r| r.submission_id == sent_unattended)
             .unwrap();
         assert_eq!(unattended.approved_unattended, Some(true));
+    }
+
+    /// The versioned pipeline answers an upload with a `processing` receipt:
+    /// uploaded, no verdict yet. That is the `submitted` bucket, never
+    /// `other`. Built from a receipt through `merge_new_receipts`, the path
+    /// an upload pass takes.
+    #[test]
+    fn rollup_counts_a_processing_receipt_as_submitted() {
+        let mut recs = vec![record(STATUS_SUBMITTED, "2026-08-08T10:00:00Z")];
+        let receipts = [receipt(
+            Uuid::new_v4(),
+            "sha256:bb",
+            "processing",
+            "2026-08-08T11:00:00Z",
+        )];
+        assert!(merge_new_receipts(&mut recs, &receipts, &BTreeMap::new()));
+
+        let r = rollup(&recs, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.all_time.submitted, 2);
+        assert_eq!(r.week.submitted, 2);
+        assert_eq!(r.all_time.other, 0, "processing is not an 'other' status");
+        assert_eq!(r.all_time.total(), 2);
     }
 
     /// K7 review: a withdrawn row lands in the `withdrawn` bucket and in
