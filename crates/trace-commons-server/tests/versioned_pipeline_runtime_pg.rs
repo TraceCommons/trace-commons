@@ -79,8 +79,9 @@ use trace_commons_server::versioned_pipeline_qualification::{
     PACKAGE_SIGNATURE_INVALID_LABEL, PACKAGE_SIGNER_UNTRUSTED_LABEL, PROMOTION_REQUIRED_CHECKS,
     PipelineCheckEmitter, PipelineCheckResult, PipelineCheckStatus, PipelineQualificationStore,
     ProductionAdapterKind, ProductionDependencyProfile, ProductionInfrastructureProfile,
-    PromotionDecision, evaluate_promotion, package_digests, sign_bundle_package,
-    trusted_key_for_pkcs8,
+    PromotionDecision, QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL,
+    QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS, evaluate_promotion, package_digests,
+    sign_bundle_package, trusted_key_for_pkcs8,
 };
 
 use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
@@ -27004,6 +27005,15 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
         "qualification_evidence_invalid:{}",
         PROMOTION_REQUIRED_CHECKS[3]
     );
+    // Fix round 2: a maximum age is the caller's input, so one above the
+    // server's ceiling (seven days) is refused. The evidence hash does not
+    // cover it, so the metadata still matches.
+    let mut above_ceiling = evidence.clone();
+    above_ceiling[5].maximum_age_seconds = QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS + 1;
+    assert_eq!(
+        promotion_now(&above_ceiling).evidence_hash,
+        metadata.evidence_hash
+    );
     for (refused_evidence, refused_metadata, label) in [
         (
             &missing_one,
@@ -27031,6 +27041,11 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             "bundle_qualification_package_mismatch",
         ),
         (&malformed, &metadata, malformed_label.as_str()),
+        (
+            &above_ceiling,
+            &metadata,
+            QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL,
+        ),
     ] {
         let error = store
             .qualify_bundle(

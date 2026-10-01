@@ -48,6 +48,12 @@ pub const QUALIFICATION_EVIDENCE_INVALID_LABEL: &str = "qualification_evidence_i
 pub const QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL: &str =
     "qualification_evidence_mixed_revision";
 pub const QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL: &str = "qualification_evidence_mixed_package";
+/// The longest maximum age `PipelineQualificationStore::qualify_bundle`
+/// accepts for a check result: seven days. A result's maximum age is the
+/// caller's input until PR 5 signs results, so the server bounds it.
+pub const QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS: u64 = 7 * 24 * 60 * 60;
+pub const QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL: &str =
+    "bundle_qualification_evidence_age_above_ceiling";
 
 pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
     "pipeline_storage_upgrade_rls",
@@ -447,7 +453,10 @@ pub fn evaluate_promotion(
         if !PROMOTION_REQUIRED_CHECKS.contains(&check_id) {
             return Err(QUALIFICATION_EVIDENCE_INVALID_LABEL.to_string());
         }
-        if item.check.validate().is_err() || item.maximum_age_seconds == 0 {
+        if item.check.validate().is_err()
+            || item.maximum_age_seconds == 0
+            || maximum_age(item).is_none()
+        {
             return Err(format!("{QUALIFICATION_EVIDENCE_INVALID_LABEL}:{check_id}"));
         }
         if by_id.insert(check_id, item).is_some() {
@@ -473,11 +482,9 @@ pub fn evaluate_promotion(
                 .iter()
                 .map(|label| format!("{label}:{check_id}")),
         );
-        let maximum_age = i64::try_from(item.maximum_age_seconds)
-            .map_err(|_| QUALIFICATION_EVIDENCE_INVALID_LABEL.to_string())?;
-        if item.check.observed_at > now
-            || now - item.check.observed_at > Duration::seconds(maximum_age)
-        {
+        let maximum_age = maximum_age(item)
+            .ok_or_else(|| format!("{QUALIFICATION_EVIDENCE_INVALID_LABEL}:{check_id}"))?;
+        if item.check.observed_at > now || now - item.check.observed_at > maximum_age {
             blockers.push(format!("{QUALIFICATION_EVIDENCE_STALE_LABEL}:{check_id}"));
         }
     }
@@ -531,6 +538,15 @@ pub fn evaluate_promotion(
             .then(|| packages.first().cloned())
             .flatten(),
     })
+}
+
+/// `item`'s maximum age as a duration; `None` when it does not fit one
+/// (above `i64::MAX` seconds, or above chrono's millisecond range, where
+/// `Duration::seconds` would panic; fix round 2).
+fn maximum_age(item: &DrillEvidence) -> Option<Duration> {
+    i64::try_from(item.maximum_age_seconds)
+        .ok()
+        .and_then(Duration::try_seconds)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -945,6 +961,10 @@ impl PipelineQualificationStore {
     ///   the check results the metadata records, and this evaluates them
     ///   itself ([`evaluate_promotion`] at the current time, so stale
     ///   evidence blocks; a malformed result is refused with its own label).
+    ///   A result's maximum age above `QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS`
+    ///   (seven days) is refused (`bundle_qualification_evidence_age_above_ceiling`):
+    ///   until PR 5 signs results, the result files, their `observed_at` and
+    ///   their maximum age are the caller's input.
     ///   The decision must be ready (`bundle_qualification_promotion_not_ready`),
     ///   its evidence hash must be the metadata's
     ///   (`bundle_qualification_evidence_mismatch`), its one code revision the
@@ -992,6 +1012,16 @@ impl PipelineQualificationStore {
         let blockers = dependencies.blockers();
         if !blockers.is_empty() {
             return Err(DatabaseError::Constraint(blockers[0].clone()));
+        }
+        // A result's maximum age is the caller's input (fix round 2), so a
+        // qualification accepts none above the server's ceiling.
+        if evidence
+            .iter()
+            .any(|item| item.maximum_age_seconds > QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS)
+        {
+            return Err(DatabaseError::Constraint(
+                QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL.to_string(),
+            ));
         }
         let promotion =
             evaluate_promotion(evidence, Utc::now()).map_err(DatabaseError::Constraint)?;
@@ -1628,6 +1658,22 @@ mod tests {
             control.safe_blockers,
             vec![QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL.to_string()]
         );
+
+        // A maximum age that does not fit a duration is refused by id, never
+        // a panic (fix round 2): above `i64::MAX` seconds, and above
+        // chrono's millisecond range (`Duration::seconds` panics there).
+        for maximum_age_seconds in [u64::MAX, (i64::MAX / 1_000) as u64 + 1] {
+            let mut overflowing = probe.clone();
+            overflowing[6].maximum_age_seconds = maximum_age_seconds;
+            assert_eq!(
+                evaluate_promotion(&overflowing, now),
+                Err(format!(
+                    "{QUALIFICATION_EVIDENCE_INVALID_LABEL}:{}",
+                    PROMOTION_REQUIRED_CHECKS[6]
+                )),
+                "{maximum_age_seconds}"
+            );
+        }
 
         // The rest of `validate()` and the age bound are refused the same way.
         let mut bad_digest = probe.clone();

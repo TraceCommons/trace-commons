@@ -327,7 +327,11 @@ bundle, a configuration or dependency-digest mismatch, any blocked
 dependency, evidence that does not back the metadata, or a second call for
 the same bundle with different metadata. It evaluates the evidence itself
 (`evaluate_promotion`, at the time of the call, so stale evidence blocks and
-a malformed result is refused with its own label). The decision must be
+a malformed result is refused with its own label). Until PR 5 signs check
+results, the result files, their `observed_at` and each result's maximum
+age are the caller's input, not facts the server checked: the server only
+bounds the maximum age, refusing one above seven days
+(`bundle_qualification_evidence_age_above_ceiling`). The decision must be
 ready (`bundle_qualification_promotion_not_ready`), its evidence hash must
 be the metadata's (`bundle_qualification_evidence_mismatch`), its one code
 revision the metadata's (`bundle_qualification_code_revision_mismatch`),
