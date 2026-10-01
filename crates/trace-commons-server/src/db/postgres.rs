@@ -8048,6 +8048,8 @@ mod tests {
             // has one.
             "ciphertext_sha256 TEXT CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
             "OR (state = 'committed' AND committed_at IS NOT NULL AND ciphertext_sha256 IS NOT NULL)",
+            // Rebase 10 review, M8: an `approved` row always has its hash.
+            "CONSTRAINT pipeline_attempt_artifacts_approved_hash\n        CHECK (ciphertext_sha256 IS NOT NULL OR artifact <> 'approved')",
             "state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed'))",
             "PRIMARY KEY (tenant_id, run_id, lease_token, artifact)",
             "UNIQUE (tenant_id, object_key)",

@@ -449,6 +449,25 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         checks.contains("ciphertext_sha256 IS NOT NULL"),
         "a committed attempt row must have its hash: {checks}"
     );
+    // Rebase 10 review, M8: an `approved` row always has its hash, so only a
+    // compatibility Score's two artifacts can be staged without one.
+    let approved_hash: Option<String> = admin
+        .query_opt(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint
+              WHERE conrelid = 'pipeline_attempt_artifacts'::regclass
+                AND conname = 'pipeline_attempt_artifacts_approved_hash'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .map(|row| row.get(0));
+    assert!(
+        approved_hash.as_deref().is_some_and(|definition| {
+            definition.contains("ciphertext_sha256 IS NOT NULL")
+                && definition.contains("artifact <> 'approved'::text")
+        }),
+        "an approved attempt row must have its hash: {approved_hash:?}"
+    );
 
     let claim_function: bool = admin
         .query_one(

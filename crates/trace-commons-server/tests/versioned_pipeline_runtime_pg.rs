@@ -27502,6 +27502,25 @@ async fn the_attempt_artifact_guard_lets_only_the_commit_set_a_missing_hash() {
         Ok(1),
         "a staged row may carry its hash"
     );
+    // Rebase 10 review, M8: only a compatibility Score's two artifacts are
+    // staged without a hash, so Review's `approved` row always carries one,
+    // and a row the sweep deletes by key alone never names an approved
+    // object.
+    let approved_without_hash = runtime(
+        insert,
+        vec![
+            Some("approved".into()),
+            Some(format!("option-d-guard-approved-{lease_token}")),
+            None,
+        ],
+    )
+    .await;
+    assert!(
+        approved_without_hash
+            .as_ref()
+            .is_err_and(|message| message.contains("pipeline_attempt_artifacts_approved_hash")),
+        "an approved row cannot be staged without its hash: {approved_without_hash:?}"
+    );
     assert!(
         runtime(
             "INSERT INTO pipeline_attempt_artifacts (

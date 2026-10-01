@@ -946,7 +946,9 @@ is not. Those rows are staged with no hash:
   records, as it moves the row to `committed`, and deletes the row of an
   artifact the Score did not write (a duplicate at Score writes no index
   command). A `committed` row always has its hash; V108's guard lets only
-  the commit set a missing hash.
+  the commit set a missing hash. Review stages its `approved` row with its
+  hash, and V108 refuses an `approved` row without one, so a row with no
+  hash only ever names a compatibility Score's object.
 - For a due `staged` row with no hash, the sweep first derives the key
   again, through the store, from the row's artifact, run and lease token.
   Only when the row's key is that key does it delete whatever object is

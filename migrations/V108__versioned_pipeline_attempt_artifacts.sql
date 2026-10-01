@@ -13,7 +13,8 @@
 -- lock (rebase 10, option D). The object key is fixed by the tenant, run,
 -- lease token and artifact before the content exists, but the ciphertext
 -- hash is not, so such a row is staged with `ciphertext_sha256` NULL and its
--- commit sets the hash. A `committed` row always has its hash.
+-- commit sets the hash. A `committed` row always has its hash, and so does
+-- every `approved` row.
 
 CREATE TABLE pipeline_attempt_artifacts (
     tenant_id TEXT NOT NULL,
@@ -34,7 +35,12 @@ CREATE TABLE pipeline_attempt_artifacts (
     CHECK (
         (state = 'staged' AND committed_at IS NULL)
         OR (state = 'committed' AND committed_at IS NOT NULL AND ciphertext_sha256 IS NOT NULL)
-    )
+    ),
+    -- Only a compatibility Score's two artifacts are staged without a hash.
+    -- Review stages its `approved` row with one, so a row whose object the
+    -- sweep deletes by key alone never names an approved object.
+    CONSTRAINT pipeline_attempt_artifacts_approved_hash
+        CHECK (ciphertext_sha256 IS NOT NULL OR artifact <> 'approved')
 );
 
 CREATE INDEX pipeline_attempt_artifacts_due
