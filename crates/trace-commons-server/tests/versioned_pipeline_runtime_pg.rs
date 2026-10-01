@@ -24753,6 +24753,84 @@ async fn a_score_commit_missing_its_attempt_row_is_refused_and_leaves_no_object(
     }
 }
 
+/// Fix round 2: the other half of the Review rule. A rejection staged no
+/// object, so its commit must move no attempt row. With an `approved` row
+/// staged (and its object published) under the rejecting claim's lease, the
+/// rejection is refused under `pipeline_attempt_artifact_missing` and
+/// commits nothing: no outcome, the run still leased to the claim, the row
+/// still `staged`.
+#[tokio::test]
+async fn a_review_rejection_that_finds_a_staged_attempt_row_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("review-rejection-row-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    stage_and_publish_attempt_artifact(
+        &store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::Approved,
+        b"{\"review\":\"approved\"}",
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await;
+
+    let source_hash = dependency_content_hash(b"review-rejection-row-source");
+    let output = ReviewOutput::rejected(PhaseResult {
+        decision: ReviewDecision::Rejected {
+            reason: ReasonCode::new("policy_rejected").unwrap(),
+        },
+        evidence: ReviewEvidence {
+            source_content_hash: source_hash.clone(),
+            result_content_hash: source_hash,
+            content_changed: false,
+            worker_identity: None,
+            transformation_metadata_hash: None,
+            human_assessment_hash: None,
+            resolved_quarantine_reasons: Vec::new(),
+        },
+        evaluation: ReviewEvaluation {
+            rule_id: "test_rejection_v1".to_string(),
+        },
+    })
+    .unwrap();
+    let stored = StoredPhaseResult::from_result(Phase::Review, output.result()).unwrap();
+    let error = store
+        .commit_review(&claimed, stored, None)
+        .await
+        .expect_err("a rejection that would move a staged row is refused");
+    assert!(
+        matches!(error, DatabaseError::Constraint(ref label) if label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        store
+            .list_outcomes(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no Review outcome is committed"
+    );
+    let current = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(
+        (current.state, current.lease_token),
+        (PipelineRunState::Leased, claimed.lease_token)
+    );
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, run.run_id).await,
+        vec![("approved".to_string(), "staged".to_string())]
+    );
+}
+
 /// Wave 2, fix round 1 (review I3): the Review commit holds the same rule.
 /// An approval must move the one `staged` `approved` row that names its
 /// object. With that row gone, naming another key, or naming another hash

@@ -336,7 +336,11 @@ ready (`bundle_qualification_promotion_not_ready`), its evidence hash must
 be the metadata's (`bundle_qualification_evidence_mismatch`), its one code
 revision the metadata's (`bundle_qualification_code_revision_mismatch`),
 and its one package the signed package
-(`bundle_qualification_package_mismatch`). A caller computes the evidence
+(`bundle_qualification_package_mismatch`). The evidence is evaluated on
+every call, so a repeat of a call that already recorded its row, made after
+the evidence went stale, is refused as
+`bundle_qualification_promotion_not_ready` instead of answering the
+existing row. A caller computes the evidence
 hash it records with `evaluate_promotion` over the same results; the hash
 leaves out the evaluation time, so the two agree. A successful call records
 one append-only row per `(tenant_id, bundle_id)` in
