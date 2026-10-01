@@ -301,6 +301,7 @@ struct RestoreFingerprint {
     runtime_privilege_count: usize,
     tenant_fingerprint: String,
     tenant_count: usize,
+    /// Hashed audit events `main`'s verifier chained, across every tenant.
     audit_event_count: usize,
 }
 
@@ -856,7 +857,9 @@ async fn tenant_fingerprint(owner: &Arc<PgBackend>) -> TenantFingerprint {
 /// logs are in the seed's temporary state directory, which a database
 /// restore does not carry, so every tenant's first hashed row must chain
 /// from genesis. Panics with `label` on a chain that does not verify;
-/// returns each tenant's event count.
+/// returns each tenant's hashed events: the rows the verifier chains and
+/// checks. An unhashed (legacy) row is skipped by the verifier, so it is not
+/// counted (review of this wave, M1).
 async fn verified_audit_events(
     mains: &Arc<dyn Database>,
     tenants: &[String],
@@ -868,7 +871,10 @@ async fn verified_audit_events(
             .await
             .unwrap_or_else(|_| panic!("{label}"));
         assert!(report.verified, "{label}");
-        counts.insert(tenant.clone(), report.event_count);
+        counts.insert(
+            tenant.clone(),
+            report.event_count - report.legacy_event_count,
+        );
     }
     counts
 }
@@ -1135,7 +1141,8 @@ async fn pipeline_restore_seed() {
     // What the resume compares across the restore, taken from the database
     // the dump reads: the RLS diagnostic over every trace table, the runtime
     // login's privileges, every tenant's rows, and every tenant's audit
-    // chain, each of the two tenants with at least one audited event.
+    // chain, each of the two tenants with at least one hashed, verified
+    // audit event.
     let rls_table_count = require_trace_tables_isolated(&runtime, "restore_seed").await;
     let (rls_policy_set_hash, rls_policy_count) = rls_policy_set(&runtime).await;
     let (runtime_privilege_set_hash, runtime_privilege_count) = runtime_privileges(&runtime).await;
