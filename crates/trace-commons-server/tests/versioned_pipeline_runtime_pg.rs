@@ -25553,6 +25553,48 @@ impl TraceArtifactStore for OutageArtifactStore {
         self.inner
             .delete_artifact(expected_tenant_storage_ref, receipt)
     }
+
+    // PR 4 (rebase 10, option D): a compatibility Score derives its object
+    // keys before its tenant lock, and the attempt sweep deletes and checks
+    // presence at a key; the double delegates all three, so an outage hits
+    // the call the test names rather than a missing method.
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
+    fn artifact_present_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        self.inner.artifact_present_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
 }
 
 /// Multi-lens review L2-2 and ruling FR3: an object-store call that fails
