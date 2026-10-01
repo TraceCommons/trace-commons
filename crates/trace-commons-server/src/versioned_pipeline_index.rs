@@ -73,6 +73,22 @@ impl IsolatedPipelineIndex {
             })
             .count()
     }
+
+    /// The number of distinct revisions with at least one entry under
+    /// `tenant_storage_ref` and `index_id`.
+    pub fn revision_count(&self, tenant_storage_ref: &TenantStorageRef, index_id: &str) -> usize {
+        self.state
+            .lock()
+            .expect("index mutex")
+            .entries
+            .iter()
+            .filter(|((stored_tenant, stored_index, _), _)| {
+                stored_tenant == tenant_storage_ref && stored_index == index_id
+            })
+            .map(|(_, entry)| entry.revision_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
 }
 
 fn dot(left: &[f32], right: &[f32]) -> f32 {

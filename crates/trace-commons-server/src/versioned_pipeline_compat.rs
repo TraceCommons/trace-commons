@@ -27,16 +27,18 @@ use trace_commons_gate_api::pipeline::{
     PolicyError, ReasonCode, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput,
     ScoreOutput, ScorePolicy, SealedIndexCommand, SealedIndexEntry, SettleDecision,
     SettleEvaluation, SettleEvidence, SettleInput, SettlePolicy, TRACE_CREDIT_DECIMALS,
-    TRACE_CREDIT_INSTRUMENT_ID,
+    TRACE_CREDIT_INSTRUMENT_ID, TenantStorageRef,
 };
 use trace_commons_gate_api::{
-    IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedPerplexityScorer, NearestNeighbor,
+    IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedPerplexityScorer, IndexSnapshot,
+    NearestNeighbor, VectorIndexReader,
 };
 use trace_commons_gate_enclave::chunk_aggregate::{
     aggregate_chunked_novelty, aggregate_chunked_perplexity,
 };
 use trace_commons_gate_enclave::chunker::{ChunkerConfig, chunk_envelope_plaintext};
 use trace_commons_gate_enclave::embedder::embed_chunk_mean_pooled;
+use uuid::Uuid;
 
 use crate::credit_quality::{constants_at, credit_quality};
 use crate::versioned_pipeline_bundle::{
@@ -478,6 +480,171 @@ fn hash_neighbors(neighbors: &[NearestNeighbor]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// The index a compatibility Score reads (Zaki review 1, round 2, finding
+/// 12, and the owner ruling of 2026-09-30): the live index, together with
+/// the entries of the index commands that the tenant's other runs committed
+/// at Score and that Settle has not applied yet. Score is serialized per
+/// tenant and builds this reader under the tenant's Score lock
+/// (`PipelineService::commit_score_phase`), so of several near-duplicate
+/// traces received together the first is novel and each later one finds the
+/// first one's entries here: it earns no award and proposes no index
+/// command, as on `main`, whose gate inserts a trace's entries before it
+/// scores the next one.
+///
+/// It holds each unapplied entry under the entry id Settle will write it
+/// under (`IndexEntryKey::entry_id`), with its exact embedding. `nearest`
+/// measures an unapplied entry by cosine similarity, as `NearestNeighbor`
+/// defines it, and does not count twice an entry the live index already
+/// holds (a Settle dispatch that applied part of its command). `snapshot`
+/// keeps the live index's generation (`snapshot_id`) and counts the
+/// unapplied entries into the cardinality and the hash, so the Score
+/// evidence describes the entries the neighbour read compared against (an
+/// entry that a partly applied write already put in the live index counts
+/// twice there).
+pub(crate) struct UnappliedIndexCommandsReader {
+    live: Arc<dyn IdentifiedIndexReader>,
+    tenant_storage_ref: TenantStorageRef,
+    entries: Vec<UnappliedIndexEntry>,
+}
+
+struct UnappliedIndexEntry {
+    index_id: String,
+    revision_id: Uuid,
+    entry_id: Uuid,
+    embedding: Vec<f32>,
+}
+
+impl UnappliedIndexCommandsReader {
+    /// `commands` are the unapplied index commands of `tenant_storage_ref`'s
+    /// other runs; `live` is the index Settle writes.
+    pub(crate) fn new(
+        live: Arc<dyn IdentifiedIndexReader>,
+        tenant_storage_ref: TenantStorageRef,
+        commands: &[SealedIndexCommand],
+    ) -> Self {
+        let entries = commands
+            .iter()
+            .flat_map(|command| {
+                command
+                    .keyed_entries(&tenant_storage_ref)
+                    .map(|(key, entry)| UnappliedIndexEntry {
+                        entry_id: key.entry_id(),
+                        index_id: key.index_id,
+                        revision_id: key.revision_id,
+                        embedding: entry.embedding.clone(),
+                    })
+            })
+            .collect();
+        Self {
+            live,
+            tenant_storage_ref,
+            entries,
+        }
+    }
+
+    fn entries_for<'a>(
+        &'a self,
+        tenant_storage_ref: &'a TenantStorageRef,
+        index_id: &'a str,
+    ) -> impl Iterator<Item = &'a UnappliedIndexEntry> + 'a {
+        let tenant_matches = *tenant_storage_ref == self.tenant_storage_ref;
+        self.entries
+            .iter()
+            .filter(move |entry| tenant_matches && entry.index_id == index_id)
+    }
+}
+
+/// Cosine similarity in `[-1.0, 1.0]`; `0.0` when either vector is zero.
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    let (mut dot, mut left_norm, mut right_norm) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for (a, b) in left.iter().zip(right) {
+        let (a, b) = (f64::from(*a), f64::from(*b));
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+    }
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return 0.0;
+    }
+    (dot / (left_norm.sqrt() * right_norm.sqrt())).clamp(-1.0, 1.0) as f32
+}
+
+impl VectorIndexReader for UnappliedIndexCommandsReader {
+    fn snapshot(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+    ) -> anyhow::Result<IndexSnapshot> {
+        let live = self.live.snapshot(tenant_storage_ref, index_id)?;
+        let unapplied = self
+            .entries_for(tenant_storage_ref, index_id)
+            .collect::<Vec<_>>();
+        if unapplied.is_empty() {
+            return Ok(live);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"trace_commons.pipeline.unapplied_index_snapshot.v1\n");
+        hasher.update(live.snapshot_hash.as_bytes());
+        for entry in &unapplied {
+            hasher.update(entry.entry_id.as_bytes());
+        }
+        Ok(IndexSnapshot {
+            snapshot_id: live.snapshot_id,
+            snapshot_hash: format!("sha256:{:x}", hasher.finalize()),
+            cardinality: live
+                .cardinality
+                .saturating_add(u64::try_from(unapplied.len()).unwrap_or(u64::MAX)),
+        })
+    }
+
+    fn nearest(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        embedding: &[f32],
+        k: usize,
+        exclude_revision: Option<Uuid>,
+    ) -> anyhow::Result<Vec<NearestNeighbor>> {
+        let mut neighbors =
+            self.live
+                .nearest(tenant_storage_ref, index_id, embedding, k, exclude_revision)?;
+        let live_ids = neighbors
+            .iter()
+            .map(|neighbor| neighbor.entry_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        neighbors.extend(
+            self.entries_for(tenant_storage_ref, index_id)
+                .filter(|entry| {
+                    entry.embedding.len() == embedding.len()
+                        && exclude_revision != Some(entry.revision_id)
+                        && !live_ids.contains(&entry.entry_id)
+                })
+                .map(|entry| NearestNeighbor {
+                    entry_id: entry.entry_id,
+                    similarity: cosine_similarity(&entry.embedding, embedding),
+                }),
+        );
+        neighbors.sort_by(|left, right| {
+            right
+                .similarity
+                .partial_cmp(&left.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        neighbors.truncate(k);
+        Ok(neighbors)
+    }
+}
+
+impl IdentifiedIndexReader for UnappliedIndexCommandsReader {
+    fn dependency_identity(&self) -> &str {
+        self.live.dependency_identity()
+    }
+
+    fn production_qualified(&self) -> bool {
+        self.live.production_qualified()
+    }
+}
+
 /// Applies the stored Score command from committed evidence only -- it never
 /// re-queries the live index (the whole point of a shadow Score policy).
 /// Membership is `Include` only when Score actually stored a command *and*
@@ -532,7 +699,7 @@ mod tests {
     };
     use trace_commons_gate_api::{
         ChunkPerplexity, Embedder, IndexSnapshot, PerplexityResult, PerplexityScorer,
-        ReferenceEmbedder, ReferencePerplexityScorer, VectorIndexReader,
+        ReferenceEmbedder, ReferencePerplexityScorer, VectorIndexReader, VectorIndexWriter,
     };
     use uuid::Uuid;
 
@@ -1358,6 +1525,112 @@ mod tests {
             .unwrap_err();
         assert!(error.is_transient());
         assert_eq!(error.label(), "index_unavailable");
+    }
+
+    /// Finding 12: the reader a compatibility Score uses counts an
+    /// unapplied command's entries as neighbours with the live index, under
+    /// the entry ids Settle will write, by cosine similarity. It never
+    /// returns the querying revision's own entries, another tenant's or
+    /// another index's, or an entry the live index already returned; and
+    /// its snapshot keeps the live generation and counts the unapplied
+    /// entries.
+    #[test]
+    fn unapplied_index_commands_count_as_neighbours_with_the_live_index() {
+        let tenant = pipeline_tenant_storage_ref("tenant-unapplied");
+        let other_tenant = pipeline_tenant_storage_ref("tenant-unapplied-other");
+        let live = IsolatedPipelineIndex::new();
+        let command = |revision: u128, embedding: Vec<f32>| {
+            SealedIndexCommand::new(
+                MINIMAL_INDEX_ID,
+                Uuid::from_u128(revision),
+                MINIMAL_PROJECTION_ID,
+                "reference-embedder-v1",
+                vec![SealedIndexEntry {
+                    chunk: 0,
+                    content_hash: format!("sha256:{}", "a".repeat(64)),
+                    embedding,
+                }],
+            )
+            .unwrap()
+        };
+        let applied = command(1, vec![0.0, 2.0]);
+        let unapplied = command(2, vec![2.0, 0.0]);
+        let (applied_key, applied_entry) = applied.keyed_entries(&tenant).next().unwrap();
+        live.upsert(
+            &applied_key,
+            &applied_entry.embedding,
+            &applied_entry.content_hash,
+        )
+        .unwrap();
+        let reader = UnappliedIndexCommandsReader::new(
+            live.clone(),
+            tenant.clone(),
+            &[applied.clone(), unapplied.clone()],
+        );
+        let unapplied_id = unapplied
+            .keyed_entries(&tenant)
+            .next()
+            .unwrap()
+            .0
+            .entry_id();
+
+        let found = reader
+            .nearest(
+                &tenant,
+                MINIMAL_INDEX_ID,
+                &[1.0, 0.0],
+                8,
+                Some(Uuid::from_u128(3)),
+            )
+            .unwrap();
+        assert_eq!(
+            found.iter().map(|n| n.entry_id).collect::<Vec<_>>(),
+            vec![unapplied_id, applied_key.entry_id()],
+            "the unapplied entry ranks first, and the applied one is not counted twice"
+        );
+        assert!((found[0].similarity - 1.0).abs() < 1e-6, "cosine, not dot");
+        assert!(
+            reader
+                .nearest(
+                    &tenant,
+                    MINIMAL_INDEX_ID,
+                    &[1.0, 0.0],
+                    8,
+                    Some(Uuid::from_u128(2))
+                )
+                .unwrap()
+                .iter()
+                .all(|n| n.entry_id != unapplied_id),
+            "the querying revision's own entries are left out"
+        );
+        assert!(
+            reader
+                .nearest(&other_tenant, MINIMAL_INDEX_ID, &[1.0, 0.0], 8, None)
+                .unwrap()
+                .is_empty(),
+            "another tenant sees no unapplied entry"
+        );
+        assert!(
+            reader
+                .nearest(&tenant, "another-index", &[1.0, 0.0], 8, None)
+                .unwrap()
+                .is_empty(),
+            "another index sees no unapplied entry"
+        );
+
+        let live_snapshot = live.snapshot(&tenant, MINIMAL_INDEX_ID).unwrap();
+        let snapshot =
+            UnappliedIndexCommandsReader::new(live.clone(), tenant.clone(), &[unapplied])
+                .snapshot(&tenant, MINIMAL_INDEX_ID)
+                .unwrap();
+        assert_eq!(snapshot.snapshot_id, live_snapshot.snapshot_id);
+        assert_ne!(snapshot.snapshot_hash, live_snapshot.snapshot_hash);
+        assert_eq!(snapshot.cardinality, live_snapshot.cardinality + 1);
+        assert_eq!(
+            reader.snapshot(&other_tenant, MINIMAL_INDEX_ID).unwrap(),
+            live.snapshot(&other_tenant, MINIMAL_INDEX_ID).unwrap(),
+            "with no unapplied entry the snapshot is the live one"
+        );
     }
 
     /// Finding 11: a production-compatible configuration is validated as

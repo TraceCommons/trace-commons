@@ -57,6 +57,9 @@ use crate::versioned_pipeline_bundle::{
     PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, PipelineTraceCreditEvent, dependency_content_hash,
     pipeline_operation_ref, pipeline_result_ref,
 };
+use crate::versioned_pipeline_compat::{
+    COMPATIBILITY_SCORE_IMPLEMENTATION, UnappliedIndexCommandsReader,
+};
 use crate::versioned_pipeline_credit::{
     DryRunNearPayoutAdapter, NearPayoutAdapter, PIPELINE_CREDIT_ACTOR_ROLE, PIPELINE_CREDIT_REASON,
     PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE, PIPELINE_SETTLEMENT_POLICY_VERSION,
@@ -2077,14 +2080,44 @@ impl PgPipelineStore {
         payout_enabled: bool,
         trace_credit_event: PipelineTraceCreditEvent,
     ) -> Result<PipelineRunRecord, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        Self::commit_score_in(
+            tx,
+            run,
+            outcome,
+            awards,
+            command,
+            neighbor,
+            payout_rails,
+            payout_enabled,
+            trace_credit_event,
+        )
+        .await
+    }
+
+    /// `commit_score`, on `tx`, a tenant transaction it commits: a
+    /// compatibility Score commits on the transaction that holds its
+    /// tenant's Score lock (`PipelineService::commit_score_phase`), so the
+    /// lock is released only with the commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_score_in(
+        tx: Transaction<'_>,
+        run: &PipelineRunRecord,
+        outcome: StoredPhaseResult,
+        awards: &InstrumentAwards,
+        command: Option<(&str, &str, &TraceObjectRefWrite)>,
+        neighbor: Option<(&str, &str, &TraceObjectRefWrite)>,
+        payout_rails: &BTreeMap<String, String>,
+        payout_enabled: bool,
+        trace_credit_event: PipelineTraceCreditEvent,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
         if outcome.phase != Phase::Score || run.next_phase != Some(Phase::Score) {
             return Err(DatabaseError::Constraint(
                 "phase does not match run transition".to_string(),
             ));
         }
         let lease_token = required_lease_token(run)?;
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
         if !Self::submission_guard_on_tx(&tx, run).await?.operable {
             // Dropping the transaction rolls it back: nothing was written.
@@ -2182,6 +2215,64 @@ impl PgPipelineStore {
         let updated = pipeline_run_from_row(&row)?;
         tx.commit().await?;
         Ok(updated)
+    }
+
+    /// The index commands a compatibility Score counts as neighbours with
+    /// the live index (Zaki review 1, round 2, finding 12): those the
+    /// tenant's other runs committed at Score and Settle has not applied,
+    /// read on `tx`, which holds the tenant's Score lock. A run's command
+    /// counts while its Settle is still to run or to retry (`next_phase =
+    /// 'settle'`, in `pending`, `leased` or `retry`), its index write is not
+    /// done (`index_write_state` `none` or `pending`: a `complete` write is
+    /// in the live index, and a `failed` or `cancelled` one is never
+    /// applied), its membership is not `excluded`, no invalidation of its
+    /// revision is queued, and its submission is operable (the predicate of
+    /// `submission_guard_on_tx`: not withdrawn, revoked, purged or expired).
+    /// Each row is `(stored ref, command hash, revision id)`, by `run_id`.
+    /// `idx_pipeline_runs_work` leads with `(tenant_id, state)`, so the read
+    /// covers the tenant's runs in flight, not its history.
+    pub async fn unapplied_index_commands_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+    ) -> Result<Vec<(String, String, Uuid)>, DatabaseError> {
+        let rows = tx
+            .query(
+                "SELECT r.index_command_ref, r.index_command_hash, r.approved_revision_id
+                   FROM pipeline_runs r
+                   JOIN trace_submissions s
+                     ON s.tenant_id = r.tenant_id AND s.submission_id = r.submission_id
+                  WHERE r.tenant_id = $1 AND r.run_id <> $2
+                    AND r.state IN ('pending', 'leased', 'retry')
+                    AND r.next_phase = 'settle'
+                    AND r.index_command_ref IS NOT NULL
+                    AND r.index_command_hash IS NOT NULL
+                    AND r.approved_revision_id IS NOT NULL
+                    AND r.index_membership <> 'excluded'
+                    AND r.index_write_state IN ('none', 'pending')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pipeline_index_invalidations i
+                         WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
+                    )
+                    AND s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                    AND NOT EXISTS (
+                        SELECT 1 FROM trace_withdrawals w
+                         WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
+                    )
+                  ORDER BY r.run_id",
+                &[&run.tenant_id, &run.run_id],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<_, String>(0),
+                    row.get::<_, String>(1),
+                    row.get::<_, Uuid>(2),
+                )
+            })
+            .collect())
     }
 
     /// Persists the Settle policy's raw result before any external effect:
@@ -5910,6 +6001,15 @@ impl PipelineService {
     /// Resolve the dependencies the package names and construct its bundle.
     /// A hash the service does not hold fails closed.
     fn construct(&self, package: BundlePackage) -> Result<MinimalPolicyBundle, &'static str> {
+        self.construct_with_index_reader(package, self.index_reader.clone())
+    }
+
+    /// `construct`, with `index_reader` as the index the Score policy reads.
+    fn construct_with_index_reader(
+        &self,
+        package: BundlePackage,
+        index_reader: Arc<dyn IdentifiedIndexReader>,
+    ) -> Result<MinimalPolicyBundle, &'static str> {
         let named = &package.manifest.score.data_artifact_hashes;
         let scorer = named
             .iter()
@@ -5922,17 +6022,12 @@ impl PipelineService {
         let (Some(scorer), Some(embedder)) = (scorer, embedder) else {
             return Err(PIPELINE_DEPENDENCY_MISSING_LABEL);
         };
-        MinimalPolicyBundle::from_package_with_runtime(
-            package,
-            scorer,
-            embedder,
-            self.index_reader.clone(),
-        )
-        .map_err(|error| match error.to_string().as_str() {
-            PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
-            "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
-            _ => PIPELINE_BUNDLE_INVALID_LABEL,
-        })
+        MinimalPolicyBundle::from_package_with_runtime(package, scorer, embedder, index_reader)
+            .map_err(|error| match error.to_string().as_str() {
+                PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
+                "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+                _ => PIPELINE_BUNDLE_INVALID_LABEL,
+            })
     }
 
     /// Loads and constructs the bundle a run is bound to, checking the
@@ -6872,14 +6967,38 @@ impl PipelineService {
         let Some(expected_hash) = evidence.embedding_artifact_hash.as_deref() else {
             return Ok(None);
         };
-        let stored = run
-            .index_command_ref
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
-        let (object_key, ciphertext_sha256) = stored
+        let (Some(stored), Some(run_hash), Some(revision_id)) = (
+            run.index_command_ref.as_deref(),
+            run.index_command_hash.as_deref(),
+            run.approved_revision_id,
+        ) else {
+            anyhow::bail!("index_command_invalid");
+        };
+        let command = self.read_index_command(&run.tenant_id, stored, run_hash, revision_id)?;
+        anyhow::ensure!(
+            run_hash == expected_hash
+                && Some(command.index_id()) == evidence.index_id.as_deref()
+                && Some(command.model_id()) == evidence.embedder_model_id.as_deref(),
+            "index_command_invalid"
+        );
+        Ok(Some(command))
+    }
+
+    /// Reads the index command a run committed at Score from its stored ref
+    /// (`object_key#ciphertext_sha256`) and checks that it hashes to
+    /// `command_hash` and names `revision_id`. Any failure is the safe label
+    /// `index_command_invalid`.
+    fn read_index_command(
+        &self,
+        tenant_id: &str,
+        stored_ref: &str,
+        command_hash: &str,
+        revision_id: Uuid,
+    ) -> anyhow::Result<SealedIndexCommand> {
+        let (object_key, ciphertext_sha256) = stored_ref
             .rsplit_once('#')
             .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
-        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let tenant = pipeline_tenant_storage_ref(tenant_id);
         let wrapper = self
             .artifact_store
             .read_json_by_object_key(
@@ -6893,18 +7012,14 @@ impl PipelineService {
             .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
         let command = serde_json::from_slice::<SealedIndexCommand>(&bytes)
             .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
-        let command_hash = command
+        let hash = command
             .content_hash()
             .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
         anyhow::ensure!(
-            command_hash == expected_hash
-                && Some(command_hash.as_str()) == run.index_command_hash.as_deref()
-                && Some(command.revision_id()) == run.approved_revision_id
-                && Some(command.index_id()) == evidence.index_id.as_deref()
-                && Some(command.model_id()) == evidence.embedder_model_id.as_deref(),
+            hash == command_hash && command.revision_id() == revision_id,
             "index_command_invalid"
         );
-        Ok(Some(command))
+        Ok(command)
     }
 
     /// Claims the next due run for `tenant_id` and advances it one phase.
@@ -7491,6 +7606,32 @@ impl PipelineService {
     /// and neighbor artifact it proposed (each wrapped per decision P1),
     /// and commits the Score outcome together with one pending settlement
     /// operation per award (decision D5).
+    ///
+    /// A compatibility Score is serialized per tenant (Zaki review 1, round
+    /// 2, finding 12, and the owner ruling of 2026-09-30). It opens a tenant
+    /// transaction, takes the tenant's Score lock on it (a transaction-scoped
+    /// advisory lock, `pipeline_compatibility_score_lock`) before it reads
+    /// any neighbour, reads on it the index commands of the tenant's other
+    /// runs that committed at Score and that Settle has not applied
+    /// (`unapplied_index_commands_on_tx`), and commits on it
+    /// (`commit_score_in`), so the lock is held from the neighbour read
+    /// through the commit. The Score policy counts the unapplied entries as
+    /// neighbours with the live index (`UnappliedIndexCommandsReader`). So
+    /// of several near-duplicate traces received together the first is
+    /// novel and each later one is a duplicate at Score: no award and no
+    /// index command, as on `main`, whose gate inserts a trace's entries
+    /// before it scores the next one. An unapplied command that cannot be
+    /// read fails the Score closed (`index_unavailable`, uncharged), since
+    /// leaving it out could credit a duplicate.
+    ///
+    /// Lock order: the tenant's Score lock first, then the run row
+    /// (`ensure_current_lease`) and the submission row
+    /// (`submission_guard_on_tx`) that the commit locks. No other path takes
+    /// the Score lock, so none holds a run or submission row while it waits
+    /// for it. The approved bytes are read before the transaction opens, so
+    /// the Score holds one pooled connection at a time. A Score that waited
+    /// for the lock past its lease stops before it scores (uncharged, as a
+    /// stale lease). Another family's Score (the minimal one) takes no lock.
     async fn commit_score_phase(
         &self,
         run: &PipelineRunRecord,
@@ -7501,6 +7642,64 @@ impl PipelineService {
             .ok_or_else(|| anyhow::anyhow!("approved revision is missing"))?;
         self.score_evaluations.fetch_add(1, Ordering::SeqCst);
         let reviewed_artifact = self.load_approved_bytes(run).await?;
+        if bundle.package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+            return self
+                .score_and_commit(run, bundle, revision_id, reviewed_artifact, None)
+                .await;
+        }
+        let mut client = self.backend.trace_pool().get().await?;
+        let lock = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        lock.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))",
+            &[&pipeline_compatibility_score_lock(&run.tenant_id)],
+        )
+        .await?;
+        let lease_live = lock
+            .query_opt(
+                "SELECT 1 FROM pipeline_runs
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND lease_token = $3 AND lease_expires_at > NOW()",
+                &[&run.tenant_id, &run.run_id, &required_lease_token(run)?],
+            )
+            .await?;
+        if lease_live.is_none() {
+            return Err(stale_lease_error().into());
+        }
+        let mut commands = Vec::new();
+        for (stored_ref, command_hash, revision) in
+            PgPipelineStore::unapplied_index_commands_on_tx(&lock, run).await?
+        {
+            commands.push(
+                self.read_index_command(&run.tenant_id, &stored_ref, &command_hash, revision)
+                    .map_err(|_| {
+                        PolicyError::transient(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+                            .expect("static label")
+                    })?,
+            );
+        }
+        let reader = Arc::new(UnappliedIndexCommandsReader::new(
+            self.index_reader.clone(),
+            pipeline_tenant_storage_ref(&run.tenant_id),
+            &commands,
+        ));
+        let bundle = self
+            .construct_with_index_reader(bundle.package.clone(), reader)
+            .map_err(|label| anyhow::anyhow!(label))?;
+        self.score_and_commit(run, &bundle, revision_id, reviewed_artifact, Some(lock))
+            .await
+    }
+
+    /// `commit_score_phase`'s Score and commit over `reviewed_artifact`.
+    /// The commit runs on `lock` when the caller holds the tenant's Score
+    /// lock on it, and on a transaction of its own otherwise.
+    async fn score_and_commit(
+        &self,
+        run: &PipelineRunRecord,
+        bundle: &MinimalPolicyBundle,
+        revision_id: Uuid,
+        reviewed_artifact: Vec<u8>,
+        lock: Option<Transaction<'_>>,
+    ) -> anyhow::Result<PipelineRunRecord> {
         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
         let output = bundle
             .score
@@ -7601,19 +7800,38 @@ impl PipelineService {
             )
         };
         self.inject_crash(PipelineCrashPoint::AfterScoreArtifactStorage)?;
-        let commit_result = self
-            .store
-            .commit_score(
-                run,
-                StoredPhaseResult::from_result(Phase::Score, &result)?,
-                result.decision.awards(),
-                stored("index-command"),
-                stored("score-neighbors"),
-                &self.settlement_adapters.payout_rails(),
-                self.payout_enabled(),
-                bundle.trace_credit_event,
-            )
-            .await;
+        let outcome = StoredPhaseResult::from_result(Phase::Score, &result)?;
+        let payout_rails = self.settlement_adapters.payout_rails();
+        let commit_result = match lock {
+            Some(lock) => {
+                PgPipelineStore::commit_score_in(
+                    lock,
+                    run,
+                    outcome,
+                    result.decision.awards(),
+                    stored("index-command"),
+                    stored("score-neighbors"),
+                    &payout_rails,
+                    self.payout_enabled(),
+                    bundle.trace_credit_event,
+                )
+                .await
+            }
+            None => {
+                self.store
+                    .commit_score(
+                        run,
+                        outcome,
+                        result.decision.awards(),
+                        stored("index-command"),
+                        stored("score-neighbors"),
+                        &payout_rails,
+                        self.payout_enabled(),
+                        bundle.trace_credit_event,
+                    )
+                    .await
+            }
+        };
         let updated = match commit_result {
             Ok(updated) => updated,
             Err(error) => {
@@ -10020,6 +10238,13 @@ pub fn pipeline_attempt_object_id(artifact: &str, run_id: Uuid, lease_token: Uui
 /// staging row names the object before it is written.
 fn pipeline_receipt_object_id(run_id: Uuid, attempt_id: Uuid) -> String {
     pipeline_attempt_object_id("source", run_id, attempt_id)
+}
+
+/// The transaction-scoped advisory lock that serializes a tenant's
+/// compatibility Score from its neighbour read through its commit (Zaki
+/// review 1, round 2, finding 12).
+fn pipeline_compatibility_score_lock(tenant_id: &str) -> String {
+    format!("pipeline-compatibility-score:{tenant_id}")
 }
 
 /// The transaction-scoped advisory lock that serializes a receipt key's

@@ -630,6 +630,18 @@ contributor status reports the leg as `not_settlement_eligible`.
 A credit hold on the contributor does not stop this event, as it does not on
 `main`: holds gate settlement batches and payouts only.
 
+Near-duplicate traces earn once. A compatibility Score runs one at a time per
+tenant, across every worker and replica: it holds a per-tenant advisory lock
+from its neighbour read through its commit, and it counts as neighbours both
+the index and the index commands of the tenant's runs that Score committed and
+Settle has not applied yet (a run still to settle, its submission operable, no
+invalidation queued). So of several near-duplicate traces received together,
+only the first earns `NoveltyUtility` and gets index entries; each later one
+completes with no award and no index entries, as on `main`, whose gate inserts
+a trace's entries before it scores the next one. A tenant's compatibility
+Score throughput is therefore one Score at a time; other tenants and the other
+phases are not serialized.
+
 Before Settle writes the ledger event, it applies `main`'s `NoveltyUtility`
 credit checks, in `main`'s order. A check that refuses the credit withholds
 the leg: the leg completes with no ledger event, its `last_error_label` is

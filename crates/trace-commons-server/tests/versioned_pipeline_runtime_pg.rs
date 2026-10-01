@@ -14287,12 +14287,34 @@ async fn compatibility_test_service_with(
     authority: Arc<dyn PipelineAuthorityProvider>,
     checks: PipelineNoveltyUtilityChecks,
 ) -> Arc<PipelineService> {
+    compatibility_test_service_on(
+        backend,
+        artifact_store,
+        config,
+        near,
+        authority,
+        checks,
+        IsolatedPipelineIndex::new(),
+    )
+    .await
+}
+
+/// `compatibility_test_service_with`, over `index`: services built over
+/// the same index and database act as workers of one deployment.
+async fn compatibility_test_service_on(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    near: Option<Arc<dyn NearPayoutAdapter>>,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+    index: Arc<IsolatedPipelineIndex>,
+) -> Arc<PipelineService> {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package =
         MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
             .expect("build compatibility bundle package");
-    let index = IsolatedPipelineIndex::new();
     let trace_credit = RecordingSettlementAdapter::new(
         InstrumentId::trace_credit(),
         "recording_trace_credit_test_only",
@@ -22572,4 +22594,246 @@ async fn a_withheld_novelty_utility_leg_never_reaches_its_adapter() {
         1,
         "a credited leg settles through its adapter"
     );
+}
+
+/// A compatibility configuration with `main`'s documented novelty floor
+/// (0.5) that awards `CHECKED_DELTA_MICROCREDITS`: the first of two
+/// identical traces is novel, the second is not.
+fn near_duplicate_config() -> CompatibilityBundleConfig {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_floor_micros = 500_000;
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    config
+}
+
+/// Receives `env` for `principal` in `tenant` and returns the new run's id.
+async fn receive_envelope(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+    env: &TraceContributionEnvelope,
+) -> uuid::Uuid {
+    let raw = serde_json::to_vec(env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = submit_registered(
+        service,
+        PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: env,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    created.run_id
+}
+
+/// Runs `process_one` for `tenant` until no run is due.
+async fn process_until_idle(service: &PipelineService, tenant: &str) {
+    for _ in 0..64 {
+        if service.process_one(tenant).await.unwrap().is_none() {
+            return;
+        }
+    }
+    panic!("the tenant's runs did not go idle");
+}
+
+/// The tenant's `novelty_utility` ledger rows.
+async fn count_novelty_utility_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND event_type = 'novelty_utility'",
+            &[&tenant_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+/// Two receipts of the same trace, in a fresh tenant: `(tenant, first,
+/// second)` envelopes that differ only in their submission id.
+async fn identical_receipts() -> (String, TraceContributionEnvelope, TraceContributionEnvelope) {
+    let tenant = format!("compat-near-duplicate-{}", uuid::Uuid::new_v4());
+    let first = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let mut second = first.clone();
+    second.submission_id = uuid::Uuid::new_v4();
+    (tenant, first, second)
+}
+
+/// Asserts the owner ruling on near-duplicates for `tenant`: exactly one
+/// `novelty_utility` ledger row, and exactly one revision in the index.
+async fn assert_one_award_and_one_indexed_revision(
+    backend: &Arc<PgBackend>,
+    index: &IsolatedPipelineIndex,
+    tenant: &str,
+) {
+    assert_eq!(
+        count_novelty_utility_rows(backend, tenant).await,
+        1,
+        "only the first of two identical traces earns NoveltyUtility"
+    );
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(tenant), MINIMAL_INDEX_ID),
+        1,
+        "only the first of two identical traces is indexed"
+    );
+}
+
+/// Zaki review 1, round 2, finding 12, and the owner ruling of 2026-09-30:
+/// near-duplicate traces are dropped after the first one. Two identical
+/// receipts, processed by a single worker until idle, give exactly one
+/// `novelty_utility` ledger row and one indexed revision, although both
+/// Scores run before the first Settle writes the index.
+#[tokio::test]
+async fn identical_receipts_earn_one_novelty_utility_award_with_one_worker() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        index.clone(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:compat-near-duplicate";
+    receive_envelope(&service, &tenant, principal, &first).await;
+    receive_envelope(&service, &tenant, principal, &second).await;
+    process_until_idle(&service, &tenant).await;
+    assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Finding 12, the interleaved variant: the second receipt arrives after
+/// the first run's Score committed, and its Review and Score run before the
+/// first run's Settle wrote the index.
+#[tokio::test]
+async fn identical_receipts_earn_one_novelty_utility_award_when_interleaved() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        index.clone(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:compat-near-duplicate";
+    let first_run = receive_envelope(&service, &tenant, principal, &first).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, first_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        0,
+        "the first run's Settle has not written the index yet"
+    );
+    let second_run = receive_envelope(&service, &tenant, principal, &second).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, second_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the second run's {phase} runs"));
+    }
+    process_until_idle(&service, &tenant).await;
+    assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Finding 12 with two workers: two services over one database and one
+/// index process the two identical receipts at the same time.
+#[tokio::test]
+async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let worker = || {
+        compatibility_test_service_on(
+            backend.clone(),
+            artifact_store(&dir),
+            near_duplicate_config(),
+            None,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks::default(),
+            index.clone(),
+        )
+    };
+    let (one, two) = (worker().await, worker().await);
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:compat-near-duplicate";
+    receive_envelope(&one, &tenant, principal, &first).await;
+    receive_envelope(&two, &tenant, principal, &second).await;
+    for phase in ["Review", "Score", "Settle"] {
+        let (a, b) = tokio::join!(one.process_one(&tenant), two.process_one(&tenant));
+        assert!(
+            a.unwrap().is_some() && b.unwrap().is_some(),
+            "both workers ran a {phase}"
+        );
+    }
+    process_until_idle(&one, &tenant).await;
+    assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Finding 12 on a pool of one: a compatibility Score reads its approved
+/// bytes before it opens the transaction that holds the tenant's Score
+/// lock, reads the unapplied index commands and commits on that same
+/// transaction, so it never holds two pooled connections. With a pool of
+/// one, a second checkout would wait for the first forever; the bound turns
+/// that into a failure.
+#[tokio::test]
+async fn compatibility_score_never_holds_two_pooled_connections() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        index.clone(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:compat-near-duplicate";
+    receive_envelope(&service, &tenant, principal, &first).await;
+    receive_envelope(&service, &tenant, principal, &second).await;
+    tokio::time::timeout(HELD_CALL_BOUND, process_until_idle(&service, &tenant))
+        .await
+        .expect("a compatibility Score never waits for a second connection");
+    assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
 }
