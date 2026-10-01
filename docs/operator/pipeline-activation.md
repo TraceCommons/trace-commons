@@ -396,7 +396,12 @@ Both need an account session, never a device key, and both answer the same
 - `POST /v1/account/traces/{submission_id}/withdraw`, `main`'s route, uses
   the pipeline withdrawal when a pipeline runtime is injected and the
   requested submission, or another submission of its source session, has a
-  pipeline run. Otherwise it takes `main`'s path, unchanged.
+  pipeline run. Otherwise it takes `main`'s path. On a build with no
+  runtime injected, that path still queues the pipeline's follow-up for
+  each withdrawn submission with a pipeline run, through the database,
+  after the tombstones and before the bytes: the revision's invalidation
+  (reason `withdrawn`), a payload deletion per live object, and the end of
+  its runs' work. A runtime processes them when it runs.
 
 An upload whose source session is withdrawn while the pipeline receipt is
 still in progress is not recorded. The receipt's final transaction locks the
@@ -434,9 +439,9 @@ settlement adapter is missing), deletes the objects it wrote.
 
 `main`'s revocation routes (`DELETE /v1/traces/{id}`,
 `POST /v1/traces/{id}/revoke`, `DELETE /v1/traces`) mark the submission
-revoked as before, and, when a pipeline runtime is injected and the
-submission has a pipeline run, then make the pipeline's follow-up in one
-transaction: the export snapshot invalidations and payload deletions above,
+revoked as before, and, when the submission has a pipeline run, then make
+the pipeline's follow-up in one transaction (with no runtime injected,
+through the database, for a later runtime to process): the export snapshot invalidations and payload deletions above,
 the run's index invalidation (reason `revoked`), and the release of a run
 parked in `awaiting_review`. Settle reads the revoked status and forfeits
 every leg it has not completed. `main`'s completion of a source-session

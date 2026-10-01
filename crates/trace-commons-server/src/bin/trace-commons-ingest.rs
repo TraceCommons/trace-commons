@@ -15135,8 +15135,15 @@ async fn revoke_submission(
     // runs' work ended -- as the pipeline withdrawal does. The submission is
     // marked revoked above, so Settle, which reads the submission guard,
     // forfeits whatever it has not completed.
+    // With no runtime injected, the follow-up is queued through the
+    // database for a later runtime (Zaki review 1, round 2, N-9).
     if let Some(pipeline) = state.pipeline_service.as_ref() {
         pipeline
+            .follow_up_revocation(tenant.tenant_id(), submission_id, tenant.principal_ref())
+            .await
+            .map_err(internal_error)?;
+    } else if let Some(store) = state.pipeline_store.as_ref() {
+        store
             .follow_up_revocation(tenant.tenant_id(), submission_id, tenant.principal_ref())
             .await
             .map_err(internal_error)?;
@@ -19165,6 +19172,26 @@ async fn account_trace_withdraw_handler(
         (tombstone, vec![submission_id])
     };
 
+    // Zaki review 1, round 2, N-9: a build with no runtime injected takes
+    // this path for a submission with a pipeline run too, so each withdrawn
+    // version with one gets the pipeline's follow-up through the database
+    // (its revision queued for removal from the pipeline index, a payload
+    // deletion per live object, its runs' work ended), for a later runtime
+    // to process. After the tombstones and before the bytes, as the
+    // completion reconciler runs it; idempotent, and nothing for a version
+    // with no run.
+    if state.pipeline_service.is_none() {
+        if let Some(store) = state.pipeline_store.as_ref() {
+            let actor = account_audit_tenant(&ctx);
+            for affected_id in &affected_ids {
+                store
+                    .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
+                    .await
+                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+            }
+        }
+    }
+
     // Credit is retained only if it is retained for every withdrawn version.
     let credit_retained = affected_ids.iter().all(|affected_id| {
         withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
@@ -21971,6 +21998,15 @@ async fn reconcile_source_session_withdrawals(
             // consumer sweep).
             if let Some(pipeline) = state.pipeline_service.as_ref() {
                 pipeline
+                    .follow_up_withdrawal(
+                        tenant_id,
+                        version.submission_id,
+                        &audit_tenant.principal_ref,
+                    )
+                    .await?;
+            } else if let Some(store) = state.pipeline_store.as_ref() {
+                // With no runtime injected, through the database (N-9).
+                store
                     .follow_up_withdrawal(
                         tenant_id,
                         version.submission_id,

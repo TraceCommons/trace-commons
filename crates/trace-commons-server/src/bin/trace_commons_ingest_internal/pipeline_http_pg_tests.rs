@@ -7637,3 +7637,85 @@ async fn a_minimal_family_award_reads_with_its_points_under_database_reads() {
         "database reads report the award as file reads do"
     );
 }
+
+/// Zaki review 1, round 2, N-9: on a build with no pipeline runtime
+/// injected, `main`'s account withdrawal of a submission with a pipeline run
+/// still queues the pipeline's follow-up through the database
+/// (`AppState::pipeline_store`), for a later runtime to process: the run's
+/// revision is queued for removal from the pipeline index (reason
+/// `withdrawn`) and a payload deletion is queued per live object. The
+/// withdrawal succeeds with `main`'s response. `main`'s revocation route
+/// does the same, under reason `revoked`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runtime_less_build_queues_the_pipeline_follow_up_through_the_database() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.token);
+    let session = account_session_headers(&fixture.state, &fixture.token).await;
+    let withdrawn = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let revoked = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let ext = account_ctx_ext(&fixture.state, &session).await;
+    let mut runtime_less = fixture.state.clone();
+    {
+        let state = Arc::make_mut(&mut runtime_less);
+        state.pipeline_service = None;
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+
+    let Json(response) = account_trace_withdraw_handler(
+        State(runtime_less.clone()),
+        ext,
+        AxumPath(withdrawn.submission_id),
+    )
+    .await
+    .expect("the withdrawal succeeds with no runtime injected");
+    assert_eq!(response.submission_id, withdrawn.submission_id);
+    assert_eq!(
+        queued_index_invalidation(&fixture.runtime, tenant, withdrawn.run_id).await,
+        (1, "pending".to_string()),
+        "the revision is queued for removal"
+    );
+    let deletions: i64 = {
+        let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, tenant).await;
+        let count = tx
+            .query_one(
+                "SELECT COUNT(*) FROM trace_revocation_propagation_items
+                  WHERE tenant_id = $1 AND source_submission_id = $2
+                    AND action = 'delete_object_payload' AND reason = 'pipeline_withdrawal'",
+                &[&tenant, &withdrawn.submission_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    assert!(
+        deletions >= 2,
+        "a payload deletion per live object ({deletions})"
+    );
+
+    let (status, body) = route_request(
+        runtime_less,
+        "DELETE",
+        &format!("/v1/traces/{}", revoked.submission_id),
+        auth_headers(&fixture.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (invalidations, run_state, deletions) =
+        pipeline_revocation_follow_up(&fixture.runtime, tenant, &revoked).await;
+    assert_eq!(
+        (invalidations, run_state.as_str()),
+        (1, "pending"),
+        "the revoked revision is queued for removal"
+    );
+    assert!(
+        deletions >= 2,
+        "a payload deletion per live object ({deletions})"
+    );
+}
