@@ -227,7 +227,11 @@ are routed or drained (the section above). With
 runtime whose privacy boundary does not run a prose-PII classifier, or that
 has none (`pipeline_privacy_filter_required`), as `main` refuses to start
 with no filter backend. This is judged by what the boundary does, not by
-whether it reports itself qualified.
+whether it reports itself qualified. The classifier-backed boundary
+(`ClassifierRedactorPipelinePrivacyBoundary`) is built with its adapter's
+backend tag, as `main` pairs them (`TRACE_PRIVACY_FILTER_BACKEND`). Over the
+no-op adapter, which is the `none` backend's, it neither classifies prose
+PII nor counts as qualified, so both refusals apply to it.
 
 ## Quarantined runs and human review
 
