@@ -23129,3 +23129,63 @@ async fn a_run_that_fails_for_good_after_its_index_write_has_its_revision_remove
         "the failed run's revision left the index"
     );
 }
+
+/// Zaki review 1, round 2, simplification: every pipeline operability check
+/// reads one definition of a live submission, which counts `withdrawn_at`
+/// as the credit leg's check always did. A submission whose row records a
+/// withdrawal time but has no `trace_withdrawals` row is no longer operable
+/// for Score either: its approved-bytes read refuses it, and the run never
+/// reaches Settle.
+#[tokio::test]
+async fn a_submission_with_a_withdrawal_time_is_not_operable_for_score() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdrawn-at-operability-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "UPDATE trace_submissions SET withdrawn_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &env.submission_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert_eq!(scored.next_phase, Some(Phase::Score), "{scored:?}");
+    assert_eq!(
+        scored.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+}

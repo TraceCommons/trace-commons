@@ -69,6 +69,58 @@ use crate::versioned_pipeline_credit::{
     pipeline_settlement_batch_id, source_list_hash,
 };
 
+/// The lifecycle half of every pipeline operability check, over the
+/// `trace_submissions` row aliased `s` (Zaki review 1, round 2,
+/// simplification: one definition, where there were five that disagreed on
+/// `withdrawn_at`): not revoked, purged, or withdrawn (`withdrawn_at`, and no
+/// `trace_withdrawals` row), and not expired on the database clock. Each
+/// check adds the status it needs (`accepted_submission_sql!`,
+/// `reviewable_submission_sql!`). A macro, so every query stays one
+/// `&'static str`.
+macro_rules! live_submission_sql {
+    () => {
+        "s.revoked_at IS NULL AND s.purged_at IS NULL AND s.withdrawn_at IS NULL
+         AND (s.expires_at IS NULL OR s.expires_at > NOW())
+         AND NOT EXISTS (
+             SELECT 1 FROM trace_withdrawals w
+              WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
+         )"
+    };
+}
+pub(crate) use live_submission_sql;
+
+/// A live submission (`live_submission_sql!`) Review approved: what Score,
+/// Settle, and an export need (the submission guard).
+macro_rules! accepted_submission_sql {
+    () => {
+        concat!("s.status = 'accepted' AND ", live_submission_sql!())
+    };
+}
+pub(crate) use accepted_submission_sql;
+
+/// A live submission (`live_submission_sql!`) Review has not decided yet:
+/// what a review claim, an assessment, and the review queue need.
+macro_rules! reviewable_submission_sql {
+    () => {
+        concat!(
+            "s.status IN ('received', 'quarantined') AND ",
+            live_submission_sql!()
+        )
+    };
+}
+
+/// A run, aliased `p`, that waits for a human review: at Review, quarantined
+/// by Admission, and idle (`pending`, `retry`, or `awaiting_review`). The
+/// review queue also leaves out a run that has an assessment; a claim checks
+/// that in a statement of its own, after it holds the run's lock (Zaki review
+/// 1, round 2, finding 8).
+macro_rules! run_waiting_for_review_sql {
+    () => {
+        "p.next_phase = 'review' AND p.admission_decision = 'quarantine'
+         AND p.state IN ('pending', 'retry', 'awaiting_review')"
+    };
+}
+
 /// The tenant's derived storage reference, the same value ingest's
 /// `tenant_storage_ref` produces: the first 16 bytes of SHA-256, as hex.
 /// Every artifact and index call in the pipeline is keyed by it.
@@ -1744,11 +1796,12 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let run_row = tx
             .query_opt(
-                "SELECT state, submission_id FROM pipeline_runs p
-                  WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.next_phase = 'review'
-                    AND p.state IN ('pending', 'retry', 'awaiting_review')
-                    AND p.admission_decision = 'quarantine'
-                  FOR UPDATE",
+                concat!(
+                    "SELECT state, submission_id FROM pipeline_runs p
+                      WHERE p.tenant_id = $1 AND p.run_id = $2 AND ",
+                    run_waiting_for_review_sql!(),
+                    " FOR UPDATE"
+                ),
                 &[&tenant_id, &run_id],
             )
             .await?;
@@ -1880,13 +1933,13 @@ impl PgPipelineStore {
         // opposite orders.
         let row = tx
             .query_opt(
-                "SELECT p.admission_reason, p.state, p.submission_id
-                 FROM pipeline_runs p
-                 WHERE p.tenant_id = $1 AND p.run_id = $2
-                   AND p.next_phase = 'review'
-                   AND p.state IN ('pending', 'retry', 'awaiting_review')
-                   AND p.admission_decision = 'quarantine'
-                 FOR UPDATE",
+                concat!(
+                    "SELECT p.admission_reason, p.state, p.submission_id
+                     FROM pipeline_runs p
+                     WHERE p.tenant_id = $1 AND p.run_id = $2 AND ",
+                    run_waiting_for_review_sql!(),
+                    " FOR UPDATE"
+                ),
                 &[&claim.tenant_id, &claim.run_id],
             )
             .await?;
@@ -2063,7 +2116,8 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let released = tx
             .execute(
-                "UPDATE pipeline_runs
+                concat!(
+                    "UPDATE pipeline_runs
                     SET state = 'pending', next_attempt_at = NOW(), last_error_label = NULL,
                         updated_at = NOW()
                   WHERE tenant_id = $1
@@ -2074,20 +2128,15 @@ impl PgPipelineStore {
                                SELECT 1 FROM trace_submissions s
                                 WHERE s.tenant_id = p.tenant_id
                                   AND s.submission_id = p.submission_id
-                                  AND s.status IN ('received', 'quarantined')
-                                  AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                                  AND s.withdrawn_at IS NULL
-                                  AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                                  AND NOT EXISTS (
-                                      SELECT 1 FROM trace_withdrawals w
-                                       WHERE w.tenant_id = s.tenant_id
-                                         AND w.submission_id = s.submission_id
-                                  )
+                                  AND ",
+                    reviewable_submission_sql!(),
+                    "
                            )
                          ORDER BY p.run_id
                          FOR UPDATE OF p SKIP LOCKED
                     )
-                    AND state = 'awaiting_review'",
+                    AND state = 'awaiting_review'"
+                ),
                 &[&tenant_id],
             )
             .await?;
@@ -2114,23 +2163,19 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
-                "SELECT p.* FROM pipeline_runs p
-                  JOIN trace_submissions s
-                    ON s.tenant_id = p.tenant_id AND s.submission_id = p.submission_id
-                  WHERE p.tenant_id = $1 AND p.next_phase = 'review'
-                    AND p.admission_decision = 'quarantine'
-                    AND p.state IN ('pending', 'retry', 'awaiting_review')
-                    AND NOT EXISTS (SELECT 1 FROM pipeline_review_assessments a
-                                     WHERE a.tenant_id = p.tenant_id AND a.run_id = p.run_id)
-                    AND s.status IN ('received', 'quarantined')
-                    AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                    AND s.withdrawn_at IS NULL
-                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                    AND NOT EXISTS (SELECT 1 FROM trace_withdrawals w
-                                     WHERE w.tenant_id = p.tenant_id
-                                       AND w.submission_id = p.submission_id)
-                  ORDER BY p.created_at, p.run_id
-                  LIMIT $2",
+                concat!(
+                    "SELECT p.* FROM pipeline_runs p
+                      JOIN trace_submissions s
+                        ON s.tenant_id = p.tenant_id AND s.submission_id = p.submission_id
+                      WHERE p.tenant_id = $1 AND ",
+                    run_waiting_for_review_sql!(),
+                    " AND NOT EXISTS (SELECT 1 FROM pipeline_review_assessments a
+                                       WHERE a.tenant_id = p.tenant_id AND a.run_id = p.run_id)
+                      AND ",
+                    reviewable_submission_sql!(),
+                    " ORDER BY p.created_at, p.run_id
+                      LIMIT $2"
+                ),
                 &[&tenant_id, &limit],
             )
             .await?;
@@ -2336,7 +2381,8 @@ impl PgPipelineStore {
     ) -> Result<Vec<(String, String, Uuid)>, DatabaseError> {
         let rows = tx
             .query(
-                "SELECT r.index_command_ref, r.index_command_hash, r.approved_revision_id
+                concat!(
+                    "SELECT r.index_command_ref, r.index_command_hash, r.approved_revision_id
                    FROM pipeline_runs r
                    JOIN trace_submissions s
                      ON s.tenant_id = r.tenant_id AND s.submission_id = r.submission_id
@@ -2352,13 +2398,10 @@ impl PgPipelineStore {
                         SELECT 1 FROM pipeline_index_invalidations i
                          WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
                     )
-                    AND s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                    AND NOT EXISTS (
-                        SELECT 1 FROM trace_withdrawals w
-                         WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
-                    )
-                  ORDER BY r.run_id",
+                    AND ",
+                    accepted_submission_sql!(),
+                    " ORDER BY r.run_id"
+                ),
                 &[&run.tenant_id, &run.run_id],
             )
             .await?;
@@ -2949,15 +2992,13 @@ impl PgPipelineStore {
         .await?;
         let row = tx
             .query_opt(
-                "SELECT s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                        AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                        AND NOT EXISTS (
-                            SELECT 1 FROM trace_withdrawals w
-                             WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
-                        )
-                   FROM trace_submissions s
-                  WHERE s.tenant_id = $1 AND s.submission_id = $2
-                  FOR SHARE OF s",
+                concat!(
+                    "SELECT ",
+                    accepted_submission_sql!(),
+                    " FROM trace_submissions s
+                      WHERE s.tenant_id = $1 AND s.submission_id = $2
+                      FOR SHARE OF s"
+                ),
                 &[&run.tenant_id, &run.submission_id],
             )
             .await?;
@@ -4801,29 +4842,28 @@ async fn review_submission_is_operable(
     // queue, the submission guard and `settle_internal_credit` judge it, so
     // the claim and the assessment never disagree with them about a
     // submission that expires near now (Zaki review 1, round 2, finding 20).
-    let operable = tx
+    // Two statements, lock first, read second, as the submission guard
+    // does: the read takes its snapshot after the lock is held, so it sees a
+    // withdrawal that committed while the lock was awaited.
+    tx.query_opt(
+        "SELECT 1 FROM trace_submissions
+          WHERE tenant_id = $1 AND submission_id = $2
+          FOR UPDATE",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    Ok(tx
         .query_opt(
-            "SELECT status IN ('received', 'quarantined')
-                    AND revoked_at IS NULL AND purged_at IS NULL AND withdrawn_at IS NULL
-                    AND (expires_at IS NULL OR expires_at > NOW())
-               FROM trace_submissions
-              WHERE tenant_id = $1 AND submission_id = $2
-              FOR UPDATE",
+            concat!(
+                "SELECT ",
+                reviewable_submission_sql!(),
+                " FROM trace_submissions s
+                  WHERE s.tenant_id = $1 AND s.submission_id = $2"
+            ),
             &[&tenant_id, &submission_id],
         )
         .await?
-        .is_some_and(|row| row.get::<_, bool>(0));
-    if !operable {
-        return Ok(false);
-    }
-    let withdrawn = tx
-        .query_opt(
-            "SELECT 1 FROM trace_withdrawals WHERE tenant_id = $1 AND submission_id = $2",
-            &[&tenant_id, &submission_id],
-        )
-        .await?
-        .is_some();
-    Ok(!withdrawn)
+        .is_some_and(|row| row.get::<_, bool>(0)))
 }
 
 /// Moves an `awaiting_review` run back to `pending`, due at once, with its
@@ -7308,26 +7348,22 @@ impl PipelineService {
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         let object_ref = tx
             .query_opt(
-                "SELECT object_ref.object_key, object_ref.content_sha256
-                   FROM trace_submissions submission
-                   JOIN trace_object_refs object_ref
-                     ON object_ref.tenant_id = submission.tenant_id
-                    AND object_ref.submission_id = submission.submission_id
-                  WHERE submission.tenant_id = $1
-                    AND submission.submission_id = $2
-                    AND object_ref.object_ref_id = $3
-                    AND submission.status NOT IN ('revoked', 'expired', 'purged')
-                    AND submission.revoked_at IS NULL
-                    AND submission.purged_at IS NULL
-                    AND (submission.expires_at IS NULL OR submission.expires_at > NOW())
-                    AND NOT EXISTS (
-                        SELECT 1 FROM trace_withdrawals w
-                         WHERE w.tenant_id = submission.tenant_id
-                           AND w.submission_id = submission.submission_id
-                    )
-                    AND object_ref.invalidated_at IS NULL
-                    AND object_ref.deleted_at IS NULL
-                  FOR SHARE OF submission, object_ref",
+                concat!(
+                    "SELECT object_ref.object_key, object_ref.content_sha256
+                       FROM trace_submissions s
+                       JOIN trace_object_refs object_ref
+                         ON object_ref.tenant_id = s.tenant_id
+                        AND object_ref.submission_id = s.submission_id
+                      WHERE s.tenant_id = $1
+                        AND s.submission_id = $2
+                        AND object_ref.object_ref_id = $3
+                        AND s.status NOT IN ('revoked', 'expired', 'purged')
+                        AND ",
+                    live_submission_sql!(),
+                    " AND object_ref.invalidated_at IS NULL
+                        AND object_ref.deleted_at IS NULL
+                      FOR SHARE OF s, object_ref"
+                ),
                 &[&run.tenant_id, &run.submission_id, &object_ref_id],
             )
             .await?
@@ -9508,15 +9544,12 @@ impl PipelineService {
         .await?;
         let submission_operable = tx
             .query_opt(
-                "SELECT s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                        AND s.withdrawn_at IS NULL
-                        AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                        AND NOT EXISTS (
-                            SELECT 1 FROM trace_withdrawals w
-                             WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
-                        )
-                   FROM trace_submissions s
-                  WHERE s.tenant_id = $1 AND s.submission_id = $2",
+                concat!(
+                    "SELECT ",
+                    accepted_submission_sql!(),
+                    " FROM trace_submissions s
+                      WHERE s.tenant_id = $1 AND s.submission_id = $2"
+                ),
                 &[&run.tenant_id, &run.submission_id],
             )
             .await?

@@ -34,7 +34,8 @@ use crate::db::postgres::{PgBackend, TRACE_COMMONS_RLS_TABLES};
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::TraceObjectArtifactKind;
 use crate::versioned_pipeline::{
-    PIPELINE_SUBMISSION_INOPERABLE_LABEL, PipelineRunState, phase_from_db, sha256_prefixed,
+    PIPELINE_SUBMISSION_INOPERABLE_LABEL, PipelineRunState, accepted_submission_sql,
+    live_submission_sql, phase_from_db, sha256_prefixed,
 };
 use crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_IMPLEMENTATION;
 
@@ -436,22 +437,13 @@ const TRACE_CREDIT_LEDGER_JOIN: &str = "
 /// Whether the submission aliased `s` may be exported for the allowed use
 /// bound as `$2`.
 ///
-/// The first four lines are the operability rule of
-/// `PgPipelineStore::submission_guard_on_tx`, the guard Score and Settle
-/// commit under: status `accepted`, not revoked, purged, or expired, and no
-/// `trace_withdrawals` row. They are repeated here in SQL because an export
-/// filters many submissions in one statement; a change to that rule must
-/// change this text too. The last line is `main`'s record-level export
-/// rule (`record_matches_export_policy_abac`): the submission's own
+/// The operability rule of `PgPipelineStore::submission_guard_on_tx`, the
+/// guard Score and Settle commit under, from its one definition
+/// (`accepted_submission_sql!`), then `main`'s record-level export rule
+/// (`record_matches_export_policy_abac`): the submission's own
 /// `allowed_uses` holds the requested use.
-const EXPORTABLE_SUBMISSION_PREDICATE: &str = "
-                        s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                    AND NOT EXISTS (
-                        SELECT 1 FROM trace_withdrawals w
-                         WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
-                    )
-                    AND s.allowed_uses ? $2";
+const EXPORTABLE_SUBMISSION_PREDICATE: &str =
+    concat!(accepted_submission_sql!(), " AND s.allowed_uses ? $2");
 
 /// The export selection: complete runs of tenant `$1` with a committed
 /// Review approved revision whose approved object is live, and whose
