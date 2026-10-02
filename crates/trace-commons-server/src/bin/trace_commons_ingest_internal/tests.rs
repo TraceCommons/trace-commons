@@ -6110,8 +6110,11 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_tenant_submission_policy,
         db_mirror,
         pipeline_service: None,
+        pipeline_product: None,
+        pipeline_store: None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -10071,6 +10074,11 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
     )
     .err()
     .unwrap();
@@ -10140,6 +10148,148 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
     }
 }
 
+/// Ruling T15-10: `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is
+/// held to the canonical hashed form the central-issuer allowlist requires.
+/// Unset is no issuer; a canonical ref is the issuer; a raw principal, a
+/// short hash, or an uppercase one refuses startup, naming the variable.
+#[test]
+fn the_pipeline_credit_issuer_ref_must_be_canonical() {
+    // SAFETY: env mutation in tests is OK here -- no other test in this
+    // suite reads this variable (only startup does, and no test runs it).
+    unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF) };
+    assert_eq!(
+        parse_pipeline_credit_issuer_principal_ref_from_env().expect("unset parses"),
+        None
+    );
+
+    let canonical = format!("principal_sha256:{}", "a".repeat(64));
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF,
+            &canonical,
+        )
+    };
+    assert_eq!(
+        parse_pipeline_credit_issuer_principal_ref_from_env().expect("a canonical ref parses"),
+        Some(canonical)
+    );
+
+    for non_canonical in [
+        "gate-worker-token".to_string(),
+        format!("principal_sha256:{}", "a".repeat(63)),
+        format!("principal_sha256:{}", "A".repeat(64)),
+        format!("sha256:{}", "a".repeat(64)),
+    ] {
+        unsafe {
+            std::env::set_var(
+                TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF,
+                &non_canonical,
+            )
+        };
+        let error = parse_pipeline_credit_issuer_principal_ref_from_env()
+            .expect_err("a non-canonical ref refuses startup");
+        assert!(
+            error
+                .to_string()
+                .contains(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF),
+            "{error}"
+        );
+        assert!(!error.to_string().contains(&non_canonical), "{error}");
+    }
+
+    unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF) };
+}
+
+/// Ruling F-I2: startup reads
+/// `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS` for the
+/// pipeline only when a pipeline runtime is assembled. With no pipeline, a
+/// value `main` would refuse (below the five-second floor, or not a number)
+/// does not stop startup, as on `main`, where only an enabled NEAR scheduler
+/// reads it. With a pipeline, the same value is refused, and a valid one is
+/// the payout's confirmation interval.
+#[test]
+fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
+    // SAFETY: env mutation in tests is OK here -- no other test in this
+    // suite reads this variable (only startup and the NEAR scheduler's own
+    // configuration parser do, and no test calls either).
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
+            "3",
+        )
+    };
+    assert_eq!(
+        pipeline_near_confirmation_interval_from_env(false)
+            .expect("no pipeline: the interval is not read"),
+        StdDuration::from_secs(TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS)
+    );
+    pipeline_near_confirmation_interval_from_env(true)
+        .expect_err("a pipeline runtime refuses an interval below the floor");
+
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
+            "not-a-number",
+        )
+    };
+    assert_eq!(
+        pipeline_near_confirmation_interval_from_env(false)
+            .expect("no pipeline: the interval is not read"),
+        StdDuration::from_secs(TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS)
+    );
+    pipeline_near_confirmation_interval_from_env(true)
+        .expect_err("a pipeline runtime refuses an interval that is not a number");
+
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
+            "120",
+        )
+    };
+    assert_eq!(
+        pipeline_near_confirmation_interval_from_env(true).expect("120 seconds is in range"),
+        StdDuration::from_secs(120)
+    );
+
+    unsafe { std::env::remove_var(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS) };
+}
+
+/// Ruling F-I2 and multi-lens review L5-1: startup reads `main`'s gate
+/// variables for the pipeline (here `TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`)
+/// only when a pipeline runtime is assembled. With no pipeline, a value
+/// `main` would refuse does not stop startup (`main` reads it only in its
+/// feature-gated enclave gate builders), and `main`'s default stands in, with
+/// no floors. With a pipeline, the same value is refused, and a valid one is
+/// the threshold handed to the runtime. The delta is `main`'s, in
+/// microcredits, either way.
+#[test]
+fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
+    // SAFETY: env mutation in tests is OK here -- no other test in this
+    // suite reads this variable (only startup and `main`'s feature-gated
+    // gate builders do, and no test calls either).
+    unsafe { std::env::set_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS, "0.05") };
+    let unread = pipeline_main_gate_config_from_env(false, 2.5)
+        .expect("no pipeline: the gate variables are not read");
+    assert_eq!(
+        unread.embed_insert_novelty_micros,
+        TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS as u64
+    );
+    assert_eq!(unread.perplexity_floor_micros, None);
+    assert_eq!(unread.novelty_utility_microcredits, 2_500_000);
+    pipeline_main_gate_config_from_env(true, 2.5)
+        .expect_err("a pipeline runtime refuses a threshold that is not an integer");
+
+    unsafe { std::env::set_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS, "120000") };
+    assert_eq!(
+        pipeline_main_gate_config_from_env(true, 0.0)
+            .expect("an integer is read")
+            .embed_insert_novelty_micros,
+        120_000
+    );
+
+    unsafe { std::env::remove_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS) };
+}
+
 #[test]
 fn pipeline_receipt_tenants_require_an_injected_runtime() {
     let gates = TraceTenantRolloutGates::for_feature(
@@ -10165,6 +10315,96 @@ fn ingest_and_pipeline_derive_the_same_tenant_storage_ref() {
             trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(tenant).as_str()
         );
     }
+}
+
+/// Zaki review 1, item 7: the worker drains the union of the tenants whose
+/// receipts are routed to the pipeline and the drain list
+/// (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`), each once.
+#[test]
+fn the_pipeline_worker_drains_the_routed_and_the_drain_tenants() {
+    use super::pipeline_runtime::pipeline_worker_tenant_ids;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &["tenant-routed", "tenant-both"],
+    );
+    state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([
+        "tenant-both".to_string(),
+        "tenant-draining".to_string(),
+    ]));
+    assert_eq!(
+        pipeline_worker_tenant_ids(&state),
+        vec![
+            "tenant-both".to_string(),
+            "tenant-draining".to_string(),
+            "tenant-routed".to_string(),
+        ]
+    );
+}
+
+/// Zaki review 1, item 7: a drain list with no pipeline runtime to drain it
+/// refuses startup; an empty one, or one with a runtime, does not.
+#[test]
+fn a_drain_list_without_a_pipeline_runtime_refuses_startup() {
+    let drain = BTreeSet::from(["tenant-draining".to_string()]);
+    assert_eq!(
+        validate_pipeline_drain_tenants(&drain, false)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_drain_tenants_configured_without_runtime"
+    );
+    validate_pipeline_drain_tenants(&BTreeSet::new(), false).unwrap();
+    validate_pipeline_drain_tenants(&drain, true).unwrap();
+}
+
+/// Zaki review 1, item 7: the readiness route reports how many tenants the
+/// worker drains without routing their receipts (a count, no tenant ids).
+#[tokio::test]
+async fn pipeline_readiness_reports_the_drain_list_size() {
+    use super::pipeline_runtime::build_pipeline_app;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([
+        "tenant-one".to_string(),
+        "tenant-two".to_string(),
+    ]));
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["drain_tenant_count"], 2, "{body}");
+    assert!(!body.to_string().contains("tenant-one"), "{body}");
 }
 
 #[tokio::test]
@@ -10199,7 +10439,11 @@ async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
     .unwrap();
     assert_eq!(
         body,
-        serde_json::json!({"status": "not_ready", "reason": "pipeline_runtime_absent"})
+        serde_json::json!({
+            "status": "not_ready",
+            "reason": "pipeline_runtime_absent",
+            "drain_tenant_count": 0,
+        })
     );
 }
 
@@ -10229,6 +10473,18 @@ fn minimal_pipeline_service(
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
 ) -> anyhow::Result<Arc<PipelineService>> {
+    Ok(Arc::new(
+        minimal_pipeline_service_builder(backend, artifact_store, object_store_name)?.build()?,
+    ))
+}
+
+/// The builder `minimal_pipeline_service` builds, for an assembler that sets
+/// more on it.
+fn minimal_pipeline_service_builder(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<trace_commons_server::versioned_pipeline::PipelineServiceBuilder> {
     use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
     use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
     use trace_commons_server::versioned_pipeline_bundle::{
@@ -10265,7 +10521,7 @@ fn minimal_pipeline_service(
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
-    Ok(Arc::new(builder.build()?))
+    Ok(builder)
 }
 
 /// M11: ingest's assembly hands the configured store's name to the
@@ -10307,6 +10563,11 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("a service that ignores the configured store name is refused");
@@ -10325,6 +10586,11 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
     )
     .unwrap()
     .unwrap();
@@ -10513,15 +10779,102 @@ impl trace_commons_gate_api::SettlementAdapter for QualifiedTestSettlementAdapte
     }
 }
 
+/// A `PipelineAuthorityProvider` whose `production_qualified` override
+/// reports `true`, permitting any tenant unconditionally. Real production
+/// authority sources are injected by a proprietary assembler and never live
+/// in this tree; this exists only so the fail-closed tests below can prove
+/// the check does not block a genuinely qualified runtime.
+struct QualifiedTestAuthority;
+
+impl trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider
+    for QualifiedTestAuthority
+{
+    fn authority_for_tenant(
+        &self,
+        _tenant_id: &str,
+    ) -> Option<trace_commons_server::trace_authority::SubmissionAuthority> {
+        Some(trace_commons_server::trace_authority::SubmissionAuthority {
+            tenant: trace_commons_server::trace_authority::SubmissionAllowlists::default(),
+            policy: None,
+            require_policy: false,
+        })
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A `PipelinePrivacyBoundary` whose `production_qualified` override
+/// reports `true`. Transforms nothing and finds nothing -- this double is
+/// never exercised past assembly in the tests that use it.
+struct QualifiedTestPrivacy;
+
+#[async_trait::async_trait]
+impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
+    for QualifiedTestPrivacy
+{
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
 /// A pipeline service whose scorer, embedder, index, and settlement adapter
 /// are all the `Qualified*` test doubles above, so
 /// `pipeline_runtime_is_production_qualified` reports `true` for it. Same
 /// shape as `minimal_pipeline_service`, which stays unqualified (its
-/// settlement adapter registry is empty).
+/// settlement adapter registry is empty). `include_authority`/
+/// `include_privacy` let a caller build an otherwise fully qualified
+/// service that is missing just one of those two controls, to isolate
+/// T2-2's own contribution to the overall qualification check from the
+/// pre-existing scorer/embedder/index/settlement checks. `payout`, when
+/// given, is the NEAR payout adapter and its configuration.
 fn qualified_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
+    include_authority: bool,
+    include_privacy: bool,
+    payout: Option<(
+        Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
+        trace_commons_server::versioned_pipeline::PipelinePayoutConfig,
+    )>,
+) -> anyhow::Result<Arc<PipelineService>> {
+    qualified_pipeline_service_with_privacy(
+        backend,
+        artifact_store,
+        object_store_name,
+        include_authority,
+        include_privacy.then(|| {
+            Arc::new(QualifiedTestPrivacy)
+                as Arc<
+                    dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary,
+                >
+        }),
+        payout,
+    )
+}
+
+/// `qualified_pipeline_service`, with `privacy` as its privacy boundary.
+fn qualified_pipeline_service_with_privacy(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+    include_authority: bool,
+    privacy: Option<
+        Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>,
+    >,
+    payout: Option<(
+        Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
+        trace_commons_server::versioned_pipeline::PipelinePayoutConfig,
+    )>,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -10569,7 +10922,363 @@ fn qualified_pipeline_service(
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
+    if include_authority {
+        builder = builder.with_authority(Arc::new(QualifiedTestAuthority));
+    }
+    if let Some(privacy) = privacy {
+        builder = builder.with_privacy(privacy);
+    }
+    if let Some((adapter, config)) = payout {
+        builder = builder.with_payout(adapter, config);
+    }
     Ok(Arc::new(builder.build()?))
+}
+
+/// `qualified_pipeline_service`'s qualified dependencies (authority and
+/// privacy included), bound to the compatibility bundle under `config`,
+/// with a qualified `trace_credit` adapter.
+fn qualified_compatibility_pipeline_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
+    object_store_name: Option<String>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::MinimalPolicyBundle;
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+
+    let scorer = Arc::new(QualifiedTestScorer(
+        trace_commons_gate_api::ReferencePerplexityScorer::new(),
+    ));
+    let embedder = Arc::new(QualifiedTestEmbedder(
+        trace_commons_gate_api::ReferenceEmbedder::new(),
+    ));
+    let package =
+        MinimalPolicyBundle::compatibility_package(config, scorer.as_ref(), embedder.as_ref())?;
+    let index = Arc::new(QualifiedTestIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
+        instrument_id: InstrumentId::trace_credit(),
+    });
+    let registry = SettlementAdapterRegistry::new(vec![adapter])?;
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(Arc::new(QualifiedTestAuthority))
+    .with_privacy(Arc::new(QualifiedTestPrivacy))
+    .with_novelty_utility_checks(checks);
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// Zaki review 1, round 2, finding 11: the qualification gate calls the
+/// compatibility configuration's `is_qualifiable`, so a runtime otherwise
+/// qualified in every dependency is not production-qualified while its
+/// compatibility bundle binds the local reference configuration (all-zero
+/// floors, not qualifiable), and is with a production-compatible one --
+/// including `main`'s pilot shape, a zero tail-fraction floor.
+#[tokio::test]
+async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_gate() {
+    use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let service = |config: &CompatibilityBundleConfig| {
+        qualified_compatibility_pipeline_service(
+            backend.clone(),
+            test_artifact_store(dir.path()),
+            config,
+            None,
+            PipelineNoveltyUtilityChecks::default(),
+        )
+        .expect("build a qualified compatibility service")
+    };
+
+    let local = service(&CompatibilityBundleConfig::local_reference());
+    assert!(!local.dependency_qualification().bundle);
+    assert!(!pipeline_runtime_is_production_qualified(&local));
+
+    let reference = CompatibilityBundleConfig::local_reference();
+    let pilot = CompatibilityBundleConfig::production_compatible(
+        reference.scorer_model_id.clone(),
+        reference.projection_id.clone(),
+        reference.index_id.clone(),
+        &TEST_MAIN_GATE,
+    )
+    .expect("main's pilot floors validate");
+    let production = service(&pilot);
+    assert!(production.dependency_qualification().bundle);
+    assert!(pipeline_runtime_is_production_qualified(&production));
+}
+
+/// Builds a qualified compatibility service through the seam from the
+/// `main` gate configuration ingest hands it, or from `main_gate` when set.
+struct CompatibilityAssembler {
+    main_gate: Option<trace_commons_server::versioned_pipeline_compat::MainGateConfig>,
+}
+
+impl IngestPipelineRuntimeAssembler for CompatibilityAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
+
+        let reference = CompatibilityBundleConfig::local_reference();
+        let config = CompatibilityBundleConfig::production_compatible(
+            reference.scorer_model_id,
+            reference.projection_id,
+            reference.index_id,
+            &self.main_gate.unwrap_or(context.main_gate),
+        )?;
+        qualified_compatibility_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            &config,
+            Some(context.object_store_name),
+            context.novelty_utility_checks,
+        )
+    }
+}
+
+/// Multi-lens review L5-4 and Zaki review 3, Z3-3 (with Zaki review 1,
+/// round 2, finding 14): a compatibility bundle holds `main`'s gate
+/// configuration -- floors, index-insert threshold, top-k, chunk knobs and
+/// the `NoveltyUtility` delta. Ingest hands it to the assembly and refuses a
+/// runtime whose compatibility configuration holds any other value (the
+/// novelty floor as the threshold, `top_k` 8, a chunk cap, a delta `main`
+/// does not award).
+#[tokio::test]
+async fn pipeline_runtime_compatibility_holds_mains_gate_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |assembler: &CompatibilityAssembler| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            false,
+            false,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+    };
+
+    let service = assemble(&CompatibilityAssembler { main_gate: None })
+        .expect("a compatibility bundle with main's gate configuration starts")
+        .expect("an assembler was given, so a service is returned");
+    assert!(
+        service
+            .compatibility_config()
+            .expect("the compatibility bundle")
+            .matches_main_gate(&TEST_MAIN_GATE)
+    );
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+    for (other, what) in [
+        (
+            MainGateConfig {
+                embed_insert_novelty_micros: 500_000,
+                ..TEST_MAIN_GATE
+            },
+            "the novelty floor as the index-insert threshold",
+        ),
+        (
+            MainGateConfig {
+                top_k: 8,
+                ..TEST_MAIN_GATE
+            },
+            "a top-k main does not use",
+        ),
+        (
+            MainGateConfig {
+                chunk_cap: 8,
+                ..TEST_MAIN_GATE
+            },
+            "a chunk cap main does not use",
+        ),
+        (
+            MainGateConfig {
+                novelty_utility_microcredits: 2_500_000,
+                ..TEST_MAIN_GATE
+            },
+            "a delta main does not award",
+        ),
+        (
+            MainGateConfig {
+                novelty_floor_micros: Some(400_000),
+                ..TEST_MAIN_GATE
+            },
+            "a floor main does not use",
+        ),
+    ] {
+        let error = assemble(&CompatibilityAssembler {
+            main_gate: Some(other),
+        })
+        .err()
+        .unwrap_or_else(|| panic!("{what} is refused"));
+        assert_eq!(
+            error.to_string(),
+            "pipeline_runtime_main_gate_config_mismatch",
+            "{what}"
+        );
+    }
+}
+
+/// Zaki review 1, round 2, finding 15: a runtime that routes or drains a
+/// tenant through the compatibility bundle refuses to start without the
+/// pipeline's credit issuer (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`),
+/// the principal its ledger rows name; with one it starts, and so does a
+/// runtime that processes no tenant.
+#[tokio::test]
+async fn pipeline_runtime_refuses_a_compatibility_bundle_without_the_credit_issuer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |tenants_processed: bool, checks: &PipelineNoveltyUtilityChecks| {
+        assemble_ingest_pipeline_runtime(
+            Some(&CompatibilityAssembler { main_gate: None }),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            tenants_processed,
+            false,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            checks,
+            TEST_MAIN_GATE,
+        )
+    };
+    let no_issuer = PipelineNoveltyUtilityChecks::default();
+    let error = assemble(true, &no_issuer)
+        .err()
+        .expect("a processing compatibility runtime without an issuer is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_credit_issuer_principal_missing"
+    );
+    assemble(false, &no_issuer).expect("a runtime that processes no tenant starts");
+    let with_issuer = PipelineNoveltyUtilityChecks {
+        issuer_principal_ref: Some(format!("principal_sha256:{}", "c".repeat(64))),
+        ..PipelineNoveltyUtilityChecks::default()
+    };
+    assemble(true, &with_issuer).expect("with the issuer it starts");
+}
+
+/// Zaki review 1, round 2, finding 21: under
+/// `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER`, ingest refuses a pipeline runtime
+/// whose privacy boundary does not classify prose PII, judged by what the
+/// boundary does (`classifies_prose_pii`), not by its qualification: a
+/// boundary that reports itself production-qualified but runs no classifier
+/// (`QualifiedTestPrivacy`) is refused, and so is a runtime with no boundary;
+/// the classifier-backed boundary over a classifier backend is accepted.
+/// Without the flag nothing is required. Zaki review 3, Z3-1: the
+/// classifier-backed boundary over the no-op adapter (the `None` backend's)
+/// is refused too, and it does not qualify the runtime, so the
+/// qualification gate refuses it without `allow_test_dependencies`.
+#[tokio::test]
+async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() {
+    use super::pipeline_runtime::validate_pipeline_privacy_filter_requirement;
+    use trace_commons_protocol::trace_contribution::{
+        NoopPrivacyFilterAdapter, PiiClassifyPolicy, PrivacyFilterBackendTag,
+    };
+    use trace_commons_server::versioned_pipeline_authority::ClassifierRedactorPipelinePrivacyBoundary;
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let qualified_without_a_classifier = qualified_pipeline_service(
+        backend.clone(),
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        true,
+        None,
+    )
+    .unwrap();
+    assert!(pipeline_runtime_is_production_qualified(
+        &qualified_without_a_classifier
+    ));
+    assert_eq!(
+        validate_pipeline_privacy_filter_requirement(true, &qualified_without_a_classifier)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_privacy_filter_required"
+    );
+    let without_a_boundary = qualified_pipeline_service(
+        backend.clone(),
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(validate_pipeline_privacy_filter_requirement(true, &without_a_boundary).is_err());
+    validate_pipeline_privacy_filter_requirement(false, &qualified_without_a_classifier)
+        .expect("nothing is required without the flag");
+
+    let noop = qualified_pipeline_service_with_privacy(
+        backend.clone(),
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        Some(Arc::new(ClassifierRedactorPipelinePrivacyBoundary::new(
+            Arc::new(NoopPrivacyFilterAdapter),
+            PrivacyFilterBackendTag::None,
+            PiiClassifyPolicy::default(),
+        ))),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        validate_pipeline_privacy_filter_requirement(true, &noop)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_privacy_filter_required",
+        "a boundary over the no-op adapter classifies nothing"
+    );
+    assert!(
+        !pipeline_runtime_is_production_qualified(&noop),
+        "a boundary over the no-op adapter does not qualify the runtime"
+    );
+
+    let classifier = qualified_pipeline_service_with_privacy(
+        backend,
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        Some(Arc::new(ClassifierRedactorPipelinePrivacyBoundary::new(
+            Arc::new(NoopPrivacyFilterAdapter),
+            PrivacyFilterBackendTag::Sidecar,
+            PiiClassifyPolicy::default(),
+        ))),
+        None,
+    )
+    .unwrap();
+    validate_pipeline_privacy_filter_requirement(true, &classifier)
+        .expect("a boundary over a classifier backend meets the requirement");
+    assert!(pipeline_runtime_is_production_qualified(&classifier));
 }
 
 /// Builds an unqualified pipeline service (`minimal_pipeline_service`)
@@ -10604,6 +11313,53 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
             context.backend,
             context.artifact_store,
             Some(context.object_store_name),
+            true,
+            true,
+            None,
+        )
+    }
+}
+
+/// Like `QualifiedAssembler`, but the service it builds holds no authority
+/// provider at all -- everything else (scorer, embedder, index, settlement,
+/// privacy) is the same fully qualified set. Isolates T2-2's own
+/// contribution to `pipeline_runtime_is_production_qualified` from the
+/// pre-existing scorer/embedder/index/settlement checks.
+struct QualifiedAssemblerWithoutAuthority;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutAuthority {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            false,
+            true,
+            None,
+        )
+    }
+}
+
+/// Like `QualifiedAssembler`, but the service it builds holds no privacy
+/// boundary at all -- the privacy counterpart of
+/// `QualifiedAssemblerWithoutAuthority`.
+struct QualifiedAssemblerWithoutPrivacy;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutPrivacy {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            true,
+            false,
+            None,
         )
     }
 }
@@ -10643,6 +11399,11 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         PipelineLeaseConfig::default(),
         true,
         false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("an unqualified dependency with routed tenants and no opt-in is refused");
@@ -10650,6 +11411,55 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         error.to_string(),
         "pipeline_runtime_dependencies_not_production_qualified"
     );
+}
+
+/// Zaki review 1, round 2, finding 3: the worker drains every tenant on
+/// `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` through the runtime's own
+/// dependencies -- Score, Settle's ledger credit, payouts -- so a drain list
+/// counts as routed tenants do. A drain-only configuration (the documented
+/// rollback, with the last tenant moved off the receipts list) with an
+/// unqualified runtime, no `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` and no
+/// opt-in refuses to start; with neither list it starts.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_only_drained() {
+    use super::pipeline_runtime::pipeline_tenants_processed;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |tenants_processed: bool| {
+        assemble_ingest_pipeline_runtime(
+            Some(&UnqualifiedAssembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            tenants_processed,
+            false,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+    };
+    let no_receipts = TraceTenantRolloutGates::default();
+
+    let drained = pipeline_tenants_processed(
+        &no_receipts,
+        &BTreeSet::from(["tenant-drained".to_string()]),
+    );
+    assert!(drained, "a drain list alone processes tenants");
+    let error = assemble(drained)
+        .err()
+        .expect("an unqualified runtime that drains a tenant is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+
+    let idle = pipeline_tenants_processed(&no_receipts, &BTreeSet::new());
+    assert!(!idle, "neither list processes no tenant");
+    assemble(idle).expect("an unqualified runtime with no tenant starts");
 }
 
 /// The same as above, with the test opt-in set --
@@ -10667,6 +11477,11 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         PipelineLeaseConfig::default(),
         true,
         true,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
     )
     .expect("the opt-in lets an unqualified dependency start")
     .expect("an assembler was given, so a service is returned");
@@ -10689,6 +11504,11 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         PipelineLeaseConfig::default(),
         false,
         true,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("the test opt-in never combines with the required flag");
@@ -10714,10 +11534,510 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         PipelineLeaseConfig::default(),
         true,
         false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
     )
     .expect("assemble a qualified runtime")
     .expect("an assembler was given, so a service is returned");
     assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// T2-2: an otherwise fully qualified service (scorer, embedder, index,
+/// settlement, and privacy all qualified) that holds no authority provider
+/// at all is refused exactly like an unqualified scorer or index would be,
+/// when tenants are routed and there is no opt-in. Isolates the authority
+/// half of Ruling T2-2's contribution to `pipeline_runtime_is_production_
+/// qualified` from the pre-existing dependency checks.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssemblerWithoutAuthority),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
+    )
+    .err()
+    .expect("a missing authority provider with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+}
+
+/// The privacy counterpart of
+/// `pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_authority`.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_privacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssemblerWithoutPrivacy),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
+    )
+    .err()
+    .expect("a missing privacy boundary with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+}
+
+/// A `RecordingNearAdapter` that reports itself production-qualified, for
+/// the payout qualification test below. Never submits anything there.
+struct QualifiedTestNearAdapter(
+    trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter,
+);
+
+#[async_trait::async_trait]
+impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
+    for QualifiedTestNearAdapter
+{
+    fn production_qualified(&self) -> bool {
+        true
+    }
+
+    fn authenticated(&self) -> bool {
+        trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter::authenticated(&self.0)
+    }
+
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter::submit(&self.0, call)
+            .await
+    }
+
+    async fn confirmation(
+        &self,
+        idempotency_key: &str,
+    ) -> Option<trace_commons_server::versioned_pipeline_credit::NearConfirmationEvidence> {
+        self.0.confirmation(idempotency_key)
+    }
+}
+
+/// The NEAR credit contract the payout tests configure.
+const TEST_PAYOUT_NEAR_CONTRACT: &str = "trace-credits.testnet";
+
+/// `main`'s NEAR outbox scheduler cadence as the assembly tests configure it
+/// (its default).
+const TEST_NEAR_CONFIRMATION_INTERVAL: StdDuration = StdDuration::from_secs(60);
+
+/// `main`'s default index-insert threshold
+/// (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`), as the assembly tests
+/// hand it to the runtime.
+const TEST_EMBED_INSERT_NOVELTY_MICROS: u64 = 50_000;
+
+/// `main`'s gate configuration the assembly tests hand the runtime: `main`'s
+/// defaults, the floors `CompatibilityAssembler` builds with, and no
+/// `NoveltyUtility` delta.
+const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateConfig =
+    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(2_000_000),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: TEST_EMBED_INSERT_NOVELTY_MICROS,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: 0,
+    };
+
+/// The `main` gate configuration `config` holds, for a test assembler that
+/// builds `config` itself.
+fn main_gate_of(
+    config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
+) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(config.perplexity_floor_micros),
+        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
+        novelty_floor_micros: Some(config.novelty_floor_micros),
+        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
+        top_k: config.top_k,
+        chunk_target_tokens: config.chunk_target_tokens,
+        chunk_max_tokens: config.chunk_max_tokens,
+        chunk_cap: config.chunk_cap,
+        chunk_min_tokens: config.chunk_min_tokens,
+        novelty_utility_microcredits: config.novelty_utility_microcredits,
+    }
+}
+
+/// `main`'s NEAR payout controls the pipeline tests assemble with: the
+/// injected adapter pays (`http`), and no adapter credential is required.
+const TEST_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayoutControls {
+    settlement_mode: PipelineNearSettlementMode::Http,
+    require_adapter_auth: false,
+};
+
+/// A payout configuration on `near_contract_id`.
+fn payout_test_config(
+    near_contract_id: Option<&str>,
+) -> trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
+    trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
+        near_contract_id: near_contract_id.map(str::to_string),
+        confirmation_interval: TEST_NEAR_CONFIRMATION_INTERVAL,
+        controls: TEST_NEAR_PAYOUT_CONTROLS,
+    }
+}
+
+/// Builds a qualified service whose payout is enabled on `near_contract_id`
+/// and polls at `confirmation_interval`, or, for either left `None`, on
+/// what ingest hands the assembly in its context (what a correct assembly
+/// does, Rulings T10-4 and T10-10).
+struct PayoutAssembler {
+    near_contract_id: Option<&'static str>,
+    confirmation_interval: Option<StdDuration>,
+    controls: Option<PipelineNearPayoutControls>,
+}
+
+impl IngestPipelineRuntimeAssembler for PayoutAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        let near_contract_id = self
+            .near_contract_id
+            .map(str::to_string)
+            .or(context.near_contract_id);
+        let mut config = payout_test_config(near_contract_id.as_deref());
+        config.confirmation_interval = self
+            .confirmation_interval
+            .unwrap_or(context.near_confirmation_interval);
+        config.controls = self.controls.unwrap_or(context.near_payout_controls);
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            true,
+            true,
+            Some((
+                Arc::new(QualifiedTestNearAdapter(
+                    trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter::authenticated(),
+                )),
+                config,
+            )),
+        )
+    }
+}
+
+/// Ruling T10-4: an enabled payout names the NEAR credit contract `main` is
+/// configured with. Ingest hands that contract to the assembly and refuses a
+/// runtime whose payout names another one, or any one when `main` has none.
+#[tokio::test]
+async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |assembler: &PayoutAssembler, configured: Option<&str>| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            true,
+            false,
+            configured,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+    };
+
+    let service = assemble(
+        &PayoutAssembler {
+            near_contract_id: None,
+            confirmation_interval: None,
+            controls: None,
+        },
+        Some(TEST_PAYOUT_NEAR_CONTRACT),
+    )
+    .expect("a payout on the configured contract starts")
+    .expect("an assembler was given, so a service is returned");
+    assert!(service.payout_enabled());
+    assert_eq!(
+        service.payout_near_contract_id(),
+        Some(TEST_PAYOUT_NEAR_CONTRACT)
+    );
+
+    for configured in [Some(TEST_PAYOUT_NEAR_CONTRACT), None] {
+        let error = assemble(
+            &PayoutAssembler {
+                near_contract_id: Some("other-credits.testnet"),
+                confirmation_interval: None,
+                controls: None,
+            },
+            configured,
+        )
+        .err()
+        .expect("a payout on another contract is refused");
+        assert_eq!(
+            error.to_string(),
+            "pipeline_runtime_near_contract_mismatch",
+            "configured {configured:?}"
+        );
+    }
+}
+
+/// Builds `minimal_pipeline_service` through the seam, passing on the
+/// NoveltyUtility checks ingest hands it only when `forward` is set.
+struct NoveltyUtilityChecksAssembler {
+    forward: bool,
+}
+
+impl IngestPipelineRuntimeAssembler for NoveltyUtilityChecksAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        let mut builder = minimal_pipeline_service_builder(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )?;
+        if self.forward {
+            builder = builder.with_novelty_utility_checks(context.novelty_utility_checks);
+        }
+        Ok(Arc::new(builder.build()?))
+    }
+}
+
+/// Ruling T15-12: ingest hands the configuration of `main`'s NoveltyUtility
+/// credit checks to the assembly and refuses a runtime that does not hold
+/// it, as for the NEAR contract: an assembly that forwards it starts with
+/// it, and one that drops it is refused.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let checks = PipelineNoveltyUtilityChecks {
+        central_issuer_principal_refs: BTreeSet::from([format!(
+            "principal_sha256:{}",
+            "c".repeat(64)
+        )]),
+        issuer_principal_ref: Some(format!("principal_sha256:{}", "c".repeat(64))),
+        require_production_gate: true,
+        // Zaki review 1, item 2: `main`'s settlement controls travel in the
+        // same value, so an assembly that drops them is refused too.
+        settlement_allowed_policy_versions: BTreeSet::from(["main-policy-v1".to_string()]),
+        settlement_require_issuer_approval: true,
+        settlement_require_rollout_smoke_ready: true,
+        settlement_max_micros_per_account: Some(5_000_000),
+    };
+    let assemble = |forward: bool| {
+        assemble_ingest_pipeline_runtime(
+            Some(&NoveltyUtilityChecksAssembler { forward }),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            false,
+            false,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &checks,
+            TEST_MAIN_GATE,
+        )
+    };
+
+    let service = assemble(true)
+        .expect("an assembly that forwards the checks starts")
+        .expect("an assembler was given, so a service is returned");
+    assert_eq!(service.novelty_utility_checks(), &checks);
+    let error = assemble(false)
+        .err()
+        .expect("an assembly that drops the checks is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_novelty_utility_checks_mismatch"
+    );
+}
+
+/// Ruling T10-10: an enabled payout polls a submitted payout at `main`'s
+/// NEAR outbox scheduler cadence. Ingest hands that cadence to the assembly
+/// and refuses a runtime whose payout polls at another one.
+#[tokio::test]
+async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |assembler: &PayoutAssembler| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            true,
+            false,
+            Some(TEST_PAYOUT_NEAR_CONTRACT),
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+    };
+
+    let service = assemble(&PayoutAssembler {
+        near_contract_id: None,
+        confirmation_interval: None,
+        controls: None,
+    })
+    .expect("a payout at main's cadence starts")
+    .expect("an assembler was given, so a service is returned");
+    assert_eq!(
+        service.payout_confirmation_interval(),
+        Some(TEST_NEAR_CONFIRMATION_INTERVAL)
+    );
+
+    let error = assemble(&PayoutAssembler {
+        near_contract_id: None,
+        confirmation_interval: Some(StdDuration::from_secs(5)),
+        controls: None,
+    })
+    .err()
+    .expect("a payout polling at another cadence is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_near_confirmation_interval_mismatch"
+    );
+}
+
+/// Zaki review 1, round 2, finding 2: an enabled payout follows `main`'s NEAR
+/// settlement mode and adapter-auth requirement. Ingest hands both to the
+/// assembly and refuses a runtime whose payout holds others.
+#[tokio::test]
+async fn pipeline_runtime_payout_follows_mains_near_payout_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let mains = PipelineNearPayoutControls {
+        settlement_mode: PipelineNearSettlementMode::Disabled,
+        require_adapter_auth: false,
+    };
+    let assemble = |assembler: &PayoutAssembler| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            true,
+            false,
+            Some(TEST_PAYOUT_NEAR_CONTRACT),
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            mains,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+    };
+
+    let service = assemble(&PayoutAssembler {
+        near_contract_id: None,
+        confirmation_interval: None,
+        controls: None,
+    })
+    .expect("a payout under main's controls starts")
+    .expect("an assembler was given, so a service is returned");
+    assert_eq!(service.payout_controls(), Some(mains));
+
+    for other in [
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::Http,
+            require_adapter_auth: false,
+        },
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::DryRun,
+            require_adapter_auth: false,
+        },
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::Disabled,
+            require_adapter_auth: true,
+        },
+    ] {
+        let error = assemble(&PayoutAssembler {
+            near_contract_id: None,
+            confirmation_interval: None,
+            controls: Some(other),
+        })
+        .err()
+        .expect("a payout under other controls is refused");
+        assert_eq!(
+            error.to_string(),
+            "pipeline_runtime_near_payout_controls_mismatch",
+            "{other:?}"
+        );
+    }
+}
+
+/// Task 10: the NEAR payout adapter counts toward production qualification
+/// only when payout is enabled. An otherwise fully qualified service is
+/// refused with an enabled payout on the unqualified `RecordingNearAdapter`,
+/// qualified with an enabled payout on a qualified adapter, and qualified
+/// with the unqualified adapter while payout is disabled.
+#[tokio::test]
+async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_is_enabled() {
+    use trace_commons_server::versioned_pipeline_credit::{
+        NearPayoutAdapter, RecordingNearAdapter,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let service = |adapter: Arc<dyn NearPayoutAdapter>, enabled: bool| {
+        qualified_pipeline_service(
+            backend.clone(),
+            test_artifact_store(dir.path()),
+            None,
+            true,
+            true,
+            enabled.then(|| (adapter, payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT)))),
+        )
+        .expect("build the pipeline service")
+    };
+
+    let unqualified_enabled = service(Arc::new(RecordingNearAdapter::new()), true);
+    assert!(!unqualified_enabled.dependency_qualification().payout);
+    assert!(!pipeline_runtime_is_production_qualified(
+        &unqualified_enabled
+    ));
+
+    let qualified_enabled = service(
+        Arc::new(QualifiedTestNearAdapter(RecordingNearAdapter::new())),
+        true,
+    );
+    assert!(qualified_enabled.dependency_qualification().payout);
+    assert!(pipeline_runtime_is_production_qualified(&qualified_enabled));
+
+    let unqualified_disabled = service(Arc::new(RecordingNearAdapter::new()), false);
+    assert!(pipeline_runtime_is_production_qualified(
+        &unqualified_disabled
+    ));
 }
 
 /// No routed tenants, no required flag, an unqualified
@@ -10735,6 +12055,11 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         PipelineLeaseConfig::default(),
         false,
         false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
     )
     .expect("no routed tenants and no required flag: an unqualified dependency starts")
     .expect("an assembler was given, so a service is returned");
@@ -10809,7 +12134,11 @@ async fn pipeline_readiness_reports_not_ready_when_the_worker_probe_fails() {
     .unwrap();
     assert_eq!(
         body,
-        serde_json::json!({"status": "not_ready", "reason": "pipeline_worker_not_ready"})
+        serde_json::json!({
+            "status": "not_ready",
+            "reason": "pipeline_worker_not_ready",
+            "drain_tenant_count": 0,
+        })
     );
 }
 
@@ -10866,6 +12195,130 @@ async fn a_panicking_tenant_batch_marks_the_worker_not_ready_and_the_pass_contin
         ready.load(std::sync::atomic::Ordering::Relaxed),
         "a later clean pass reports ready again"
     );
+}
+
+/// Zaki review 1, round 2, item 4: the worker runs a tenant's index
+/// invalidation step at most every 10 seconds and its payout step at the
+/// confirmation interval, each at once when this process woke it (it queued
+/// an invalidation, or completed a Trace Credit leg), and on a tenant's
+/// first pass. Each step's interval counts from its own last run, each
+/// tenant has its own, a batch that used its whole limit leaves the step due
+/// on the next pass, and a disabled payout never runs.
+#[test]
+fn the_worker_runs_a_follow_up_step_when_woken_or_once_its_interval_has_passed() {
+    use super::pipeline_runtime::{PipelineFollowUpCadence, PipelineFollowUpStep};
+    use trace_commons_server::versioned_pipeline::PipelineFollowUps;
+
+    let start = std::time::Instant::now();
+    let at = |seconds: u64| start + StdDuration::from_secs(seconds);
+    let payout_interval = Some(StdDuration::from_secs(60));
+    let steps = |index_invalidations: bool, payouts: bool| PipelineFollowUps {
+        index_invalidations,
+        payouts,
+        credit_audits: false,
+    };
+    // The credit audit step has its own clock, checked at the end; the
+    // asserts above it compare the other two steps.
+    let without_audits = |due: PipelineFollowUps| PipelineFollowUps {
+        credit_audits: false,
+        ..due
+    };
+    let unwoken = PipelineFollowUps::default();
+    let mut cadence = PipelineFollowUpCadence::default();
+
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(0))),
+        steps(true, true),
+        "a tenant's first pass runs both steps"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(9))),
+        steps(false, false),
+        "within both intervals, nothing woken, neither runs"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(10))),
+        steps(true, false),
+        "the invalidation step runs every 10 seconds"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", steps(true, false), payout_interval, at(11))),
+        steps(true, false),
+        "a queued invalidation wakes the invalidation step at once"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(20))),
+        steps(false, false),
+        "the interval counts from the woken run"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(21))),
+        steps(true, false)
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", steps(false, true), payout_interval, at(22))),
+        steps(false, true),
+        "a completed Trace Credit leg wakes the payout step at once"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(81))),
+        steps(true, false),
+        "the payout step waits out the confirmation interval from its last run"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(82))),
+        steps(false, true)
+    );
+
+    cadence.run_again("tenant-a", PipelineFollowUpStep::Payouts);
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(83))),
+        steps(false, true),
+        "a full payout batch leaves the step due on the next pass"
+    );
+    cadence.run_again("tenant-a", PipelineFollowUpStep::IndexInvalidations);
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-a", unwoken, payout_interval, at(84))),
+        steps(true, false),
+        "and so does a full invalidation batch"
+    );
+
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-b", unwoken, payout_interval, at(84))),
+        steps(true, true),
+        "each tenant has its own clock"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-c", steps(true, true), None, at(0))),
+        steps(true, false),
+        "a disabled payout never runs, woken or not"
+    );
+    assert_eq!(
+        without_audits(cadence.due_steps("tenant-c", unwoken, None, at(1_000))),
+        steps(true, false)
+    );
+
+    // Zaki review 1, round 2, N-5: the credit audit step runs on a tenant's
+    // first pass, every 10 seconds, and at once when a settled Trace Credit
+    // leg woke it.
+    let audits = |woken: bool, seconds: u64, cadence: &mut PipelineFollowUpCadence| {
+        cadence
+            .due_steps(
+                "tenant-d",
+                PipelineFollowUps {
+                    credit_audits: woken,
+                    ..PipelineFollowUps::default()
+                },
+                payout_interval,
+                at(seconds),
+            )
+            .credit_audits
+    };
+    assert!(audits(false, 0, &mut cadence), "the first pass audits");
+    assert!(!audits(false, 9, &mut cadence));
+    assert!(audits(true, 9, &mut cadence), "a settled leg wakes it");
+    assert!(!audits(false, 18, &mut cadence));
+    assert!(audits(false, 19, &mut cadence), "every 10 seconds");
 }
 
 #[tokio::test]
@@ -26740,8 +28193,11 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_tenant_submission_policy: false,
         db_mirror: None,
         pipeline_service: None,
+        pipeline_product: None,
+        pipeline_store: None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
@@ -83095,6 +84551,226 @@ async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// A versioned-pipeline payout row in `trace_near_credit_outbox` (a
+/// non-NULL `instrument_id`, V94) of `tenant_id`, `pending`, with its own
+/// finalized `trace_credit` batch, written as the pipeline writes one.
+/// Returns the row's `near_outbox_id`.
+async fn insert_pipeline_near_outbox_row(backend: &PgBackend, tenant_id: &str) -> Uuid {
+    let batch_id = Uuid::new_v4();
+    let near_outbox_id = Uuid::new_v4();
+    let list_hash = sha256_prefixed(&format!("pipeline-batch:{batch_id}"));
+    let account_hash = sha256_prefixed("pipeline-account");
+    let call = NearCreditReceiptCall::settle(
+        "trace-credits.testnet",
+        NearCreditReceipt {
+            settlement_batch_id: batch_id,
+            credit_account_hash: account_hash.clone(),
+            policy_version: "pipeline-internal-v1".to_string(),
+            source_list_hash: list_hash.clone(),
+            attestation_hash: list_hash.clone(),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: list_hash.clone(),
+        },
+    )
+    .expect("pipeline NEAR call");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("seed tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set seed tenant context");
+    tx.execute(
+        "INSERT INTO trace_credit_settlement_batches (
+            tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+            source_list_hash, settled_credit_points, settled_credit_micros,
+            actor_principal_ref, instrument_id
+         ) VALUES ($1, $2, 'pipeline-internal-v1', 'finalized', $3, $3, '1', 1000000,
+                   'principal_sha256:pipeline', 'trace_credit')",
+        &[&tenant_id, &batch_id, &list_hash],
+    )
+    .await
+    .expect("insert pipeline batch");
+    tx.execute(
+        "INSERT INTO trace_near_credit_outbox (
+            tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
+            near_call_json, status, instrument_id
+         ) VALUES ($1, $2, $3, $4, $5, 'pending', 'trace_credit')",
+        &[
+            &tenant_id,
+            &near_outbox_id,
+            &batch_id,
+            &account_hash,
+            &serde_json::to_value(&call).expect("call json"),
+        ],
+    )
+    .await
+    .expect("insert pipeline outbox row");
+    tx.commit().await.expect("commit seed");
+    near_outbox_id
+}
+
+/// The whole `trace_near_credit_outbox` row `near_outbox_id`, as text.
+async fn near_outbox_row_text(
+    backend: &PgBackend,
+    tenant_id: &str,
+    near_outbox_id: Uuid,
+) -> String {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("read tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set read tenant context");
+    let text: String = tx
+        .query_one(
+            "SELECT to_jsonb(o)::TEXT FROM trace_near_credit_outbox o
+              WHERE tenant_id = $1 AND near_outbox_id = $2",
+            &[&tenant_id, &near_outbox_id],
+        )
+        .await
+        .expect("read outbox row")
+        .get(0);
+    tx.commit().await.expect("commit read");
+    text
+}
+
+/// Ruling T10-3: `main`'s NEAR outbox workers never submit or confirm a
+/// versioned-pipeline payout row (a non-NULL `instrument_id`); the pipeline
+/// pays those through its own NEAR payout adapter. The submit worker still
+/// submits the legacy row, the confirm worker still confirms it, and the
+/// pipeline row stays byte-identical through both, as `pending` and then as
+/// a confirm candidate (`submitted` with a transaction hash).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn near_credit_outbox_workers_never_touch_a_pipeline_payout_row() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let fake_submitter = FakeNearCreditSubmitter::default();
+    let submit_calls = fake_submitter.calls.clone();
+    Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+    let fake_confirmer = FakeNearCreditConfirmer::default();
+    let confirm_calls = fake_confirmer.calls.clone();
+    Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(fake_confirmer));
+
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement beside a pipeline payout row".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+    let legacy_outbox_id = read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+        .expect("file read")[0]
+        .near_outbox_id;
+    let pipeline_outbox_id = insert_pipeline_near_outbox_row(backend.as_ref(), "tenant-a").await;
+    let pipeline_row = near_outbox_row_text(backend.as_ref(), "tenant-a", pipeline_outbox_id).await;
+
+    let Json(submitted) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("submit beside a pipeline payout row".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("submit worker runs");
+    assert_eq!(submitted.submitted, 1);
+    assert_eq!(
+        submitted.pending, 0,
+        "the pipeline row is no submit candidate"
+    );
+    let calls = submit_calls.lock().expect("calls lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].near_outbox_id, legacy_outbox_id);
+    assert_eq!(
+        near_outbox_row_text(backend.as_ref(), "tenant-a", pipeline_outbox_id).await,
+        pipeline_row,
+        "the submit worker leaves the pipeline row untouched"
+    );
+
+    // Make the pipeline row a confirm candidate, as the pipeline's own submit
+    // leaves it, and let the confirm worker read the database.
+    backend
+        .update_trace_near_credit_outbox_status(
+            "tenant-a",
+            pipeline_outbox_id,
+            StorageTraceCreditSettlementNearStatus::Submitted,
+            Some(TEST_NEAR_TX_HASH_2.to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("pipeline row submitted")
+        .expect("pipeline row exists");
+    let pipeline_row = near_outbox_row_text(backend.as_ref(), "tenant-a", pipeline_outbox_id).await;
+    Arc::make_mut(&mut state).db_reviewer_reads = true;
+    let Json(confirmed) = near_credit_outbox_confirm_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxConfirmWorkerRequest {
+            purpose: Some("confirm beside a pipeline payout row".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("confirm worker runs");
+    assert_eq!(confirmed.confirmed, 1);
+    assert_eq!(
+        confirmed.pending, 0,
+        "the pipeline row is no confirm candidate"
+    );
+    let calls = confirm_calls.lock().expect("calls lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].near_outbox_id, legacy_outbox_id);
+    assert_eq!(
+        near_outbox_row_text(backend.as_ref(), "tenant-a", pipeline_outbox_id).await,
+        pipeline_row,
+        "the confirm worker leaves the pipeline row untouched"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 /// Config-edge fail-closed: a DB mirror is present but DB-mirror writes are NOT
 /// required (`require_db_mirror_writes=false`, best-effort dual write). In that mode
 /// neither store is guaranteed authoritative — a submit can write the FILE
@@ -94839,6 +96515,901 @@ async fn settlement_posture_handler_refuses_without_a_credential() {
         .await
         .expect_err("an unknown bearer is refused");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------------------
+// Versioned pipeline product routes and the pipeline status block, without a
+// database. The PostgreSQL tests of the same routes are in
+// `pipeline_http_pg_tests.rs`.
+// ---------------------------------------------------------------------------
+
+/// A pipeline status whose Trace Credit leg is finalized, with a second
+/// instrument at the largest amount an `AtomicUnits` holds.
+fn pipeline_contributor_status_fixture() -> PipelineContributorStatus {
+    use trace_commons_gate_api::pipeline::{AtomicUnits, Phase};
+    use trace_commons_server::versioned_pipeline_product::{
+        PipelineInstrumentStatus, PipelineProcessingStatus,
+    };
+    PipelineContributorStatus {
+        submission_id: Uuid::new_v4(),
+        trace_id: Uuid::new_v4(),
+        run_id: Uuid::new_v4(),
+        bundle_id: format!("sha256:{}", "a".repeat(64)),
+        processing: PipelineProcessingStatus::Complete,
+        current_phase: None,
+        responsible_phase: Some(Phase::Settle),
+        reason_label: None,
+        credit: PipelineCreditStatus::Finalized,
+        score_microcredits: Some(2_500_000),
+        score_outcome_id: Some(Uuid::new_v4()),
+        settlement_batch_id: Some(Uuid::new_v4()),
+        payout: Some("confirmed".to_string()),
+        instruments: vec![
+            PipelineInstrumentStatus {
+                instrument_id: "storage_rebate".to_string(),
+                atomic_units: AtomicUnits::from_raw(u128::MAX),
+                operation_state: "complete".to_string(),
+                internal_settlement_state: "not_applicable".to_string(),
+                credit_event_id: None,
+                settlement_batch_id: None,
+                payout_rail: "none".to_string(),
+                payout_state: "disabled".to_string(),
+                reason_label: None,
+            },
+            PipelineInstrumentStatus {
+                instrument_id: "trace_credit".to_string(),
+                atomic_units: AtomicUnits::from_raw(2_500_000),
+                operation_state: "complete".to_string(),
+                internal_settlement_state: "finalized".to_string(),
+                credit_event_id: Some(Uuid::new_v4()),
+                settlement_batch_id: Some(Uuid::new_v4()),
+                payout_rail: "near".to_string(),
+                payout_state: "confirmed".to_string(),
+                reason_label: None,
+            },
+        ],
+        compatibility: None,
+        submission_status: "accepted".to_string(),
+        admission_decision: "admit".to_string(),
+    }
+}
+
+/// Rulings T15-7 and T15-12: a compatibility run's status reads its credit
+/// figure from the Score evidence as `main` reads its gate decision, and a
+/// Trace Credit leg one of `main`'s checks withheld passes its label on as
+/// that decision's `credit_withheld_reason`, as on `main`. A run that is not
+/// of the compatibility family, or whose Score has not committed, gives no
+/// decision.
+#[test]
+fn compatibility_credit_decision_carries_the_withheld_reason() {
+    use trace_commons_server::versioned_pipeline_product::{
+        PipelineCompatibilityStatus, PipelineShadowCreditQuality,
+    };
+    let mut status = pipeline_contributor_status_fixture();
+    assert!(compatibility_credit_decision(&status).is_none());
+    status.compatibility = Some(PipelineCompatibilityStatus {
+        credit_quality: None,
+    });
+    assert!(compatibility_credit_decision(&status).is_none());
+    status.compatibility = Some(PipelineCompatibilityStatus {
+        credit_quality: Some(PipelineShadowCreditQuality {
+            credit_quality_micros: 812_000,
+            credit_quality_version: 3,
+            chunk_count: Some(2),
+            total_chunk_count: Some(3),
+            chunks_capped: Some(true),
+        }),
+    });
+    let decision = compatibility_credit_decision(&status).expect("a decision");
+    assert_eq!(decision.submission_id, status.submission_id);
+    assert_eq!(decision.credit_quality_micros, Some(812_000));
+    assert_eq!(decision.credit_quality_calibration_version, Some(3));
+    assert_eq!(decision.chunk_count, Some(2));
+    assert_eq!(decision.total_chunk_count, Some(3));
+    assert_eq!(decision.chunks_capped, Some(true));
+    assert_eq!(decision.credit_withheld_reason, None);
+
+    let trace_credit = status
+        .instruments
+        .iter_mut()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .unwrap();
+    trace_credit.internal_settlement_state = "withheld".to_string();
+    trace_credit.reason_label = Some("policy_mismatch".to_string());
+    assert_eq!(
+        compatibility_credit_decision(&status)
+            .unwrap()
+            .credit_withheld_reason
+            .as_deref(),
+        Some("policy_mismatch")
+    );
+}
+
+/// A submission only the pipeline knows reads as a status document built
+/// from its run. The operation, internal settlement, and payout states of
+/// each instrument stay separate; each amount is a decimal string; Trace
+/// Credit becomes points the way legacy computes them (microcredits over one
+/// million), final only once finalized; and nothing in the block names a
+/// credit event, a settlement batch, an account, a transaction, or a
+/// principal.
+#[test]
+fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash_only() {
+    let status = pipeline_contributor_status_fixture();
+    let projected = submission_status_from_pipeline(&status);
+    assert_eq!(projected.submission_id, status.submission_id);
+    assert_eq!(projected.trace_id, status.trace_id);
+    assert_eq!(
+        projected.status, "accepted",
+        "`main`'s vocabulary; the pipeline state is in the pipeline block"
+    );
+    assert_eq!(projected.credit_points_pending, 2.5);
+    assert_eq!(projected.credit_points_final, Some(2.5));
+    assert_eq!(
+        projected.credit_points_ledger, 0.0,
+        "legacy's ledger points are delayed ledger deltas; the award is none"
+    );
+    assert_eq!(
+        projected.credit_points_total, None,
+        "legacy has a total only with delayed ledger events"
+    );
+    let pipeline = projected
+        .pipeline
+        .expect("the document carries a pipeline block");
+    assert_eq!(pipeline.run_id, status.run_id);
+    assert_eq!(pipeline.bundle_id, status.bundle_id);
+    assert_eq!(pipeline.processing_state, "complete");
+    assert_eq!(pipeline.current_phase, None);
+    assert_eq!(pipeline.responsible_phase.as_deref(), Some("settle"));
+    assert_eq!(pipeline.instruments.len(), 2);
+    assert_eq!(pipeline.instruments[0].instrument_id, "storage_rebate");
+    assert_eq!(pipeline.instruments[0].atomic_units, u128::MAX.to_string());
+    assert_eq!(
+        pipeline.instruments[0].internal_settlement_state,
+        "not_applicable"
+    );
+    assert_eq!(pipeline.instruments[0].payout_state, "disabled");
+    assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+    assert_eq!(pipeline.instruments[1].operation_state, "complete");
+    assert_eq!(
+        pipeline.instruments[1].internal_settlement_state,
+        "finalized"
+    );
+    assert_eq!(pipeline.instruments[1].payout_rail, "near");
+    assert_eq!(pipeline.instruments[1].payout_state, "confirmed");
+    let json = serde_json::to_value(&pipeline).unwrap();
+    assert_eq!(
+        json["instruments"][1]["atomic_units"],
+        serde_json::json!("2500000")
+    );
+    let text = json.to_string();
+    for hidden in [
+        status.instruments[1].credit_event_id.unwrap(),
+        status.instruments[1].settlement_batch_id.unwrap(),
+        status.settlement_batch_id.unwrap(),
+        status.score_outcome_id.unwrap(),
+    ] {
+        assert!(!text.contains(&hidden.to_string()), "{text}");
+    }
+    for word in ["account", "transaction", "principal"] {
+        assert!(!text.contains(word), "{text}");
+    }
+
+    let pending = PipelineContributorStatus {
+        credit: PipelineCreditStatus::Pending,
+        ..status
+    };
+    let projected = submission_status_from_pipeline(&pending);
+    assert_eq!(projected.credit_points_pending, 2.5);
+    assert_eq!(
+        projected.credit_points_final, None,
+        "points are final only once the leg is finalized"
+    );
+    assert_eq!(projected.credit_points_ledger, 0.0);
+    assert_eq!(
+        projected.credit_points_total, None,
+        "a pending award is never reported as a total"
+    );
+}
+
+/// Zaki review 1, minor item M-b: a Trace Credit leg that will never be paid
+/// reports no pending points, as a forfeited or failed one does: a
+/// `NoveltyUtility` leg `main` never settles (`NotSettlementEligible`) and
+/// one `main`'s credit checks withheld (`Withheld`).
+#[test]
+fn a_withheld_or_never_settled_leg_reports_no_pending_points() {
+    for (credit, internal_settlement_state) in [
+        (PipelineCreditStatus::Withheld, "withheld"),
+        (
+            PipelineCreditStatus::NotSettlementEligible,
+            "not_settlement_eligible",
+        ),
+    ] {
+        let mut status = pipeline_contributor_status_fixture();
+        status.credit = credit;
+        let trace_credit = status
+            .instruments
+            .iter_mut()
+            .find(|instrument| instrument.instrument_id == "trace_credit")
+            .unwrap();
+        trace_credit.internal_settlement_state = internal_settlement_state.to_string();
+        trace_credit.settlement_batch_id = None;
+        let projected = submission_status_from_pipeline(&status);
+        assert_eq!(
+            projected.credit_points_pending, 0.0,
+            "a {internal_settlement_state} leg has no pending points"
+        );
+        assert_eq!(projected.credit_points_final, None);
+        assert_eq!(
+            projected.pipeline.unwrap().instruments[1].atomic_units,
+            "2500000",
+            "the pipeline block still carries the award"
+        );
+    }
+}
+
+/// Zaki review 1, minor item M-c: a pipeline-only submission's `status` is
+/// in `main`'s vocabulary, so the contributor daemon's history counts and
+/// its held-for-review check (`quarantined`) recognize it; the pipeline's own
+/// state stays in the pipeline block. A decided submission reports `main`'s
+/// stored status as is. One not yet decided (`received`) reports what
+/// `main`'s receipt would have: `quarantined` while it waits for a human
+/// review or its Admission quarantined it and Review has not passed it,
+/// `rejected` for an Admission reject, and `accepted` otherwise.
+#[test]
+fn a_pipeline_only_submission_reports_mains_status_vocabulary() {
+    use trace_commons_gate_api::pipeline::Phase;
+    use trace_commons_server::versioned_pipeline_product::PipelineProcessingStatus as P;
+    for (processing, submission_status, admission, phase, expected) in [
+        (P::Complete, "accepted", "admit", None, "accepted"),
+        (P::Rejected, "rejected", "quarantine", None, "rejected"),
+        (
+            P::Withdrawn,
+            "revoked",
+            "admit",
+            Some(Phase::Settle),
+            "revoked",
+        ),
+        (P::Withdrawn, "purged", "admit", None, "purged"),
+        (
+            P::Pending,
+            "accepted",
+            "quarantine",
+            Some(Phase::Score),
+            "accepted",
+        ),
+        (
+            P::AwaitingReview,
+            "received",
+            "quarantine",
+            Some(Phase::Review),
+            "quarantined",
+        ),
+        (
+            P::Pending,
+            "received",
+            "quarantine",
+            Some(Phase::Review),
+            "quarantined",
+        ),
+        (
+            P::Retry,
+            "received",
+            "admit",
+            Some(Phase::Review),
+            "accepted",
+        ),
+        (
+            P::Blocked,
+            "received",
+            "admit",
+            Some(Phase::Review),
+            "accepted",
+        ),
+        (
+            P::Pending,
+            "received",
+            "reject",
+            Some(Phase::Review),
+            "rejected",
+        ),
+        (
+            P::Failed,
+            "received",
+            "quarantine",
+            Some(Phase::Review),
+            "quarantined",
+        ),
+        (
+            P::Failed,
+            "accepted",
+            "admit",
+            Some(Phase::Settle),
+            "accepted",
+        ),
+    ] {
+        let mut status = pipeline_contributor_status_fixture();
+        status.processing = processing;
+        status.submission_status = submission_status.to_string();
+        status.admission_decision = admission.to_string();
+        status.current_phase = phase;
+        let projected = submission_status_from_pipeline(&status);
+        assert_eq!(
+            projected.status, expected,
+            "{processing:?} / {submission_status} / {admission}"
+        );
+        assert_eq!(
+            projected.pipeline.unwrap().processing_state,
+            snake_case_label(processing),
+            "the pipeline state stays in the pipeline block"
+        );
+    }
+}
+
+/// Ruling F-M8: points that will never arrive are not pending. A run whose
+/// Trace Credit leg was forfeited (a withdrawal came first) or failed (Settle
+/// failed it) reports no pending points and no final points; the pipeline
+/// block still carries the award and the leg's state.
+#[test]
+fn a_forfeited_or_failed_leg_reports_no_pending_points() {
+    for (credit, operation_state) in [
+        (PipelineCreditStatus::Forfeited, "forfeited"),
+        (PipelineCreditStatus::Failed, "failed"),
+    ] {
+        let mut status = pipeline_contributor_status_fixture();
+        status.credit = credit;
+        let trace_credit = status
+            .instruments
+            .iter_mut()
+            .find(|instrument| instrument.instrument_id == "trace_credit")
+            .unwrap();
+        trace_credit.operation_state = operation_state.to_string();
+        trace_credit.internal_settlement_state = "not_settled".to_string();
+        trace_credit.credit_event_id = None;
+        trace_credit.settlement_batch_id = None;
+        let projected = submission_status_from_pipeline(&status);
+        assert_eq!(
+            projected.credit_points_pending, 0.0,
+            "a {operation_state} leg has no pending points"
+        );
+        assert_eq!(projected.credit_points_final, None, "{operation_state}");
+        let pipeline = projected.pipeline.expect("the pipeline block");
+        assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+        assert_eq!(pipeline.instruments[1].operation_state, operation_state);
+    }
+}
+
+/// A legacy status document still reads, with no pipeline block, and a list
+/// that mixes it with an upgraded one writes the pipeline key only for the
+/// upgraded one, whose amounts are decimal strings; the upgraded document
+/// reads back unchanged.
+#[test]
+fn legacy_and_pipeline_status_documents_remain_wire_compatible() {
+    let legacy_json = serde_json::json!({
+        "submission_id": Uuid::new_v4(),
+        "trace_id": Uuid::new_v4(),
+        "status": "accepted",
+        "credit_points_pending": 0.0,
+        "credit_points_ledger": 0.0,
+        "explanation": [],
+        "delayed_credit_explanations": [],
+        "consent_scopes": []
+    });
+    let legacy: TraceSubmissionStatusUpdate =
+        serde_json::from_value(legacy_json).expect("legacy status remains readable");
+    assert!(legacy.pipeline.is_none());
+
+    let mut upgraded = legacy.clone();
+    upgraded.pipeline = Some(TracePipelineStatusUpdate {
+        run_id: Uuid::new_v4(),
+        bundle_id: format!("sha256:{}", "b".repeat(64)),
+        processing_state: "pending".to_string(),
+        current_phase: Some("review".to_string()),
+        responsible_phase: Some("admission".to_string()),
+        reason_label: None,
+        instruments: vec![TraceInstrumentStatusUpdate {
+            instrument_id: "trace_credit".to_string(),
+            atomic_units: "7".to_string(),
+            operation_state: "pending".to_string(),
+            internal_settlement_state: "pending".to_string(),
+            payout_rail: "near".to_string(),
+            payout_state: "disabled".to_string(),
+            reason_label: None,
+        }],
+    });
+    let mixed = serde_json::to_value(vec![legacy, upgraded.clone()]).unwrap();
+    assert!(mixed[0].get("pipeline").is_none());
+    assert_eq!(mixed[1]["pipeline"]["processing_state"], "pending");
+    assert_eq!(
+        mixed[1]["pipeline"]["instruments"][0]["atomic_units"],
+        serde_json::json!("7")
+    );
+    let read_back: TraceSubmissionStatusUpdate =
+        serde_json::from_value(mixed[1].clone()).expect("the upgraded document reads back");
+    assert_eq!(read_back, upgraded);
+}
+
+/// A product store whose database cannot be reached: a handler that refuses
+/// a request before its first query answers normally, and one that queries
+/// fails with a 500. The pool connects lazily, so building it connects to
+/// nothing.
+async fn unreachable_pipeline_product() -> Arc<PipelineProductStore> {
+    let backend = PgBackend::new(&DatabaseConfig::from_postgres_url(
+        "postgres://unused@127.0.0.1:9/unused",
+        1,
+    ))
+    .await
+    .expect("a lazy pool builds without connecting");
+    Arc::new(PipelineProductStore::new(Arc::new(backend)))
+}
+
+/// Sends one request through the router and returns its status and JSON
+/// body (`Null` when the body is empty).
+async fn pipeline_product_request(
+    state: Arc<AppState>,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    idempotency_key: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+
+    let mut request = axum::http::Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+    if let Some(key) = idempotency_key {
+        request = request.header("idempotency-key", key);
+    }
+    let request = match body {
+        Some(body) => request
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string())),
+        None => request.body(Body::empty()),
+    }
+    .unwrap();
+    let response = app(state).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, body)
+}
+
+/// A valid export request body.
+fn pipeline_export_body() -> serde_json::Value {
+    serde_json::json!({"allowed_use": "evaluation", "purpose": "benchmark refresh"})
+}
+
+/// Without a pipeline runtime there is no product store, and every product
+/// route answers 404 to a caller holding its credential. The body is the
+/// handler's own refusal, not the router's empty fallback for an unknown
+/// path.
+#[tokio::test]
+async fn pipeline_product_routes_are_not_found_without_a_pipeline_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    assert!(state.pipeline_product.is_none());
+    let run = Uuid::new_v4();
+    let snapshot = Uuid::new_v4();
+    let requests = [
+        (
+            "GET",
+            "/v1/contributors/me/pipeline-score-attestation".to_string(),
+            "token-a",
+            None,
+        ),
+        (
+            "POST",
+            "/v1/pipeline/exports".to_string(),
+            "export-worker-token-a",
+            Some(pipeline_export_body()),
+        ),
+        (
+            "POST",
+            format!("/v1/pipeline/exports/{snapshot}/complete"),
+            "export-worker-token-a",
+            None,
+        ),
+        (
+            "GET",
+            "/v1/admin/pipeline/operational-summary".to_string(),
+            "admin-token-a",
+            None,
+        ),
+        (
+            "GET",
+            format!("/v1/admin/pipeline/runs/{run}/forensic"),
+            "admin-token-a",
+            None,
+        ),
+    ];
+    for (method, uri, token, body) in requests {
+        let (status, body) =
+            pipeline_product_request(state.clone(), method, &uri, Some(token), Some("key"), body)
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert_eq!(
+            body["error"], "pipeline runtime not configured",
+            "{method} {uri}"
+        );
+    }
+    // The three review routes answer the same with the review credential.
+    assert!(state.pipeline_service.is_none());
+    for (method, uri, body) in pipeline_review_route_requests(run) {
+        let (status, body) = pipeline_product_request(
+            state.clone(),
+            method,
+            &uri,
+            Some("review-token-a"),
+            None,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert_eq!(
+            body["error"], "pipeline runtime not configured",
+            "{method} {uri}"
+        );
+    }
+}
+
+/// The three pipeline review routes for `run`, each with a body its
+/// extractor accepts: the quarantine queue, the claim, and the assessment.
+fn pipeline_review_route_requests(
+    run: Uuid,
+) -> [(&'static str, String, Option<serde_json::Value>); 3] {
+    [
+        ("GET", "/v1/review/pipeline/quarantine".to_string(), None),
+        (
+            "POST",
+            format!("/v1/review/pipeline/runs/{run}/claim"),
+            None,
+        ),
+        (
+            "POST",
+            format!("/v1/review/pipeline/runs/{run}/assessment"),
+            Some(serde_json::json!({
+                "lease_token": Uuid::new_v4(),
+                "recommendation": "approve",
+                "reason": "privacy_review_required",
+                "resolved_quarantine_reasons": ["privacy_review_required"],
+            })),
+        ),
+    ]
+}
+
+/// The three pipeline review routes need a reviewer credential: a
+/// contributor or an export worker gets 403, and no credential 401, before
+/// the runtime is looked up.
+#[tokio::test]
+async fn pipeline_review_routes_refuse_a_caller_who_is_not_a_reviewer() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    for (method, uri, body) in pipeline_review_route_requests(Uuid::new_v4()) {
+        let (status, _) =
+            pipeline_product_request(state.clone(), method, &uri, None, None, body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} without a credential"
+        );
+        for token in ["token-a", "export-worker-token-a"] {
+            let (status, _) = pipeline_product_request(
+                state.clone(),
+                method,
+                &uri,
+                Some(token),
+                None,
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri} with {token}");
+        }
+    }
+}
+
+/// The operational summary and the forensic trace need an admin credential
+/// (401 without a credential, 403 with a contributor, reviewer, or export
+/// worker credential), and the export routes the export credential (401
+/// without one, 403 for a contributor or a reviewer). The score attestation
+/// needs a credential. Each refusal comes before the store is read: the
+/// store here cannot reach its database, so a read would be a 500.
+#[tokio::test]
+async fn pipeline_product_routes_refuse_a_caller_without_their_credential() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).pipeline_product = Some(unreachable_pipeline_product().await);
+    let run = Uuid::new_v4();
+    let snapshot = Uuid::new_v4();
+    let admin_routes = [
+        "/v1/admin/pipeline/operational-summary".to_string(),
+        format!("/v1/admin/pipeline/runs/{run}/forensic"),
+    ];
+    for uri in &admin_routes {
+        let (status, _) =
+            pipeline_product_request(state.clone(), "GET", uri, None, None, None).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{uri} without a credential"
+        );
+        for token in ["token-a", "review-token-a", "export-worker-token-a"] {
+            let (status, _) =
+                pipeline_product_request(state.clone(), "GET", uri, Some(token), None, None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri} with {token}");
+        }
+    }
+    let export_routes = [
+        (
+            "/v1/pipeline/exports".to_string(),
+            Some(pipeline_export_body()),
+        ),
+        (format!("/v1/pipeline/exports/{snapshot}/complete"), None),
+    ];
+    for (uri, body) in &export_routes {
+        let (status, _) =
+            pipeline_product_request(state.clone(), "POST", uri, None, Some("key"), body.clone())
+                .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{uri} without a credential"
+        );
+        for token in ["token-a", "review-token-a"] {
+            let (status, _) = pipeline_product_request(
+                state.clone(),
+                "POST",
+                uri,
+                Some(token),
+                Some("key"),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri} with {token}");
+        }
+    }
+    let (status, _) = pipeline_product_request(
+        state.clone(),
+        "GET",
+        "/v1/contributors/me/pipeline-score-attestation",
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// An export request is checked before the store is read: the store here
+/// cannot reach its database, so a request that reached it would be a 500.
+/// Refused: no idempotency key; an unknown body field; a consent scope
+/// `main` does not export; with `main`'s export guardrails on, an empty
+/// purpose and a missing consent scope; a scoped export credential that does
+/// not allow the requested use, or the requested consent scope; a tenant
+/// policy that does not allow the use; and, when a tenant policy is
+/// required, a tenant with none. All but the first two are `main`'s export
+/// rules, with its messages.
+#[tokio::test]
+async fn pipeline_product_export_request_is_refused_before_the_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut tokens = BTreeMap::new();
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        "export-worker-token-a",
+        TokenRole::ExportWorker,
+    );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        "scoped-export-worker-token-a",
+        TokenRole::ExportWorker,
+    );
+    tokens
+        .get_mut("scoped-export-worker-token-a")
+        .unwrap()
+        .allowed_uses = BTreeSet::from([TraceAllowedUse::Debugging]);
+    let mut state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
+    Arc::make_mut(&mut state).pipeline_product = Some(unreachable_pipeline_product().await);
+    let create = |state: Arc<AppState>,
+                  token: &'static str,
+                  key: Option<&'static str>,
+                  body: serde_json::Value| async move {
+        pipeline_product_request(
+            state,
+            "POST",
+            "/v1/pipeline/exports",
+            Some(token),
+            key,
+            Some(body),
+        )
+        .await
+    };
+
+    let (status, body) = create(
+        state.clone(),
+        "export-worker-token-a",
+        None,
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "idempotency_key_required");
+    let mut unsupported_scope = pipeline_export_body();
+    unsupported_scope["consent_scope"] = serde_json::json!("public_attribution");
+    let (status, body) = create(
+        state.clone(),
+        "export-worker-token-a",
+        Some("key"),
+        unsupported_scope,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"],
+        "unsupported consent_scope filter: public_attribution"
+    );
+
+    let mut guarded = state.clone();
+    Arc::make_mut(&mut guarded).require_export_guardrails = true;
+    let mut empty_purpose = pipeline_export_body();
+    empty_purpose["purpose"] = serde_json::json!("  ");
+    empty_purpose["consent_scope"] = serde_json::json!("debugging_evaluation");
+    let (status, body) = create(
+        guarded.clone(),
+        "export-worker-token-a",
+        Some("key"),
+        empty_purpose,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"],
+        "pipeline export requires an explicit purpose"
+    );
+    let (status, body) = create(
+        guarded,
+        "export-worker-token-a",
+        Some("key"),
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"],
+        "pipeline export requires an explicit consent_scope"
+    );
+    let mut unknown_field = pipeline_export_body();
+    unknown_field["requester_principal_ref"] = serde_json::json!("principal_sha256:other");
+    let (status, _) = create(
+        state.clone(),
+        "export-worker-token-a",
+        Some("key"),
+        unknown_field,
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "an unknown field is refused: {status}"
+    );
+
+    let (status, body) = create(
+        state.clone(),
+        "scoped-export-worker-token-a",
+        Some("key"),
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"],
+        "scoped tenant token does not allow this trace use"
+    );
+    let mut scoped_state = state.clone();
+    let mut scoped_tokens = (*scoped_state.tokens).clone();
+    let scoped = scoped_tokens
+        .get_mut("scoped-export-worker-token-a")
+        .unwrap();
+    scoped.allowed_uses = BTreeSet::new();
+    scoped.allowed_consent_scopes = BTreeSet::from([ConsentScope::DebuggingEvaluation]);
+    Arc::make_mut(&mut scoped_state).tokens = Arc::new(scoped_tokens);
+    let mut other_scope = pipeline_export_body();
+    other_scope["consent_scope"] = serde_json::json!("model_training");
+    let (status, body) = create(
+        scoped_state,
+        "scoped-export-worker-token-a",
+        Some("key"),
+        other_scope,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"],
+        "scoped tenant token does not allow this trace consent scope"
+    );
+
+    let mut restricted = state.clone();
+    Arc::make_mut(&mut restricted).tenant_policies = Arc::new(BTreeMap::from([(
+        "tenant-a".to_string(),
+        TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::from([TraceAllowedUse::Debugging]),
+        },
+    )]));
+    let (status, body) = create(
+        restricted,
+        "export-worker-token-a",
+        Some("key"),
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"],
+        "trace export use is not allowed for this tenant"
+    );
+
+    let mut policy_required = state.clone();
+    Arc::make_mut(&mut policy_required).require_tenant_submission_policy = true;
+    let (status, body) = create(
+        policy_required,
+        "export-worker-token-a",
+        Some("key"),
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"],
+        "trace export tenant does not have a contribution policy"
+    );
+}
+
+/// Ruling T14-10: `pipeline_export:` purpose codes are reserved for pipeline
+/// export manifests, which `main`'s replay-dataset list and count leave out.
+/// So `main`'s replay export refuses a purpose in that family, with a label,
+/// before it records anything: it cannot hide itself from the list. An
+/// ordinary purpose still exports.
+#[tokio::test]
+async fn replay_export_refuses_the_reserved_pipeline_export_purpose() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    let (status, body) = pipeline_product_request(
+        state.clone(),
+        "POST",
+        "/v1/workers/replay-export",
+        Some("export-worker-token-a"),
+        None,
+        Some(serde_json::json!({"purpose": " pipeline_export:evaluation "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "export_purpose_reserved");
+    assert!(
+        read_all_export_manifests(temp.path(), "tenant-a")
+            .unwrap()
+            .is_empty(),
+        "the refused export recorded no manifest"
+    );
+
+    let (status, body) = pipeline_product_request(
+        state,
+        "POST",
+        "/v1/workers/replay-export",
+        Some("export-worker-token-a"),
+        None,
+        Some(serde_json::json!({"purpose": "trace_commons_worker_replay_dataset"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let manifests = read_all_export_manifests(temp.path(), "tenant-a").unwrap();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].purpose, "trace_commons_worker_replay_dataset");
 }
 
 // ============================================================================

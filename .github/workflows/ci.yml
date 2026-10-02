@@ -110,6 +110,8 @@ jobs:
         admission_test_device_invite_subject
         admission_test_pipeline
         admission_test_pipeline_http
+        admission_test_pipeline_compat
+        admission_test_pipeline_parity
         admission_test_unbound_reaper
         pipeline_test_upgrade
     # The tests in this repository that touch PostgreSQL do not run anywhere.
@@ -222,6 +224,19 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
+      # The two versioned pipeline HTTP steps below withdraw through an
+      # account session, which needs the login-resolver pool. The roles are
+      # the ones the `ingest-bin-postgres` job creates, for the same reason
+      # it gives there, and they are created here before any suite migrates:
+      # V30 creates `trace_login_resolver` only if it is absent.
+      - name: Create the login-resolver roles
+        run: |
+          set -euo pipefail
+          PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
+          CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
+          CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
+          GRANT trace_login_resolver TO tc_login_resolver_login;
+          SQL
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block (`PG_SUITE_DATABASES` above is job-wide only because no
       # suite reads it). That is not tidiness: `trace_invite_registry_pg` reads
@@ -401,10 +416,36 @@ jobs:
             echo "::error::versioned_pipeline_runtime_pg never provisioned its runtime role"
             exit 1
           fi
+      # Each of the three steps below runs one named test in `<database>_pilot`,
+      # a database each test process drops and creates beside the one its URL
+      # names, so neither the xact_commit guard at the end of this job nor a
+      # commit floor can prove the test ran (the harness setup alone commits
+      # more than some of the tests do). A test name that matches nothing
+      # passes with "0 passed", so each step requires its own "1 passed" line,
+      # as the upgrade step requires its count.
       - name: versioned pipeline real HTTP
-        run: cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart 2>&1 | tee pipeline-real-http.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-real-http.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
+      - name: versioned pipeline compatibility through HTTP
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export 2>&1 | tee pipeline-compat.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-compat.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_compat
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_compat
+      - name: versioned pipeline parity with legacy
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest legacy_and_pipeline_tenants_match_under_equivalent_configuration 2>&1 | tee pipeline-parity.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-parity.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_parity
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
@@ -624,17 +665,29 @@ jobs:
       # return leaves xact_commit where createdb left it. A full run commits
       # tens of thousands of transactions; the floor is far below that and far
       # above what a skipping run could produce.
+      #
+      # The pipeline HTTP tests commit to `admission_test_ingest_bin_pilot`, a
+      # database their harness creates beside this one, so it is held to its
+      # own floor. Their harness setup alone commits about 550 transactions
+      # there and the tests about 10,000 more; 2,000 is far above the first
+      # and far below the second.
       - name: Refuse a run that executed nothing
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
-                -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_ingest_bin';")
-          echo "admission_test_ingest_bin committed ${n:-0} transactions"
-          if [ "${n:-0}" -lt 1000 ]; then
-            echo "::error::admission_test_ingest_bin shows no real activity; the PostgreSQL tests skipped instead of running"
-            exit 1
-          fi
+          fail=0
+          for pair in admission_test_ingest_bin:1000 admission_test_ingest_bin_pilot:2000; do
+            db=${pair%%:*}
+            floor=${pair##*:}
+            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$db';")
+            echo "$db committed ${n:-0} transactions (floor $floor)"
+            if [ "${n:-0}" -lt "$floor" ]; then
+              echo "::error::$db shows no real activity; the PostgreSQL tests skipped instead of running"
+              fail=1
+            fi
+          done
+          exit $fail
       - uses: ./.github/actions/trim-cargo-cache
 
   mark-assets-drift:

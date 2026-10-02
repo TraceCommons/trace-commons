@@ -15,17 +15,65 @@ use super::*;
 /// carries the configured store's label and lease lengths, the same way M11
 /// pins the store name; `assemble_ingest_pipeline_runtime` refuses a service
 /// that does not.
+///
+/// `near_contract_id` is the NEAR credit contract `main`'s legacy NEAR path
+/// is configured with (`TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`).
+/// An assembly that enables payout passes it as
+/// `PipelinePayoutConfig::near_contract_id` (Ruling T10-4);
+/// `assemble_ingest_pipeline_runtime` refuses an enabled payout that names
+/// another contract, or any contract when none is configured.
+///
+/// `near_confirmation_interval` is `main`'s NEAR outbox scheduler cadence
+/// (`TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS`, 60 seconds
+/// unless configured). An assembly that enables payout passes it as
+/// `PipelinePayoutConfig::confirmation_interval` (Ruling T10-10), and
+/// `assemble_ingest_pipeline_runtime` refuses one that does not.
+///
+/// `novelty_utility_checks` is the configuration of `main`'s
+/// `NoveltyUtility` credit checks (Rulings T15-6, T15-10, T15-11): `main`'s
+/// central-issuer allowlist, the pipeline's issuer principal
+/// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), and `main`'s
+/// production-gate flag. An assembly passes it to
+/// `PipelineServiceBuilder::with_novelty_utility_checks`, and
+/// `assemble_ingest_pipeline_runtime` refuses one that does not. The tenant
+/// policy those checks read comes from the assembly's own authority
+/// provider, the source the receipt uses.
+///
+/// `near_payout_controls` are `main`'s NEAR payout controls: its settlement
+/// mode (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE`) and
+/// `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, resolved before
+/// assembly. An assembly that enables payout passes them as
+/// `PipelinePayoutConfig::controls`, and `assemble_ingest_pipeline_runtime`
+/// refuses one that does not (Zaki review 1, round 2, finding 2).
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
     pub object_store_name: String,
     pub lease_config: PipelineLeaseConfig,
+    pub near_contract_id: Option<String>,
+    pub near_confirmation_interval: StdDuration,
+    pub near_payout_controls: PipelineNearPayoutControls,
+    pub novelty_utility_checks: PipelineNoveltyUtilityChecks,
+    /// `main`'s gate configuration and `NoveltyUtility` delta, as ingest
+    /// parsed them (multi-lens review L5-4, Zaki review 3, Z3-3; the
+    /// index-insert threshold since Zaki review 1, round 2, finding 14). An
+    /// assembly that binds the compatibility bundle builds its configuration
+    /// from it (`CompatibilityBundleConfig::production_compatible`), and
+    /// `assemble_ingest_pipeline_runtime` refuses one that does not hold it.
+    pub main_gate: MainGateConfig,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
 /// assembly. The stock binary intentionally has no implementation: the
 /// scorer, embedder, vector index, settlement, and payout backends a
 /// deployable pipeline needs do not live in this tree.
+///
+/// The index writer an assembly injects must return from every call well
+/// within `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS` (60 s): Settle stops
+/// starting index calls at its lease's end, and a withdrawal waits out that
+/// margin before it removes the revision, so a call that outlives it could
+/// write a withdrawn revision's entry after its removal (multi-lens review
+/// L4-3).
 pub trait IngestPipelineRuntimeAssembler: Send + Sync {
     fn assemble(
         &self,
@@ -45,24 +93,35 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// non-production-qualified dependency (the Reference scorer, the in-memory
 /// `IsolatedPipelineIndex`, `RecordingSettlementAdapter`, or the like) refuses
 /// startup with `pipeline_runtime_dependencies_not_production_qualified`
-/// whenever `tenants_routed` or `production_required` is true -- tenants
-/// routed to the pipeline is exactly the condition under which real receipts
-/// would otherwise be scored and settled by test doubles. This holds whether
-/// or not `production_required` itself is set; `tenants_routed` alone is
-/// enough. `allow_test_dependencies` is the only way past that refusal, is
+/// whenever `tenants_processed` or `production_required` is true -- tenants
+/// the worker processes (`pipeline_tenants_processed`: routed or drained) is
+/// exactly the condition under which real receipts would otherwise be
+/// scored, settled and paid by test doubles. This holds whether or not
+/// `production_required` itself is set; `tenants_processed` alone is enough. `allow_test_dependencies` is the only way past that refusal, is
 /// meant for tests and local development only, and never combines with
 /// `production_required` -- both set refuses startup at once with
 /// `pipeline_test_dependencies_not_allowed_when_required`, regardless of
 /// qualification. The caller resolves both booleans from the environment (or
 /// from the tenant rollout gates); this function reads neither directly.
+/// `near_contract_id` is `main`'s configured NEAR credit contract,
+/// `near_confirmation_interval` its NEAR outbox scheduler cadence,
+/// `near_payout_controls` its NEAR settlement mode and adapter-auth
+/// requirement, and `novelty_utility_checks` the configuration of `main`'s
+/// `NoveltyUtility` credit checks, all handed to the assembly in its context.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
     db_connections: Option<&TraceCorpusDbConnections>,
     artifact_store: Option<&ConfiguredTraceArtifactStore>,
     production_required: bool,
     lease_config: PipelineLeaseConfig,
-    tenants_routed: bool,
+    tenants_processed: bool,
     allow_test_dependencies: bool,
+    near_contract_id: Option<&str>,
+    near_confirmation_interval: StdDuration,
+    near_payout_controls: PipelineNearPayoutControls,
+    novelty_utility_checks: &PipelineNoveltyUtilityChecks,
+    main_gate: MainGateConfig,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
@@ -86,6 +145,11 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         artifact_store: configured_store.store.clone(),
         object_store_name: object_store_name.clone(),
         lease_config,
+        near_contract_id: near_contract_id.map(str::to_string),
+        near_confirmation_interval,
+        near_payout_controls,
+        novelty_utility_checks: novelty_utility_checks.clone(),
+        main_gate,
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.
@@ -100,7 +164,55 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         service.lease_config() == lease_config,
         "pipeline_runtime_lease_config_mismatch"
     );
-    if (production_required || tenants_routed)
+    // Ruling T10-4: an enabled payout pays through the NEAR credit contract
+    // `main` is configured with, never one the assembly picked itself, and
+    // not at all when `main` has none.
+    anyhow::ensure!(
+        !service.payout_enabled() || service.payout_near_contract_id() == near_contract_id,
+        "pipeline_runtime_near_contract_mismatch"
+    );
+    // Ruling T10-10: an enabled payout polls a submitted payout at `main`'s
+    // NEAR outbox scheduler cadence.
+    anyhow::ensure!(
+        !service.payout_enabled()
+            || service.payout_confirmation_interval() == Some(near_confirmation_interval),
+        "pipeline_runtime_near_confirmation_interval_mismatch"
+    );
+    // Zaki review 1, round 2, finding 2: an enabled payout follows `main`'s
+    // NEAR settlement mode and adapter-auth requirement, never ones the
+    // assembly picked itself.
+    anyhow::ensure!(
+        !service.payout_enabled() || service.payout_controls() == Some(near_payout_controls),
+        "pipeline_runtime_near_payout_controls_mismatch"
+    );
+    // Multi-lens review L5-4 and Zaki review 3, Z3-3 (and Zaki review 1,
+    // round 2, finding 14): a compatibility bundle holds `main`'s gate
+    // configuration -- floors, index-insert threshold, top-k, chunk knobs and
+    // the `NoveltyUtility` delta -- never values the assembly picked.
+    anyhow::ensure!(
+        service
+            .compatibility_config()
+            .is_none_or(|config| config.matches_main_gate(&main_gate)),
+        "pipeline_runtime_main_gate_config_mismatch"
+    );
+    // Ruling T15-12: a compatibility award applies `main`'s NoveltyUtility
+    // credit checks with the configuration ingest was started with, never a
+    // looser one an assembly picked itself or dropped.
+    anyhow::ensure!(
+        service.novelty_utility_checks() == novelty_utility_checks,
+        "pipeline_runtime_novelty_utility_checks_mismatch"
+    );
+    // Zaki review 1, round 2, finding 15: a compatibility award's ledger
+    // row names the pipeline's issuer, as `main`'s names its issuing gate
+    // worker. A runtime that processes a tenant through the compatibility
+    // bundle cannot run without one.
+    anyhow::ensure!(
+        !(tenants_processed
+            && service.binds_compatibility_bundle()
+            && novelty_utility_checks.issuer_principal_ref.is_none()),
+        "pipeline_credit_issuer_principal_missing"
+    );
+    if (production_required || tenants_processed)
         && !pipeline_runtime_is_production_qualified(&service)
     {
         anyhow::ensure!(
@@ -116,14 +228,37 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     Ok(Some(service))
 }
 
+/// Refuses, with `pipeline_privacy_filter_required`, a pipeline runtime
+/// whose privacy boundary does not classify prose PII while `main` requires
+/// prose-PII filtering (`TRACE_COMMONS_REQUIRE_PRIVACY_FILTER`), as `main`
+/// refuses to start with no filter backend. Judged by what the boundary does
+/// (`PipelinePrivacyBoundary::classifies_prose_pii`), not by whether it
+/// reports itself production-qualified (Zaki review 1, round 2, finding 21).
+pub(crate) fn validate_pipeline_privacy_filter_requirement(
+    require_privacy_filter: bool,
+    service: &PipelineService,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !require_privacy_filter || service.privacy_classifies_prose_pii(),
+        "pipeline_privacy_filter_required"
+    );
+    Ok(())
+}
+
 /// Whether every dependency an injected pipeline runtime holds is
 /// production-qualified.
 ///
-/// Checks only `scorer`, `embedder`, `index_reader`, `index_writer`, and
-/// every registered settlement adapter (decision P4's
-/// `PipelineDependencyQualification`). Authority, privacy, and payout
-/// qualification are PR 3 and are not part of this bundle-runtime
-/// dependency set.
+/// Checks `scorer`, `embedder`, `index_reader`, `index_writer`, every
+/// registered settlement adapter (decision P4's
+/// `PipelineDependencyQualification`), and now `authority` and `privacy`
+/// (Ruling T2-2): an unqualified authority provider or privacy boundary
+/// fails closed the same way an unqualified scorer or index does, whenever
+/// tenants are routed. The NEAR payout adapter counts only when payout is
+/// enabled (`PipelineService::payout_enabled`): a service that pays nothing
+/// out holds no payout dependency to qualify. A compatibility bundle's
+/// configuration must be qualifiable (`bundle`, Zaki review 1, round 2,
+/// finding 11), so the all-zero local reference never binds for real
+/// tenants.
 pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService) -> bool {
     let qualification = service.dependency_qualification();
     qualification.scorer
@@ -135,16 +270,23 @@ pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService
             .settlement_adapters
             .values()
             .all(|ready| *ready)
+        && qualification.authority
+        && qualification.privacy
+        && qualification.bundle
+        && (!service.payout_enabled() || qualification.payout)
 }
 
 /// Label-only readiness body. `reason` is present only when `status` is
-/// `"not_ready"`, so a ready response serialises to exactly `{"status":
-/// "ready"}` with no dangling null field.
+/// `"not_ready"`, so a ready response has no dangling null field.
+/// `drain_tenant_count` is the size of `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`,
+/// the tenants the worker drains without routing their receipts (Zaki
+/// review 1, item 7): a count, never a tenant id.
 #[derive(Debug, Serialize)]
 pub(crate) struct PipelineReadinessResponse {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
+    drain_tenant_count: usize,
 }
 
 /// Answers `GET /v1/pipeline/readiness`. Unauthenticated and registered in
@@ -155,12 +297,14 @@ pub(crate) struct PipelineReadinessResponse {
 pub(crate) async fn pipeline_readiness_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<PipelineReadinessResponse>) {
+    let drain_tenant_count = state.pipeline_drain_tenant_ids.len();
     if state.pipeline_service.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(PipelineReadinessResponse {
                 status: "not_ready",
                 reason: Some("pipeline_runtime_absent"),
+                drain_tenant_count,
             }),
         );
     }
@@ -173,6 +317,7 @@ pub(crate) async fn pipeline_readiness_handler(
             Json(PipelineReadinessResponse {
                 status: "not_ready",
                 reason: Some("pipeline_worker_not_ready"),
+                drain_tenant_count,
             }),
         );
     }
@@ -181,6 +326,7 @@ pub(crate) async fn pipeline_readiness_handler(
         Json(PipelineReadinessResponse {
             status: "ready",
             reason: None,
+            drain_tenant_count,
         }),
     )
 }
@@ -207,6 +353,125 @@ const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 /// pass (`PipelineService::sweep_staged_receipts`), after draining its runs.
 /// The rest wait for the next pass.
 const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
+
+/// How many of one tenant's due index invalidations the worker processes
+/// each time it runs the tenant's invalidation step
+/// (`PipelineService::process_index_invalidations`), right after draining
+/// its runs. A step that used the whole limit runs again on the next pass
+/// (`PipelineFollowUpCadence::run_again`).
+const PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT: usize = 32;
+
+/// How many of one tenant's complete runs the worker pays out each time it
+/// runs the tenant's payout step (`PipelineService::process_payouts`), after
+/// its index invalidations. A step that used the whole limit runs again on
+/// the next pass.
+const PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT: usize = 32;
+
+/// How often the worker runs a tenant's index invalidation step when nothing
+/// woke it (Zaki review 1, round 2, item 4). Invalidations are queued only
+/// by a withdrawal, a cancelled index write, or a requeue, and each of those
+/// wakes the step at once in the process that queued it; the interval
+/// bounds the wait for one another replica queued, a retry's backoff, and a
+/// claim whose lease passed.
+const PIPELINE_WORKER_INDEX_INVALIDATION_INTERVAL: StdDuration = StdDuration::from_secs(10);
+
+/// How often the worker runs a tenant's credit audit step when nothing woke
+/// it (Zaki review 1, round 2, N-5). A Trace Credit leg that writes a
+/// credit event wakes the step at once in the process that settled it; the
+/// interval bounds the wait for one another replica settled, and for a pass
+/// that failed to append.
+const PIPELINE_WORKER_CREDIT_AUDIT_INTERVAL: StdDuration = StdDuration::from_secs(10);
+
+/// The most `CreditMutate` audit events the worker appends for one tenant
+/// in one pass.
+const PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT: usize = 32;
+
+/// A follow-up step of a tenant's drain, after its runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PipelineFollowUpStep {
+    IndexInvalidations,
+    Payouts,
+    CreditAudits,
+}
+
+/// When the worker last ran each tenant's follow-up steps, so an idle
+/// tenant costs no invalidation or payout query on most passes (Zaki review
+/// 1, round 2, item 4). One per worker loop; the run drain and the
+/// staged-receipt sweep are not scheduled here and run on every pass.
+#[derive(Debug, Default)]
+pub(crate) struct PipelineFollowUpCadence {
+    last_run: HashMap<(String, PipelineFollowUpStep), std::time::Instant>,
+}
+
+impl PipelineFollowUpCadence {
+    /// The follow-up steps that run for `tenant_id` on the pass at `now`,
+    /// each recorded as run at `now`. A step runs when `woken` names it
+    /// (this process queued work for it: `PipelineService::take_follow_ups`),
+    /// on the tenant's first pass, and once its interval has passed since it
+    /// last ran: `PIPELINE_WORKER_INDEX_INVALIDATION_INTERVAL` for the
+    /// invalidation step, and `payout_interval` -- the payout's confirmation
+    /// interval, `main`'s NEAR cadence -- for the payout step, which never
+    /// runs while `payout_interval` is `None` (payout disabled).
+    pub(crate) fn due_steps(
+        &mut self,
+        tenant_id: &str,
+        woken: PipelineFollowUps,
+        payout_interval: Option<StdDuration>,
+        now: std::time::Instant,
+    ) -> PipelineFollowUps {
+        PipelineFollowUps {
+            index_invalidations: self.take_due(
+                tenant_id,
+                PipelineFollowUpStep::IndexInvalidations,
+                woken.index_invalidations,
+                PIPELINE_WORKER_INDEX_INVALIDATION_INTERVAL,
+                now,
+            ),
+            payouts: payout_interval.is_some_and(|interval| {
+                self.take_due(
+                    tenant_id,
+                    PipelineFollowUpStep::Payouts,
+                    woken.payouts,
+                    interval,
+                    now,
+                )
+            }),
+            credit_audits: self.take_due(
+                tenant_id,
+                PipelineFollowUpStep::CreditAudits,
+                woken.credit_audits,
+                PIPELINE_WORKER_CREDIT_AUDIT_INTERVAL,
+                now,
+            ),
+        }
+    }
+
+    fn take_due(
+        &mut self,
+        tenant_id: &str,
+        step: PipelineFollowUpStep,
+        woken: bool,
+        interval: StdDuration,
+        now: std::time::Instant,
+    ) -> bool {
+        let key = (tenant_id.to_string(), step);
+        let due = woken
+            || self
+                .last_run
+                .get(&key)
+                .is_none_or(|last_run| now.saturating_duration_since(*last_run) >= interval);
+        if due {
+            self.last_run.insert(key, now);
+        }
+        due
+    }
+
+    /// `step` ran for `tenant_id` and used its whole limit, so work may be
+    /// left: it runs again on the next pass.
+    pub(crate) fn run_again(&mut self, tenant_id: &str, step: PipelineFollowUpStep) {
+        self.last_run.remove(&(tenant_id.to_string(), step));
+    }
+}
 
 /// How long the worker sleeps between iterations when `stop` does not fire
 /// first.
@@ -294,14 +559,40 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// never the tenant id or the error's own text -- and ends this tenant's
 /// batch for the pass.
 ///
-/// Then, whatever the runs did, it sweeps up to
+/// Then, whatever the runs did, it runs the follow-up steps `cadence` finds
+/// due (`PipelineFollowUpCadence::due_steps`, with the steps this service
+/// woke): it releases the tenant's parked runs whose submission is no
+/// longer operable (`release_inoperable_parked_runs`), processes up to
+/// `PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT` of the tenant's due
+/// index invalidations (`process_index_invalidations`, which removes a
+/// withdrawn or cancelled revision from the index), and pays out up to
+/// `PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT` of the tenant's complete runs
+/// (`process_payouts`; Ruling S7 puts the invalidations right after the runs
+/// and the payouts after them). Last, on every pass, it sweeps up to
 /// `PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT` of the tenant's receipt
 /// attempts that never committed: each staged object whose
-/// row's `cleanup_after` has passed is deleted with its row. A sweep failure
-/// is logged the same way.
-async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String) {
+/// row's `cleanup_after` has passed is deleted with its row. An
+/// invalidation, payout, or sweep failure is logged the same way, and the
+/// drain goes on to the next step. All of it runs in the pass's supervised
+/// task for the tenant (`run_pipeline_worker_pass`).
+pub(crate) async fn drain_pipeline_tenant(
+    state: Arc<AppState>,
+    service: Arc<PipelineService>,
+    tenant_id: String,
+    cadence: Arc<std::sync::Mutex<PipelineFollowUpCadence>>,
+) {
     for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
         match service.process_one(&tenant_id).await {
+            // Multi-lens review L3-2: another Score holds this tenant's Score
+            // lock, so this replica moves on to its other tenants for the pass.
+            Ok(Some(run))
+                if run.last_error_label.as_deref()
+                    == Some(
+                        trace_commons_server::versioned_pipeline::PIPELINE_SCORE_LOCK_BUSY_LABEL,
+                    ) =>
+            {
+                break;
+            }
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(error) => {
@@ -312,6 +603,95 @@ async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String)
                     "pipeline worker run failed"
                 );
                 break;
+            }
+        }
+    }
+    let lock_cadence = || {
+        cadence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let due = lock_cadence().due_steps(
+        &tenant_id,
+        service.take_follow_ups(&tenant_id),
+        service.payout_confirmation_interval(),
+        std::time::Instant::now(),
+    );
+    if due.index_invalidations {
+        // A run parked for review whose submission expired, was purged, or
+        // was revoked or withdrawn without the pipeline's follow-up is
+        // reached by nothing else (Zaki review 1, round 2, finding 9).
+        if let Err(error) = service.release_inoperable_parked_runs(&tenant_id).await {
+            tracing::warn!(
+                error_class = "pipeline_worker_parked_run_release_failed",
+                tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker parked run release failed"
+            );
+        }
+        match service
+            .process_index_invalidations(
+                &tenant_id,
+                PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT,
+            )
+            .await
+        {
+            Ok(processed) => {
+                if processed >= PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::IndexInvalidations);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_index_invalidation_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker index invalidation failed"
+                );
+            }
+        }
+    }
+    if due.credit_audits {
+        match append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant_id,
+            PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT,
+        )
+        .await
+        {
+            Ok(appended) => {
+                if appended >= PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::CreditAudits);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_credit_audit_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker credit audit failed"
+                );
+            }
+        }
+    }
+    if due.payouts {
+        match service
+            .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
+            .await
+        {
+            Ok(processed) => {
+                if processed >= PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::Payouts);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_payout_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker payout failed"
+                );
             }
         }
     }
@@ -328,16 +708,160 @@ async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String)
     }
 }
 
+/// Zaki review 1, round 2, N-5: appends `main`'s hash-only `CreditMutate`
+/// audit event for each credit event the tenant's Trace Credit legs wrote
+/// to `main`'s ledger (`PgPipelineStore::list_unaudited_credit_events`), up
+/// to `limit`, through `main`'s mirrored audit log, as `main`'s credit paths
+/// append one after each credit event they write
+/// (`append_automatic_utility_credit_events_once_with_counts`), and then
+/// marks each leg audited. The event carries the credit event's id, so a
+/// pass that stopped after the append and before the mark finds the event
+/// already in the database and only marks the leg. Its actor is the ledger
+/// row's: for a `NoveltyUtility` event the pipeline's issuer, in the role
+/// `main` records for its gate worker; an actor whose role is not a token
+/// role (a minimal-family `accepted` event's `pipeline_worker`) is recorded
+/// as the in-process pipeline worker, role `system`. Returns how many legs
+/// it handled.
+pub(crate) async fn append_pipeline_credit_audit_events(
+    state: &AppState,
+    service: &PipelineService,
+    tenant_id: &str,
+    limit: usize,
+) -> anyhow::Result<usize> {
+    let items = service
+        .store()
+        .list_unaudited_credit_events(tenant_id, limit)
+        .await?;
+    for item in &items {
+        let already_appended = match state.db_mirror.as_ref() {
+            Some(db) => db
+                .get_trace_audit_event_by_id(tenant_id, item.credit_event_id)
+                .await?
+                .is_some(),
+            None => false,
+        };
+        if !already_appended {
+            let points = item
+                .points_delta
+                .parse::<f32>()
+                .map_err(|_| anyhow::anyhow!("pipeline_credit_points_invalid"))?;
+            let (actor, actor_role_label) = match serde_json::from_value::<TokenRole>(
+                serde_json::Value::String(item.actor_role.clone()),
+            ) {
+                Ok(role) => (
+                    TenantAuth {
+                        role,
+                        principal_ref: item.actor_principal_ref.clone(),
+                        ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
+                    },
+                    None,
+                ),
+                Err(_) => (
+                    system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF),
+                    Some("system"),
+                ),
+            };
+            let mut event = TraceCommonsAuditEvent::credit_mutation(
+                &actor,
+                item.submission_id,
+                points,
+                item.reason.as_deref(),
+            );
+            event.event_id = item.credit_event_id;
+            append_audit_event_mirrored(
+                state,
+                &actor,
+                event,
+                AuditRowMirror {
+                    action: StorageTraceAuditAction::CreditMutate,
+                    metadata: StorageTraceAuditSafeMetadata::CreditMutation {
+                        event_type: item.event_type,
+                        credit_points_delta_micros: credit_delta_micros(points),
+                        reason_hash: sha256_prefixed(item.reason.as_deref().unwrap_or_default()),
+                        external_ref_hash: item.external_ref.as_deref().map(sha256_prefixed),
+                    },
+                    object_ref_id: None,
+                    actor_role_label,
+                },
+                "pipeline credit audit event",
+            )
+            .await?;
+        }
+        service.store().mark_credit_audited(tenant_id, item).await?;
+    }
+    Ok(items.len())
+}
+
+/// The actor label of an audit event the pipeline worker appends as an
+/// in-process driver (`system_audit_tenant`).
+const PIPELINE_WORKER_AUDIT_ACTOR_REF: &str = "pipeline_worker";
+
+/// Whether the pipeline worker processes any tenant: one routed to the
+/// pipeline (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) or on the drain
+/// list (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`). The worker drains a
+/// drain tenant's runs, ledger credit and payouts through the runtime's own
+/// dependencies, so the fail-closed qualification gate counts both lists
+/// (Zaki review 1, round 2, finding 3).
+pub(crate) fn pipeline_tenants_processed(
+    tenant_rollout_gates: &TraceTenantRolloutGates,
+    drain_tenant_ids: &BTreeSet<String>,
+) -> bool {
+    tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0
+        || !drain_tenant_ids.is_empty()
+}
+
+/// Multi-lens review L5-2 and Zaki review 3, Z3-2: before ingest serves,
+/// runs the default package's startup checks on every bundle a worker may
+/// run for a routed or drained tenant -- its active bundle and the bundle of
+/// each run in flight (`PipelineService::check_tenant_bundles`) -- and
+/// refuses to start on the first failure, under its label. A tenant keeps
+/// its active bundle when the default package changes, so the assembly's
+/// checks of the default package alone do not cover it.
+pub(crate) async fn validate_pipeline_tenant_bundles(
+    service: &PipelineService,
+    tenant_rollout_gates: &TraceTenantRolloutGates,
+    drain_tenant_ids: &BTreeSet<String>,
+    main_gate: &MainGateConfig,
+    allow_test_dependencies: bool,
+) -> anyhow::Result<()> {
+    let mut tenant_ids =
+        tenant_rollout_gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
+    tenant_ids.extend(drain_tenant_ids.iter().cloned());
+    for tenant_id in tenant_ids {
+        service
+            .check_tenant_bundles(&tenant_id, main_gate, !allow_test_dependencies)
+            .await?;
+    }
+    Ok(())
+}
+
+/// The tenants the pipeline worker drains on each pass, each once, in order:
+/// the tenants whose receipts are routed to the pipeline
+/// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) and the drain list
+/// (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`). A tenant rolled back off the
+/// first list onto the second keeps its runs in flight, index
+/// invalidations, payouts and confirmations, and staged receipt sweeps
+/// processed, while no receipt of its is routed (Zaki review 1, item 7).
+pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
+    let mut tenant_ids = state
+        .tenant_rollout_gates
+        .tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
+    tenant_ids.extend(state.pipeline_drain_tenant_ids.iter().cloned());
+    tenant_ids.into_iter().collect()
+}
+
 /// Starts the owned pipeline worker loop. `None` when no pipeline runtime is
 /// injected -- there is nothing to drain, and the repository binary injects
 /// none.
 ///
-/// Each iteration runs one `run_pipeline_worker_pass` over the
-/// `PipelineReceipts` rollout tenants, then sleeps
+/// Each iteration runs one `run_pipeline_worker_pass` over
+/// `pipeline_worker_tenant_ids` (the `PipelineReceipts` rollout tenants and
+/// the drain list, read once at start), then sleeps
 /// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires.
 fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let service = state.pipeline_service.clone()?;
-    let gates = state.tenant_rollout_gates.clone();
+    let tenant_ids = pipeline_worker_tenant_ids(&state);
+    let cadence = Arc::new(std::sync::Mutex::new(PipelineFollowUpCadence::default()));
     let ready = state.pipeline_worker_ready.clone();
     let worker_ready = ready.clone();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
@@ -347,8 +871,15 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
             let drain_service = service.clone();
             run_pipeline_worker_pass(
                 async move { probe_service.readiness().await },
-                gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts),
-                |tenant_id| drain_pipeline_tenant(drain_service.clone(), tenant_id),
+                tenant_ids.clone(),
+                |tenant_id| {
+                    drain_pipeline_tenant(
+                        state.clone(),
+                        drain_service.clone(),
+                        tenant_id,
+                        cadence.clone(),
+                    )
+                },
                 &worker_ready,
                 &stop_rx,
             )
