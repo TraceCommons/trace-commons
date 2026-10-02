@@ -878,3 +878,164 @@ mod tests {
         }
     }
 }
+
+/// Connect a retained NEAR AI login to the signed-in, unbound passkey
+/// account. The authenticated bind protocol has its own account-bound proof;
+/// the unauthenticated provisioning preimage is never substituted for it.
+pub(super) async fn bind(shared: &DaemonShared) -> Result<serde_json::Value> {
+    use super::native_identity::{authenticated, resolve_origin};
+    use reqwest::Method;
+    use serde_json::json;
+    if shared.store.load_config()?.is_some() {
+        bail!("account-already-enrolled");
+    }
+    let origin = resolve_origin(&shared.store, &json!({}))?;
+    let mut account = crate::account_auth::try_load_session_with_snapshot(&shared.store)?
+        .ok_or_else(|| anyhow!("account-session-required"))?;
+    let account_id = uuid::Uuid::parse_str(&account.session.account_id)
+        .map_err(|_| anyhow!("account-bind-invalid"))?;
+    let binding = authenticated(
+        shared,
+        &origin,
+        &mut account,
+        Method::GET,
+        "/v1/account/binding",
+        None,
+    )
+    .await?;
+    if binding.get("binding_state").and_then(|v| v.as_str()) != Some("unbound") {
+        bail!("account-bind-refused");
+    }
+    let prepared = prepare(shared, &origin).await?;
+    let api = CloudApi::live().map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
+    bind_prepared(shared, &api, &origin, account, account_id, prepared).await
+}
+
+async fn bind_prepared(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    origin: &str,
+    mut account: crate::account_auth::LoadedAccountSession,
+    account_id: uuid::Uuid,
+    prepared: Prepared,
+) -> Result<serde_json::Value> {
+    use super::native_identity::authenticated;
+    use reqwest::Method;
+    use serde_json::json;
+    let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
+    let verifier = random()?;
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+    let started = authenticated(
+        shared,
+        origin,
+        &mut account,
+        Method::POST,
+        "/v1/account/near-ai/provision/bind/start",
+        Some(&start_payload(&challenge, &identity.public_key_b64)),
+    )
+    .await?;
+    let started: Started =
+        serde_json::from_value(started).map_err(|_| anyhow!("account-bind-invalid"))?;
+    let signature = bind_device_proof(
+        &identity,
+        &started.ceremony_id,
+        &started.nonce,
+        &challenge,
+        started.expires_at,
+        Utc::now().timestamp(),
+        &account_id,
+    )?;
+    // Capabilities, local authority, server ceremony and device proof have all
+    // been validated before this one-use refresh credential is spent.
+    if super::commons_credentials::snapshot(
+        &shared.store,
+        super::commons_credentials::Kind::Account,
+    )? != account.snapshot
+    {
+        bail!("account-session-changed");
+    }
+    let token = super::nearai_credential::exchange(shared, api, &prepared.session)
+        .await
+        .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
+    let result = authenticated(shared,origin,&mut account,Method::POST,"/v1/account/near-ai/provision/bind/finish",Some(&json!({
+        "ceremony_id":started.ceremony_id,"code_verifier":verifier,"device_public_key":identity.public_key_b64,
+        "device_signature":signature,"access_token":token.access_token,
+    }))).await?;
+    let outcome = result
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("account-bind-invalid"))?
+        .to_string();
+    let state = result
+        .get("binding_state")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("account-bind-invalid"))?
+        .to_string();
+    let finished: Finished =
+        serde_json::from_value(result).map_err(|_| anyhow!("account-bind-invalid"))?;
+    let returned_id =
+        uuid::Uuid::parse_str(&finished.account_id).map_err(|_| anyhow!("account-bind-invalid"))?;
+    match outcome.as_str() {
+        "bound" if state == "bound" && returned_id == account_id => {}
+        "existing_account"
+            if matches!(state.as_str(), "bound" | "legacy") && returned_id != account_id => {}
+        _ => bail!("account-bind-invalid"),
+    }
+    // First enrollment is atomic with the replacement account session. A
+    // bound result keeps this account; existing_account intentionally switches
+    // account and does not claim that the newly created passkey moved.
+    persist(
+        &shared.store,
+        Commons {
+            ingest_url: origin,
+            issuer_url: &prepared.issuer_url,
+            audience: &prepared.audience,
+            witness: prepared.witness,
+            receipt_endpoint: prepared.receipt_endpoint,
+        },
+        &identity,
+        finished,
+        Some(&account.snapshot),
+    )?;
+    Ok(json!({"outcome":outcome,"binding_state":state}))
+}
+
+pub(super) fn bind_device_proof(
+    identity: &DeviceIdentity,
+    ceremony_id: &str,
+    nonce_wire: &str,
+    challenge: &str,
+    expires_at: i64,
+    now: i64,
+    account_id: &uuid::Uuid,
+) -> Result<String> {
+    // Reuse provisioning's freshness and encoding validation, but discard its
+    // signature: the signed bytes below are the distinct bind contract.
+    device_proof_for_ceremony(
+        identity,
+        ceremony_id,
+        nonce_wire,
+        challenge,
+        expires_at,
+        now,
+    )?;
+    let nonce: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(nonce_wire)?
+        .try_into()
+        .map_err(|_| anyhow!("account-bind-invalid"))?;
+    let device: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(&identity.public_key_b64)?
+        .try_into()
+        .map_err(|_| anyhow!("account-bind-invalid"))?;
+    Ok(identity.sign_b64(
+        &trace_commons_protocol::onboarding::near_ai_bind_device_bytes(
+            &nonce,
+            ceremony_id,
+            &device,
+            challenge,
+            expires_at,
+            account_id,
+        ),
+    ))
+}

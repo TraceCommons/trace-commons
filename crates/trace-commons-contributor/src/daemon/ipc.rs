@@ -290,6 +290,19 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "account_bind",
+    "account_binding",
+    "account_session_status",
+    "account_sign_in",
+    "account_sign_out",
+    "passkey_add_begin",
+    "passkey_add_complete",
+    "passkey_cancel",
+    "passkey_create_begin",
+    "passkey_create_complete",
+    "passkey_login_begin",
+    "passkey_login_complete",
+    "passkey_state",
     "acknowledge_arming_rewordings",
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
@@ -506,6 +519,7 @@ pub struct GateHeld {
 
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
+    pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
     pub store: ConfigStore,
     pub queue: Mutex<Queue>,
     pub policy: Mutex<ProjectPolicy>,
@@ -841,6 +855,7 @@ impl DaemonShared {
                 super::private_inference::PrivateInferenceState::Off,
             )),
             harness_plans: super::harness::PlanStore::default(),
+            native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
         })
     }
@@ -2352,6 +2367,19 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("inference_summary", "inference-summary-requires-async"),
     ("set_private_ai", "private-ai-requires-async"),
     ("invite_lookup", "invite-lookup-requires-async"),
+    ("account_bind", "identity-requires-async"),
+    ("account_binding", "identity-requires-async"),
+    ("account_session_status", "identity-requires-async"),
+    ("account_sign_in", "identity-requires-async"),
+    ("account_sign_out", "identity-requires-async"),
+    ("passkey_add_begin", "identity-requires-async"),
+    ("passkey_add_complete", "identity-requires-async"),
+    ("passkey_cancel", "identity-requires-async"),
+    ("passkey_create_begin", "identity-requires-async"),
+    ("passkey_create_complete", "identity-requires-async"),
+    ("passkey_login_begin", "identity-requires-async"),
+    ("passkey_login_complete", "identity-requires-async"),
+    ("passkey_state", "identity-requires-async"),
     (
         "prepare_admission_session",
         "admission-setup-requires-async",
@@ -4062,6 +4090,20 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "inference_summary" => super::network_data::handle_summary(shared, req).await,
         "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
         "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
+        "account_bind" => super::native_identity::handle(shared, req).await,
+        "account_binding" => super::native_identity::handle(shared, req).await,
+        "account_session_status" => super::native_identity::handle(shared, req).await,
+        "account_sign_in" => super::native_identity::handle(shared, req).await,
+        "account_sign_out" => super::native_identity::handle(shared, req).await,
+        "passkey_add_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_add_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_cancel" => super::native_identity::handle(shared, req).await,
+        "passkey_create_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_create_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_login_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_login_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_state" => super::native_identity::handle(shared, req).await,
+
         "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
         "prepare_admission_session" => super::native_flow::admission_response(
             super::admission_setup::handle_prepare_admission_session(shared, req).await,
@@ -13313,7 +13355,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 40);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 53);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -13665,6 +13707,18 @@ mod tests {
         assert_eq!(PROBE_UNREACHABLE, "unreachable");
     }
 
+    #[tokio::test]
+    async fn native_identity_no_config_status_and_logout_are_available() {
+        let s = shared();
+        let status =
+            handle_request_async(&s, &req("account_session_status", serde_json::json!({}))).await;
+        assert_eq!(status.result.unwrap()["signed_in"], false);
+        let logout =
+            handle_request_async(&s, &req("account_sign_out", serde_json::json!({}))).await;
+        assert_eq!(logout.result.unwrap()["signed_out"], true);
+        assert!(s.store.load_config().unwrap().is_none());
+    }
+
     /// `hello`'s method list and the dispatchers are one contract, checked
     /// here in BOTH directions against this file's own source.
     ///
@@ -13743,7 +13797,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 58, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 47, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 60, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

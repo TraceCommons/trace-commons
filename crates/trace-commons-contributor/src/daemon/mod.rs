@@ -53,6 +53,7 @@ pub mod ironwire_pointer;
 pub(crate) mod legacy_migration;
 pub mod mission_catalogue;
 pub mod native_flow;
+mod native_identity;
 pub mod nearai_credential;
 pub mod nearai_onboarding;
 mod network_data;
