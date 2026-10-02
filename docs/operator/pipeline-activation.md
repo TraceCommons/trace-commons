@@ -874,7 +874,7 @@ to start on the first failure:
 | The package is a policy family the runtime runs. | `pipeline_tenant_bundle_not_runnable` |
 | A compatibility package holds `main`'s gate configuration (floors, top-k, chunk knobs, index-insert threshold, delta). | `pipeline_runtime_main_gate_config_mismatch` |
 | A compatibility package has the pipeline's issuer configured. | `pipeline_credit_issuer_principal_missing` |
-| A compatibility package is qualifiable, unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. | `pipeline_runtime_dependencies_not_production_qualified` |
+| The package passes the default package's qualification gate, unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set: every dependency it names is production-qualified (the runtime may hold one that is not, as long as its default package does not name it), and a compatibility package's configuration is qualifiable. | `pipeline_runtime_dependencies_not_production_qualified` |
 | The tenant's bundles can be read. | `pipeline_tenant_bundle_unreadable` |
 
 To change a value the default package carries (a floor, the threshold, the

@@ -7222,11 +7222,16 @@ impl PipelineService {
     /// tenant keeps when the default package changes
     /// (`activate_bundle_if_none`). Each gets the checks ingest gives the
     /// default package at assembly: its dependencies resolve (`construct`),
-    /// and a compatibility package holds `main`'s gate configuration
-    /// (`main_gate`), has the pipeline's credit issuer, and, with
-    /// `require_qualifiable`, is qualifiable. The error is the first
-    /// failure's label, the default package check's where they share one;
-    /// ingest refuses to start on it.
+    /// a compatibility package holds `main`'s gate configuration
+    /// (`main_gate`) and has the pipeline's credit issuer, and, with
+    /// `require_qualifiable`, the package passes the default package's
+    /// qualification gate: its own bundle qualification
+    /// (`bundle_qualification`, decision P4-D7), every dependency it names
+    /// and its configuration term. P4-D7 lets the service hold a dependency
+    /// that is not production-qualified while the default package does not
+    /// name it, so a tenant bundle that names one is refused here. The error
+    /// is the first failure's label, the default package check's where they
+    /// share one; ingest refuses to start on it.
     pub async fn check_tenant_bundles(
         &self,
         tenant_id: &str,
@@ -7274,9 +7279,16 @@ impl PipelineService {
             if self.novelty_utility_checks.issuer_principal_ref.is_none() {
                 return Err("pipeline_credit_issuer_principal_missing");
             }
-            if require_qualifiable && !config.is_qualifiable() {
-                return Err("pipeline_runtime_dependencies_not_production_qualified");
-            }
+        }
+        // The default package's gate (`pipeline_runtime_is_production_qualified`
+        // in ingest): the bundle qualification of this package, which also
+        // carries the configuration term (`bundle_configuration_not_qualifiable`).
+        if require_qualifiable
+            && !self
+                .bundle_qualification(package)
+                .is_ok_and(|qualification| qualification.is_production_qualified())
+        {
+            return Err("pipeline_runtime_dependencies_not_production_qualified");
         }
         Ok(())
     }

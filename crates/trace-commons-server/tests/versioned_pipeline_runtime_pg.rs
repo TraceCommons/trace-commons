@@ -25882,6 +25882,93 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
     );
 }
 
+/// PR 4's per-bundle qualification (decision P4-D7) under PR 3's tenant
+/// bundle check (dc8b68cd): startup gives every bundle a routed or drained
+/// tenant may run the default package's qualification gate, not only its
+/// configuration term. P4-D7 lets a service hold a scorer that is not
+/// production-qualified as long as its default bundle does not name it, so
+/// a tenant whose active bundle names that scorer is refused without test
+/// dependencies (`pipeline_runtime_dependencies_not_production_qualified`)
+/// although its configuration is qualifiable, and passes with them. A tenant
+/// on the service's fully qualified default bundle passes either way.
+#[tokio::test]
+async fn startup_qualifies_every_bundle_a_tenant_may_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let qualified_scorer = Arc::new(QualifiedProductionScorer(ReferencePerplexityScorer::new()));
+    let unqualified_scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(QualifiedProductionEmbedder(ReferenceEmbedder::new()));
+    let config = production_compatible_config();
+    let gate = main_gate_of(&config);
+    let service_over = |scorer: &dyn IdentifiedPerplexityScorer| {
+        let package =
+            MinimalPolicyBundle::compatibility_package(&config, scorer, embedder.as_ref())
+                .expect("production-compatible bundle package builds");
+        let index = Arc::new(QualifiedProductionIndex(IsolatedPipelineIndex::new()));
+        let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedProductionSettlementAdapter {
+            instrument_id: InstrumentId::trace_credit(),
+        });
+        PipelineServiceBuilder::new(
+            backend.clone(),
+            artifact_store(&dir),
+            package,
+            index.clone(),
+            index,
+            SettlementAdapterRegistry::new(vec![adapter]).expect("build the adapter registry"),
+            PipelineCaps {
+                per_instrument_atomic_units: BTreeMap::new(),
+            },
+        )
+        .with_scorer(qualified_scorer.clone())
+        .with_scorer(unqualified_scorer.clone())
+        .with_embedder(embedder.clone())
+        .with_authority(Arc::new(QualifiedProductionAuthority))
+        .with_privacy(Arc::new(QualifiedProductionPrivacy))
+        .with_novelty_utility_checks(issuing_checks())
+        .build()
+        .expect("build the pipeline service")
+    };
+    let service = service_over(qualified_scorer.as_ref());
+    let other = service_over(unqualified_scorer.as_ref());
+    let label = |result: anyhow::Result<()>| result.unwrap_err().to_string();
+
+    let qualified_tenant = format!("startup-qualified-bundle-{}", uuid::Uuid::new_v4());
+    service
+        .register_default_bundle(&qualified_tenant)
+        .await
+        .unwrap();
+    service
+        .check_tenant_bundles(&qualified_tenant, &gate, true)
+        .await
+        .expect("the qualified default bundle passes without test dependencies");
+
+    let tenant = format!("startup-unqualified-bundle-{}", uuid::Uuid::new_v4());
+    other.register_default_bundle(&tenant).await.unwrap();
+    assert!(
+        trace_commons_server::versioned_pipeline_bundle::package_configuration_is_qualifiable(
+            other.default_package()
+        ),
+        "the configuration term alone passes"
+    );
+    assert!(
+        !service
+            .bundle_qualification(other.default_package())
+            .is_ok_and(|qualification| qualification.is_production_qualified()),
+        "the bundle names a scorer that is not production-qualified"
+    );
+    assert_eq!(
+        label(service.check_tenant_bundles(&tenant, &gate, true).await),
+        "pipeline_runtime_dependencies_not_production_qualified",
+        "a tenant bundle gets the default package's qualification gate"
+    );
+    service
+        .check_tenant_bundles(&tenant, &gate, false)
+        .await
+        .expect("test dependencies allowed");
+}
+
 /// Finding 16, first bullet: the payout pays only a leg Score seeded for
 /// the batches Settle writes now -- a batch line under the account's
 /// settlement key, carrying the account's hold (`payout_eligible`). A
