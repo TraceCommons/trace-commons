@@ -2027,11 +2027,27 @@ async fn a_missing_gate_decision_blocks_the_drain_only_when_the_gate_driver_runs
         "quarantined"
     );
     assert_eq!(fixture.runs_of(tenant, quarantined.submission_id).await, 0);
-    // What the gate driver selects, plus X: the number of legacy submissions
-    // with an envelope and no decision.
+    // The gate driver selects W and the quarantined submission Q (each has an
+    // envelope and no decision, and the driver's selection has no status
+    // filter); X is at its ceiling and is not selected. Three submissions
+    // have an envelope and no decision.
+    let mut expected_selected = vec![waiting.submission_id, quarantined.submission_id];
+    expected_selected.sort();
     let selected = fixture.gate_selected(tenant).await;
-    assert!(selected.contains(&waiting.submission_id));
-    let absent = selected.len() as u64 + 1;
+    assert_eq!(
+        selected, expected_selected,
+        "the gate driver selects exactly W and Q"
+    );
+    let three = vec![
+        waiting.submission_id,
+        at_ceiling.submission_id,
+        quarantined.submission_id,
+    ];
+    assert_eq!(
+        fixture.rows_without_a_gate_decision(tenant, &three).await,
+        3
+    );
+    let absent = 3;
     let off_quarantine = fixture.report_driver_off(tenant).await;
     assert_counts_driver_off(
         &off_quarantine,
@@ -2041,7 +2057,6 @@ async fn a_missing_gate_decision_blocks_the_drain_only_when_the_gate_driver_runs
     );
     assert!(!off_quarantine.drained);
     assert_eq!(off_quarantine.pending["quarantine_review_pending"], 1);
-    assert!(off_quarantine.not_blocking[ABSENT_LABEL] >= 2);
     let on_quarantine = fixture.report(tenant).await;
     assert_counts(
         &on_quarantine,

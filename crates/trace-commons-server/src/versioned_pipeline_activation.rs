@@ -206,10 +206,10 @@ pub struct ReceiptOwnership {
 /// `pending` holds every one of the ten labels that `legacy_drain_report`
 /// lists, a zero too, so a missing key never reads as "nothing owed". It holds
 /// them in both modes of the gate driver. `not_blocking` holds the one label
-/// `gate_decision_absent`, a zero too: the legacy submissions that have no gate
-/// decision, counted only when the caller says that the gate driver is off
-/// (`gate_driver_enabled` false), because then no code makes the decision and
-/// it is not work that the legacy path owes. `evidence_hash` is the canonical
+/// `gate_decision_absent`, a zero too: the legacy submissions with an active
+/// submitted envelope that have no gate decision, counted only when the caller
+/// says that the gate driver is off (`gate_driver_enabled` false), because then
+/// no code makes the decision and it is not work that the legacy path owes. `evidence_hash` is the canonical
 /// hash (`evidence_hash`) of `{"schema": "trace_commons.pipeline_legacy_drain.v1",
 /// "gate_driver_enabled": gate_driver_enabled, "pending": pending,
 /// "not_blocking": not_blocking}`: the same counts in the same mode give the
@@ -222,8 +222,10 @@ pub struct LegacyDrainReport {
     pub routing_state: Option<RoutingState>,
     /// The mode of this report: true when the caller said that the
     /// deployment runs the gate driver (`Some(ceiling)`), false when it said
-    /// that the driver is off (`None`). The two modes of the same rows give
-    /// different `pending`, `not_blocking`, and `evidence_hash`.
+    /// that the driver is off (`None`). The two modes of the same rows always
+    /// give a different `evidence_hash`; they give different `pending` and
+    /// `not_blocking` only when a legacy submission with an active submitted
+    /// envelope has no gate decision.
     pub gate_driver_enabled: bool,
     /// What the legacy path owes. Every count in it blocks `drained`.
     pub pending: BTreeMap<String, u64>,
@@ -272,9 +274,11 @@ struct LegacyDrainCount {
     counted: DrainCounted,
 }
 
-/// The ten counts that block `drained` and the one that does not, each the
-/// predicate of the legacy worker that does the work, with the tenant filter
-/// and "no pipeline run owns the submission"
+/// The ten counts that block `drained`, each the predicate of the legacy
+/// worker that does the work, and the one that does not, `gate_decision_absent`
+/// (the two gate counts without their attempts predicate: it runs only when
+/// the gate driver is off, so no worker does that work). Each has the tenant
+/// filter and "no pipeline run owns the submission"
 /// (`NOT EXISTS ... pipeline_runs`, the exclusion
 /// `list_submissions_needing_gate_decision` applies too: a pipeline receipt
 /// also writes a `trace_submissions` row, in the status `received`,
@@ -1077,7 +1081,12 @@ impl PipelineActivationStore {
     /// - `Some(ceiling)`: the deployment runs the gate driver with that
     ///   attempt ceiling. `gate_decision_pending` and `gate_decision_exhausted`
     ///   are counted as above, `not_blocking["gate_decision_absent"]` is 0, and
-    ///   `gate_driver_enabled` is true.
+    ///   `gate_driver_enabled` is true. `gate_decision_pending` is every legacy
+    ///   submission below the ceiling with an envelope and no decision,
+    ///   accepted or not, and legacy code clears it: the in-process gate
+    ///   driver, or a `/v1/workers/gate/evaluate` call that names the
+    ///   submission, scores it. It is therefore not listed below among the
+    ///   counts that wait for a person; `gate_decision_exhausted` is.
     /// - `None`: the gate driver is off. `gate_decision_pending` and
     ///   `gate_decision_exhausted` are 0. `not_blocking["gate_decision_absent"]`
     ///   is the number of legacy submissions with an active submitted envelope
@@ -1099,14 +1108,6 @@ impl PipelineActivationStore {
     /// Counts that can stay above zero without legacy code ever clearing
     /// them, so that an operator reads them as work for a person:
     ///
-    /// - `gate_decision_pending` is counted only when the caller says that the
-    ///   gate driver runs (`Some`); it is every legacy submission below the
-    ///   ceiling with an envelope and no decision, accepted or not, and it
-    ///   clears only when the in-process gate driver scores the submission.
-    ///   With the driver off, nothing scores one by itself and the same
-    ///   submissions are `not_blocking["gate_decision_absent"]`;
-    ///   `/v1/workers/gate/evaluate` can still score a submission that its
-    ///   caller names, in either mode.
     /// - `gate_decision_exhausted` (only with the gate driver on) and
     ///   `awaiting_pii_backstop` after the attempts ran out: the driver stops,
     ///   and an operator resets the attempt row or accepts the loss.
@@ -1585,5 +1586,26 @@ mod tests {
             ),
             Err(DatabaseError::Constraint(label)) if label == ACTIVATION_ACTOR_INVALID_LABEL
         ));
+    }
+
+    /// The table pairs each statement with the mode that supplies its
+    /// parameters: a statement that takes the gate ceiling (`$2`) is taken
+    /// only when the caller gave one, and no other statement is; and exactly
+    /// one entry goes into `not_blocking`.
+    #[test]
+    fn the_drain_table_takes_the_gate_ceiling_only_with_the_gate_driver() {
+        let mut not_blocking = Vec::new();
+        for count in &LEGACY_DRAIN_COUNTS {
+            assert_eq!(
+                matches!(count.params, DrainParams::TenantAndGateCeiling),
+                matches!(count.counted, DrainCounted::BlockingWhenGateDriverRuns),
+                "{}: a statement takes the ceiling if and only if it is counted with the gate driver",
+                count.label
+            );
+            if matches!(count.counted, DrainCounted::NotBlockingWhenGateDriverIsOff) {
+                not_blocking.push(count.label);
+            }
+        }
+        assert_eq!(not_blocking, vec!["gate_decision_absent"]);
     }
 }
