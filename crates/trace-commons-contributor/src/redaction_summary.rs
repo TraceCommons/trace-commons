@@ -115,6 +115,28 @@ pub fn rows(
     grouped.into_iter().partition(|row| is_removal(&row.family))
 }
 
+/// The whole panel, as every shell reads it: `removed` renders under
+/// "Removed", `still_present` under its own heading in the attention tone.
+#[derive(serde::Serialize)]
+pub struct SummaryCopy {
+    pub removed: Vec<Row>,
+    pub still_present: Vec<Row>,
+}
+
+/// [`rows`] as one serializable table, so a shell receives both lists by
+/// name and cannot swap them.
+#[must_use]
+pub fn summary_copy(
+    occurrences: &BTreeMap<String, u32>,
+    distinct: &BTreeMap<String, u32>,
+) -> SummaryCopy {
+    let (removed, still_present) = rows(occurrences, distinct);
+    SummaryCopy {
+        removed,
+        still_present,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +291,27 @@ mod tests {
             &map(&[]),
         );
         assert_eq!(still[0].detail, ["events.3.tool_result"]);
+    }
+
+    #[test]
+    fn the_summary_table_names_both_lists_and_keeps_them_apart() {
+        let copy = summary_copy(
+            &map(&[
+                ("secret:aws", 2),
+                ("residual_secret_at:events.3.correction", 1),
+            ]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(copy.removed.len(), 1);
+        assert_eq!(copy.removed[0].family, "secret");
+        assert_eq!(copy.still_present.len(), 1);
+        assert_eq!(copy.still_present[0].family, RESIDUAL_PREFIX);
+        let value = serde_json::to_value(&copy).unwrap();
+        assert_eq!(value["removed"][0]["occurrences"], 2);
+        assert_eq!(
+            value["still_present"][0]["detail"][0],
+            "events.3.correction"
+        );
+        assert_eq!(value.as_object().unwrap().len(), 2);
     }
 }

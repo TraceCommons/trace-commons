@@ -5192,6 +5192,385 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
     })
 }
 
+// ---------------------------------------------------------------------------
+// K3 (#1173): the copy commands that reached only Tauri. Each export below
+// is the C ABI route to a sentence, or a table of them, the contributor core
+// already assembles; none of them chooses or writes a word of its own.
+// ---------------------------------------------------------------------------
+
+/// Borrow an optional C string: NULL, or bytes that are not UTF-8, read as
+/// `None` so a copy export can answer its own fallback rather than fail.
+///
+/// # Safety
+/// `ptr`, if non-null, must point to a valid, NUL-terminated C string.
+unsafe fn borrow_optional_str<'a>(ptr: *const c_char) -> Option<&'a str> {
+    if ptr.is_null() {
+        return None;
+    }
+    unsafe { borrow_str(ptr) }.ok()
+}
+
+/// A JSON object of `label -> count`, as the daemon's `redaction_counts` and
+/// `redactions_distinct` carry them. `None` for anything that is not one.
+fn parse_count_map(text: &str) -> Option<std::collections::BTreeMap<String, u32>> {
+    serde_json::from_str(text).ok()
+}
+
+/// The line shown when a session carries secrets that were found and left
+/// in what would be sent (`preview_copy::residual_secret_line`).
+///
+/// `count` is the number of detection SITES, not of secrets: the sentence
+/// never names a number of secrets, because one site can hold more than one.
+/// `sites_json`, if non-null, is a JSON array of the sites' schema paths
+/// (`events.3.correction`), named in the sentence in the order given; NULL,
+/// or anything that is not an array of strings, names none.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `sites_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_residual_secret_line_text(
+    count: u32,
+    sites_json: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let sites: Vec<String> = unsafe { borrow_optional_str(sites_json) }
+            .and_then(|text| serde_json::from_str(text).ok())
+            .unwrap_or_default();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::preview_copy::residual_secret_line(count, &sites),
+        ))
+    })
+}
+
+/// The preview's removed-summary panel (`redaction_summary::summary_copy`):
+/// a JSON object `{"removed": [row], "still_present": [row]}`, each row
+/// `{family, display, description, occurrences, distinct, detail}`.
+///
+/// `redactions_json` is the preview summary's `redaction_counts` object and
+/// `distinct_json` its `redactions_distinct` object, both passed through as
+/// the daemon sent them. A NULL or unparseable `distinct_json` reads as no
+/// distinct counts, which the rows report as zero ("not measured").
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS: which family is a removal and
+/// which is a secret still present, the grouping by family, the order and
+/// every description are the core's. A shell renders the two lists under
+/// their own headings and decides none of it.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unparseable `redactions_json`, and on a caught panic.
+///
+/// # Safety
+/// `redactions_json` and `distinct_json`, if non-null, must each point to a
+/// valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_redaction_summary_json(
+    redactions_json: *const c_char,
+    distinct_json: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(redactions) =
+            unsafe { borrow_optional_str(redactions_json) }.and_then(parse_count_map)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let distinct = unsafe { borrow_optional_str(distinct_json) }
+            .and_then(parse_count_map)
+            .unwrap_or_default();
+        let copy =
+            trace_commons_contributor::redaction_summary::summary_copy(&redactions, &distinct);
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The ignore-project control and its confirmation for one project
+/// (`project_copy::ignore_project_copy`): a JSON object
+/// `{title, body, button, tooltip}`.
+///
+/// `project_label` is the label the queue shows for the project; `pending`
+/// is how many of its sessions the confirmation will say it removes, as this
+/// shell's queue shows them. A negative `pending` clamps to 0, which no
+/// honest caller sends.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL or non-UTF-8 `project_label`, and on a caught panic.
+///
+/// # Safety
+/// `project_label`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_project_ignore_copy_json(
+    project_label: *const c_char,
+    pending: i64,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(label) = (unsafe { borrow_optional_str(project_label) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let copy = trace_commons_contributor::project_copy::ignore_project_copy(
+            label,
+            usize::try_from(pending).unwrap_or(0),
+        );
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// What is said after an ignore when the daemon removed a different number
+/// of waiting sessions than the confirmation named
+/// (`project_copy::ignore_project_reconciled`).
+///
+/// `promised` is the count the confirmation stated; `purged` is the
+/// daemon's `purged` answer, which is the authority. Negative values clamp
+/// to 0.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. The EMPTY
+/// STRING when the two agree, which is the ordinary case and says nothing.
+/// NULL for a NULL or non-UTF-8 `project_label`, and on a caught panic.
+///
+/// # Safety
+/// `project_label`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_project_ignore_reconciled_text(
+    project_label: *const c_char,
+    promised: i64,
+    purged: i64,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(label) = (unsafe { borrow_optional_str(project_label) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let line = trace_commons_contributor::project_copy::ignore_project_reconciled(
+            label,
+            usize::try_from(promised).unwrap_or(0),
+            u64::try_from(purged).unwrap_or(0),
+        );
+        Ok(to_owned_cstring(line.as_deref().unwrap_or("")))
+    })
+}
+
+/// The arming offer and the arming confirmation for one project
+/// (`project_copy::arming_offer_copy`): a JSON object
+/// `{evidence, question, confirm, decline, body, body_with_backlog,
+/// customize}`, `customize` being Customize's table (K5).
+///
+/// `project_label` is the project's label and `count` how many times the
+/// contributor has contributed from it (`arming_suggestion`'s
+/// `contributed_count`). A confirmation shown from Settings, where no count
+/// is in hand, passes 0 and does not render `evidence`. `body` is the
+/// from-now confirmation; `body_with_backlog` the one for
+/// `set_project_mode`'s `include_backlog`.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL or non-UTF-8 `project_label`, and on a caught panic.
+///
+/// # Safety
+/// `project_label`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_arming_offer_copy_json(
+    project_label: *const c_char,
+    count: u32,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(label) = (unsafe { borrow_optional_str(project_label) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let copy = trace_commons_contributor::project_copy::arming_offer_copy(label, count);
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The offer to move a legacy invite identity to a NEAR AI account
+/// (`consent_copy::legacy_migration_offer`), as a JSON object of
+/// `LegacyMigrationOfferCopy`'s fields. Shown only while
+/// `status.legacy_invite_migration.offered` is true.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_legacy_migration_offer_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::legacy_migration_offer();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The sentence for a refused `legacy_invite_migrate`
+/// (`consent_copy::legacy_migration_refusal_line`), from the IPC error's
+/// label. A label this build does not know, and a NULL or non-UTF-8 one, get
+/// the core's own fallback sentence, so no shell words a refusal itself.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_legacy_migration_refusal_text(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = unsafe { borrow_optional_str(label) }.unwrap_or("");
+        Ok(to_owned_cstring(
+            trace_commons_contributor::consent_copy::legacy_migration_refusal_line(label),
+        ))
+    })
+}
+
+/// The glass monitor's Traces words (`preview_copy::monitor_traces_copy`):
+/// a JSON object of `MonitorTracesCopy`'s fields.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_monitor_traces_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::preview_copy::monitor_traces_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The Traces badge's text equivalent
+/// (`preview_copy::decisions_owed_text`). A negative `decisions_owed` is an
+/// unknown count, which is never read as zero.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. The EMPTY
+/// STRING for zero (no badge). NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_decisions_owed_text(decisions_owed: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let count = u64::try_from(decisions_owed).ok();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::preview_copy::decisions_owed_text(count),
+        ))
+    })
+}
+
+/// The connecting-inference step's sentences (K12,
+/// `consent_copy::inference_connection_copy`), as a JSON object of
+/// `InferenceConnectionCopy`'s fields.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_inference_connection_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::inference_connection_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The Flow 1 grant screens' sentences
+/// (`consent_copy::automatic_contribution_copy`), as a JSON object of
+/// `AutomaticGrantCopy`'s fields, for the contributor configuration in
+/// `config_dir`.
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS: the core chooses the disclosure
+/// (R1) and exactly one of `patterns_only` and `model_scrubbed` is present.
+/// A shell renders the one it is given and never reads `auto_scrub_*` to
+/// pick.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL or non-UTF-8 `config_dir`, a state directory or configuration that
+/// cannot be read, and on a caught panic.
+///
+/// # Safety
+/// `config_dir`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_automatic_contribution_copy_json(
+    config_dir: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(dir) = (unsafe { borrow_optional_str(config_dir) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(store) = ConfigStore::open(std::path::PathBuf::from(dir)) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(config) = store.load_config() else {
+            return Ok(std::ptr::null_mut());
+        };
+        let copy =
+            trace_commons_contributor::consent_copy::automatic_contribution_copy(config.as_ref());
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The quit prompt that is true for the process holding `handle`
+/// (`quit_copy::quit_prompt`), as a JSON object
+/// `{role, title, body, confirm, cancel}`.
+///
+/// The role is read off the handle, not asked of the shell: a handle that
+/// runs the daemon in this process is `hosting` (quitting stops the
+/// watcher), one attached to a daemon another process runs is `attached`
+/// (the watcher keeps running, and keeps sending), and a NULL handle, one
+/// that is not live (recorded as `invalid-handle-pointer` via
+/// `tc_last_error`), or one whose daemon has stopped is `unavailable`.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+///
+/// # Safety
+/// `handle`, if non-null, must be a `tc_handle*` from `tc_daemon_start*` or
+/// `tc_daemon_attach` that has not been passed to `tc_handle_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_quit_prompt_json(handle: *const tc_handle) -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
+        // A pointer that is not a live handle records
+        // `invalid-handle-pointer` and is answered as no watcher, which is
+        // then the true prompt: nothing this process holds is watching.
+        let role = if handle.is_null() || !handle_pointer_is_live(handle) {
+            QuitRole::Unavailable
+        } else {
+            let handle = unsafe { &*handle };
+            match attached_of(handle) {
+                Some(attached) if !attached.is_closed() => QuitRole::Attached,
+                Some(_) => QuitRole::Unavailable,
+                None if shared_of(handle).is_some() => QuitRole::Hosting,
+                None => QuitRole::Unavailable,
+            }
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&quit_prompt(
+            role,
+        ))?))
+    })
+}
+
+/// The withdrawal confirmation for a trace whose reach this machine cannot
+/// know (`withdraw::confirmation_prompt_unknown`): the question, what
+/// withdrawing does, that distributed copies cannot be recalled, and what
+/// happens to credit, as one text with paragraphs separated by a blank line.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_withdrawal_confirmation_prompt_text() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::withdraw::confirmation_prompt_unknown(),
+        ))
+    })
+}
+
+/// The extra privacy scan's words (`privacy_scan_copy::privacy_scan_copy`),
+/// for onboarding's scan screen and the recovery prompt shown while the
+/// daemon holds uploads for `near-ai-notice-not-acknowledged`, as a JSON
+/// object of `PrivacyScanCopy`'s fields.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_privacy_scan_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::privacy_scan_copy::privacy_scan_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// Can this process reach the Cloud credential store?
 ///
 /// Exists so a release pipeline can ask a *signed bundle* the question, which

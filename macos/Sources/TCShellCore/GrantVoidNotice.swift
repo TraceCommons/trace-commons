@@ -41,6 +41,14 @@ public struct GrantVoidWire: Decodable, Equatable, Sendable {
     }
 }
 
+/// Encodes the element back exactly as it came, so a model that carries
+/// `GrantVoidWire` (`DaemonData.Status`) can still be `Codable`.
+extension GrantVoidWire: Encodable {
+    public func encode(to encoder: Encoder) throws {
+        try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)).encode(to: encoder)
+    }
+}
+
 /// A JSON value, kept whole so an element can go back to the core as it came.
 enum JSONValue: Codable, Equatable {
     case null

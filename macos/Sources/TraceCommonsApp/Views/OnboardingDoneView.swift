@@ -86,6 +86,7 @@ struct OnboardingDoneContent: View {
             Text(Notifier.copy?.notificationDenied ?? "")
                 .font(.callout).foregroundStyle(.secondary)
             Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
+                .tint(TC.accentText)
         } else if Notifier.canPostDigest(notificationStatus) {
             Text(Notifier.copy?.notificationAllowed ?? "")
                 .font(.callout).foregroundStyle(.secondary)

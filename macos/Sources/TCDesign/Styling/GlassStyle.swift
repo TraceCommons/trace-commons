@@ -32,14 +32,12 @@ public enum GlassStatus: Sendable, Equatable {
 
 private struct GlassTypeModifier: ViewModifier {
     let style: GlassTypeStyle
-    /// Read so the modifier re-runs when the system text size changes:
-    /// leading and tracking are resolved against the drawn size, which
-    /// AppKit has already scaled, so the value itself is not applied again.
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    // Leading and tracking are resolved against the size AppKit draws the
+    // text style at. SwiftUI's `dynamicTypeSize` does not scale macOS text
+    // styles, so it is not read here.
     func body(content: Content) -> some View {
-        _ = dynamicTypeSize
-        return content
+        content
             .font(style.font)
             .tracking(style.resolvedTracking)
             .lineSpacing(style.lineSpacing)
@@ -226,24 +224,56 @@ private struct GlassSurfaceModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
-        let native = (floating ?? (layer == .floating)) && !reduceTransparency
-        if native {
+        switch GlassSurfaceBacking.choose(floating: floating ?? (layer == .floating), reduceTransparency: reduceTransparency) {
+        case .liquidGlass:
             if #available(macOS 26.0, *) {
+                // The interactive glass gives the press its own response, so
+                // no tier fill is drawn to darken here.
                 content
                     .clipShape(shape)
                     .glassEffect(tier.floatingGlass, in: shape)
                     .contentShape(shape)
             } else {
-                // Before 26: the painted tier over a real blur of what it
-                // floats on, so a popover or node card reads as glass and
-                // not as a flat translucent fill.
-                content
-                    .glassTier(tier, radius: radius)
-                    .background { GlassFloatingBlur(cornerRadius: radius ?? tier.radius) }
+                content.glassTier(tier, radius: radius)
             }
-        } else {
+        case .blur:
+            // Before 26: the painted tier over a real blur of what it
+            // floats on, so a popover or node card reads as glass and
+            // not as a flat translucent fill.
+            content
+                .glassTier(tier, radius: radius)
+                .background { GlassFloatingBlur(cornerRadius: radius ?? tier.radius) }
+        case .opaqueBase:
+            // Reduce Transparency: the painted tier over the opaque pane
+            // base, as `GlassPaneFill` does for a pane. The tiers' own fills
+            // are translucent (0.72-0.78, white at 7-14% for a control) and
+            // would show the map sharply through the text.
+            content
+                .glassTier(tier, radius: radius)
+                .background { shape.fill(GlassTokens.Color.paneOpaque.color) }
+        case .painted:
             content.glassTier(tier, radius: radius)
         }
+    }
+}
+
+/// What a surface is drawn over.
+enum GlassSurfaceBacking: Equatable {
+    /// Liquid Glass (macOS 26, floating).
+    case liquidGlass
+    /// The painted tier over a within-window blur (before 26, floating).
+    case blur
+    /// The painted tier over the opaque pane base (floating, Reduce
+    /// Transparency).
+    case opaqueBase
+    /// The painted tier alone, inside a pane that is its backing.
+    case painted
+
+    static func choose(floating: Bool, reduceTransparency: Bool) -> GlassSurfaceBacking {
+        guard floating else { return .painted }
+        if reduceTransparency { return .opaqueBase }
+        if #available(macOS 26.0, *) { return .liquidGlass }
+        return .blur
     }
 }
 

@@ -41,6 +41,15 @@ pub struct HfJsonlDataset {
 #[allow(dead_code)] // binary uses this; integration tests import only helper functions
 impl HfJsonlDataset {
     pub fn open(dataset_id: &str, cache_dir: Option<&Path>) -> anyhow::Result<Self> {
+        Self::open_at_revision(dataset_id, "main", cache_dir)
+    }
+
+    pub fn open_at_revision(
+        dataset_id: &str,
+        revision: &str,
+        cache_dir: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(!revision.trim().is_empty(), "HF dataset revision is empty");
         // `from_env()` honors `HF_HOME` and `HF_ENDPOINT`. The latter lets the
         // operator smoke harness redirect dataset discovery at a loopback mock
         // without rebuilding; production runs leave both unset and pick up the
@@ -50,7 +59,11 @@ impl HfJsonlDataset {
             builder = builder.with_cache_dir(dir.to_path_buf());
         }
         let api = builder.build().with_context(|| "build hf-hub api")?;
-        let repo = api.repo(Repo::new(dataset_id.to_string(), RepoType::Dataset));
+        let repo = api.repo(Repo::with_revision(
+            dataset_id.to_string(),
+            RepoType::Dataset,
+            revision.to_string(),
+        ));
 
         Ok(Self {
             dataset_id: dataset_id.to_string(),
