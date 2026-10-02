@@ -15,6 +15,12 @@ public enum GlassColor {
     public static var hairline: Color {
         GlassTokens.Color.hairline.adaptive(highContrast: GlassTokens.Color.hairlineHighContrast)
     }
+
+    /// An overlay at `alpha`: white over the dark appearance, black over the
+    /// light one, for strokes and fills drawn over a surface.
+    public static func ink(_ alpha: Double) -> Color {
+        GlassTokens.Color.ink.opacity(alpha).color
+    }
 }
 
 /// Status is carried by a dot and a label, never by a fill.

@@ -1,31 +1,72 @@
 import AppKit
 import SwiftUI
 
-/// An sRGB colour with alpha, as the token source states it.
+/// An sRGB colour with alpha, as the token source states it: its dark
+/// appearance value, and its light appearance value where the two differ.
+/// `color` follows the person's system appearance (light or dark) by itself.
 public struct GlassRGBA: Sendable, Equatable {
+    /// The dark appearance value.
     public let rgb: UInt32
     public let alpha: Double
+    /// The light appearance value; nil when it is the dark one.
+    public let lightRGB: UInt32?
+    public let lightAlpha: Double?
 
-    public init(_ rgb: UInt32, alpha: Double = 1) {
+    public init(_ rgb: UInt32, alpha: Double = 1, light: GlassRGBA? = nil) {
         self.rgb = rgb
         self.alpha = alpha
+        self.lightRGB = light?.rgb
+        self.lightAlpha = light?.alpha
     }
 
     public var red: Double { Double((rgb >> 16) & 0xFF) / 255 }
     public var green: Double { Double((rgb >> 8) & 0xFF) / 255 }
     public var blue: Double { Double(rgb & 0xFF) / 255 }
 
+    /// This colour in the light appearance.
+    public var light: GlassRGBA {
+        GlassRGBA(lightRGB ?? rgb, alpha: lightAlpha ?? alpha)
+    }
+
+    /// This colour in the dark appearance.
+    public var dark: GlassRGBA { GlassRGBA(rgb, alpha: alpha) }
+
+    /// The colour, light or dark with the person's system appearance.
     public var color: Color {
-        Color(.sRGB, red: red, green: green, blue: blue, opacity: alpha)
+        guard lightRGB != nil || lightAlpha != nil else {
+            return Color(.sRGB, red: red, green: green, blue: blue, opacity: alpha)
+        }
+        return Color(nsColor: dynamicNSColor)
     }
 
-    /// The same colour at a different alpha (tints, rings at 60%).
+    /// The same colour at a different alpha in both appearances (tints,
+    /// rings at 60%).
     public func opacity(_ alpha: Double) -> GlassRGBA {
-        GlassRGBA(rgb, alpha: alpha)
+        GlassRGBA(rgb, alpha: alpha, light: lightRGB.map { GlassRGBA($0, alpha: alpha) })
     }
 
+    /// The dark appearance value as an `NSColor`.
     var nsColor: NSColor {
         NSColor(srgbRed: red, green: green, blue: blue, alpha: alpha)
+    }
+
+    /// The colour as a system dynamic colour: resolved per appearance.
+    var dynamicNSColor: NSColor {
+        let dark = nsColor
+        let light = self.light.nsColor
+        return NSColor(name: nil) { appearance in
+            GlassRGBA.isLight(appearance) ? light : dark
+        }
+    }
+
+    /// Whether an appearance is a light one (aqua, or its high-contrast and
+    /// vibrant variants).
+    static func isLight(_ appearance: NSAppearance) -> Bool {
+        let match = appearance.bestMatch(from: [
+            .darkAqua, .vibrantDark, .accessibilityHighContrastDarkAqua, .accessibilityHighContrastVibrantDark,
+            .aqua, .vibrantLight, .accessibilityHighContrastAqua, .accessibilityHighContrastVibrantLight,
+        ])
+        return match.map { !$0.rawValue.contains("Dark") } ?? false
     }
 
     /// This colour, or `highContrast` when the person has turned on Increase
@@ -42,10 +83,11 @@ public struct GlassRGBA: Sendable, Equatable {
         highContrast: GlassRGBA,
         increases: @escaping (NSAppearance) -> Bool = GlassRGBA.increasesContrast
     ) -> NSColor {
-        let base = nsColor
-        let increased = highContrast.nsColor
+        let base = (dark: nsColor, light: light.nsColor)
+        let increased = (dark: highContrast.nsColor, light: highContrast.light.nsColor)
         return NSColor(name: nil) { appearance in
-            increases(appearance) ? increased : base
+            let pair = increases(appearance) ? increased : base
+            return GlassRGBA.isLight(appearance) ? pair.light : pair.dark
         }
     }
 
@@ -73,8 +115,8 @@ public struct GlassStop: Sendable, Equatable {
     public let color: GlassRGBA
     public let location: CGFloat
 
-    public init(_ rgb: UInt32, alpha: Double, at location: CGFloat) {
-        self.color = GlassRGBA(rgb, alpha: alpha)
+    public init(_ rgb: UInt32, alpha: Double, at location: CGFloat, light: GlassRGBA? = nil) {
+        self.color = GlassRGBA(rgb, alpha: alpha, light: light)
         self.location = location
     }
 }

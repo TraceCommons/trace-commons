@@ -170,7 +170,7 @@ public struct GlassOptionRow: View {
             .padding(.horizontal, GlassTokens.Space.s5)
             .background(
                 RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                    .fill(hovering && isEnabled ? Color.white.opacity(0.1) : .clear)
+                    .fill(hovering && isEnabled ? GlassColor.ink(0.1) : .clear)
                     .glassPressedFill()
             )
             .contentShape(Rectangle())
@@ -249,7 +249,7 @@ public struct GlassDayGraph: View {
                         }
                     }
                     .frame(height: Self.plotHeight / 2, alignment: .bottom)
-                    Rectangle().fill(Color.white.opacity(0.14)).frame(height: 1)
+                    Rectangle().fill(GlassColor.ink(0.14)).frame(height: 1)
                     HStack(alignment: .top, spacing: 2) {
                         ForEach(columns) { column in
                             UnevenRoundedRectangle(bottomLeadingRadius: 2, bottomTrailingRadius: 2)
@@ -367,7 +367,7 @@ public struct GlassActivityRow: View {
         Button(action: action) {
             HStack(spacing: GlassTokens.Space.s5) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.white.opacity(0.12))
+                    RoundedRectangle(cornerRadius: 5, style: .continuous).fill(GlassColor.ink(0.12))
                     if let logo = tool?.logo, let tool {
                         GlassToolLogoShape(logo).fill(hovering ? Color.white : tool.tint.color).frame(width: 12, height: 12)
                     } else if let tool {

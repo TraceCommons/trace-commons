@@ -266,7 +266,7 @@ struct MenuBarGlassPanel: View {
     }
 
     private var hairline: some View {
-        Rectangle().fill(Color.white.opacity(0.12)).frame(height: 1)
+        Rectangle().fill(GlassColor.ink(0.12)).frame(height: 1)
             .padding(.vertical, GlassTokens.Space.s2)
             .accessibilityHidden(true)
     }
@@ -344,7 +344,7 @@ struct MenuBarPreviewWindow: View {
         VStack(alignment: .trailing, spacing: GlassTokens.Space.s4) {
             MenuBarStripLabel(model: model, store: store)
                 .padding(.horizontal, GlassTokens.Space.s4)
-                .background(Capsule().fill(Color.white.opacity(0.12)))
+                .background(Capsule().fill(GlassColor.ink(0.12)))
             MenuBarGlassPanel(navigation: navigation, store: store, ownsSurface: true)
         }
         .padding(GlassTokens.Space.s10)

@@ -139,7 +139,7 @@ struct GlassFloatingBlur: NSViewRepresentable {
 // MARK: - Window
 
 /// Makes the hosting window a floating glass window: no background of its
-/// own, a transparent full-size title bar, and dark (D2). Panes then float
+/// own and a transparent full-size title bar, in the system appearance. Panes then float
 /// on the desktop with the gap between them showing through.
 private struct GlassWindowConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
@@ -159,7 +159,8 @@ private struct GlassWindowConfigurator: NSViewRepresentable {
         window.titleVisibility = .hidden
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
-        window.appearance = NSAppearance(named: .darkAqua)
+        // No appearance of our own: the window follows the person's system
+        // appearance, light or dark, and every token resolves for it.
         // An empty unified toolbar makes the title bar taller and brings the
         // real traffic lights in from the window's corner, so with the 10pt
         // window padding they sit inside the main pane, not on its rim.

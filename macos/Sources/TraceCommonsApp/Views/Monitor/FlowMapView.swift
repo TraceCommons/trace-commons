@@ -73,9 +73,9 @@ struct FlowMapView: View {
             let strong = contrast == .increased
             switch arc.style {
             case .quiet:
-                context.stroke(path, with: .color(.white.opacity((strong ? 0.5 : 0.2) * arc.dim)), lineWidth: width)
+                context.stroke(path, with: .color(GlassColor.ink((strong ? 0.5 : 0.2) * arc.dim)), lineWidth: width)
             case .dashed:
-                context.stroke(path, with: .color(.white.opacity((strong ? 0.45 : 0.18) * arc.dim)),
+                context.stroke(path, with: .color(GlassColor.ink((strong ? 0.45 : 0.18) * arc.dim)),
                                style: StrokeStyle(lineWidth: width, dash: [5 * fit.scale, 5 * fit.scale]))
             case .flowing:
                 context.stroke(path, with: .color(GlassTokens.Color.statusOn.color.opacity(0.35 * arc.dim)), lineWidth: width)
@@ -109,12 +109,12 @@ struct FlowMapView: View {
         switch node.kind {
         case .hub:
             layer.fill(disc, with: .color(GlassTokens.Color.statusOff.color))
-            ring(disc, radius: radius, centre: centre, in: &layer, colour: .white.opacity(0.25))
+            ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassColor.ink(0.25))
         case .library(let active):
             layer.fill(disc, with: .color(active ? GlassTokens.Color.blue.color : GlassTokens.Color.mapNodeOff.color))
             if active { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.blue.color.opacity(0.35)) }
         case .tool(let tool, let off):
-            layer.fill(disc, with: .color(.white.opacity(0.12)))
+            layer.fill(disc, with: .color(GlassColor.ink(0.12)))
             mark(tool, centre: centre, side: 16 * fit.scale, in: &layer)
             if off {
                 var slash = Path()
@@ -127,7 +127,7 @@ struct FlowMapView: View {
             layer.fill(disc, with: .color(rule.fill.color))
             layer.stroke(disc, with: .color(rule.stroke.color), lineWidth: 2 * fit.scale)
         case .harness(let tool, _):
-            layer.fill(disc, with: .color(.white.opacity(0.12)))
+            layer.fill(disc, with: .color(GlassColor.ink(0.12)))
             if let tool { mark(tool, centre: centre, side: 16 * fit.scale, in: &layer) }
         case .destination(let answering):
             layer.fill(disc, with: .color(answering ? GlassTokens.Color.mapCredentialOn.color : GlassTokens.Color.mapNodeOff.color))

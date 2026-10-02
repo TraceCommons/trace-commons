@@ -20,7 +20,7 @@ public struct GlassStatusDot: View {
             .frame(width: size, height: size)
             .overlay {
                 if halo {
-                    Circle().stroke(Color.white.opacity(0.08), lineWidth: 2).padding(-1)
+                    Circle().stroke(GlassColor.ink(0.08), lineWidth: 2).padding(-1)
                 }
                 if ring {
                     Circle().stroke(status.color.opacity(0.25), lineWidth: 3).padding(-1.5)
@@ -129,7 +129,7 @@ public struct GlassBadge: View {
             .padding(.horizontal, 5)
             .frame(minWidth: subtle ? nil : 16, minHeight: subtle ? 14 : 16)
             .background(
-                Capsule().fill(subtle ? Color.white.opacity(0.16) : GlassTokens.Color.statusOutside.color)
+                Capsule().fill(subtle ? GlassColor.ink(0.16) : GlassTokens.Color.statusOutside.color)
             )
             .accessibilityLabel(label ?? count.map(String.init) ?? "—")
     }
@@ -217,7 +217,7 @@ public struct GlassToolTile: View {
                     }
                 }
                     .frame(width: side, height: side)
-                    .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(Color.white.opacity(0.1)))
+                    .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassColor.ink(0.1)))
             case .folder:
                 Image(systemName: "folder.fill")
                     .glassGlyph(large ? 12 : 10, weight: .semibold)
@@ -277,11 +277,11 @@ public struct GlassBarGraph: View {
                 VStack(spacing: GlassTokens.Space.s2) {
                     ZStack {
                         RoundedRectangle(cornerRadius: thin ? 3 : GlassTokens.Radius.control, style: .continuous)
-                            .fill(Color.white.opacity(hovered == bucket.id ? 0.18 : 0.08))
+                            .fill(GlassColor.ink(hovered == bucket.id ? 0.18 : 0.08))
                         VStack(spacing: 0) {
                             Spacer(minLength: 0)
                             bar(bucket.up, of: maximum, color: GlassTokens.Color.dataShared.color, top: true)
-                            Rectangle().fill(Color.white.opacity(0.18)).frame(height: 1)
+                            Rectangle().fill(GlassColor.ink(0.18)).frame(height: 1)
                             bar(bucket.down, of: maximum, color: GlassTokens.Color.dataKept.color, top: false)
                             Spacer(minLength: 0)
                         }

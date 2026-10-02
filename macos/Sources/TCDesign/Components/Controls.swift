@@ -164,7 +164,7 @@ public struct GlassToolbarButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .glassGlyph(13)
-                .foregroundStyle(pressed == false ? Color(white: 0.49) : Color(white: 0.9))
+                .foregroundStyle(pressed == false ? GlassColor.textTertiary : GlassColor.textPrimary)
                 .glassPressedFill()
                 .frame(width: 28, height: 24)
                 .contentShape(Capsule())
@@ -238,7 +238,7 @@ public struct GlassKebab: View {
                 .frame(width: 22, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(open ? Color.white.opacity(0.14) : .clear)
+                        .fill(open ? GlassColor.ink(0.14) : .clear)
                 )
                 .glassPressedFill()
                 .contentShape(Rectangle())
