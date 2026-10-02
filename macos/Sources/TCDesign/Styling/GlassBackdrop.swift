@@ -7,16 +7,29 @@ public enum GlassMaterial: Sendable, Equatable {
     case liquidGlass
     /// The HUD vibrancy material, blended behind the window (macOS 14–25).
     case vibrancy
-    /// No material: the opaque pane base. Reduce Transparency, and any
-    /// surface that must not show what is behind the window.
+    /// No material: the opaque pane base, for a pane in the content layer
+    /// (the map), which Apple keeps out of Liquid Glass.
     case opaque
 
-    /// The material this Mac draws for a pane.
-    public static func current(reduceTransparency: Bool) -> GlassMaterial {
-        if reduceTransparency { return .opaque }
+    /// The material this Mac draws for a pane in the navigation layer.
+    ///
+    /// Reduce Transparency, Increase Contrast and Reduce Motion are not
+    /// handled here. Liquid Glass and the system materials adapt to them by
+    /// themselves (Liquid Glass turns frostier under Reduce Transparency and
+    /// takes a contrasting border under Increase Contrast), and Apple's
+    /// guidance is to let them rather than swap in a fill of our own (R14).
+    public static func current(content: Bool = false) -> GlassMaterial {
+        if content { return .opaque }
         if #available(macOS 26.0, *) { return .liquidGlass }
         return .vibrancy
     }
+}
+
+public extension EnvironmentValues {
+    /// True inside a pane in the content layer (the map): it is drawn on the
+    /// opaque base, never Liquid Glass, so the controls floating on it are
+    /// the only glass there (no glass on glass).
+    @Entry var glassPaneIsContent: Bool = false
 }
 
 /// The native material under a glass pane, clipped to the pane's rounded
@@ -65,24 +78,35 @@ struct GlassBackdrop: NSViewRepresentable {
     }
 }
 
-/// A pane's whole fill: the native material, then the dark veil that keeps
-/// text at contrast on it, then the specular sheen. With Reduce
-/// Transparency the material and veil give way to the opaque base.
+/// A pane's whole fill.
+///
+/// - On macOS 26, Liquid Glass alone. No veil and no sheen: the regular
+///   variant keeps its own contents legible and draws its own highlights,
+///   and Apple reserves a dimming layer for the clear variant and tinting
+///   for primary actions.
+/// - Before 26, the HUD material with the veil and sheen over it: a painted
+///   approximation of the glass, as the spec gives it.
+/// - In the content layer, the opaque base.
 struct GlassPaneFill: View {
     let radius: CGFloat
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.glassPaneIsContent) private var content
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        let material = GlassMaterial.current(reduceTransparency: reduceTransparency)
-        ZStack {
-            if material == .opaque {
-                shape.fill(GlassTokens.Color.paneOpaque.color)
-            } else {
-                GlassBackdrop(material: material, cornerRadius: radius)
+        switch GlassMaterial.current(content: content) {
+        case .liquidGlass:
+            GlassBackdrop(material: .liquidGlass, cornerRadius: radius)
+        case .vibrancy:
+            ZStack {
+                GlassBackdrop(material: .vibrancy, cornerRadius: radius)
                 shape.fill(GlassTokens.Color.glassVeil.color)
+                shape.fill(GlassTokens.Gradient.paneFill.linear)
             }
-            shape.fill(GlassTokens.Gradient.paneFill.linear)
+        case .opaque:
+            ZStack {
+                shape.fill(GlassTokens.Color.paneOpaque.color)
+                shape.fill(GlassTokens.Gradient.paneFill.linear)
+            }
         }
     }
 }
@@ -91,7 +115,7 @@ struct GlassPaneFill: View {
 /// blended within the window, so it blurs the map or pane the surface floats
 /// on. The spec's popover tier asks for blur 24 at 170% saturation; the
 /// system material is the nearest native equivalent, and it adapts with the
-/// system (Reduce Transparency is handled by the caller).
+/// system, Reduce Transparency included.
 struct GlassFloatingBlur: NSViewRepresentable {
     let cornerRadius: CGFloat
 

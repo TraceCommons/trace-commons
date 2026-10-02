@@ -4,12 +4,19 @@ import SwiftUI
 /// between them; there is no window chrome around them.
 public struct GlassPane<Content: View>: View {
     private let padding: CGFloat?
+    private let isContent: Bool
     private let content: Content
 
     /// `padding` defaults to the pane padding; pass 0 for edge-to-edge
-    /// content such as the Traces tree.
-    public init(padding: CGFloat? = GlassTokens.Space.panePadding, @ViewBuilder content: () -> Content) {
+    /// content such as the Traces tree. `isContent` puts the pane in the
+    /// content layer (the map): the opaque base, never Liquid Glass, so the
+    /// glass controls floating on it are not glass on glass.
+    public init(
+        padding: CGFloat? = GlassTokens.Space.panePadding, isContent: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
         self.padding = padding
+        self.isContent = isContent
         self.content = content()
     }
 
@@ -18,6 +25,7 @@ public struct GlassPane<Content: View>: View {
             .padding(padding ?? 0)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .glassTier(.pane)
+            .environment(\.glassPaneIsContent, isContent)
     }
 }
 

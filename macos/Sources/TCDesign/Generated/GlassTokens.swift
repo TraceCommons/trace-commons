@@ -21,6 +21,14 @@ public enum GlassTokens {
         public static let textSecondary: GlassRGBA = GlassRGBA(0xC9C9D0, alpha: 1)
         /// Raised from #a9a9b0 for 4.5:1 on glass.
         public static let textTertiary: GlassRGBA = GlassRGBA(0xB4B4BC, alpha: 1)
+        /// textSecondary under Increase Contrast.
+        public static let textSecondaryHighContrast: GlassRGBA = GlassRGBA(0xE6E6EC, alpha: 1)
+        /// textTertiary under Increase Contrast.
+        public static let textTertiaryHighContrast: GlassRGBA = GlassRGBA(0xD6D6DC, alpha: 1)
+        /// hairline under Increase Contrast.
+        public static let hairlineHighContrast: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.4)
+        /// A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance).
+        public static let edgeHighContrast: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 0.4)
         public static let textOnAccent: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
         public static let textOnStatus: GlassRGBA = GlassRGBA(0x0C0C0E, alpha: 1)
         /// Watching, share automatically, automatic, always on. Glyph and label only.
@@ -106,6 +114,10 @@ public enum GlassTokens {
             "textPrimary": textPrimary,
             "textSecondary": textSecondary,
             "textTertiary": textTertiary,
+            "textSecondaryHighContrast": textSecondaryHighContrast,
+            "textTertiaryHighContrast": textTertiaryHighContrast,
+            "hairlineHighContrast": hairlineHighContrast,
+            "edgeHighContrast": edgeHighContrast,
             "textOnAccent": textOnAccent,
             "textOnStatus": textOnStatus,
             "statusOn": statusOn,

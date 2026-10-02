@@ -25,6 +25,10 @@ struct MenuBarGlassPanel: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let navigation: MainWindowNavigation
     let store: MenuPanelStore
+    /// Whether the panel draws its own glass. Inside `MenuBarExtra` the
+    /// system window already carries its material, and a second layer of
+    /// glass on it is glass on glass (R14); the preview window has none.
+    var ownsSurface = false
 
     enum Pill: Equatable { case mode, watch, privateAI }
 
@@ -49,7 +53,7 @@ struct MenuBarGlassPanel: View {
         }
         .padding(GlassTokens.Space.s5)
         .frame(width: Self.width)
-        .glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
+        .modifier(PanelSurface(owns: ownsSurface))
         .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: sub)
         .task { await store.run() }
     }
@@ -204,6 +208,7 @@ struct MenuBarGlassPanel: View {
         let start = Calendar.current.date(byAdding: .day, value: -(MenuPanelData.days - 1), to: Date()) ?? Date()
         return GlassDayGraph(
             columns: columns, paused: paused,
+            summary: "\(FlowMapScene.pair(MenuWords.shared, columns.reduce(0) { $0 + $1.up })) · \(FlowMapScene.pair(MenuWords.kept, columns.reduce(0) { $0 + $1.down }))",
             sharedChip: String(columns.reduce(0) { $0 + $1.up }),
             keptChip: String(columns.reduce(0) { $0 + $1.down }),
             leading: start.formatted(.dateTime.month(.abbreviated).day()),
@@ -273,6 +278,19 @@ struct MenuBarGlassPanel: View {
     }
 }
 
+/// The popover's own glass, only where nothing else provides a material.
+private struct PanelSurface: ViewModifier {
+    let owns: Bool
+
+    func body(content: Content) -> some View {
+        if owns {
+            content.glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
+        } else {
+            content
+        }
+    }
+}
+
 /// The menu-bar item in the glass system: the last seven days as a strip,
 /// with the decisions-owed badge. Grey while paused.
 struct MenuBarStripLabel: View {
@@ -327,7 +345,7 @@ struct MenuBarPreviewWindow: View {
             MenuBarStripLabel(model: model, store: store)
                 .padding(.horizontal, GlassTokens.Space.s4)
                 .background(Capsule().fill(Color.white.opacity(0.12)))
-            MenuBarGlassPanel(navigation: navigation, store: store)
+            MenuBarGlassPanel(navigation: navigation, store: store, ownsSurface: true)
         }
         .padding(GlassTokens.Space.s10)
         .background(LinearGradient(colors: [GlassTokens.Color.sceneWarm.color, GlassTokens.Color.sceneBase.color], startPoint: .top, endPoint: .bottom))

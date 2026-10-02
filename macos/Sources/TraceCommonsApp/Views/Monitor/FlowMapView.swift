@@ -21,6 +21,7 @@ struct FlowMapView: View {
     @State private var hovered: String?
     @State private var pinned: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
 
     static let zoomRange: ClosedRange<CGFloat> = 0.6 ... 2
     static let zoomStep: CGFloat = 0.25
@@ -67,11 +68,14 @@ struct FlowMapView: View {
             path.move(to: fit.point(arc.from))
             path.addCurve(to: fit.point(arc.to), control1: fit.point(arc.control1), control2: fit.point(arc.control2))
             let width = 1.4 * fit.scale
+            // Increase Contrast: the quiet links are drawn plainly enough to
+            // follow (R14).
+            let strong = contrast == .increased
             switch arc.style {
             case .quiet:
-                context.stroke(path, with: .color(.white.opacity(0.2 * arc.dim)), lineWidth: width)
+                context.stroke(path, with: .color(.white.opacity((strong ? 0.5 : 0.2) * arc.dim)), lineWidth: width)
             case .dashed:
-                context.stroke(path, with: .color(.white.opacity(0.18 * arc.dim)),
+                context.stroke(path, with: .color(.white.opacity((strong ? 0.45 : 0.18) * arc.dim)),
                                style: StrokeStyle(lineWidth: width, dash: [5 * fit.scale, 5 * fit.scale]))
             case .flowing:
                 context.stroke(path, with: .color(GlassTokens.Color.statusOn.color.opacity(0.35 * arc.dim)), lineWidth: width)

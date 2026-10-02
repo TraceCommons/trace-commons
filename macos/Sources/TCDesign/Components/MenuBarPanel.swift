@@ -204,14 +204,21 @@ public struct GlassDayColumn: Identifiable, Sendable, Equatable {
 public struct GlassDayGraph: View {
     private let columns: [GlassDayColumn]
     private let paused: Bool
+    private let summary: String
     private let sharedChip: String
     private let keptChip: String
     private let leading: String
     private let trailing: String
 
-    public init(columns: [GlassDayColumn], paused: Bool, sharedChip: String, keptChip: String, leading: String, trailing: String) {
+    /// `summary` is what VoiceOver reads for the plot, from the caller: the
+    /// bars are a picture, and a picture needs its words (R14).
+    public init(
+        columns: [GlassDayColumn], paused: Bool, summary: String,
+        sharedChip: String, keptChip: String, leading: String, trailing: String
+    ) {
         self.columns = columns
         self.paused = paused
+        self.summary = summary
         self.sharedChip = sharedChip
         self.keptChip = keptChip
         self.leading = leading
@@ -259,7 +266,8 @@ public struct GlassDayGraph: View {
                     .frame(maxHeight: .infinity, alignment: .bottom)
             }
             .frame(height: Self.plotHeight)
-            .accessibilityHidden(true)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(summary)
             HStack {
                 Text(leading)
                 Spacer(minLength: 0)

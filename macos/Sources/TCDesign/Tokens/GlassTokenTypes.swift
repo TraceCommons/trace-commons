@@ -23,6 +23,49 @@ public struct GlassRGBA: Sendable, Equatable {
     public func opacity(_ alpha: Double) -> GlassRGBA {
         GlassRGBA(rgb, alpha: alpha)
     }
+
+    var nsColor: NSColor {
+        NSColor(srgbRed: red, green: green, blue: blue, alpha: alpha)
+    }
+
+    /// This colour, or `highContrast` when the person has turned on Increase
+    /// Contrast. Resolved by the system per appearance, the way its own
+    /// semantic colours are, so every view using it follows the setting
+    /// with no environment to read.
+    public func adaptive(highContrast: GlassRGBA) -> Color {
+        Color(nsColor: adaptiveNSColor(highContrast: highContrast))
+    }
+
+    /// `increases` decides, per appearance, whether Increase Contrast is on;
+    /// injected so a test can ask for either answer.
+    func adaptiveNSColor(
+        highContrast: GlassRGBA,
+        increases: @escaping (NSAppearance) -> Bool = GlassRGBA.increasesContrast
+    ) -> NSColor {
+        let base = nsColor
+        let increased = highContrast.nsColor
+        return NSColor(name: nil) { appearance in
+            increases(appearance) ? increased : base
+        }
+    }
+
+    /// Whether the person has turned on Increase Contrast: the system's
+    /// display option, or a high-contrast appearance where the system hands
+    /// one to the app.
+    static func increasesContrast(_ appearance: NSAppearance) -> Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast || isHighContrast(appearance)
+    }
+
+    /// Whether an appearance is one of the system's Increase Contrast
+    /// variants.
+    static func isHighContrast(_ appearance: NSAppearance) -> Bool {
+        let match = appearance.bestMatch(from: [
+            .accessibilityHighContrastDarkAqua, .accessibilityHighContrastAqua,
+            .accessibilityHighContrastVibrantDark, .accessibilityHighContrastVibrantLight,
+            .darkAqua, .aqua, .vibrantDark, .vibrantLight,
+        ])
+        return match?.rawValue.contains("HighContrast") == true
+    }
 }
 
 /// One stop of a linear gradient.

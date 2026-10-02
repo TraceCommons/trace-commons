@@ -1,12 +1,20 @@
 import SwiftUI
 
-/// Shorthand for the token colours as SwiftUI colours.
+/// Shorthand for the token colours as SwiftUI colours. The secondary and
+/// tertiary text and the hairline follow Increase Contrast by themselves
+/// (R14), as the system's semantic colours do.
 public enum GlassColor {
     public static var textPrimary: Color { GlassTokens.Color.textPrimary.color }
-    public static var textSecondary: Color { GlassTokens.Color.textSecondary.color }
-    public static var textTertiary: Color { GlassTokens.Color.textTertiary.color }
+    public static var textSecondary: Color {
+        GlassTokens.Color.textSecondary.adaptive(highContrast: GlassTokens.Color.textSecondaryHighContrast)
+    }
+    public static var textTertiary: Color {
+        GlassTokens.Color.textTertiary.adaptive(highContrast: GlassTokens.Color.textTertiaryHighContrast)
+    }
     public static var accentText: Color { GlassTokens.Color.purpleText.color }
-    public static var hairline: Color { GlassTokens.Color.hairline.color }
+    public static var hairline: Color {
+        GlassTokens.Color.hairline.adaptive(highContrast: GlassTokens.Color.hairlineHighContrast)
+    }
 }
 
 /// Status is carried by a dot and a label, never by a fill.
@@ -72,11 +80,24 @@ public extension View {
 private struct GlassEdgeModifier<S: InsettableShape>: ViewModifier {
     let layers: [GlassShadow]
     let shape: S
+    @Environment(\.colorSchemeContrast) private var contrast
 
     func body(content: Content) -> some View {
         let outer = layers.filter { !$0.inset }
-        let inner = layers.filter(\.inset)
+        // Increase Contrast (spec, Appearance): the soft light-and-shade
+        // edge becomes a solid 1pt stroke at 40% text colour. Only painted
+        // surfaces draw this edge; Liquid Glass takes the system's own
+        // contrasting border instead (R14).
+        let increased = contrast == .increased && !layers.isEmpty
+        let inner = increased ? [] : layers.filter(\.inset)
         return content
+            .overlay {
+                if increased {
+                    shape
+                        .strokeBorder(GlassTokens.Color.edgeHighContrast.color, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+            }
             .overlay {
                 ZStack {
                     ForEach(Array(inner.enumerated()), id: \.offset) { _, layer in
@@ -188,11 +209,11 @@ public extension View {
 private struct GlassTierModifier: ViewModifier {
     let tier: GlassTier
     let radius: CGFloat?
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.glassPaneIsContent) private var paneIsContent
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
-        let material = GlassMaterial.current(reduceTransparency: reduceTransparency)
+        let material = GlassMaterial.current(content: paneIsContent)
         // Clip the content and fill first; the edge's drop shadows fall
         // outside the shape and must not be clipped with them.
         return content
@@ -222,11 +243,12 @@ private struct GlassSurfaceModifier: ViewModifier {
     let radius: CGFloat?
     let floating: Bool?
     @Environment(\.glassLayer) private var layer
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
-        let native = (floating ?? (layer == .floating)) && !reduceTransparency
+        // Reduce Transparency is the system's to apply: Liquid Glass frosts
+        // and the HUD blur turns opaque by themselves (R14).
+        let native = floating ?? (layer == .floating)
         if native {
             if #available(macOS 26.0, *) {
                 content
@@ -248,16 +270,17 @@ private struct GlassSurfaceModifier: ViewModifier {
 }
 
 extension GlassTier {
-    /// The Liquid Glass a floating surface of this tier gets. Controls react
-    /// to the pointer; cards and menus carry the dark veil as a tint so
-    /// their text keeps its contrast over a bright map.
+    /// The Liquid Glass a floating surface of this tier gets: the regular
+    /// variant, which keeps what is on it legible by itself. Controls react
+    /// to the pointer. Untinted: Apple keeps tint for primary actions, not
+    /// for legibility or brand (R14).
     @available(macOS 26.0, *)
     var floatingGlass: Glass {
         switch self {
         case .control, .controlSelected, .well:
             .regular.interactive()
         case .pane, .card, .cardQuiet, .popover, .menu, .nodeCard:
-            .regular.tint(GlassTokens.Color.glassVeil.color)
+            .regular
         }
     }
 }
