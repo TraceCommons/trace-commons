@@ -1,13 +1,19 @@
 # Glass for the Native macOS App — Design
 
-Date: 2026-09-30. Revised 2026-10-02 to match Ron's decisions on #1173.
-Status: draft for review. Partly implemented in Ron's (rdisandro's) draft
-stack #1178–#1183 (#1173's C2 and R1–R6); this spec is the yardstick those
-PRs are reviewed against.
+Date: 2026-09-30. Revised 2026-10-02 to match Ron's decisions on #1173, and
+again on 2026-10-02 to make Ron's design the source of truth.
+Status: draft for review. Implemented in Ron's (rdisandro's) draft stack
+#1178→#1184 (#1173's C2 and R1–R7).
+**Precedence (Zaki, 2026-10-02).** Ron's implementation (#1178→#1184) and
+his decisions on #1173 are the source of truth for the macOS glass work.
+This spec documents them and records the shared requirements (consent copy,
+behaviour kept from `main`, accessibility). Where this spec and Ron's code or
+#1173 decisions disagree, the spec is wrong and follows Ron.
 - Decided: dark only (D2), purple brand (D3), the minimum OS and glass on
   every supported macOS (D4), the Settings window (D8), the three-pane layout
-  (D9), SF Pro and SF Mono, and the token source and generator. See
-  "Decisions".
+  (D9), SF Pro and SF Mono, the token source and generator, Ron's
+  custom-painted menus, popovers and toggles, eyebrow weight 600, and the
+  Reduce Transparency base `paneOpaque`. See "Decisions".
 - Open: the items marked open in "Decisions", "Tokens" and "Open".
 Visual source: #1146, "Adopt the WYSIWYG UX and Glass design system" (open,
 frozen as the design reference per #1173), at `a15fa6addf`, plus the
@@ -20,6 +26,31 @@ target), the token source `design-tokens/glass.tokens.json`, and its Swift
 generator. No product behaviour changes. No Tauri or GTK output.
 
 ## Changes since 2026-09-30
+
+### Second revision (2026-10-02): Ron's design is the source of truth
+
+Checked against the PR heads on 2026-10-02: #1178 `e6e05ac2`, #1179
+`cab266ff`, #1180 `9bc8168d`, #1181 `44865ff2`, #1182 `aa64a1cc`, #1183
+`a549b81b`, #1184 `2c701c2a`.
+
+- **Precedence** stated above: the spec follows Ron's code and his #1173
+  decisions.
+- **Menus, popovers and toggles are Ron's custom-painted components**
+  (`GlassMenu`, `GlassMenuItem`, `GlassPopover`, `GlassToggleStyle`), not
+  the system `Menu`/`Popover`/`NSMenu` and `Toggle(.switch)` the first
+  revision required. The accessibility those system controls gave for free
+  is now a requirement on the custom components (see Components).
+- **Eyebrow weight: decided, 600** (`semibold` in the JSON since #1179).
+- **`windowControlsWidth`: satisfied, 78** (#1182).
+- **Reduce Transparency base: decided, `paneOpaque` `#1C1E24`** (#1180).
+- **Implementation status.** The doubled rim on 26 is fixed (#1180, a pane on
+  Liquid Glass draws no edge of its own); floating surfaces blur before 26
+  (#1181, `GlassFloatingBlur`); the pane layout matches D9, with the
+  leading-width formula, the 1100pt rule, 10pt padding and gaps, the 760×560
+  minimum and the single ease curve with Reduce Motion (#1182). The easing
+  control points are now in the JSON (#1182).
+
+### First revision (2026-10-02)
 
 Ron recorded his decisions on #1173 on 2026-10-02, and zmanian's reviews of
 #1178–#1182 (2026-10-02) listed where the code and this spec disagreed. This
@@ -50,15 +81,16 @@ missing.
 - **Settings.** D8 confirmed: a macOS Settings window (⌘,), which may later be
   restyled to the glass theme.
 - **Type scale.** Every step is a macOS text style (#1179). `micro` is added
-  and `number` is 26 (largeTitle); both adopted. Eyebrow weight is open.
+  and `number` is 26 (largeTitle); both adopted. Eyebrow weight was open here;
+  it is now decided as 600 (see the second revision).
 - **Choices in Ron's code recorded as decisions**, each marked adopted or
   open: `paneBase`, `glassVeil`, the single `glassSurface` call site, the HUD
   material before 26, painted controls inside panes. See "Tokens" and
   "Materials by OS".
 - **Kept as requirements** because the reviews found the code missing them:
   the blur values, window radius 22, the ease curve, scene glows, the window
-  rim, own edges only before 26, system Menu/Popover, `Toggle(.switch)`,
-  pressed as a darker fill, the Reduce Transparency base, Increase Contrast,
+  rim, own edges only before 26, pressed as a darker fill, the Reduce
+  Transparency base, Increase Contrast,
   Reduce Motion, arrow-key lists, no hard-coded wording, traffic-light
   clearance of at least 78pt, minimum window 760×560, the exercised pre-26
   fallback, and the accent contrast floor (#1178's blocking finding).
@@ -204,6 +236,11 @@ From #1173's table and Ron's 2026-10-02 comment on it.
    `NavigationSplitView` (D9).** Three floating glass panes with gaps; the map
    and the inspector are each hidden independently from the toolbar.
 8. **Map tab label: decided, "Private AI" (D11).**
+9. **Menus, popovers and toggles: decided, Ron's custom-painted
+   `GlassMenu`, `GlassPopover` and `GlassToggleStyle`** (#1178), carrying the
+   accessibility obligations listed in Components.
+10. **Eyebrow weight: decided, 600** (#1179).
+11. **Reduce Transparency base: decided, `paneOpaque` `#1C1E24`** (#1180).
 
 ## Tokens
 
@@ -250,7 +287,6 @@ and a generated constant:
   SwiftUI has no public saturation control, so saturation is recorded but
   may be unused (see Materials by OS); the radius is not optional.
 - **Window radius:** 22 (the JSON's `radius` group stops at pane 16).
-- **Easing:** `cubic-bezier(0.2, 0.8, 0.2, 1)`, as control points.
 - **Scene glows:** `#3F6A8A`, `#6A3F7A`, `#2F6B5A` (the JSON has only
   `sceneBase` and `sceneWarm`).
 - **Window rim:** #1146's window-tier edge, as a `shadow` entry.
@@ -269,13 +305,15 @@ These are exact, from `tauri-desktop/frontend/src/design-system/tokens/` at
 - **Text:** primary `#F2F2F4`, secondary `#C9C9D0`, tertiary `#B4B4BC`, on
   accent `#FFFFFF`, on status `#0C0C0E`.
 - **Status**, for glyphs and labels only, never fills: on `#3DDC84`, ask
-  `#F5C142`, off `#A9A9B0`, outside `#FF6B6B`.
+  `#F5C142`, off `#A9A9B0`, outside `#FF6B6B`. The one exception is Ron's
+  `watchOn` (`#3DDC84`), the watch switch's on fill.
 - **Data:** shared `#8A3DFF`, kept `#3A7BD5`, inference `#A78BFA`.
 - **Scene:** base `#0F1219`, warm `#1D2430`, glows `#3F6A8A`, `#6A3F7A`,
   `#2F6B5A` (glows not yet in the JSON).
 - **Radii:** window 22 (not yet in the JSON), pane 16, card 14, small card
   12, control 8, pill 999. The JSON adds tile 6 and checkbox 5.
-- **Motion:** ease `cubic-bezier(0.2, 0.8, 0.2, 1)` (not yet in the JSON);
+- **Motion:** ease `cubic-bezier(0.2, 0.8, 0.2, 1)` (`easeX1`…`easeY2`
+  since #1182);
   durations 150, 220 and 300 ms.
 - **Spacing:**
   - scale 2, 4, 6, 8, 10, 12, 14, 16, 20, 24;
@@ -309,7 +347,7 @@ the macOS text-size setting; leading and tracking scale with it (#1179).
 | Style | Size/line height | Weight | `textStyle` | Note |
 |---|---|---|---|---|
 | micro | 10/13 | bold | caption2 | new; tags and badges. **Adopted.** |
-| eyebrow | 10/14 | 600 (#1146); the JSON has bold (700) | caption2 | uppercase, tracking 0.08em. **Weight open.** |
+| eyebrow | 10/14 | 600 (semibold) | caption2 | uppercase, tracking 0.08em. **Decided** (#1179). |
 | caption | 11/16 | regular | subheadline | |
 | label | 12/16 | medium | callout | |
 | body | 13/18 | regular | body | |
@@ -326,8 +364,8 @@ the macOS text-size setting; leading and tracking scale with it (#1179).
   required.
 - **`micro`: adopted.** It covers tags and badges, the only words without a
   step.
-- **Eyebrow weight: open.** #1146 and the 2026-09-30 spec say 600; the JSON
-  has 700. Ron to confirm one; the spec value stands until he does.
+- **Eyebrow weight: decided, 600.** #1178 had bold (700); from #1179 on the
+  JSON has `semibold`, matching #1146.
 - **Labels in fixed-height controls** must not clip at large text sizes: use
   a minimum height, not a fixed one, where the label scales (#1179 review).
 - **Fixed point sizes** in components are forbidden except for glyphs inside
@@ -341,13 +379,14 @@ the macOS text-size setting; leading and tracking scale with it (#1179).
 - **`glassVeil` `#0C0E14` at 0.28: adopted.** A thin dark veil over native
   glass that keeps text at contrast, as #1146's native-glass CSS does. Text
   contrast is checked with the veil, on a light and a dark desktop.
-- **`windowControlsInset` 30 and `windowControlsWidth` 76: width must
-  change.** The traffic-light clearance is at least 78pt (see Window and
-  layout); the token and its test (which asserts at least 70) are raised.
-- **`watchSwitchWidth`/`watchSwitchHeight` 38×22 and
-  `toggleWidth`/`toggleHeight` 40×24: not adopted.** Toggles are
-  `Toggle(.switch)` at system size (see Components); the tokens become unused
-  and should be removed.
+- **`windowControlsInset` 30 and `windowControlsWidth` 78: satisfied.**
+  #1182 raised the width from 76 to 78, the traffic-light clearance in
+  Window and layout.
+- **`toggleWidth`/`toggleHeight` 40×24 and
+  `watchSwitchWidth`/`watchSwitchHeight` 38×22: adopted.** They size Ron's
+  `GlassToggleStyle` (see Components), with `toggleOn` `#3A7BD5`,
+  `toggleOnSettings` `#8A3DFF`, `watchOn` `#3DDC84` and `toggleOff` white at
+  0.18.
 - **`mapWidth` 600: open, still in the JSON.** As built in #1146 the map is
   the remaining width (580 at 1320 wide, matching the flow map's `viewBox`).
   The recommendation stands: drop the token and define the map as the
@@ -369,11 +408,10 @@ three durations or add a named token for it.
   colour. No PR in the stack handles it yet; #1173 schedules it as R14.
 - **Reduce Transparency** (`accessibilityReduceTransparency`). Every tier
   swaps blur and translucent fill for an opaque fill: pane `#1C1E24`, card
-  one step lighter. This is required, because #1146 has no fallback. The
-  value is the 2026-09-30 spec value; #1180 uses `paneBase` (`#161A22`)
-  instead, and no #1173 decision supports the change, so `#1C1E24` stands
-  and the swap is listed as open for Ron. If `paneBase` is adopted, the
-  Reduce Transparency fill is its colour at full opacity, not at 0.96.
+  one step lighter. This is required, because #1146 has no fallback.
+  **Decided:** the pane base is the `paneOpaque` token, `#1C1E24`, solid
+  (#1180). Floating surfaces under Reduce Transparency get their painted
+  tier alone, with no blur (#1181).
 
 ## Materials by OS
 
@@ -382,9 +420,9 @@ three durations or add a named token for it.
 | Scene | the desktop, through a transparent window background; #1146's painted scene only behind the first-run pane | the system material behind the window (below) |
 | Pane | Liquid Glass (`NSGlassEffectView` or `.glassEffect`) in a 16pt continuous rounded rectangle, with `glassVeil` and the pane sheen | the system material in the same shape, plus the pane edge as a gradient stroke overlay |
 | Card / well / control inside a pane | a painted tint with no blur (the fill colour at its opacity) | the same |
-| Control or card floating over the map | Liquid Glass, through the single call site | a painted fill plus popover-tier blur |
+| Control or card floating over the map | Liquid Glass, through the single call site | the painted tier over a within-window HUD blur (`GlassFloatingBlur`) |
 | Primary button | `.buttonStyle(.glassProminent)` tinted `#6D14F3`, or a painted fill of the CTA gradient | a filled button, the CTA gradient |
-| Popover / menu | the system `Menu`, `Popover` and `NSMenu`, which get glass on 26 | the system controls |
+| Popover / menu (`GlassPopover`, `GlassMenu`) | Liquid Glass through `glassSurface(_, floating: true)`, tinted with `glassVeil` | the painted popover or menu tier over a within-window HUD blur (`GlassFloatingBlur`) |
 
 - **Material before 26: HUD vibrancy, adopted subject to the macOS 14
   check.** #1180 uses `NSVisualEffectView` with the `.hudWindow` material
@@ -405,13 +443,15 @@ three durations or add a named token for it.
 - **Glass controls over the map: open.** #1181 floats Liquid Glass controls
   and node cards over the map, which itself sits in a Liquid Glass pane.
   Whether that reads as glass on glass is decided on a real device.
-- **Specular edges** (the multi-inset CSS edges, `glassEdge`) are drawn only
-  before 26. On 26 the system draws its own rim, and adding ours doubles it
-  (#1180 review).
-- **Popover tier blur.** Popovers, menus and node cards before 26 are not a
-  bare translucent fill: they use blur 24 (the popover tier). Where the
-  system `Menu`/`Popover` is used, the system's own material satisfies this
-  (#1181 review).
+- **Specular edges** (the multi-inset CSS edges, `glassEdge`) are not drawn
+  on a Liquid Glass surface: on 26 the system draws its own rim, and adding
+  ours doubles it. Painted tiers (cards, wells and controls inside a pane)
+  keep their edges on every OS, and every tier draws its edge before 26.
+  Fixed in #1180 (`drawsOwnEdge`).
+- **Floating blur before 26.** Popovers, menus, node cards and controls that
+  float are not a bare translucent fill: they are the painted tier over a
+  within-window HUD blur of what they float on (`GlassFloatingBlur`, #1181).
+  Under Reduce Transparency they are the painted tier alone.
 - **Saturation** (`saturate(180%)`) has no public SwiftUI control. Omit it.
 - **Glass-only APIs** (`NSGlassEffectView`, `.glassEffect`,
   `GlassEffectContainer`, `.buttonStyle(.glass)`, `.glassProminent`) are
@@ -542,6 +582,40 @@ and no focus style on rows and map nodes, so both are defined here.
 - **Focus** is the system focus ring (`.focusable()` plus the default ring),
   not #1146's custom 2px purple ring. That keeps VoiceOver and Full Keyboard
   Access consistent.
+
+**Custom-painted menus, popovers and toggles.** Ron paints these himself
+(#1178, `macos/Sources/TCDesign`), rather than using the system `Menu`,
+`Popover`, `NSMenu` and `Toggle(.switch)`:
+
+- `GlassMenu` (minimum width 220, 5pt inset, the menu tier at radius 12)
+  holding `GlassMenuItem` rows (an optional leading check) and
+  `GlassMenuSeparator`;
+- `GlassPopover` (the popover tier at radius 14), also the menu-bar panel;
+- `GlassToggleStyle(.standard | .settings | .watch)`: a 40×24 switch
+  (`toggleWidth`/`toggleHeight`), or 38×22 for the watch switch on tree rows
+  (`watchSwitchWidth`/`watchSwitchHeight`), with an 18pt white knob; on
+  colours `toggleOn`, `toggleOnSettings` and `watchOn`, off `toggleOff`.
+
+The system controls brought accessibility for free; these do not, so each
+must supply it:
+
+- **Keyboard.** Every menu item, toggle and popover control is reachable by
+  Tab and Full Keyboard Access and shows the system focus ring. Space or
+  Return activates the focused item; a menu or popover closes with Escape
+  and returns focus to the control that opened it.
+- **VoiceOver.** Each control exposes the role of the system control it
+  replaces: a toggle reads as a switch with its on/off state (Ron's
+  `accessibilityRepresentation` of a native `Toggle` does this), a checked
+  menu item reads as selected, and a menu or popover is one container. Labels
+  and values are supplied by the caller, from the core's copy; the
+  components hard-code no wording, including state words.
+- **Reduce Motion.** The knob slide and any menu or popover transition are
+  removed when Reduce Motion is on (`GlassMotion.systemReducesMotion`).
+- **Contrast floor.** A knob, check or label on an on-state fill reaches at
+  least 3:1 against it, and the off state is distinguishable from the on
+  state by more than colour. White on `toggleOn` is about 4.2:1 and on
+  `toggleOnSettings` about 5.0:1; white on `watchOn` (`#3DDC84`) is about
+  1.8:1 and is open (see Open).
 - **No wording in components.** Components author no words, including
   accessibility values and default labels ("on"/"off", "checked",
   "expanded", "More", "Choose…", tile text such as "dir"). Callers pass every
@@ -551,7 +625,7 @@ and no focus style on rows and map nodes, so both are defined here.
 | #1146 component | macOS build |
 |---|---|
 | Window, Pane | the Window and layout section |
-| Popover, Menu | the system `Menu` and `Popover`, not custom-painted surfaces; they bring glass on 26 and keyboard and VoiceOver handling |
+| Popover, Menu | Ron's custom-painted `GlassPopover` and `GlassMenu` (with `GlassMenuItem`, `GlassMenuSeparator`), meeting the accessibility requirements above |
 | Modal, Sheet | `.sheet`; Settings is its own window |
 | Scrim | the system sheet dimming |
 | Card (quiet, flush, interactive), Well | custom `TCGlassCard` using the tier tokens |
@@ -561,9 +635,9 @@ and no focus style on rows and map nodes, so both are defined here.
 | SegmentedTabs | `Picker(.segmented)`; badge and dot in a custom segment label |
 | Breadcrumb, StepProgress | custom |
 | Buttons (primary, secondary, glass, round, pill icon, icon, submit, folder, kebab) | `ButtonStyle`s over the tier tokens; see Materials by OS |
-| Picker | `Picker(.menu)` |
-| Toggle (plain, settings, watch) | `Toggle(.switch)` at system size, with `.tint`; not a custom switch, and #1146's 38×22 watch size is not copied |
-| Checkbox (with mixed) | a wrapped `NSButton` checkbox, since SwiftUI has no tri-state; its accessible name is its full sentence, never "Option" |
+| Picker | `GlassPicker`: a native SwiftUI `Menu` dressed as a glass pill; the placeholder comes from the caller |
+| Toggle (plain, settings, watch) | a SwiftUI `Toggle` with Ron's `GlassToggleStyle` (`.standard` 40×24, `.settings` 40×24, `.watch` 38×22), meeting the accessibility requirements above |
+| Checkbox (with mixed) | a SwiftUI `Toggle` with Ron's `GlassCheckboxStyle` (15pt); the mixed state's spoken value comes from the caller; its accessible name is its full sentence, never "Option" |
 | Expander | `DisclosureGroup` |
 | TextField | `TextField` with a custom style |
 | Dot, Status, Chip, Tag, Badge | custom; the colour is always paired with a label; "clear" or "on" glyphs use `statusOn`, not the accent |
@@ -591,8 +665,8 @@ separate target).
 tier: menu-bar panel, floating menus." (`components/surfaces.tsx:44`). `main`
 has a `MenuBarExtra`. This spec defines its look, not its content:
 
-- a `MenuBarExtra(.window)` panel at the popover tier: blur 24, popover fill
-  and edge, radius 14;
+- a `MenuBarExtra(.window)` panel drawn as a `GlassPopover`: the popover
+  tier, radius 14;
 - a status row (dot plus label from the core);
 - the decisions-owed badge;
 - the actions the current menu already has.
@@ -648,14 +722,16 @@ Each step is a PR of its own. #1173's numbering is in brackets.
 2. **Type scale [R2].** Text-style mapping, `micro`, the fixed-point guard.
    In #1179. No fonts are bundled.
 3. **Materials [R3].** The native backdrop for both OS paths, Reduce
-   Transparency. In #1180. Remaining: no own edges on 26.
+   Transparency (`paneOpaque`). In #1180, including no own pane edge on 26.
 4. **Components [R4].** The glass rendering behind C2's API, the single
-   `glassSurface` call site, the tool logos. In #1181 (in part). Remaining:
-   system Menu/Popover, `Toggle(.switch)`, pressed fill, no wording in
-   components, arrow-key lists, popover blur before 26.
+   `glassSurface` call site, the tool logos, Ron's `GlassMenu`,
+   `GlassPopover` and `GlassToggleStyle`, and the floating blur before 26.
+   In #1178 and #1181. Remaining: the accessibility requirements on the
+   custom menus, popovers and toggles (see Components), pressed fill, no
+   wording in components, arrow-key lists.
 5. **Window shell [R5].** Three panes, the toolbar, tabs, restoration, all
    four pane compositions, independent scrolling, and the Settings window.
-   In #1182 (debug-only). Remaining: the hiding contract (map and inspector,
+   In #1182 (debug-only), including the hiding contract (map and inspector,
    never the left pane), the leading-width formula, the 1100pt rule, 10pt
    padding, the 760×560 minimum, 78pt clearance, the ease curve and Reduce
    Motion.
@@ -699,7 +775,7 @@ Each step is a PR of its own. #1173's numbering is in brackets.
   remain reachable, and the deadline is not restarted by a layout change.
 - On macOS 14, the same screens render with the material fallback, with no
   missing panes or controls, and with our own pane edges drawn; on macOS 26
-  our edges are not drawn.
+  our edges are not drawn on Liquid Glass surfaces.
 - **The pre-26 fallback is exercised, not only compiled.** CI's only macOS
   runner is `macos-26`, so compiling against `.macOS(.v14)` proves the
   availability guards but never runs the vibrancy branch. Before the shell
@@ -727,13 +803,13 @@ Each step is a PR of its own. #1173's numbering is in brackets.
   reachable.
 - The Liquid Glass tint values per tier on macOS 26. They are tuned on
   device and recorded in the JSON.
-- Eyebrow weight: 600 (#1146, this spec) or 700 (the JSON). Ron to confirm.
-- Reduce Transparency base: `#1C1E24` (this spec) or `paneBase` `#161A22` at
-  full opacity (#1180). No #1173 decision covers it; Ron to confirm.
+- The watch switch's knob contrast: white on `watchOn` (`#3DDC84`) is about
+  1.8:1, below the 3:1 floor in Components. Ron to choose the fix (a darker
+  knob, a darker on colour, or a state cue besides colour).
 - Glass controls and node cards floating over a map that is itself in a
   Liquid Glass pane (#1181): decide on a real device.
 - How Increase Contrast values are represented in the JSON.
-- Removing the unused `mapWidth`, `watchSwitch*` and `toggleWidth`/`toggleHeight` tokens.
+- Removing the unused `mapWidth` token.
 - A separate tint for Gemini CLI, and artwork for Gemini CLI and Cline.
 - Restyling the Settings window to the glass theme (Ron, D8: "theming may
   follow").
