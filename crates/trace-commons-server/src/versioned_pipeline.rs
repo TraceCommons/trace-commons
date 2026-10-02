@@ -139,6 +139,13 @@ pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
 pub const PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL: &str = "artifact_store_unavailable";
+/// Safe label of an object-store call in the run path that reached the
+/// object and found it missing or not what its receipt names (a
+/// `TraceArtifactIntegrityError`: not found, a hash or ref mismatch, a decode
+/// or decrypt failure). Retrying cannot fix it, so it is charged and the
+/// phase's attempt budget ends the run with it (Zaki's approval of #1143,
+/// ZA-2).
+pub const PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL: &str = "artifact_integrity_failed";
 /// Safe label of a compatibility Score released, uncharged, because its
 /// tenant's Score lock was held by another Score (multi-lens review L3-2).
 /// The run is due again after `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS`,
@@ -368,14 +375,15 @@ where
 
 /// Runs `call`, an object-store call of the run path (Review's source read
 /// and approved write, Score's approved read and object writes), on the
-/// blocking pool, and reports the store's own
-/// error as the uncharged suspension `artifact_store_unavailable`
-/// (multi-lens review L2-2, ruling FR3): a store call that fails is an
-/// outage, not the trace's fault. `TraceArtifactStore` errors are untyped,
-/// so an integrity failure the store itself reports is suspended the same
-/// way; it stays visible by its label and retries at most once an hour.
-/// The caller's own checks of what the store returned (a decode, a hash or
-/// a revision mismatch) stay charged, and a lost blocking task keeps
+/// blocking pool, and reports the store's own error by its class. A
+/// transport or availability failure is the uncharged suspension
+/// `artifact_store_unavailable` (multi-lens review L2-2, ruling FR3): an
+/// outage, not the trace's fault. An integrity failure the store reports
+/// (`is_trace_artifact_integrity_error`: the object missing, or not what its
+/// receipt names) is the charged `artifact_integrity_failed`, which the
+/// phase's attempt budget ends (Zaki's approval, ZA-2). The caller's own
+/// checks of what the store returned (a decode, a hash or a revision
+/// mismatch) stay charged, and a lost blocking task keeps
 /// `blocking_call_failed`.
 async fn artifact_store_call<T, F>(call: F) -> anyhow::Result<T>
 where
@@ -383,11 +391,15 @@ where
     T: Send + 'static,
 {
     on_blocking_pool(move || {
-        call().map_err(|_| {
-            anyhow::Error::from(
-                PolicyError::transient(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL)
-                    .expect("static label"),
-            )
+        call().map_err(|error| {
+            if crate::trace_artifact_store::is_trace_artifact_integrity_error(&error) {
+                anyhow::anyhow!(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL)
+            } else {
+                anyhow::Error::from(
+                    PolicyError::transient(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL)
+                        .expect("static label"),
+                )
+            }
         })
     })
     .await
@@ -7850,6 +7862,7 @@ impl PipelineService {
                 // the raw message itself.
                 let retry_label = match label.as_str() {
                     "index_command_invalid"
+                    | "artifact_integrity_failed"
                     | "approved_content_mismatch"
                     | "score_outcome_invalid"
                     | "settlement_operation_mismatch"

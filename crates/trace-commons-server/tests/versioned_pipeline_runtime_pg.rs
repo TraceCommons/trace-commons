@@ -24427,6 +24427,93 @@ async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
     assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
 }
 
+/// Zaki's approval of #1143, ZA-2: a store read that finds the object
+/// missing is an integrity failure, not an outage. It is the charged
+/// `artifact_integrity_failed`, so Review's attempt budget ends the run with
+/// it, instead of an uncharged suspension retried hourly for good. (A
+/// transport failure stays uncharged:
+/// `an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase`.)
+#[tokio::test]
+async fn a_missing_source_object_is_charged_and_ends_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("integrity-missing-source-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let object_key: String = tx
+        .query_one(
+            "SELECT object_key FROM trace_object_refs
+              WHERE tenant_id = $1 AND object_ref_id = $2",
+            &[&tenant, &created.source_object_ref_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    std::fs::remove_file(artifact_file_path(
+        dir.path(),
+        pipeline_tenant_storage_ref(&tenant).as_str(),
+        &object_key,
+    ))
+    .unwrap();
+
+    let first = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(
+        (
+            first.state,
+            first.last_error_label.as_deref(),
+            first.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+            1
+        ),
+        "a missing object is charged"
+    );
+    let mut last = first;
+    for _ in 1..last.max_attempts {
+        force_due(&backend, &tenant, created.run_id).await;
+        last = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review runs again");
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        ),
+        "the attempt budget ends the run"
+    );
+}
+
 /// Zaki review 1, round 2, N-6: a store whose every call made on a Tokio
 /// runtime worker fails, so a pipeline object-store call that was not moved
 /// to the blocking pool shows as a failed phase.

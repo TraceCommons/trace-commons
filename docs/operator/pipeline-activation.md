@@ -312,13 +312,16 @@ not the trace's fault:
   adapter again with the same operation reference. The adapter must answer
   that call from the first one.
 - `artifact_store_unavailable` (Review and Score): an object-store call of
-  the run failed -- Review's source read or approved write, or Score's
-  approved read or object writes. A check of what the store returned (a
-  decode or hash mismatch) is still charged. The store's errors carry no
-  type, so an integrity failure the store itself reports waits here too,
-  retried at most once an hour; look for a run that stays on this label.
-  Settle's read of the stored index command is still charged
-  (`index_command_invalid`).
+  the run failed for a transport or availability reason -- Review's source
+  read or approved write, or Score's approved read or object writes. When
+  the store reached the object and found it missing (on a store that reports
+  a missing object as such: the local and file stores) or not what its
+  receipt names (a hash or reference mismatch, a decode or decrypt failure),
+  the attempt is charged instead, as `artifact_integrity_failed`, and the
+  phase's attempt budget ends the run. A Google Cloud Storage fetch that
+  fails is not typed, so a missing object there still waits here, retried
+  at most once an hour. Settle's read of the stored index command is always
+  charged (`index_command_invalid`).
 
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.

@@ -226,12 +226,23 @@ impl<C: GcsObjectClient> RemoteTraceArtifactProvider for GcsRemoteTraceArtifactP
             .client
             .get_object(&key)
             .map_err(|err| anyhow::anyhow!("GcsGetFailed: {err}"))?;
-        let record: GcsRecord = serde_json::from_slice(&fetch.body)
-            .map_err(|err| anyhow::anyhow!("GcsGetFailed: parse record: {err}"))?;
-        anyhow::ensure!(
-            record.object_ref == *object_ref,
-            "GcsGetFailed: remote trace artifact object ref mismatch"
-        );
+        // ZA-2: a record that does not parse or names another object is an
+        // integrity failure; the fetch's own failure (which may be a missing
+        // object, untyped here) is not marked.
+        let record: GcsRecord = serde_json::from_slice(&fetch.body).map_err(|err| {
+            anyhow::Error::from(
+                crate::trace_artifact_store::TraceArtifactIntegrityError::new(format!(
+                    "GcsGetFailed: parse record: {err}"
+                )),
+            )
+        })?;
+        if record.object_ref != *object_ref {
+            return Err(anyhow::Error::from(
+                crate::trace_artifact_store::TraceArtifactIntegrityError::new(
+                    "GcsGetFailed: remote trace artifact object ref mismatch".to_string(),
+                ),
+            ));
+        }
         Ok(RemoteTraceArtifactRecord {
             object_ref: record.object_ref,
             artifact: record.artifact,
