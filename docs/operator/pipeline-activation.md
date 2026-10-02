@@ -484,7 +484,13 @@ withdrawal on its own path -- at an account merge confirm, for a version the
 merge joined to a withdrawn session, and in the revocation-propagation
 worker's reconciler -- makes the same follow-up for a version with a
 pipeline run (reason `withdrawn`), so that version leaves the reconciler's
-incomplete list once completed.
+incomplete list once completed. The follow-up runs before `main` deletes the
+version's content. A follow-up that fails (a database error, for example)
+therefore delays that deletion until the reconciler's next pass, which
+retries both; the log line is `Trace Commons source-session withdrawal
+completion failed; the next reconcile retries it`. The order is deliberate:
+the reconciler retries only versions that are still incomplete, so deleting
+the content first would leave a failed follow-up with no retry.
 
 `main` marks the submission in one transaction and the follow-up runs in
 another, so a process that stops between the two loses the follow-up. The

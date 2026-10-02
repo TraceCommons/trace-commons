@@ -22082,6 +22082,13 @@ async fn reconcile_source_session_withdrawals(
             // tombstone and before the bytes, and is idempotent, so a retried
             // completion repeats nothing (Zaki review 1, round 2: #1155's
             // consumer sweep).
+            //
+            // poldsam P-3: the order is deliberate. A follow-up that fails
+            // returns here, before `complete_trace_withdrawal`, so `main`'s
+            // content deletion of this version waits for the reconciler's
+            // next pass. The other order would lose the follow-up: the
+            // reconciler retries only versions that are still incomplete,
+            // and a version whose bytes were deleted is complete.
             if let Some(pipeline) = state.pipeline_service.as_ref() {
                 pipeline
                     .follow_up_withdrawal(
