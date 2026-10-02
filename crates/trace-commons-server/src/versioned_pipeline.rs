@@ -3446,6 +3446,88 @@ impl PgPipelineStore {
         .await
     }
 
+    /// poldsam P-2: recovers the follow-up of a submission `main` revoked or
+    /// withdrew whose follow-up was lost. `main` marks the submission in one
+    /// transaction and the follow-up (`follow_up_revocation`,
+    /// `follow_up_withdrawal`) runs in another, so a process that stops
+    /// between the two leaves runs with index work and no queued
+    /// invalidation, which nothing else reaches. This finds at most `limit`
+    /// such submissions of `tenant_id`, in submission id order: revoked, or
+    /// with a `trace_withdrawals` row, with a run whose index write started
+    /// (`pending`, `complete`, `failed` or `cancelled`, the states
+    /// `end_runs_of_inoperable_submission_on_tx` queues) and no invalidation
+    /// row at all. For each it runs the follow-up, under reason `withdrawn`
+    /// when the withdrawal row exists and `revoked` otherwise, with
+    /// `actor_principal_ref` as the actor. A follow-up is idempotent and
+    /// queues an invalidation for every such run, so a recovered submission
+    /// is not found again. Returns how many it recovered.
+    pub async fn recover_lost_inoperable_follow_ups(
+        &self,
+        tenant_id: &str,
+        actor_principal_ref: &str,
+        limit: usize,
+    ) -> Result<usize, DatabaseError> {
+        let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+        let lost = {
+            let mut client = self.backend.trace_pool().get().await?;
+            let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+            let rows = tx
+                .query(
+                    "SELECT s.submission_id,
+                            EXISTS (
+                                SELECT 1 FROM trace_withdrawals w
+                                 WHERE w.tenant_id = s.tenant_id
+                                   AND w.submission_id = s.submission_id
+                            ) AS withdrawn
+                       FROM trace_submissions s
+                      WHERE s.tenant_id = $1
+                        AND (
+                            s.status = 'revoked'
+                            OR EXISTS (
+                                SELECT 1 FROM trace_withdrawals w
+                                 WHERE w.tenant_id = s.tenant_id
+                                   AND w.submission_id = s.submission_id
+                            )
+                        )
+                        AND EXISTS (
+                            SELECT 1 FROM pipeline_runs r
+                             WHERE r.tenant_id = s.tenant_id
+                               AND r.submission_id = s.submission_id
+                               AND r.approved_revision_id IS NOT NULL
+                               AND r.index_write_state IN
+                                   ('pending', 'complete', 'failed', 'cancelled')
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM pipeline_index_invalidations i
+                                    WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
+                               )
+                        )
+                      ORDER BY s.submission_id
+                      LIMIT $2",
+                    &[&tenant_id, &limit],
+                )
+                .await?;
+            tx.commit().await?;
+            rows.iter()
+                .map(|row| (row.get::<_, Uuid>(0), row.get::<_, bool>(1)))
+                .collect::<Vec<_>>()
+        };
+        for (submission_id, withdrawn) in &lost {
+            let reason_code = if *withdrawn {
+                PIPELINE_WITHDRAWAL_INVALIDATION_REASON
+            } else {
+                PIPELINE_REVOCATION_INVALIDATION_REASON
+            };
+            self.follow_up_inoperable_submission(
+                tenant_id,
+                *submission_id,
+                actor_principal_ref,
+                reason_code,
+            )
+            .await?;
+        }
+        Ok(lost.len())
+    }
+
     /// The pipeline's follow-up of a submission `main` made inoperable on its
     /// own path, in one tenant transaction after `main` marked it. For a
     /// submission with a pipeline run it does what the pipeline withdrawal
@@ -6407,6 +6489,22 @@ impl PipelineService {
             );
         }
         Ok(requeued)
+    }
+
+    /// Recovers `tenant_id`'s revocation and withdrawal follow-ups that were
+    /// lost (`PgPipelineStore::recover_lost_inoperable_follow_ups`; poldsam
+    /// P-2); the worker runs it on its invalidation step, before the
+    /// invalidations, so a recovered one is processed in the same pass.
+    pub async fn recover_lost_inoperable_follow_ups(
+        &self,
+        tenant_id: &str,
+        actor_principal_ref: &str,
+        limit: usize,
+    ) -> anyhow::Result<usize> {
+        Ok(self
+            .store
+            .recover_lost_inoperable_follow_ups(tenant_id, actor_principal_ref, limit)
+            .await?)
     }
 
     /// Releases `tenant_id`'s parked runs whose submission is no longer

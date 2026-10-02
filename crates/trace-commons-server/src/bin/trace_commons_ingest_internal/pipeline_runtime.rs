@@ -365,6 +365,11 @@ const PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT: usize = 32;
 /// rest.
 const PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT: usize = 32;
 
+/// The most lost revocation or withdrawal follow-ups one worker pass
+/// recovers for one tenant (`recover_lost_inoperable_follow_ups`; poldsam
+/// P-2).
+const PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT: usize = 32;
+
 /// How many of one tenant's complete runs the worker pays out each time it
 /// runs the tenant's payout step (`PipelineService::process_payouts`), after
 /// its index invalidations. A step that used the whole limit runs again on
@@ -566,7 +571,10 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// Then, whatever the runs did, it runs the follow-up steps `cadence` finds
 /// due (`PipelineFollowUpCadence::due_steps`, with the steps this service
 /// woke): it releases the tenant's parked runs whose submission is no
-/// longer operable (`release_inoperable_parked_runs`), processes up to
+/// longer operable (`release_inoperable_parked_runs`), runs again up to
+/// `PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT` revocation or withdrawal
+/// follow-ups that were lost (`recover_lost_inoperable_follow_ups`),
+/// processes up to
 /// `PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT` of the tenant's due
 /// index invalidations (`process_index_invalidations`, which removes a
 /// withdrawn or cancelled revision from the index), and pays out up to
@@ -637,6 +645,26 @@ pub(crate) async fn drain_pipeline_tenant(
                 tenant_storage_ref = %tenant_storage_ref(&tenant_id),
                 error_hash = %safe_display_error_hash(&error),
                 "pipeline worker parked run release failed"
+            );
+        }
+        // poldsam P-2: a revocation or withdrawal whose pipeline follow-up
+        // was lost (`main` marks the submission in one transaction, the
+        // follow-up runs in another) leaves index work no invalidation
+        // reaches; the follow-up is run again here, before the
+        // invalidations, so its invalidations are processed in this pass.
+        if let Err(error) = service
+            .recover_lost_inoperable_follow_ups(
+                &tenant_id,
+                PIPELINE_WORKER_AUDIT_ACTOR_REF,
+                PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT,
+            )
+            .await
+        {
+            tracing::warn!(
+                error_class = "pipeline_worker_lost_follow_up_recovery_failed",
+                tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker lost follow-up recovery failed"
             );
         }
         match service

@@ -22661,6 +22661,126 @@ async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
     );
 }
 
+/// The `(reason_code, state)` of `run_id`'s index invalidation, or `None`
+/// when none is queued.
+async fn index_invalidation_of(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Option<(String, String)> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_opt(
+            "SELECT reason_code, state FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    row.map(|row| (row.get(0), row.get(1)))
+}
+
+/// poldsam P-2: `main` marks a submission revoked or withdrawn in one
+/// transaction and runs the pipeline's follow-up in another, so a process
+/// that stops between the two loses the follow-up. The worker's sweep
+/// (`recover_lost_inoperable_follow_ups`) finds such a submission (a run
+/// with index work and no queued invalidation), at most its limit per call,
+/// and runs the follow-up under the matching reason; a recovered submission
+/// is not found again, and one whose follow-up ran is never found.
+#[tokio::test]
+async fn the_sweep_recovers_a_revocation_or_withdrawal_whose_follow_up_was_lost() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:lost-follow-up";
+    let mut runs = Vec::new();
+    for _ in 0..3 {
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let run = submit_envelope_and_complete(&service, &tenant, principal, &env).await;
+        assert_eq!(run.state, PipelineRunState::Complete);
+        assert_eq!(run.index_write_state, "complete");
+        runs.push(run);
+    }
+    let (revoked, withdrawn, followed_up) = (&runs[0], &runs[1], &runs[2]);
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    for run in [revoked, followed_up] {
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    }
+    tx.execute(
+        "INSERT INTO trace_withdrawals (
+            tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+         ) VALUES ($1, $2, NOW(), 'accepted', 'not_distributed')",
+        &[&tenant, &withdrawn.submission_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(owner);
+    // The third revocation's follow-up ran; the other two were lost.
+    PgPipelineStore::new(backend.clone())
+        .follow_up_revocation(&tenant, followed_up.submission_id, principal)
+        .await
+        .unwrap();
+    for run in [revoked, withdrawn] {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            None
+        );
+    }
+
+    let mut recovered = 0;
+    for expected in [1, 1, 0] {
+        let swept = service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 1)
+            .await
+            .unwrap();
+        assert_eq!(swept, expected, "one per call, then none");
+        recovered += swept;
+    }
+    assert_eq!(recovered, 2);
+    for (run, reason) in [(revoked, "revoked"), (withdrawn, "withdrawn")] {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            Some((reason.to_string(), "pending".to_string())),
+            "{reason}"
+        );
+    }
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        3,
+        "the recovered invalidations are processed as any other"
+    );
+    assert_eq!(
+        service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .unwrap(),
+        0,
+        "a processed invalidation is not recovered again"
+    );
+}
+
 /// Zaki review 3, Z3-L4: one release of parked runs of inoperable
 /// submissions takes at most its limit, in run id order; the next takes the
 /// rest.

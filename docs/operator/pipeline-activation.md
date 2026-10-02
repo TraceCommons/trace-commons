@@ -486,6 +486,17 @@ worker's reconciler -- makes the same follow-up for a version with a
 pipeline run (reason `withdrawn`), so that version leaves the reconciler's
 incomplete list once completed.
 
+`main` marks the submission in one transaction and the follow-up runs in
+another, so a process that stops between the two loses the follow-up. The
+worker recovers it: on each invalidation step (below), before claiming
+invalidations, it finds up to 32 of the tenant's revoked or withdrawn
+submissions with a run whose index write started and no queued
+invalidation, and makes the follow-up for each (reason `withdrawn` when a
+withdrawal row exists, `revoked` otherwise, actor `pipeline_worker`). A
+recovery failure is logged as
+`pipeline_worker_lost_follow_up_recovery_failed` and retried on the next
+step.
+
 The response is `main`'s withdrawal response plus two follow-up states,
 `index_invalidation` and `revocation_propagation`. Each is `not_required`,
 `pending`, `complete`, or `failed`. `credit_retained` is false when the

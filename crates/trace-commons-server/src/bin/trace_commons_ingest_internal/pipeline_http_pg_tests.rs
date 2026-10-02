@@ -2829,6 +2829,86 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
     );
 }
 
+/// poldsam P-2 through the worker: a revocation whose pipeline follow-up
+/// was lost (`main` marked the submission revoked and stopped before the
+/// follow-up's own transaction) is recovered by the worker's tenant drain,
+/// which queues and processes the invalidation in one pass, so the revoked
+/// revision's entries leave the index.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_recovers_a_revocation_whose_follow_up_was_lost() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let index = IsolatedPipelineIndex::new();
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        local_artifacts(&dir),
+        index.clone(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_lost_follow_up_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-lost-follow-up-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-lost-follow-up-{suffix}"));
+    let tenant_ref = trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+    let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &run.submission_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        queued_index_invalidation(&runtime, &tenant, run.run_id)
+            .await
+            .1,
+        "none",
+        "the lost follow-up queued nothing"
+    );
+
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(
+        state,
+        service.clone(),
+        tenant.clone(),
+        Arc::new(std::sync::Mutex::new(
+            pipeline_runtime::PipelineFollowUpCadence::default(),
+        )),
+    )
+    .await;
+
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "no entry of the revoked revision stays in the index"
+    );
+    assert_eq!(
+        queued_index_invalidation(&runtime, &tenant, run.run_id)
+            .await
+            .1,
+        "complete"
+    );
+}
+
 /// Zaki review 1, item 1: Score stores the index command (embeddings and
 /// content hashes) and the neighbour set as objects of their own. A run of
 /// the compatibility bundle has both. The run is withdrawn after Score and
