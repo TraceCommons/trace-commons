@@ -500,8 +500,10 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
-| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
+| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
+| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; see "The contribution override" below |
+| `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended` and `approved_verdict` | see "History provenance (K7)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
@@ -577,9 +579,14 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "grant_voids": [],
   "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
   "arming_rewordings": [],
-  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] }
+  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] },
+  "contribution_override": null,
+  "contribution_mode": "notify_only"
 }
 ```
+
+`contribution_override` and `contribution_mode` are additive; see "The
+contribution override" below.
 
 `grant_voids` is additive; see "Void notices" below. `witness_capacity`,
 `arming_rewordings`, `automatic_contribution_held` and `decisions_owed` are
@@ -1453,6 +1460,96 @@ so the picker and the rule compose: the rule covers what comes next, the
 picker what is already there. Unticked sessions stay `pending`; "Keep on this
 Mac" (`keep`) takes one out of the list without deciding it for good.
 
+### The contribution override
+
+The menu-bar Contribution mode pill (R13, #1202; requested on #1173) offers
+three global overrides: **Ask me** (`notify_only`), **Auto contribute**
+(`auto_upload`) and **Never** (`ignore`). `set_contribution_override` sets
+one; `clear_contribution_override` clears it.
+
+**Per-folder modes are never written.** The override is one value in the
+policy file beside the folders' own entries, and the mode in force is read
+over the folder's own mode. Clearing it drops that value, so every folder is
+back on exactly the mode it had. `set_project_mode` still works while an
+override is in force: it sets the folder's own mode (`list_projects`
+`folder_mode`), and the override still decides `mode` until it clears.
+
+What each override does, with the stricter rule winning:
+
+| Override | Folder set to Automatic | Folder set to Ask me, or never ruled on | Folder set to Never | Unresolved bucket |
+|---|---|---|---|---|
+| `ignore` | Never | Never | Never | Never |
+| `notify_only` | Ask me | Ask me | **Never** | Ask me (or Never if set) |
+| `auto_upload` | Automatic, under its own holds | **Automatic from now** | **Never** | Ask me (or Never if set) |
+
+- **Never** queues and sends nothing from any folder. Nothing waiting is
+  refused: entries already `pending` stay `pending` (they leave
+  `decisions_owed` while it is in force), and an unattended approval not yet
+  sent goes back to `pending` rather than being refused, so clearing the
+  override restores both. Sessions finished while it is in force are not
+  queued; once it clears, the next pass offers them under each folder's own
+  mode -- an Automatic folder sends them unattended.
+- **Ask me** leaves nothing to go unattended. Every unattended approval not
+  yet sent in a folder that no longer resolves to Automatic goes back to
+  `pending` (counted in `returned`), and the send path returns any that
+  comes back from `uploading`. A folder set to Never stays Never.
+- **Auto contribute** is the consent-sensitive one, and is held to the
+  arming paths' rules:
+  - **It arms nothing already on disk.** For every folder not already armed
+    by its own mode it is an arming from now (see "Arming from now"): what is
+    on disk when it begins, queued or not, is recorded per source by the next
+    full pass and waits for a person; until a source is recorded, nothing
+    from it goes. Only a session that first appears after it is approved
+    unattended. A folder already armed keeps its own holds (an arming from
+    now, the automatic grant's) and nothing more.
+  - **A folder set to Never stays Never.** A global override does not reach
+    into a folder the contributor excluded.
+  - Every other gate still applies: the Scrub check (Manual holds
+    everything), review holds, the settle window, and the
+    automatic-contribution gate.
+  - It is refused without `confirm: true` (`bad_params` /
+    `confirm-required`; a non-boolean `confirm` is `confirm-invalid`). A
+    shell sends it only from the confirmation the core words
+    (`tc_contribution_override_confirm_json`), which carries the arming
+    disclosure.
+  - It records **no grant**: no grant terms, no `automatic_grant`, and no
+    per-folder `armed-auto-upload` row, so R6 voids do not reach it; whether
+    a widening of the terms should void it is an open consent-spec question.
+    Folders it arms report the `patterns_only` disclosure.
+- Re-sending the override in force changes nothing (`changed: false`): no
+  audit row, and an Auto contribute override keeps the hold it had.
+- Clearing an Auto contribute override returns what it approved unattended
+  and has not sent, in folders that then ask first, to `pending`.
+
+**Audit.** Label-only, never a folder: `contribution-override-set` with
+`detail` the mode, and `contribution-override-cleared` with `detail` the
+mode that was in force. For `auto_upload` the row is written **before** the
+override takes effect, and an audit failure refuses the call
+(`unavailable` / `audit-write-failed`). A stopping override and a clear are
+never refused for want of an audit row, and record after.
+
+**Writes and events.** A policy file that cannot be written rolls the
+override back (`unavailable` / `policy-write-failed`) and nothing changes. On
+every change `status_changed` is published, and `queue_changed` too when
+entries were returned to `pending`. A queue file that cannot be written after
+that keeps the in-memory truth, publishes both events exactly as success
+does, and answers `unavailable` / `queue-write-failed`.
+
+**Status.** `status.contribution_override` is `null`, or `{mode, since}`
+while one is in force. `status.contribution_mode` is the pill's roll-up, so
+no shell computes it: the override's mode while one is in force; otherwise
+the one mode every folder shares (`notify_only`, `auto_upload`, `ignore`), or
+`mixed`. "Every folder" is every configured folder and every folder with a
+session in the queue, by its own mode, excluding the unresolved bucket, which
+can never be armed. With no folders it is `notify_only`, the default.
+
+**Copy.** `tc_contribution_mode_copy_json` is the pill (title, `Mixed`, the
+three choices with their sub-list lines, the override line and the clear
+action). `tc_contribution_override_confirm_json(mode, config_dir)` is each
+confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
+screens' disclosure table for the configuration in `config_dir`. Every new
+sentence is DRAFT, NEEDS APPROVAL (`project_copy.rs`).
+
 ### `preview_body`
 
 The redacted body `preview` describes: the envelope's redacted events,
@@ -1756,6 +1853,7 @@ handle with `preview-requires-embedded`.
       "project_id": "proj_9f2c1ab30d4e5f60",
       "project_label": "my-proj",
       "mode": "notify_only",
+      "folder_mode": "notify_only",
       "added_at": null,
       "configured": false,
       "is_unresolved_bucket": false,
@@ -1821,10 +1919,17 @@ Every project the daemon knows about, in two kinds:
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
 
+`mode` is the mode **in force**, which a contribution override can change;
+`folder_mode` is the folder's own mode, the one `set_project_mode` set and
+clearing the override returns it to. They differ only while an override is
+in force. See "The contribution override" below.
+
 An armed row also carries `from_now`: `true` when it was armed from now,
 the `set_project_mode` default, so its backlog waits for the contributor,
 and `false` when it was armed with `include_backlog: true` or before that
-default existed. Absent on rows that are not armed. See
+default existed. A row armed only by an "Auto contribute" override reports
+`from_now: true` too, since the override holds its backlog the same way.
+Absent on rows that are not armed. See
 "Arming from now" above.
 
 #### `is_unresolved_bucket`
