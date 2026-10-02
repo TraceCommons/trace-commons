@@ -132,6 +132,11 @@ private struct MonitorMainPane: View {
                 // title bar centres 26pt below the window's top edge.
                 .padding(.top, Self.lightsCentre - GlassTokens.Space.windowPadding - GlassTokens.Space.panePadding
                     - GlassTokens.Size.controlLarge / 2)
+                // The same notices the main window puts above everything,
+                // here in the pane that is always shown, so a void or a gate
+                // hold during monitor use is told whatever the map and the
+                // inspector are doing.
+                ShellNotices()
                 GlassSegmentedTabs(
                     "Monitor",
                     selection: $tab,
