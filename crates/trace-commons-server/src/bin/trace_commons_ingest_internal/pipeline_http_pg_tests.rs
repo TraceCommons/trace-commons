@@ -4121,6 +4121,79 @@ async fn a_dropped_index_rebuild_request_keeps_its_run_locked_until_its_writes_c
     assert_eq!(audit_rows().await, 1, "one audit row for the one rebuild");
 }
 
+/// Zaki's re-review of #1166, Low: `POST /v1/workers/pipeline/index-rebuild`
+/// runs one rebuild per tenant. While a tenant's rebuild is held at its
+/// write, a second request for that tenant is refused with `409`
+/// `pipeline_index_rebuild_in_progress` and starts nothing; once the first
+/// ends, the tenant can be rebuilt again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_index_rebuild_of_a_tenant_is_refused_while_one_runs() {
+    let index = IsolatedPipelineIndex::new();
+    let (writer, release) = HeldRebuildWriter::new(index.clone());
+    let service_writer = writer.clone();
+    let Some(mut fixture) = withdrawal_fixture_with(
+        move |runtime, artifacts| {
+            assemble_test_pipeline_service_with_writer(
+                runtime,
+                artifacts,
+                index,
+                Some(service_writer as Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_withdrawal_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let admin = format!("token-admin-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &admin, TokenRole::Admin);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+
+    writer
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first = tokio::spawn(pipeline_index_rebuild_handler(
+        State(fixture.state.clone()),
+        auth_headers(&admin),
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        writer.entered.notified(),
+    )
+    .await
+    .expect("the first rebuild reaches its write");
+
+    let refused =
+        pipeline_index_rebuild_handler(State(fixture.state.clone()), auth_headers(&admin))
+            .await
+            .expect_err("a second rebuild of the tenant is refused while one runs");
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert_eq!(refused.1.0.error, "pipeline_index_rebuild_in_progress");
+
+    release.send(()).expect("the held write is waiting");
+    let report = tokio::time::timeout(std::time::Duration::from_secs(10), first)
+        .await
+        .expect("the first rebuild ends once released")
+        .expect("the first rebuild did not panic")
+        .expect("the first rebuild succeeds");
+    assert_eq!(report.0.command_count, 1);
+    let again = pipeline_index_rebuild_handler(State(fixture.state.clone()), auth_headers(&admin))
+        .await
+        .expect("the tenant can be rebuilt again once its rebuild ended");
+    assert_eq!(again.0.command_count, 1);
+}
+
 /// `POST /v1/pipeline/exports` for `use`, with `limit`, keyed by `key`.
 async fn create_pipeline_export(
     state: &Arc<AppState>,

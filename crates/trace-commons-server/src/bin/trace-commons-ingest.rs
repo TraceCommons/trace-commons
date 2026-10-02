@@ -1683,6 +1683,10 @@ struct AppState {
     /// refused at startup without a pipeline runtime
     /// (`validate_pipeline_drain_tenants`).
     pipeline_drain_tenant_ids: Arc<BTreeSet<String>>,
+    /// The index rebuilds this process runs
+    /// (`POST /v1/workers/pipeline/index-rebuild`): one per tenant at a time,
+    /// drained at shutdown (`pipeline_runtime::PipelineIndexRebuilds`).
+    pipeline_index_rebuilds: Arc<pipeline_runtime::PipelineIndexRebuilds>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -4476,6 +4480,7 @@ impl AppState {
             pipeline_runtime_required,
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
+            pipeline_index_rebuilds: Arc::default(),
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,

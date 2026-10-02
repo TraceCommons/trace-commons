@@ -6115,6 +6115,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
+        pipeline_index_rebuilds: Arc::default(),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -28541,6 +28542,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
+        pipeline_index_rebuilds: Arc::default(),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
@@ -40118,6 +40120,92 @@ async fn pipeline_index_rebuild_worker_route_answers_404_without_a_pipeline_runt
         .expect_err("no pipeline runtime is injected in this test state");
     assert_eq!(error.0, StatusCode::NOT_FOUND);
     assert_eq!(error.1.0.error, "pipeline runtime not configured");
+}
+
+/// Zaki's re-review of #1166, Low: the rebuild route runs one rebuild per
+/// tenant at a time, in a task the shutdown drains. While a tenant's
+/// rebuild runs, a second one for it is refused
+/// (`pipeline_index_rebuild_in_progress`) and another tenant's starts; once
+/// it ends, the tenant can be rebuilt again. `drain` refuses new rebuilds
+/// (`pipeline_index_rebuild_shutting_down`), waits for a running one within
+/// the grace period, and aborts one that outlives it, which frees its
+/// tenant's slot.
+#[tokio::test]
+async fn pipeline_index_rebuilds_run_one_per_tenant_and_drain_at_shutdown() {
+    use pipeline_runtime::{
+        PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL, PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL,
+        PipelineIndexRebuilds,
+    };
+    let rebuilds = Arc::new(PipelineIndexRebuilds::default());
+
+    let (release_a, held_a) = tokio::sync::oneshot::channel::<()>();
+    let first = rebuilds
+        .start("tenant-a", async move {
+            let _ = held_a.await;
+            "a"
+        })
+        .expect("the first rebuild of tenant-a starts");
+    assert_eq!(
+        rebuilds.start("tenant-a", async { "again" }).err(),
+        Some(PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL),
+        "a second rebuild of a tenant whose rebuild runs is refused"
+    );
+    let other = rebuilds
+        .start("tenant-b", async { "b" })
+        .expect("another tenant's rebuild starts");
+    assert_eq!(other.await.unwrap(), "b");
+
+    release_a.send(()).unwrap();
+    assert_eq!(first.await.unwrap(), "a");
+    let again = tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            match rebuilds.start("tenant-a", async { "again" }) {
+                Ok(receiver) => break receiver,
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("the ended rebuild frees its tenant");
+    assert_eq!(again.await.unwrap(), "again");
+
+    // The shutdown waits for a rebuild that ends within the grace period.
+    let (release_c, held_c) = tokio::sync::oneshot::channel::<()>();
+    let finishing = rebuilds
+        .start("tenant-c", async move {
+            let _ = held_c.await;
+            "c"
+        })
+        .unwrap();
+    let (release_d, held_d) = tokio::sync::oneshot::channel::<()>();
+    let _stuck = rebuilds
+        .start("tenant-d", async move {
+            let _ = held_d.await;
+            "d"
+        })
+        .unwrap();
+    let drain = tokio::spawn({
+        let rebuilds = rebuilds.clone();
+        async move { rebuilds.drain(StdDuration::from_millis(500)).await }
+    });
+    tokio::time::sleep(StdDuration::from_millis(50)).await;
+    assert_eq!(
+        rebuilds.start("tenant-e", async { "e" }).err(),
+        Some(PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL),
+        "a rebuild requested during the drain is refused"
+    );
+    assert!(!drain.is_finished(), "the drain waits for running rebuilds");
+    release_c.send(()).unwrap();
+    assert_eq!(finishing.await.unwrap(), "c");
+    // tenant-d's rebuild outlives the grace period and is aborted.
+    tokio::time::timeout(StdDuration::from_secs(5), drain)
+        .await
+        .expect("the drain ends at the grace period")
+        .unwrap();
+    assert!(
+        release_d.send(()).is_err(),
+        "the rebuild that outlived the grace period was aborted"
+    );
 }
 
 #[tokio::test]

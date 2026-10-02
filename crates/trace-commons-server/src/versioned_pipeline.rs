@@ -8905,11 +8905,12 @@ impl PipelineService {
     /// rebuild route therefore runs the rebuild in a task of its own, so a
     /// client disconnect does not drop it (review of the follow-up wave,
     /// m1), as Settle's index dispatch runs in a task that owns its
-    /// transaction (PR 3, b14d25e9). The windows that remain are the ones
-    /// that release the locks while the writes go on: a lost database
-    /// session, and the process exit (the graceful shutdown drains open
-    /// connections only and does not wait for a rebuild whose client has
-    /// gone, and the runtime drops that task when the process exits).
+    /// transaction (PR 3, b14d25e9). The route also runs one rebuild per
+    /// tenant at a time and its shutdown waits for running rebuilds with the
+    /// worker's grace period (`PipelineIndexRebuilds` in ingest; Zaki's
+    /// re-review of #1166, Low). The windows that remain are the ones that
+    /// release the locks while a write goes on: a lost database session, a
+    /// rebuild aborted past the shutdown grace period, and the process exit.
     ///
     /// The rows are held no longer than a deadline, as Settle's dispatch
     /// holds its rows (merge review I1; PR 3, 82d276c1): the smaller of

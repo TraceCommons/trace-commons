@@ -359,12 +359,15 @@ pub(crate) async fn pipeline_readiness_handler(
 /// handler awaits (review of the follow-up wave, m1). A client that
 /// disconnects drops this handler's future, but not that task: each run's
 /// writes still finish under the run and submission locks its transaction
-/// holds, and the audit row is still appended. That task is not tracked: the
-/// graceful shutdown drains open connections only, so it does not wait for a
-/// rebuild whose client has gone, and the runtime drops that task when the
-/// process exits. That exit, or a lost database session, can still release
-/// a run's locks while its writes go on; see
-/// `PipelineService::rebuild_index_run`.
+/// holds, and the audit row is still appended. The task is tracked in
+/// `AppState::pipeline_index_rebuilds` (Zaki's re-review of #1166, Low):
+/// one rebuild per tenant at a time, so a second request for a tenant whose
+/// rebuild is running is refused with `409`
+/// `pipeline_index_rebuild_in_progress`, and the shutdown waits for running
+/// rebuilds with the worker's grace period (`run_pipeline_app`) before it
+/// aborts what is left. An abort past the grace period, the process exit
+/// itself, or a lost database session can still release a run's locks
+/// while a write goes on; see `PipelineService::rebuild_index_run`.
 pub(crate) async fn pipeline_index_rebuild_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -372,9 +375,120 @@ pub(crate) async fn pipeline_index_rebuild_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
     require_pipeline_service(state.as_ref())?;
-    tokio::spawn(rebuild_index_and_audit(state, tenant))
+    let tenant_id = tenant.tenant_id.clone();
+    let rebuild = state
+        .pipeline_index_rebuilds
+        .start(&tenant_id, rebuild_index_and_audit(state.clone(), tenant))
+        .map_err(|refusal| match refusal {
+            PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL => {
+                api_error(StatusCode::SERVICE_UNAVAILABLE, refusal)
+            }
+            _ => api_error(StatusCode::CONFLICT, refusal),
+        })?;
+    rebuild
         .await
         .map_err(|_| internal_error("pipeline_index_rebuild_task_failed"))?
+}
+
+/// Safe label of a rebuild request for a tenant whose rebuild is already
+/// running in this process (`PipelineIndexRebuilds::start`).
+pub(crate) const PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL: &str =
+    "pipeline_index_rebuild_in_progress";
+/// Safe label of a rebuild request that arrives once the shutdown has
+/// started draining the rebuilds (`PipelineIndexRebuilds::drain`).
+pub(crate) const PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL: &str =
+    "pipeline_index_rebuild_shutting_down";
+
+/// The index rebuilds this process runs (Zaki's re-review of #1166, Low):
+/// at most one per tenant, each in a task the shutdown drains
+/// (`drain`). Held in `AppState` behind an `Arc`, so every clone of the
+/// state shares it. The tenant ids it holds stay in memory and are never
+/// logged.
+#[derive(Default)]
+pub(crate) struct PipelineIndexRebuilds {
+    state: std::sync::Mutex<PipelineIndexRebuildsState>,
+}
+
+#[derive(Default)]
+struct PipelineIndexRebuildsState {
+    running: BTreeSet<String>,
+    tasks: tokio::task::JoinSet<()>,
+    closed: bool,
+}
+
+impl PipelineIndexRebuilds {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PipelineIndexRebuildsState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Runs `rebuild` for `tenant_id` in a tracked task and returns a
+    /// receiver for its result; dropping the receiver does not stop the
+    /// rebuild. Refuses with `pipeline_index_rebuild_in_progress` while a
+    /// rebuild of the same tenant runs, and with
+    /// `pipeline_index_rebuild_shutting_down` once `drain` has started.
+    pub(crate) fn start<F, T>(
+        self: &Arc<Self>,
+        tenant_id: &str,
+        rebuild: F,
+    ) -> Result<tokio::sync::oneshot::Receiver<T>, &'static str>
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let mut state = self.lock();
+        if state.closed {
+            return Err(PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL);
+        }
+        // Finished tasks keep their slot until they are joined.
+        while state.tasks.try_join_next().is_some() {}
+        if !state.running.insert(tenant_id.to_string()) {
+            return Err(PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL);
+        }
+        let running = RunningIndexRebuild {
+            rebuilds: self.clone(),
+            tenant_id: tenant_id.to_string(),
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        state.tasks.spawn(async move {
+            // Dropped when the task ends, is aborted, or panics, so the
+            // tenant can be rebuilt again.
+            let _running = running;
+            let _ = sender.send(rebuild.await);
+        });
+        Ok(receiver)
+    }
+
+    /// Refuses new rebuilds, waits up to `grace` for the running ones, and
+    /// aborts what is left (as `join_or_abort` does for the worker).
+    pub(crate) async fn drain(&self, grace: StdDuration) {
+        let mut tasks = {
+            let mut state = self.lock();
+            state.closed = true;
+            std::mem::take(&mut state.tasks)
+        };
+        let drained =
+            tokio::time::timeout(grace, async { while tasks.join_next().await.is_some() {} }).await;
+        if drained.is_err() {
+            tracing::warn!(
+                "pipeline index rebuild did not stop within the shutdown grace period; aborting it"
+            );
+            tasks.shutdown().await;
+        }
+    }
+}
+
+/// A tenant's slot in `PipelineIndexRebuilds::running`, released on drop.
+struct RunningIndexRebuild {
+    rebuilds: Arc<PipelineIndexRebuilds>,
+    tenant_id: String,
+}
+
+impl Drop for RunningIndexRebuild {
+    fn drop(&mut self) {
+        self.rebuilds.lock().running.remove(&self.tenant_id);
+    }
 }
 
 /// `pipeline_index_rebuild_handler`'s rebuild and audit row, for the
@@ -1146,7 +1260,8 @@ pub(crate) async fn join_or_abort<T>(mut handle: tokio::task::JoinHandle<T>, gra
 /// resolves, the worker (if any) is asked to stop and given the same grace
 /// period to confirm it did. A worker that does not stop in time is aborted
 /// (`join_or_abort`) rather than left running -- shutdown still completes
-/// either way.
+/// either way. The index rebuilds still running (`PipelineIndexRebuilds`)
+/// get the same grace period, at the same time, and are aborted past it.
 pub async fn run_pipeline_app(
     state: Arc<AppState>,
     listener: TcpListener,
@@ -1154,6 +1269,7 @@ pub async fn run_pipeline_app(
 ) -> anyhow::Result<()> {
     register_default_bundles_for_rollout_tenants(&state).await?;
     let worker = spawn_pipeline_worker(state.clone());
+    let rebuilds = state.pipeline_index_rebuilds.clone();
     let grace = parse_usize_env(
         TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
         TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS,
@@ -1161,15 +1277,20 @@ pub async fn run_pipeline_app(
     let result =
         serve_ingest_with_graceful_shutdown(listener, build_pipeline_app(state), grace, shutdown)
             .await;
-    if let Some(worker) = worker {
-        let _ = worker.stop.send(true);
-        // Stop advertising ready the moment shutdown is requested, rather
-        // than leaving the last readiness probe's result standing until the
-        // loop wakes for its next (possibly final) iteration.
-        worker
-            .ready
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        join_or_abort(worker.join, StdDuration::from_secs(grace)).await;
-    }
+    let stop_worker = async {
+        if let Some(worker) = worker {
+            let _ = worker.stop.send(true);
+            // Stop advertising ready the moment shutdown is requested, rather
+            // than leaving the last readiness probe's result standing until
+            // the loop wakes for its next (possibly final) iteration.
+            worker
+                .ready
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            join_or_abort(worker.join, StdDuration::from_secs(grace)).await;
+        }
+    };
+    // Zaki's re-review of #1166, Low: an index rebuild whose client has gone
+    // still runs; it gets the worker's grace period, at the same time.
+    tokio::join!(stop_worker, rebuilds.drain(StdDuration::from_secs(grace)));
     result
 }
