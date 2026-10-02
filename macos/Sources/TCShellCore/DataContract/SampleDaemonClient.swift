@@ -70,12 +70,14 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
             + serve("list_kept", as: DaemonData.KeptList.self).kept
     }
 
-    /// `preview` and a ready `preview_request` share this summary.
-    private func summary(for entryId: String, method: String) throws -> DaemonData.PreviewSummary {
+    /// The card `preview` and a ready `preview_request` share, as the
+    /// daemon's `preview_card_value` does. Only `preview` adds the entry.
+    private func summary(for entryId: String, method: String, withEntry: Bool) throws -> DaemonData.PreviewSummary {
         guard let entry = try allEntries().first(where: { $0.entryId == entryId }) else {
             throw DaemonDataError.daemon(code: "bad_params", message: "unknown-entry-id")
         }
-        return try decode(SampleDaemonData.previewSummary(for: entry), method: method, as: DaemonData.PreviewSummary.self)
+        let json = SampleDaemonData.previewCard(for: entry, withEntry: withEntry)
+        return try decode(json, method: method, as: DaemonData.PreviewSummary.self)
     }
 
     // MARK: Status and the queue
@@ -106,7 +108,8 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     /// Every sample preview is already built: `ready`, from cache, so no
     /// `previewReady` event follows (as the daemon does for a cached one).
     public func requestPreview(entryId: String) async throws -> DaemonData.PreviewRequestOutcome {
-        PreviewRequestResult(entryID: entryId, state: .ready, summary: try summary(for: entryId, method: "preview_request"))
+        PreviewRequestResult(
+            entryID: entryId, state: .ready, summary: try summary(for: entryId, method: "preview_request", withEntry: false))
     }
 
     public func setVisiblePreviews(entryIds: [String]) async throws -> Int {
@@ -121,7 +124,7 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     public func preview(entryId: String) async throws -> DaemonData.PreviewSummary {
-        try summary(for: entryId, method: "preview")
+        try summary(for: entryId, method: "preview", withEntry: true)
     }
 
     public func previewUnsureSpans(entryId: String, bodyDigest: String) async throws -> DaemonData.UnsureSpans {
@@ -132,10 +135,11 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     // MARK: Queue actions
 
-    /// Approves a pending entry of this set. Any other id answers the way
-    /// the daemon answers an entry it cannot act on: OK, `approved: 0`, and
-    /// a `not-pending` skip, which `approve(entryId:)` throws as
-    /// `notApproved`.
+    /// Approves a pending entry of this set. A kept entry answers the way
+    /// the daemon answers an entry it holds but cannot act on: OK,
+    /// `approved: 0`, and a `not-pending` skip, which `approve(entryId:)`
+    /// throws as `notApproved`. An id this set never held is refused up
+    /// front with `unknown-entry-id`, as the daemon refuses it.
     public func approve(entryId: String, verdict: ContributorVerdict?, correction: String?) async throws
         -> ApproveResponse
     {
@@ -146,6 +150,9 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
             verdict != .partly, verdict != .failed
         {
             throw DaemonDataError.daemon(code: "bad_params", message: "correction-needs-outcome")
+        }
+        guard try allEntries().contains(where: { $0.entryId == entryId }) else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "unknown-entry-id")
         }
         let pending = try serve("list_pending", as: DaemonData.PendingList.self).pending
         let json = pending.contains(where: { $0.entryId == entryId })
@@ -166,11 +173,12 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         return 0
     }
 
-    /// Approves every pending entry of that folder in this set, held ones
-    /// excepted, as the daemon's group selector does.
+    /// Approves every pending entry of that folder in this set, except
+    /// those held for a person (`heldForReview`), as the daemon's group
+    /// selector does. A Manual Scrub check hold is approved with the rest.
     public func approveFolder(projectId: String) async throws -> ApproveResponse {
         let pending = try await listPending(projectId: projectId)
-        let held = pending.filter { $0.heldForSecondLook || $0.heldByManualScrubCheck }.count
+        let held = pending.filter(\.heldForReview).count
         let json = SampleDaemonData.approvedGroup(approved: pending.count - held, excludedHeld: held)
         return try decode(json, method: "approve", as: ApproveResponse.self)
     }

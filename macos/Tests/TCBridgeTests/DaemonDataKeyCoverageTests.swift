@@ -93,13 +93,15 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
     }
 
     private func waitForFile(named name: String) throws {
-        for _ in 0..<200 {
+        for _ in 0..<600 {
             let found = FileManager.default.enumerator(atPath: directory.path)?
                 .contains { ($0 as? String)?.hasSuffix(name) == true } ?? false
             if found { return }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        throw XCTSkip("the first tick never saved \(name)")
+        // A failure, not a skip: a daemon that stopped saving would
+        // otherwise pass this suite as skipped.
+        throw DaemonWaitTimedOut(what: "the first tick never saved \(name)")
     }
 
     /// The `result` of one `tc_call`, as a JSON value; fails on an error frame.
@@ -133,12 +135,12 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
     }
 
     private func waitForPending(_ daemon: TCDaemon) throws -> [String: Any] {
-        for _ in 0..<200 {
+        for _ in 0..<600 {
             let pending = try XCTUnwrap((try result(daemon, "list_pending") as? [String: Any])?["pending"] as? [Any])
             if let entry = pending.first as? [String: Any] { return entry }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        throw XCTSkip("the watcher never queued the session")
+        throw DaemonWaitTimedOut(what: "the watcher never queued the session")
     }
 
     func testEveryKeyTheDaemonSendsIsDeclared() throws {
@@ -406,4 +408,10 @@ private final class Pipe: DaemonTransport, @unchecked Sendable {
     func call(_ method: String, params paramsJSON: String) -> String {
         daemon.call(method, params: paramsJSON)
     }
+}
+
+/// A wait on the real daemon that ran out. Thrown, so the test fails.
+private struct DaemonWaitTimedOut: Error, CustomStringConvertible {
+    let what: String
+    var description: String { "\(what) within 30 seconds" }
 }
