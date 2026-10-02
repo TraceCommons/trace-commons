@@ -525,12 +525,16 @@ enum TC {
 
     /// The brand accent: purple from the Trace logo (glass tokens, D3),
     /// replacing the community green. A FILL and TINT colour only -- the
-    /// window tint, a checked box, the prominent button -- so it is the brand
-    /// purple #6D14F3 in both schemes, carrying white glyphs at 6.9:1. The
-    /// lavender #C9B3FF is a text colour and lives only in `accentText`:
-    /// white on it is 1.85:1. Accent glyphs or text on the ground use
-    /// `accentText`. Good standing is not this colour: see `statusOn`.
-    static let accent = dynamic(glass(GlassTokens.Color.purple), glass(GlassTokens.Color.purple))
+    /// window tint, an on-switch track, a checked box, the prominent button.
+    /// Light is the brand purple #6D14F3 (6.4:1 on the ground, white glyphs
+    /// on it 6.9:1). Dark is `purpleSoft` #8A3DFF: the brand purple is only
+    /// 2.25:1 on the dark ground, below the 3:1 floor for a UI component,
+    /// while #8A3DFF is 3.1:1 on the ground and still carries white at 5.0:1.
+    /// The lavender #C9B3FF is a text colour and lives only in `accentText`:
+    /// white on it is 1.85:1. Accent glyphs or text on the ground -- links
+    /// and `.borderless` buttons, which draw in the tint -- use `accentText`.
+    /// Good standing is not this colour: see `statusOn`.
+    static let accent = dynamic(glass(GlassTokens.Color.purple), glass(GlassTokens.Color.purpleSoft))
     /// Spec `blue.brand`, site `--blue`. Secondary. Held, ranked, in progress,
     /// and the mark's bottom-right bracket.
     ///
@@ -584,7 +588,9 @@ enum TC {
     // A consent action nobody can read is not a consent action, so the pair
     // is measured: white on the brand purple #6D14F3 is 6.9:1 in both
     // schemes. It replaces the community green pair (#137C61 / #3FBE9A).
-    /// Spec `on.accent` fill. The glass brand purple.
+    /// Spec `on.accent` fill. The glass brand purple, in both schemes. Unlike
+    /// `accent` it keeps #6D14F3 in dark: the primary button is identified by
+    /// its white label (6.9:1), not by its edge against the ground.
     static let primaryFill = dynamic(glass(GlassTokens.Color.purple), glass(GlassTokens.Color.purple))
     /// Spec `on.accent`. White on `primaryFill`, 6.9:1 in both schemes.
     static let primaryLabel = dynamic(glass(GlassTokens.Color.textOnAccent), glass(GlassTokens.Color.textOnAccent))

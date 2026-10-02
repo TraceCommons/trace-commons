@@ -164,11 +164,8 @@ public struct GlassGallery: View {
                 Toggle("settings", isOn: $settingsToggle).labelsHidden().toggleStyle(GlassToggleStyle(.settings))
                 Toggle("watch", isOn: $watched).labelsHidden().toggleStyle(GlassToggleStyle(.watch))
                 Toggle("Single", isOn: $checked).toggleStyle(GlassCheckboxStyle())
-                Toggle("Group", isOn: Binding(
-                    get: { children.allSatisfy { $0 } },
-                    set: { value in children = children.map { _ in value } }
-                ))
-                .toggleStyle(GlassCheckboxStyle(mixed: children.contains(true) && children.contains(false)))
+                Toggle("Group", sources: $children, isOn: \.self)
+                    .toggleStyle(GlassCheckboxStyle())
                 GlassCheckMark(checked: true)
                 GlassCheckMark(checked: false)
                 GlassExpander("Decisions", isOpen: $expanded).frame(width: 140)
@@ -259,8 +256,8 @@ public struct GlassGallery: View {
             GlassPane(padding: 8) {
                 VStack(spacing: 2) {
                     GlassListRow(depth: .tool, tile: .tool(.claudeCode), title: "tool", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, onToggleExpand: {}, onSubmit: {})
-                    GlassListRow(depth: .folder, tile: .folder, title: "folder", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, onToggleExpand: {}, onSubmit: {}, onMenu: {})
-                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", onSubmit: {}, onMenu: {})
+                    GlassListRow(depth: .folder, tile: .folder, title: "folder", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, menuLabel: "menu", onToggleExpand: {}, onSubmit: {}, onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
                 }
             }
             .frame(width: 420, height: 150)

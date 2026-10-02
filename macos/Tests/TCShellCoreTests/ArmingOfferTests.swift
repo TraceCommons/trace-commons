@@ -15,43 +15,23 @@ final class ArmingOfferTests: XCTestCase {
         XCTAssertEqual(offer.contributedCount, 5)
     }
 
-    /// The evidence is stated before the question, so a contributor who
-    /// reads only the first line still learns why they are being asked.
-    func testEvidenceNamesTheProjectAndTheCount() {
-        XCTAssertEqual(
-            ArmingOfferCopy.evidence(project: "api", count: 5),
-            "You've contributed from api 5 times."
-        )
-    }
-
-    /// The daemon's threshold is five, so this branch is unreachable today.
-    /// It is here because the sentence must be right about whatever count it
-    /// is handed, and "contributed from api 1 times" is not.
-    func testEvidenceIsSingularForOne() {
-        XCTAssertEqual(
-            ArmingOfferCopy.evidence(project: "api", count: 1),
-            "You've contributed from api once."
-        )
-    }
-
-    func testTheQuestionNamesTheProject() {
-        XCTAssertEqual(
-            ArmingOfferCopy.question(project: "api"),
-            "Contribute from api automatically?"
-        )
-    }
-
-    /// A confirm button reading "OK" would make the reader reconstruct what
-    /// they had agreed to from the question above it.
-    func testTheButtonsCarryTheirActions() {
-        XCTAssertEqual(ArmingOfferCopy.confirm, "Turn on automatic contributing")
-        XCTAssertEqual(ArmingOfferCopy.decline, "Not now")
-    }
-
-    /// "Not now", not "No": the daemon silences the offer for thirty days
-    /// rather than forever, and the button must not promise otherwise.
-    func testDeclineIsNotPermanentSoundingCopy() {
-        XCTAssertFalse(ArmingOfferCopy.decline.lowercased().contains("never"))
-        XCTAssertFalse(ArmingOfferCopy.decline.lowercased().contains("don't ask"))
+    /// The offer's words are the core's (`ProjectArmingCopy`), decoded here
+    /// and asserted against the real export in
+    /// `TCBridgeTests/CoreCopyExportTests`.
+    func testTheOffersWordsDecodeFromTheCoresTable() throws {
+        let json = """
+            {"evidence": "E", "question": "Q", "confirm": "C", "decline": "D", "body": "B",
+             "body_with_backlog": "BB", "customize": {}}
+            """
+        let copy = try XCTUnwrap(ProjectArmingCopy.decode(fromJSON: json))
+        XCTAssertEqual(copy.evidence, "E")
+        XCTAssertEqual(copy.question, "Q")
+        XCTAssertEqual(copy.confirm, "C")
+        XCTAssertEqual(copy.decline, "D")
+        XCTAssertEqual(copy.body, "B")
+        XCTAssertEqual(copy.bodyWithBacklog, "BB")
+        XCTAssertNil(ProjectArmingCopy.decode(fromJSON: json.replacingOccurrences(
+            of: "\"Q\"", with: "\"\"")))
+        XCTAssertNil(ProjectArmingCopy.decode(fromJSON: nil))
     }
 }
