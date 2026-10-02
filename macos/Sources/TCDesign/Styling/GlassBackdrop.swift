@@ -77,13 +77,38 @@ struct GlassPaneFill: View {
         let material = GlassMaterial.current(reduceTransparency: reduceTransparency)
         ZStack {
             if material == .opaque {
-                shape.fill(GlassTokens.Color.paneBase.color.opacity(1))
+                shape.fill(GlassTokens.Color.paneOpaque.color)
             } else {
                 GlassBackdrop(material: material, cornerRadius: radius)
                 shape.fill(GlassTokens.Color.glassVeil.color)
             }
             shape.fill(GlassTokens.Gradient.paneFill.linear)
         }
+    }
+}
+
+/// The blur under a floating surface before macOS 26: the HUD material
+/// blended within the window, so it blurs the map or pane the surface floats
+/// on. The spec's popover tier asks for blur 24 at 170% saturation; the
+/// system material is the nearest native equivalent, and it adapts with the
+/// system (Reduce Transparency is handled by the caller).
+struct GlassFloatingBlur: NSViewRepresentable {
+    let cornerRadius: CGFloat
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let effect = NSVisualEffectView()
+        effect.material = .hudWindow
+        effect.blendingMode = .withinWindow
+        effect.state = .active
+        effect.wantsLayer = true
+        effect.layer?.cornerRadius = cornerRadius
+        effect.layer?.cornerCurve = .continuous
+        effect.layer?.masksToBounds = true
+        return effect
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.layer?.cornerRadius = cornerRadius
     }
 }
 
@@ -111,6 +136,13 @@ private struct GlassWindowConfigurator: NSViewRepresentable {
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
         window.appearance = NSAppearance(named: .darkAqua)
+        // An empty unified toolbar makes the title bar taller and brings the
+        // real traffic lights in from the window's corner, so with the 10pt
+        // window padding they sit inside the main pane, not on its rim.
+        if window.toolbar == nil {
+            window.toolbar = NSToolbar(identifier: "glass-window")
+        }
+        window.toolbarStyle = .unified
     }
 
     private final class WindowProbe: NSView {

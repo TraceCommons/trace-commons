@@ -54,7 +54,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                     .foregroundStyle(selected ? GlassColor.textPrimary : (floating ? GlassColor.textSecondary : GlassColor.textTertiary))
                     .padding(.horizontal, floating ? 12 : 8)
                     .frame(maxWidth: floating ? nil : .infinity)
-                    .frame(height: floating ? 24 : GlassTokens.Size.tab)
+                    .frame(minHeight: floating ? 24 : GlassTokens.Size.tab)
                     .background {
                         if selected {
                             if floating {
@@ -72,7 +72,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
             }
         }
         .padding(2)
-        .frame(height: floating ? nil : GlassTokens.Size.segmentedTrack)
+        .frame(minHeight: floating ? nil : GlassTokens.Size.segmentedTrack)
         .glassSurface(floating ? .control : .well, floating: floating)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
