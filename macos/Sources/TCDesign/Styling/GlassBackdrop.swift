@@ -77,7 +77,7 @@ struct GlassPaneFill: View {
         let material = GlassMaterial.current(reduceTransparency: reduceTransparency)
         ZStack {
             if material == .opaque {
-                shape.fill(GlassTokens.Color.paneBase.color.opacity(1))
+                shape.fill(GlassTokens.Color.paneOpaque.color)
             } else {
                 GlassBackdrop(material: material, cornerRadius: radius)
                 shape.fill(GlassTokens.Color.glassVeil.color)

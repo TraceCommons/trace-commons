@@ -180,13 +180,33 @@ public enum GlassTier: Sendable, Equatable {
 public extension View {
     /// Put this view on a material tier: its fill, its edge, its radius.
     func glassTier(_ tier: GlassTier, radius: CGFloat? = nil) -> some View {
+        modifier(GlassTierModifier(tier: tier, radius: radius))
+    }
+}
+
+private struct GlassTierModifier: ViewModifier {
+    let tier: GlassTier
+    let radius: CGFloat?
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
+        let material = GlassMaterial.current(reduceTransparency: reduceTransparency)
         // Clip the content and fill first; the edge's drop shadows fall
         // outside the shape and must not be clipped with them.
-        return self
+        return content
             .background { tier.fill(in: shape) }
             .clipShape(shape)
-            .glassEdge(tier.edge, in: shape)
+            .glassEdge(tier.drawsOwnEdge(on: material) ? tier.edge : [], in: shape)
             .contentShape(shape)
+    }
+}
+
+extension GlassTier {
+    /// Whether this tier draws its own edge. A pane on Liquid Glass does
+    /// not: `NSGlassEffectView` draws its own rim, and ours on top doubles
+    /// it. Everything else, and every tier before macOS 26, draws its edge.
+    func drawsOwnEdge(on material: GlassMaterial) -> Bool {
+        !(self == .pane && material == .liquidGlass)
     }
 }
