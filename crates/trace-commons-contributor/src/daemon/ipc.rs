@@ -304,6 +304,7 @@ pub const METHODS: &[&str] = &[
     "cancel",
     "clear_public_profile",
     "commons_credit_summary",
+    "mission_catalogue",
     "consent_options",
     "discover_routing",
     "dismiss",
@@ -2386,6 +2387,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "commons_credit_summary",
         "commons-credit-summary-requires-async",
     ),
+    ("mission_catalogue", "mission-catalogue-requires-async"),
     (
         "inference_connection_offers",
         "inference-connection-requires-async",
@@ -4105,6 +4107,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "commons_credit_summary" => {
             super::commons_credit::handle_commons_credit_summary(shared, req).await
         }
+        "mission_catalogue" => super::mission_catalogue::handle_catalogue(shared, req).await,
         "inference_connection_offers" => {
             super::inference_connection::handle_offers(shared, req).await
         }
@@ -6798,6 +6801,9 @@ fn signer_attestor_for(
 
 #[cfg(test)]
 mod tests {
+    mod missions {
+        include!("mission_catalogue_tests.rs");
+    }
     mod witnessed_flow {
         include!("ipc_witness_flow_test.rs");
     }
@@ -13307,7 +13313,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 39);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 40);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -13737,7 +13743,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 58, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 46, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 47, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
