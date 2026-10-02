@@ -10,9 +10,10 @@ Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
 surface in the Tauri client, named the main client for the MVP in #1003 and
 merged in #963. No production code in this PR.
 
-> **Superseded 2026-10-01** by #1173 D1: native SwiftUI (`macos/`) is now the
-> main client on macOS; the Tauri app is retired there once the native
-> screens match, and stays the client on Windows and Linux (D13).
+> **Superseded 2026-09-28** by #1173 D1 (decided 2026-09-28, recorded in
+> #1173 on 2026-10-01): native SwiftUI (`macos/`) is now the main client on
+> macOS; the Tauri app is retired there once the native screens match, and
+> stays the client on Windows and Linux (D13).
 
 > **Amended 2026-09-27** (decision 6 of
 > [`2026-09-26-earned-account-trust-design.md`](2026-09-26-earned-account-trust-design.md)):

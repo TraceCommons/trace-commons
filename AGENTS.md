@@ -6,9 +6,9 @@ it too. This file leads with licensing because it is the one rule here whose
 violation a compiler will never report.
 
 Native SwiftUI (`macos/`) is the main client on macOS (#1173 D1): no new
-Tauri work, and the Tauri app is retired on macOS once the native screens
-match. Windows and Linux stay on Tauri, frozen, until macOS ships (#1173
-D13, a default for now). `CLAUDE.md` lists the other shells.
+Tauri work on macOS, and the Tauri app is retired there once the native
+screens match. Windows and Linux stay on Tauri, frozen, until macOS ships
+(#1173 D13, a default for now). `CLAUDE.md` lists the other shells.
 
 ## Licensing: the split is load-bearing
 

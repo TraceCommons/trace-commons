@@ -17,9 +17,9 @@ shells -- macOS (`macos/`, Swift), Windows (`windows/`, C#), Linux GTK
 (`crates/trace-commons-contributor-gtk`), and Tauri (`tauri-desktop/`).
 
 **Native SwiftUI (`macos/`) is the main client on macOS** (#1173 D1): no new
-Tauri work, and the Tauri app is retired on macOS once the native screens
-match. Windows and Linux stay on Tauri, frozen, until macOS ships (#1173
-D13, a default for now).
+Tauri work on macOS, and the Tauri app is retired there once the native
+screens match. Windows and Linux stay on Tauri, frozen, until macOS ships
+(#1173 D13, a default for now).
 
 There is **no Ironclaw path dependency**. Do not look for one. Do not propose
 adding one.

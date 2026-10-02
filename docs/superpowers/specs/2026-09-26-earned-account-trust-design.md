@@ -602,9 +602,10 @@ these hold:
    credit-quality eras in effect, the gate policy versions in effect.
 7. The contributor-facing tier-change notice exists in at least the Tauri
    client, which is the MVP client, so nothing is earned silently.
-   > **Superseded 2026-10-01** by #1173 D1: native SwiftUI (`macos/`) is now
-   > the main client on macOS, so the notice must exist there too; Tauri
-   > remains the client this condition covers on Windows and Linux (D13).
+   > **Superseded 2026-09-28** by #1173 D1 (decided 2026-09-28, recorded
+   > in #1173 on 2026-10-01): native SwiftUI (`macos/`) is now the main
+   > client on macOS, so the notice must exist there too; Tauri remains the
+   > client this condition covers on Windows and Linux (D13).
 8. Zaki approves the tier table and ceiling as a reviewed policy version.
 
 Switching off is a policy version bump back to `"none"`. Spend already
