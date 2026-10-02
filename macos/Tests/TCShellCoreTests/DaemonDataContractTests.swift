@@ -297,6 +297,8 @@ final class DaemonDataContractTests: XCTestCase {
     }
 
     func testLiveEventsDeliverParsedFrames() async {
+        // "{}" is not a frame, so the opening snapshot cannot be built and
+        // the stream opens with a resync instead; frames follow it.
         let client = LiveDaemonClient(transport: FakeTransport(response: "{}"))
         let stream = client.events()
         client.deliver(eventJSON: #"{"event":"status_changed","data":{}}"#)
@@ -305,6 +307,8 @@ final class DaemonDataContractTests: XCTestCase {
         // or `cost`.
         client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"tool":"codex","model":"m","proof":"pending"}}"#)
         var iterator = stream.makeAsyncIterator()
+        let opening = await iterator.next()
+        XCTAssertEqual(opening, .resyncRequired)
         let first = await iterator.next()
         XCTAssertEqual(first, .statusChanged)
         guard case .inferenceCallAdded(let call)? = await iterator.next() else {
