@@ -109,6 +109,33 @@ old behaviour, because no application has shipped against `v1` yet. See
     `GET /v1/account/credit-summary` with the account session. The daemon
     never read either before this. See
     ["`commons_credit_summary`"](#commons_credit_summary).
+- **K9 (titles on the queue).** `title` -- previously served only on a
+  `preview` summary -- is now also on every queue entry (`list_pending`, the
+  `snapshot` event). It is never written to a receipt or a history row.
+  The watcher computes it synchronously when it queues the session, from
+  the same opening prompt and the same cut/truncate rule `preview`'s own
+  `title` uses, but through the deterministic redaction pass alone rather
+  than a full preview build. See ["`title`"](#title) and
+  ["The preview content boundary"](#the-preview-content-boundary).
+- **K10 (sizes in history, and the would-send size).** Two additive fields,
+  so the History graph can weigh contributions by bytes and not only by
+  count. `list_history` rows now carry `uploaded_bytes`: the serialized size
+  of the redacted envelope a submission actually sent, recorded once at
+  upload time. Every queue entry (`list_pending`, the `snapshot` event) now
+  also carries `would_send_bytes`: the serialized size of the redacted
+  envelope a preview pinned for that entry, present only once a preview has
+  run. Neither is the raw session size on disk (`size_bytes`), which was the
+  only figure either surface could report before this. See
+  ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
+- **K12 (withdrawal dates on revoked rows).** `list_history` rows now carry
+  `revoked_at`: when a server `revoked` read-back -- a withdrawal made on the
+  web, which this daemon never drove -- was first observed, so a revoked row
+  can show a date the way a locally `withdrawn` one already does from
+  `withdrawn_at`. The server's read-back itself carries no timestamp, so this
+  is the moment of first discovery rather than the moment of the web
+  withdrawal; it does not move on a later poll that only re-confirms the same
+  status. See
+  ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -353,8 +380,10 @@ something it can corroborate, rather than to a string a client invented.
   sizes. The full redacted event body is a separate call, `preview_body`,
   because it does not fit one frame and has to be paged. Both carry trace
   content under the preview boundary below. Account-authenticated session
-  detail and tested-skill extraction have their own bounded content boundary;
-  no other method returns session-derived text.
+  detail and tested-skill extraction have their own bounded content boundary.
+  The one other session-derived text is a queue entry's `title` (K9), a
+  bounded exception described under the boundary below; no other method
+  returns session-derived text.
   An earlier revision of this document said the body was deliberately
   in-process only, reachable through the crate's C ABI, on the reasoning
   that any process could compute a preview for itself. That reasoning does
@@ -386,6 +415,24 @@ and a project name is not an informed one. This content is bounded:
 - **Never onward.** It never appears in a log line, an audit entry, a
   history record, notification text, or a receipt. Not truncated, not
   summarized, not hashed-with-a-sample. Nothing copies it into any of those.
+
+**The one exception: a queue entry's `title` (K9).** Every queue entry, in
+`list_pending` and the `snapshot` event, carries `title`: the first non-empty
+line of the opening prompt, cut and truncated as `preview`'s `title` is. It
+departs from the first two rules above, deliberately, and only these ways:
+
+- **Deterministic redaction only.** The watcher builds it when it queues the
+  session, through the deterministic pass alone (secret-leak patterns, local
+  paths, private emails, PEM blocks), never a configured prose filter. So it
+  is never less redacted than an unenrolled `preview.title`, but can be less
+  redacted than an enrolled contributor's.
+- **Served in bulk.** It is on every row of the queue a client already
+  lists, without naming an entry.
+
+It keeps the third rule in full. It lives on the queue entry and goes when
+the entry goes. It is never written to a receipt, a history record, a log, an
+audit entry or a notification, and nothing copies it onward. A history list
+shows the project label, not a title.
 
 `preview_unsure_spans` is outside the exemption for the same reason as
 `preview_turns` below: it carries fixed labels and byte offsets into the body
@@ -470,7 +517,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
+| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -502,7 +549,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended` and `approved_verdict` | see "History provenance (K7)" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -930,12 +977,38 @@ other would be a claim this daemon cannot verify.
 above for why this one field is allowed to be, and what that permission does
 not extend to.
 
+#### `title`
+
 `title` is a short name for the session, for a row or a sheet header: the
 first non-empty line of the redacted `opening_prompt`, cut at a word boundary
 to 60 characters with an ellipsis when cut, and `null` when there is no task
-description. It is the same redacted content as `opening_prompt`, under the
-same boundary, so it is served only where `opening_prompt` is -- in a preview
-summary, never in `list_pending`. A list that wants titles schedules previews
+description.
+
+**K9**: `title` is no longer confined to a `preview` summary. It is also on
+every queue entry (`list_pending`, the `snapshot` event), as the one
+exception to the preview content boundary -- see
+["The preview content boundary"](#the-preview-content-boundary). It is never
+carried onto a receipt or a `list_history` row.
+The watcher builds it once, synchronously, at the moment it queues the
+session, from the same opening prompt and the same cut/truncate rule this
+`preview` field uses -- but through the deterministic redaction pass alone
+(secret-leak patterns, known and generic local paths, private emails, PEM
+blocks), never a configured prose privacy filter. The watcher's poll loop is
+synchronous and runs on every discovered session; it cannot pay for that
+filter's network call there the way a `preview` build can. That deterministic
+pass is the floor every `preview`'s own redaction starts from and an
+unenrolled contributor's `preview.title` never goes past, so the queued
+`title` is never LESS redacted than an equivalent `preview.title` -- an
+enrolled contributor's `preview` may additionally scrub prose PII that only a
+configured filter catches, which the queued `title` cannot. `preview.title`
+itself is unchanged: same field, same rule, independently computed on that
+path.
+
+`title` on a queue entry is `null` on an entry queued before this existed --
+it is not backfilled, exactly like `shape` (see below): the entry gets a
+title the next time its session is loaded (it grows, or is re-offered) --
+and whenever the task named no description. A client that wants the
+preview's fully-filtered title regardless of either still schedules previews
 (`preview_request`, `preview_visible`) and fills each row in as its
 `preview_ready` arrives.
 
@@ -957,6 +1030,12 @@ every event of the redacted envelope. `ended_at` spans the delegated work
 too, since it is part of the session. An entry queued before these fields
 existed has them all `null`; it is not backfilled, and gains a shape when its
 session is next loaded (it grows, or is re-offered).
+
+Every entry also carries `title` (K9) -- unlike the fields above, redacted
+*content*, not metadata, so it is documented on its own: see
+["`title`"](#title). It also carries `would_send_bytes` (K10), the pinned
+preview's measured size, documented in
+["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
 
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are
@@ -3871,6 +3950,105 @@ Render both as fixed labels, never as prose composed from anything else on
 the row -- "you approved" and "armed" are not synonyms for any existing
 status, and mean nothing about whether the submission was later accepted,
 quarantined, or withdrawn.
+
+### Sizes in history, and the would-send size (K10)
+
+Before this, a history row carried no bytes at all -- only the server's
+status, credit and explanation prose -- so the History graph could count
+sessions but not weigh them, and nothing on a queue entry said how large an
+upload would actually be once redaction ran. `size_bytes` on a queue entry
+is the raw session file on disk, which redaction shrinks or reshapes; it was
+never a stand-in for either figure.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "uploaded_bytes": 15320
+}
+```
+
+- **`uploaded_bytes`** -- the serialized size, in bytes, of the redacted
+  envelope this submission actually sent, or `null`. Recorded once, at
+  upload time, in `submit_loaded`: a witnessed submission reports the
+  witness's own certified `envelope_bytes.len()` -- the exact wire bytes
+  `/v1/traces` received -- and an ordinary submission reports
+  `envelope::envelope_size` on the final, grant-stamped envelope, which is
+  what the same call serializes onto the wire. Written onto the receipt
+  by `submit_loaded`, and carried from there onto the history row.
+
+Every queue entry (`list_pending`, the `snapshot` event) carries a sibling
+field:
+
+```json
+{
+  "entry_id": "…",
+  "...": "…existing fields unchanged…",
+  "size_bytes": 48210,
+  "would_send_bytes": 15320
+}
+```
+
+- **`would_send_bytes`** -- the serialized size of the redacted envelope a
+  preview pinned for this entry, or `null` when nothing is pinned: an entry
+  never previewed (an armed auto-upload, an approve-all), or one written
+  before this field existed. The same figure [`preview`](#preview)'s own
+  `would_send_bytes` reports, mirrored onto the entry at the moment a
+  preview pins it (`QueueEntry::previewed_envelope_digest`'s own sibling
+  field) so a queue list can say it without opening the stored envelope for
+  every row -- the same reason `attested_inference` is mirrored there. It
+  is cleared wherever the pin is (keep, Undo, a released preview, a revoked
+  approval). For a local preview it is measured before the upload stamps
+  the grant's scopes onto the envelope, so it can be a few bytes short of
+  `uploaded_bytes`; treat it as the size to expect, not a promise.
+
+Both `uploaded_bytes` and `would_send_bytes` are `Option<u64>`,
+`#[serde(default)]` on the wire, so a cached row or a queue line written
+before either field existed still loads, reading `null`.
+
+### Withdrawal dates on revoked rows (K12)
+
+A locally driven withdrawal (`withdraw`, `withdraw_bulk`) stamps
+`withdrawn_at` the moment it runs, so a `withdrawn` row has always been able
+to show a date. A withdrawal made on the web instead, which this daemon only
+learns about the next time it polls submission status and gets back
+`revoked`, had no equivalent: the server's status read-back
+(`TraceSubmissionStatusUpdate`) carries a status and credit figures, never a
+timestamp, so a `revoked` row had no date to show at all.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "status": "revoked",
+  "revoked_at": "2026-08-09T12:00:00Z"
+}
+```
+
+- **`revoked_at`** -- when this row was first seen carrying status
+  `revoked`, or `null` for a row that is not (or not yet) revoked, or one
+  written before this field existed. **Not** the moment of the web
+  withdrawal itself, which this daemon has no way to learn -- the moment
+  this device first discovered it, the same honest compromise
+  `observed_modified_at` and `review_started_at` already make elsewhere on
+  this contract for a fact only discoverable by polling. Stamped once, by
+  the history join that first sees `revoked`, from that poll's own
+  `last_refreshed_at`, and carried forward on every later refresh exactly
+  the way a local `withdrawn_at` already is -- a later poll that merely
+  re-confirms the same `revoked` status must not push the date forward.
+  Two cases stay `null` on purpose: a row the cache already held as
+  `revoked` before this field existed (it was withdrawn on a day this
+  device cannot know, and the upgrade's first poll is not that day), and a
+  withdrawal this device drove itself, which already carries `withdrawn_at`
+  and whose `revoked` read-back is not a web withdrawal.
+
+`#[serde(default)]` on the wire, like every other field on this row, so a
+cached row written before this field existed still loads, reading `null`
+until the next poll re-observes the revocation and dates it.
 
 ### `history_rollup`
 
