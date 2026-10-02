@@ -81,7 +81,7 @@ public struct GlassGallery: View {
                 Text("textTertiary").foregroundStyle(GlassColor.textTertiary)
                 Text("purpleText").foregroundStyle(GlassColor.accentText)
             }
-            .font(.system(size: 13))
+            .glassType(GlassTokens.TypeScale.body)
         }
     }
 
@@ -114,7 +114,7 @@ public struct GlassGallery: View {
 
     private var type: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(["display", "heading", "title", "body", "bodyStrong", "label", "caption", "eyebrow", "mono", "number"], id: \.self) { name in
+            ForEach(["display", "heading", "title", "body", "bodyStrong", "label", "caption", "micro", "eyebrow", "mono", "number"], id: \.self) { name in
                 if let style = GlassTokens.TypeScale.all[name] {
                     Text(name)
                         .glassType(style)
@@ -252,9 +252,9 @@ public struct GlassGallery: View {
             .frame(width: 420, height: 150)
             VStack(alignment: .leading, spacing: 10) {
                 GlassEyebrowCard("History", action: {}) {
-                    Text("accessory").font(.system(size: 11)).foregroundStyle(GlassColor.textSecondary)
+                    Text("accessory").glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
                 } content: {
-                    Text("content").font(.system(size: 13, weight: .semibold)).foregroundStyle(GlassColor.textPrimary)
+                    Text("content").glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
                 }
                 GlassConsentBlock("consent")
                 GlassKeyValueList([.init("Path", "~/code/orchard-api", mono: true), .init("Sessions", "18")])

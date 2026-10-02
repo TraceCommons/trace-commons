@@ -45,7 +45,7 @@ public struct GlassStatusLabel: View {
             GlassStatusDot(status)
             Text(title)
         }
-        .font(.system(size: 12, weight: .medium))
+        .glassType(GlassTokens.TypeScale.label)
         .foregroundStyle(GlassColor.textSecondary)
         .accessibilityElement(children: .combine)
     }
@@ -97,7 +97,7 @@ public struct GlassTag: View {
         case .accent: (GlassTokens.Color.tintAccent, GlassColor.accentText)
         }
         Text(title)
-            .font(.system(size: 10, weight: .bold))
+            .glassType(GlassTokens.TypeScale.micro)
             .foregroundStyle(ink)
             .padding(.vertical, 3)
             .padding(.horizontal, 8)
@@ -122,7 +122,8 @@ public struct GlassBadge: View {
 
     public var body: some View {
         Text("\(count)")
-            .font(.system(size: 10, weight: .bold))
+            .glassType(GlassTokens.TypeScale.micro)
+            .monospacedDigit()
             .monospacedDigit()
             .foregroundStyle(subtle ? GlassColor.textPrimary : GlassTokens.Color.textOnStatus.color)
             .padding(.horizontal, 5)
@@ -188,19 +189,19 @@ public struct GlassToolTile: View {
             switch kind {
             case let .tool(tool):
                 Text(tool.initials)
-                    .font(.system(size: large ? 11 : 9, weight: .bold))
+                    .glassGlyph(large ? 11 : 9, weight: .bold)
                     .foregroundStyle(tool.tint.color)
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(Color.white.opacity(0.1)))
             case .folder:
                 Text("dir")
-                    .font(.system(size: large ? 11 : 9, weight: .bold))
+                    .glassGlyph(large ? 11 : 9, weight: .bold)
                     .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
             case .session:
                 Image(systemName: "doc.plaintext")
-                    .font(.system(size: large ? 13 : 10))
+                    .glassGlyph(large ? 13 : 10)
                     .foregroundStyle(GlassTokens.Color.statusOff.color)
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
@@ -263,7 +264,7 @@ public struct GlassBarGraph: View {
                     }
                     .frame(height: 96)
                     Text(bucket.label)
-                        .font(.system(size: thin ? 9 : 11))
+                        .glassType(thin ? GlassTokens.TypeScale.micro.weight(.regular) : GlassTokens.TypeScale.caption)
                         .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
                         .frame(height: 12)
                 }
@@ -306,10 +307,10 @@ public struct GlassNodeCard: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(GlassColor.textPrimary)
-            Text(detail).font(.system(size: 12)).foregroundStyle(GlassColor.textSecondary)
+            Text(title).glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
+            Text(detail).glassType(GlassTokens.TypeScale.label.weight(.regular)).foregroundStyle(GlassColor.textSecondary)
             if let hint {
-                Text(hint).font(.system(size: 10, design: .monospaced)).foregroundStyle(GlassColor.textTertiary).padding(.top, 3)
+                Text(hint).glassType(GlassTokens.TypeScale.micro.weight(.regular).monospaced).foregroundStyle(GlassColor.textTertiary).padding(.top, 3)
             }
         }
         .padding(.vertical, 12)

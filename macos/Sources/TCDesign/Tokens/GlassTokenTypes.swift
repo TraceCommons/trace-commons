@@ -1,4 +1,4 @@
-import CoreGraphics
+import AppKit
 import SwiftUI
 
 /// An sRGB colour with alpha, as the token source states it.
@@ -111,18 +111,69 @@ public enum GlassFontDesign: Sendable, Equatable {
     }
 }
 
+/// A macOS text style. Every step of the type scale is one, so the scale
+/// grows and shrinks with the system text size like the rest of the shell.
+public enum GlassTextStyle: Sendable, Equatable {
+    case largeTitle, title, title2, title3, headline, body, callout, subheadline, footnote, caption, caption2
+
+    public var font: Font.TextStyle {
+        switch self {
+        case .largeTitle: .largeTitle
+        case .title: .title
+        case .title2: .title2
+        case .title3: .title3
+        case .headline: .headline
+        case .body: .body
+        case .callout: .callout
+        case .subheadline: .subheadline
+        case .footnote: .footnote
+        case .caption: .caption
+        case .caption2: .caption2
+        }
+    }
+
+    public var appKit: NSFont.TextStyle {
+        switch self {
+        case .largeTitle: .largeTitle
+        case .title: .title1
+        case .title2: .title2
+        case .title3: .title3
+        case .headline: .headline
+        case .body: .body
+        case .callout: .callout
+        case .subheadline: .subheadline
+        case .footnote: .footnote
+        case .caption: .caption1
+        case .caption2: .caption2
+        }
+    }
+
+    /// The points this style is drawn at under the current system text size.
+    public var resolvedSize: CGFloat {
+        NSFont.preferredFont(forTextStyle: appKit).pointSize
+    }
+}
+
 /// A step of the type scale, in SF Pro (or SF Mono for `.monospaced`).
+///
+/// `size`, `lineHeight` and `tracking` are stated at the default system text
+/// size, where `size` is the text style's own size (the generator refuses
+/// anything else). At any other text size the font follows the style, and
+/// leading and tracking are scaled by the same ratio, so the three never
+/// come apart.
 public struct GlassTypeStyle: Sendable, Equatable {
+    public let textStyle: GlassTextStyle
     public let size: CGFloat
     public let weight: GlassWeight
     public let lineHeight: CGFloat
-    /// Letter spacing in points.
+    /// Letter spacing in points, at `size`.
     public let tracking: CGFloat
     public let design: GlassFontDesign
     public let uppercase: Bool
     public let tabular: Bool
 
     public init(
+        textStyle: GlassTextStyle,
         size: CGFloat,
         weight: GlassWeight,
         lineHeight: CGFloat,
@@ -131,6 +182,7 @@ public struct GlassTypeStyle: Sendable, Equatable {
         uppercase: Bool,
         tabular: Bool
     ) {
+        self.textStyle = textStyle
         self.size = size
         self.weight = weight
         self.lineHeight = lineHeight
@@ -140,13 +192,39 @@ public struct GlassTypeStyle: Sendable, Equatable {
         self.tabular = tabular
     }
 
+    /// The same step at another weight (a selected tab, a bold count).
+    public func weight(_ weight: GlassWeight) -> GlassTypeStyle {
+        GlassTypeStyle(
+            textStyle: textStyle, size: size, weight: weight, lineHeight: lineHeight,
+            tracking: tracking, design: design, uppercase: uppercase, tabular: tabular)
+    }
+
+    /// The same step in SF Mono, for a figure or path inside it.
+    public var monospaced: GlassTypeStyle {
+        GlassTypeStyle(
+            textStyle: textStyle, size: size, weight: weight, lineHeight: lineHeight,
+            tracking: tracking, design: .monospaced, uppercase: uppercase, tabular: tabular)
+    }
+
     public var font: Font {
-        let base = Font.system(size: size, weight: weight.font, design: design.font)
+        let base = Font.system(textStyle.font, design: design.font).weight(weight.font)
         return tabular ? base.monospacedDigit() : base
     }
 
-    /// Extra spacing between lines to reach the stated line height.
+    /// How far the system text size has moved this step from `size`.
+    public var scale: CGFloat {
+        size > 0 ? textStyle.resolvedSize / size : 1
+    }
+
+    /// Tracking at the size the type is drawn at now.
+    public var resolvedTracking: CGFloat {
+        tracking * scale
+    }
+
+    /// Extra spacing between lines to reach the stated line height, at the
+    /// size the type is drawn at now. Approximates the default line box as
+    /// 1.2x, as `TC.Font_.LineHeight` does.
     public var lineSpacing: CGFloat {
-        max(0, lineHeight - size * 1.2)
+        max(0, (lineHeight - size * 1.2) * scale)
     }
 }

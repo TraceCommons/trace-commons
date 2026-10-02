@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 
@@ -114,6 +115,7 @@ final class TokenDriftTests: XCTestCase {
             XCTAssertTrue(made.uppercase == ((entry["uppercase"] as? Bool) ?? false), "type.\(name) uppercase")
             XCTAssertTrue(made.tabular == ((entry["tabular"] as? Bool) ?? false), "type.\(name) tabular")
             XCTAssertTrue((made.design == .monospaced) == ((entry["design"] as? String) == "monospaced"), "type.\(name) design")
+            XCTAssertTrue(String(describing: made.textStyle) == (entry["textStyle"] as? String), "type.\(name) textStyle")
         }
     }
 
@@ -139,5 +141,90 @@ final class GradientGeometryTests: XCTestCase {
         XCTAssertTrue(abs(points.start.x - 0) < 1e-9)
         XCTAssertTrue(abs(points.end.x - 1) < 1e-9)
         XCTAssertTrue(abs(points.start.y - 0.5) < 1e-9)
+    }
+}
+
+/// R2: the type scale is SF Pro and SF Mono set as macOS text styles, so it
+/// follows the system text size instead of sitting at fixed points.
+final class TypeScaleTests: XCTestCase {
+    private static let styles: [GlassTextStyle] = [
+        .largeTitle, .title, .title2, .title3, .headline, .body, .callout, .subheadline, .footnote, .caption, .caption2,
+    ]
+
+    /// Each step resolves its size from its own text style.
+    func test_eachStepResolvesItsSizeFromItsTextStyle() {
+        for (name, step) in GlassTokens.TypeScale.all {
+            XCTAssertEqual(
+                step.textStyle.resolvedSize,
+                NSFont.preferredFont(forTextStyle: step.textStyle.appKit).pointSize,
+                accuracy: 0.001, "type.\(name)")
+            XCTAssertGreaterThan(step.textStyle.resolvedSize, 0, "type.\(name) resolved to nothing")
+        }
+    }
+
+    /// A mapping that answered `.body` for everything would pass the test
+    /// above and flatten the scale.
+    func test_theTextStyleMappingIsNotDegenerate() {
+        let appKit = Self.styles.map { $0.appKit.rawValue }
+        XCTAssertEqual(Set(appKit).count, Self.styles.count)
+        XCTAssertGreaterThan(GlassTextStyle.largeTitle.resolvedSize, GlassTextStyle.title.resolvedSize)
+        XCTAssertGreaterThan(GlassTextStyle.title.resolvedSize, GlassTextStyle.body.resolvedSize)
+        XCTAssertGreaterThan(GlassTextStyle.body.resolvedSize, GlassTextStyle.subheadline.resolvedSize)
+    }
+
+    /// The scale climbs: no step is drawn smaller than a step below it.
+    func test_theScaleIsOrdered() {
+        let order = ["micro", "caption", "label", "body", "title", "heading", "display", "number"]
+        let sizes = order.compactMap { GlassTokens.TypeScale.all[$0]?.size }
+        XCTAssertEqual(sizes.count, order.count)
+        XCTAssertEqual(sizes, sizes.sorted())
+    }
+
+    /// Leading and tracking scale with the drawn size, not apart from it.
+    func test_leadingAndTrackingFollowTheDrawnSize() {
+        for (name, step) in GlassTokens.TypeScale.all {
+            XCTAssertEqual(step.scale, step.textStyle.resolvedSize / step.size, accuracy: 0.0001, "type.\(name)")
+            XCTAssertEqual(step.resolvedTracking, step.tracking * step.scale, accuracy: 0.0001, "type.\(name)")
+            XCTAssertGreaterThanOrEqual(step.lineSpacing, 0, "type.\(name)")
+        }
+    }
+
+    /// Only the mono step is SF Mono; prose is never monospaced.
+    func test_onlyMonoIsMonospaced() {
+        for (name, step) in GlassTokens.TypeScale.all {
+            XCTAssertEqual(step.design == .monospaced, name == "mono", "type.\(name)")
+        }
+    }
+}
+
+/// Words in TCDesign are set with `glassType(_:)`, never at fixed points.
+/// The one fixed-size font is `glassGlyph(_:weight:)`, for marks inside a
+/// control of fixed size.
+final class FixedPointTypeTests: XCTestCase {
+    func test_noComponentSetsWordsAtFixedPoints() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // TCDesignTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // macos
+            .appendingPathComponent("Sources/TCDesign")
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertGreaterThanOrEqual(files.count, 8, "the TCDesign sources were not found")
+
+        var allowed = 0
+        var failures: [String] = []
+        for file in files {
+            let lines = try String(contentsOf: file, encoding: .utf8).components(separatedBy: "\n")
+            for (index, line) in lines.enumerated() where line.contains("system(size:") {
+                if line.contains("font(.system(size: size, weight: weight.font))") {
+                    allowed += 1
+                } else {
+                    failures.append("\(file.lastPathComponent):\(index + 1) sets a fixed point size; use glassType or glassGlyph")
+                }
+            }
+        }
+        XCTAssertEqual(allowed, 1, "glassGlyph's own font was not found; this scan proved nothing")
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
     }
 }

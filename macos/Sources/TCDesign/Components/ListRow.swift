@@ -76,7 +76,7 @@ public struct GlassListRow: View {
                 if let expanded, let onToggleExpand {
                     Button(action: onToggleExpand) {
                         Text("›")
-                            .font(.system(size: 14))
+                            .glassGlyph(14)
                             .foregroundStyle(selected ? Color.white : GlassTokens.Color.statusOff.color)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                     }
@@ -93,11 +93,11 @@ public struct GlassListRow: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
-                    .font(.system(size: 13, weight: depth == .session ? .medium : .semibold))
+                    .glassType(GlassTokens.TypeScale.body.weight(depth == .session ? .medium : .semibold))
                     .lineLimit(1)
                 if let sub {
                     Text(sub)
-                        .font(.system(size: 11))
+                        .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(subColor)
                         .lineLimit(1)
                 }

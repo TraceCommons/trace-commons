@@ -32,11 +32,16 @@ public enum GlassStatus: Sendable, Equatable {
 
 private struct GlassTypeModifier: ViewModifier {
     let style: GlassTypeStyle
+    /// Read so the modifier re-runs when the system text size changes:
+    /// leading and tracking are resolved against the drawn size, which
+    /// AppKit has already scaled, so the value itself is not applied again.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     func body(content: Content) -> some View {
-        content
+        _ = dynamicTypeSize
+        return content
             .font(style.font)
-            .tracking(style.tracking)
+            .tracking(style.resolvedTracking)
             .lineSpacing(style.lineSpacing)
             .textCase(style.uppercase ? .uppercase : nil)
     }
@@ -46,6 +51,18 @@ public extension View {
     /// Set text in a step of the type scale (SF Pro, or SF Mono for `.mono`).
     func glassType(_ style: GlassTypeStyle) -> some View {
         modifier(GlassTypeModifier(style: style))
+    }
+}
+
+// MARK: - Glyphs
+
+public extension View {
+    /// Size an SF Symbol or a mark inside a control of fixed size: a
+    /// chevron, a check, a tool's initials in a 22pt tile. Glyphs keep their
+    /// points because the control around them does; words never use this,
+    /// they use `glassType(_:)` and follow the system text size.
+    func glassGlyph(_ size: CGFloat, weight: GlassWeight = .regular) -> some View {
+        font(.system(size: size, weight: weight.font))
     }
 }
 

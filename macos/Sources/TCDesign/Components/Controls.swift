@@ -48,7 +48,7 @@ private struct GlassButtonBody: View {
         switch kind {
         case .primary:
             configuration.label
-                .font(.system(size: small ? 12 : 13, weight: .bold))
+                .glassType(small ? GlassTokens.TypeScale.label.weight(.bold) : GlassTokens.TypeScale.bodyStrong.weight(.bold))
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
                 .padding(.horizontal, small ? 14 : 16)
                 .frame(height: small ? 30 : GlassTokens.Size.cta)
@@ -56,7 +56,7 @@ private struct GlassButtonBody: View {
                 .glassEdge(isEnabled ? GlassTokens.Shadow.ctaEdge : Array(GlassTokens.Shadow.ctaEdge.prefix(2)), in: Capsule())
         case .secondary:
             configuration.label
-                .font(.system(size: small ? 12 : 13, weight: .bold))
+                .glassType(small ? GlassTokens.TypeScale.label.weight(.bold) : GlassTokens.TypeScale.bodyStrong.weight(.bold))
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
                 .padding(.horizontal, 14)
                 .frame(height: small ? 30 : GlassTokens.Size.cta)
@@ -64,21 +64,21 @@ private struct GlassButtonBody: View {
                 .glassEdge(GlassTokens.Shadow.ctaSecondaryEdge, in: Capsule())
         case .glass:
             configuration.label
-                .font(.system(size: 12, weight: .semibold))
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                 .foregroundStyle(GlassColor.textPrimary)
                 .padding(.horizontal, 12)
                 .frame(height: GlassTokens.Size.controlLarge)
                 .glassTier(.control)
         case let .submit(done):
             configuration.label
-                .font(.system(size: 11, weight: .bold))
+                .glassType(GlassTokens.TypeScale.caption.weight(.bold))
                 .foregroundStyle(done ? GlassTokens.Color.statusOn.color : GlassColor.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(height: GlassTokens.Size.submitPill)
                 .glassTier(.control)
         case .link:
             configuration.label
-                .font(.system(size: 12, weight: .semibold))
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                 .foregroundStyle(GlassColor.accentText)
         }
     }
@@ -102,7 +102,7 @@ public struct GlassRoundButton: View {
         let side = small ? GlassTokens.Size.control : GlassTokens.Size.controlLarge
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: small ? 11 : 13, weight: .medium))
+                .glassGlyph(small ? 11 : 13, weight: .medium)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: side, height: side)
                 .glassTier(.control, radius: side / 2)
@@ -128,7 +128,7 @@ public struct GlassPillIconButton: View {
     public var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 11, weight: .semibold))
+                .glassGlyph(11, weight: .semibold)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: 30, height: GlassTokens.Size.control)
                 .glassTier(.control)
@@ -157,7 +157,7 @@ public struct GlassToolbarButton: View {
     public var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 13))
+                .glassGlyph(13)
                 .foregroundStyle(pressed == false ? Color(white: 0.49) : Color(white: 0.9))
                 .frame(width: 28, height: 24)
                 .contentShape(Capsule())
@@ -224,7 +224,7 @@ public struct GlassKebab: View {
         Button(action: action) {
             Image(systemName: "ellipsis")
                 .rotationEffect(.degrees(90))
-                .font(.system(size: 12, weight: .bold))
+                .glassGlyph(12, weight: .bold)
                 .foregroundStyle(open ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
                 .frame(width: 22, height: 24)
                 .background(
@@ -256,12 +256,12 @@ public struct GlassExpander: View {
         } label: {
             HStack(spacing: GlassTokens.Space.s4) {
                 Text("›")
-                    .font(.system(size: 14))
+                    .glassGlyph(14)
                     .foregroundStyle(GlassColor.textTertiary)
                     .rotationEffect(.degrees(isOpen ? 90 : 0))
                     .frame(width: 12)
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                     .foregroundStyle(GlassColor.textPrimary)
                 Spacer(minLength: 0)
             }
@@ -319,10 +319,10 @@ public struct GlassPicker<Value: Hashable>: View {
                 }
                 Text(current?.title ?? placeholder)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                    .glassGlyph(8, weight: .bold)
                     .foregroundStyle(GlassColor.textTertiary)
             }
-            .font(.system(size: 12, weight: .semibold))
+            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
             .foregroundStyle(GlassColor.textPrimary)
             .padding(.leading, 10)
             .padding(.trailing, 8)
@@ -402,7 +402,7 @@ public struct GlassCheckboxStyle: ToggleStyle {
             HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
                 GlassCheckMark(checked: configuration.isOn, mixed: mixed)
                 configuration.label
-                    .font(.system(size: 12))
+                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
                     .foregroundStyle(GlassColor.textPrimary)
             }
             .contentShape(Rectangle())
@@ -434,9 +434,9 @@ public struct GlassCheckMark: View {
                 shape.fill(GlassTokens.Color.wellFill.color)
             }
             if mixed {
-                Image(systemName: "minus").font(.system(size: 8, weight: .black)).foregroundStyle(.white)
+                Image(systemName: "minus").glassGlyph(8, weight: .heavy).foregroundStyle(.white)
             } else if checked {
-                Image(systemName: "checkmark").font(.system(size: 8, weight: .black)).foregroundStyle(.white)
+                Image(systemName: "checkmark").glassGlyph(8, weight: .heavy).foregroundStyle(.white)
             }
         }
         .frame(width: GlassTokens.Size.checkbox, height: GlassTokens.Size.checkbox)
@@ -462,7 +462,7 @@ public struct GlassTextField: View {
             Text(label).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
             TextField(label, text: $text, prompt: prompt.map { Text($0) })
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .glassType(GlassTokens.TypeScale.label.weight(.regular))
                 .foregroundStyle(GlassColor.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(height: GlassTokens.Size.controlLarge)

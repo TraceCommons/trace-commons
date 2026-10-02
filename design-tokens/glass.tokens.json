@@ -1,5 +1,5 @@
 {
-  "$comment": "Trace Commons glass design tokens: the one source for the native macOS app (and, later, any other shell). Dark only (D2), purple brand (D3), SF Pro and SF Mono. Seeded from #1146's tauri-desktop/frontend/src/design-system/tokens at 09a26c0d. Edit here, then run scripts/design-tokens/generate.py; a Swift test fails if the generated file drifts.",
+  "$comment": "Trace Commons glass design tokens: the one source for the native macOS app (and, later, any other shell). Dark only (D2), purple brand (D3), SF Pro and SF Mono (R2): every type step is a macOS text style, so it follows the system text size, and its size is that style's size at the default setting (number was 28 in #1146; largeTitle is 26). Seeded from #1146's tauri-desktop/frontend/src/design-system/tokens at 09a26c0d. Edit here, then run scripts/design-tokens/generate.py; a Swift test fails if the generated file drifts.",
   "version": 1,
   "color": {
     "purple": { "hex": "#6d14f3", "note": "Brand purple from the Trace logo; the one action." },
@@ -207,16 +207,17 @@
     "rowOff": 0.6
   },
   "type": {
-    "eyebrow": { "size": 10, "weight": "bold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
-    "caption": { "size": 11, "weight": "regular", "lineHeight": 16 },
-    "label": { "size": 12, "weight": "medium", "lineHeight": 16 },
-    "body": { "size": 13, "weight": "regular", "lineHeight": 18 },
-    "bodyStrong": { "size": 13, "weight": "semibold", "lineHeight": 18 },
-    "title": { "size": 15, "weight": "semibold", "lineHeight": 20 },
-    "heading": { "size": 17, "weight": "semibold", "lineHeight": 22 },
-    "display": { "size": 22, "weight": "bold", "lineHeight": 28, "tracking": -0.22 },
-    "number": { "size": 28, "weight": "bold", "lineHeight": 34, "tabular": true },
-    "mono": { "size": 11, "weight": "regular", "lineHeight": 16, "design": "monospaced" }
+    "micro": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 13 },
+    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
+    "caption": { "textStyle": "subheadline", "size": 11, "weight": "regular", "lineHeight": 16 },
+    "label": { "textStyle": "callout", "size": 12, "weight": "medium", "lineHeight": 16 },
+    "body": { "textStyle": "body", "size": 13, "weight": "regular", "lineHeight": 18 },
+    "bodyStrong": { "textStyle": "body", "size": 13, "weight": "semibold", "lineHeight": 18 },
+    "title": { "textStyle": "title3", "size": 15, "weight": "semibold", "lineHeight": 20 },
+    "heading": { "textStyle": "title2", "size": 17, "weight": "semibold", "lineHeight": 22 },
+    "display": { "textStyle": "title", "size": 22, "weight": "bold", "lineHeight": 28, "tracking": -0.22 },
+    "number": { "textStyle": "largeTitle", "size": 26, "weight": "bold", "lineHeight": 34, "tabular": true },
+    "mono": { "textStyle": "subheadline", "size": 11, "weight": "regular", "lineHeight": 16, "design": "monospaced" }
   },
   "motion": {
     "fast": 0.15,

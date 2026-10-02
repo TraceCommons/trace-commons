@@ -50,7 +50,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                             GlassBadge(count: badge, subtle: true)
                         }
                     }
-                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                    .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
                     .foregroundStyle(selected ? GlassColor.textPrimary : (floating ? GlassColor.textSecondary : GlassColor.textTertiary))
                     .padding(.horizontal, floating ? 12 : 8)
                     .frame(maxWidth: floating ? nil : .infinity)
@@ -124,7 +124,7 @@ public struct GlassBreadcrumb: View {
                 }
             }
         }
-        .font(.system(size: 12, weight: .semibold))
+        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
     }
 }
 
