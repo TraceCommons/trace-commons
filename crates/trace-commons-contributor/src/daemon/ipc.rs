@@ -1601,6 +1601,7 @@ impl DaemonShared {
         let routing = self.routing_value();
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
+        let account_scope = super::commons_credentials::account_scope(&self.store).ok();
         let private_inference = self.private_inference_value();
         // Before the queue lock too: it takes the policy lock and then the
         // queue lock, the order `list_projects` takes them in.
@@ -1626,6 +1627,7 @@ impl DaemonShared {
         serde_json::json!({
             "schema_version": IPC_SCHEMA,
             "logged_in": self.logged_in(),
+            "account_scope": account_scope,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             "paused": self.is_paused(now),

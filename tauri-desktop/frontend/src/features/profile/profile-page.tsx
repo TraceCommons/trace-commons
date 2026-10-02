@@ -71,7 +71,7 @@ export function ProfilePage({
           profile={publicProfile}
           profileState={publicProfileState}
         />
-        <ContributionAccount key={`${coreStatus?.daemon.tenant_id ?? "signed-out"}:${coreStatus?.daemon.logged_in ?? false}`} />
+        <ContributionAccount key={coreStatus?.daemon.account_scope ?? "scope-unavailable"} scope={coreStatus?.daemon.account_scope ?? null} />
         <ProfileEditor
           saved={saved}
           actionState={actions.state}

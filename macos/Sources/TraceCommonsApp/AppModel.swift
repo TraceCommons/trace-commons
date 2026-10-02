@@ -77,27 +77,26 @@ final class AppModel: ObservableObject {
     @Published private(set) var contributionBusy = false
     private var inviteAttempt: (code: String, key: String)?
     func updateContributionAccount(inviteCode: String? = nil) async -> Bool {
-        guard let client, !contributionBusy else { return false }
+        guard let client, let scope = status.accountScope, !contributionBusy else { return false }
         contributionBusy = true
         contributionLine = privateInferenceCopy?.accountContributionChecking ?? ""
         if let inviteCode, inviteAttempt?.code != inviteCode {
             inviteAttempt = (inviteCode, UUID().uuidString)
         }
         let attempt = inviteAttempt
-        let tenant = status.tenantID
-        let loggedIn = status.loggedIn
         let outcome = await Task.detached(priority: .userInitiated) {
             Result {
                 if let inviteCode, let attempt {
-                    return try client.redeemInvite(code: inviteCode, idempotencyKey: attempt.key)
+                    return try client.redeemInvite(code: inviteCode, idempotencyKey: attempt.key, scope: scope)
                 }
-                return try client.contributionStatus()
+                return try client.contributionStatus(scope: scope)
             }
         }.value
         contributionBusy = false
-        guard self.client === client, self.status.tenantID == tenant, self.status.loggedIn == loggedIn, !Task.isCancelled else { return false }
+        guard self.client === client, self.status.accountScope == scope, !Task.isCancelled else { return false }
         switch outcome {
         case .success(let account):
+            guard account.accountScope == scope else { return false }
             contributionLine = account.line
             if inviteCode != nil { inviteAttempt = nil }
             return true
@@ -116,7 +115,7 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
-            if status.tenantID != oldValue.tenantID || status.loggedIn != oldValue.loggedIn {
+            if status.accountScope != oldValue.accountScope {
                 contributionLine = privateInferenceCopy?.accountContributionRefresh ?? ""
                 inviteAttempt = nil
             }

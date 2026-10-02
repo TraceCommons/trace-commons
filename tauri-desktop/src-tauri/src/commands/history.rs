@@ -296,11 +296,12 @@ mod tests {
 #[tauri::command]
 pub(crate) async fn account_contribution_status(
     state: State<'_, AppState>,
+    account_scope: String,
 ) -> Result<serde_json::Value, String> {
     call_daemon(
         shared_state(&state)?,
         "account_contribution_status",
-        serde_json::json!({}),
+        serde_json::json!({"account_scope":account_scope}),
     )
     .await
 }
@@ -310,11 +311,12 @@ pub(crate) async fn account_invite_redeem(
     state: State<'_, AppState>,
     invite_code: String,
     idempotency_key: String,
+    account_scope: String,
 ) -> Result<serde_json::Value, String> {
     call_daemon(
         shared_state(&state)?,
         "account_invite_redeem",
-        serde_json::json!({"invite_code": invite_code, "idempotency_key": idempotency_key}),
+        serde_json::json!({"invite_code": invite_code, "idempotency_key": idempotency_key, "account_scope": account_scope}),
     )
     .await
 }

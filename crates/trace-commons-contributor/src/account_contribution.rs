@@ -55,11 +55,20 @@ async fn call<B: Serialize + ?Sized, T: DeserializeOwned>(
     method: Method,
     route: &str,
     body: Option<&B>,
+    expected_scope: Option<&str>,
 ) -> Result<T> {
     let loaded =
         crate::daemon::run_blocking(|| account_auth::try_load_session_with_snapshot(store))?
             .ok_or_else(|| anyhow::anyhow!("account-sign-in-required"))?;
     if crate::daemon::commons_credentials::account_snapshot(store, cfg)? != loaded.snapshot {
+        bail!("account-session-changed");
+    }
+    if expected_scope.is_some_and(|scope| {
+        crate::daemon::commons_credentials::scope_for_snapshot(&loaded.snapshot)
+            .ok()
+            .as_deref()
+            != Some(scope)
+    }) {
         bail!("account-session-changed");
     }
     let client = trace_commons_operator_client::Client::builder(
@@ -105,6 +114,7 @@ pub async fn status(store: &ConfigStore, cfg: &ContributorConfig) -> Result<Cont
         Method::GET,
         "/v1/account/contribution-status",
         None,
+        None,
     )
     .await
 }
@@ -127,8 +137,65 @@ pub async fn redeem(
             invite_code: invite_code.trim(),
             idempotency_key,
         }),
+        None,
     )
     .await
+}
+
+/// One principal/lifecycle/configuration across a composed operation, allowing rotation.
+pub(crate) struct Operation<'a> {
+    store: &'a ConfigStore,
+    cfg: &'a ContributorConfig,
+    pub scope: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+impl<'a> Operation<'a> {
+    pub async fn open(store: &'a ConfigStore, cfg: &'a ContributorConfig) -> Result<Self> {
+        let loaded =
+            crate::daemon::run_blocking(|| account_auth::try_load_session_with_snapshot(store))?
+                .ok_or_else(|| anyhow::anyhow!("account-sign-in-required"))?;
+        if crate::daemon::commons_credentials::account_snapshot(store, cfg)? != loaded.snapshot {
+            bail!("account-session-changed");
+        }
+        Ok(Self {
+            store,
+            cfg,
+            scope: crate::daemon::commons_credentials::scope_for_snapshot(&loaded.snapshot)?,
+            expires_at: loaded.session.expires_at,
+        })
+    }
+    pub async fn status(&self) -> Result<ContributionStatus> {
+        call::<(), _>(
+            self.store,
+            self.cfg,
+            Method::GET,
+            "/v1/account/contribution-status",
+            None,
+            Some(&self.scope),
+        )
+        .await
+    }
+    pub async fn redeem(&self, code: &str, key: Uuid) -> Result<InviteRedemption> {
+        if code.trim().is_empty() || code.len() > 512 {
+            bail!("account-invite-invalid");
+        }
+        call(
+            self.store,
+            self.cfg,
+            Method::POST,
+            "/v1/account/invites/redeem",
+            Some(&InviteRequest {
+                invite_code: code.trim(),
+                idempotency_key: key,
+            }),
+            Some(&self.scope),
+        )
+        .await
+    }
+    pub async fn redeem_and_status(&self, code: &str, key: Uuid) -> Result<ContributionStatus> {
+        self.redeem(code, key).await?;
+        self.status().await
+    }
 }
 
 pub(crate) async fn handle(
@@ -141,7 +208,11 @@ pub(crate) async fn handle(
             .store
             .load_config()?
             .ok_or_else(|| anyhow::anyhow!("account-enrollment-required"))?;
-        if req.method == "account_invite_redeem" {
+        let operation = Operation::open(&shared.store, &cfg).await?;
+        if let Some(expected) = req.params.get("account_scope").and_then(|v| v.as_str()) {
+            if expected != operation.scope { bail!("account-session-changed"); }
+        }
+        let status = if req.method == "account_invite_redeem" {
             let code = req
                 .params
                 .get("invite_code")
@@ -153,10 +224,9 @@ pub(crate) async fn handle(
                 .and_then(|v| v.as_str())
                 .and_then(|v| Uuid::parse_str(v).ok())
                 .ok_or_else(|| anyhow::anyhow!("account-invite-invalid"))?;
-            redeem(&shared.store, &cfg, code, key).await?;
-        }
-        let status = status(&shared.store, &cfg).await?;
-        Ok::<_, anyhow::Error>(serde_json::json!({"status": status, "line": status.line()}))
+            operation.redeem_and_status(code, key).await?
+        } else { operation.status().await? };
+        Ok::<_, anyhow::Error>(serde_json::json!({"status": status, "line": status.line(), "account_scope": operation.scope}))
     }
     .await;
     match result {
@@ -345,6 +415,162 @@ mod tests {
             *keys.lock().unwrap(),
             vec![serde_json::json!(key), serde_json::json!(key)]
         );
+    }
+
+    fn publish_native_session(store: &ConfigStore, account: &str) {
+        let session = account_auth::AccountSession {
+            access_token: "synthetic-native-token".into(),
+            expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(6),
+            account_id: account.into(),
+        };
+        let expected =
+            commons_credentials::snapshot(store, commons_credentials::Kind::Account).unwrap();
+        commons_credentials::replace(
+            store,
+            &expected,
+            &serde_json::to_vec(&session).unwrap(),
+            None,
+        )
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn cli_status_reads_opaque_native_credentials_and_calls_ingest() {
+        let (_dir, store, mut cfg) = fixture();
+        cfg.ingest_url = serve(Router::new().route(
+            "/v1/account/contribution-status",
+            get(|| async { Json(ready()) }),
+        ))
+        .await;
+        store.save_config(&cfg).unwrap();
+        publish_native_session(&store, "account-a");
+        let raw = std::fs::read(store.daemon_path(crate::config::ACCOUNT_SESSION_FILE)).unwrap();
+        assert!(
+            serde_json::from_slice::<account_auth::AccountSession>(&raw).is_err(),
+            "fixture must be an opaque credential record"
+        );
+        let report = crate::commands::account_status_value(&store).await.unwrap();
+        assert_eq!(report["signed_in"], true);
+        assert!(report["expires_at"].is_string());
+        assert_eq!(report["contribution_status"]["ready"], true);
+    }
+    #[tokio::test]
+    async fn composed_redemption_accepts_rotation_but_rejects_between_call_changes() {
+        let (_dir, store, mut cfg) = fixture();
+        cfg.ingest_url = serve(
+            Router::new()
+                .route(
+                    "/v1/account/invites/redeem",
+                    post(|| async {
+                        let mut response =
+                            Json(serde_json::json!({"authority":"invited","trust_version":1}))
+                                .into_response();
+                        response.headers_mut().insert(
+                            trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+                            "synthetic-rotated".parse().unwrap(),
+                        );
+                        response
+                    }),
+                )
+                .route(
+                    "/v1/account/contribution-status",
+                    get(|| async { Json(ready()) }),
+                ),
+        )
+        .await;
+        store.save_config(&cfg).unwrap();
+        publish_native_session(&store, "account-a");
+        let op = Operation::open(&store, &cfg).await.unwrap();
+        assert!(
+            op.redeem_and_status("SYNTHETICINVITE01", Uuid::new_v4())
+                .await
+                .unwrap()
+                .ready
+        );
+        assert_eq!(
+            commons_credentials::account_scope(&store).unwrap(),
+            op.scope,
+            "rotation preserves operation scope"
+        );
+        for change in ["replace", "logout-relogin", "ingest"] {
+            publish_native_session(&store, "account-a");
+            let op = Operation::open(&store, &cfg).await.unwrap();
+            op.redeem("SYNTHETICINVITE01", Uuid::new_v4())
+                .await
+                .unwrap();
+            match change {
+                "replace" => publish_native_session(&store, "account-b"),
+                "logout-relogin" => {
+                    account_auth::clear_token(&store).unwrap();
+                    publish_native_session(&store, "account-a");
+                }
+                _ => {
+                    let mut changed = cfg.clone();
+                    changed.ingest_url = "https://other.invalid".into();
+                    store.save_config(&changed).unwrap();
+                }
+            }
+            assert!(
+                op.status().await.is_err(),
+                "refresh must refuse {change} between successful POST and GET"
+            );
+            store.save_config(&cfg).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn account_scope_changes_without_device_tenant_change() {
+        let (_dir, store, cfg) = fixture();
+        publish_native_session(&store, "account-a");
+        let first = commons_credentials::account_scope(&store).unwrap();
+        publish_native_session(&store, "account-a");
+        let relogin = commons_credentials::account_scope(&store).unwrap();
+        assert_ne!(
+            first, relogin,
+            "a new login to the same principal is a new lifecycle"
+        );
+        account_auth::clear_token(&store).unwrap();
+        let signed_out = commons_credentials::account_scope(&store).unwrap();
+        assert_ne!(signed_out, relogin);
+        publish_native_session(&store, "account-b");
+        assert_ne!(
+            commons_credentials::account_scope(&store).unwrap(),
+            signed_out
+        );
+        assert_eq!(
+            store.load_config().unwrap().unwrap().tenant_id,
+            cfg.tenant_id
+        );
+        let before_ingest = commons_credentials::account_scope(&store).unwrap();
+        let mut changed = cfg.clone();
+        changed.ingest_url = "https://other.invalid".into();
+        store.save_config(&changed).unwrap();
+        assert_ne!(
+            commons_credentials::account_scope(&store).unwrap(),
+            before_ingest
+        );
+        assert!(!first.contains("synthetic-native-token"));
+    }
+    #[tokio::test]
+    async fn unarmed_daemon_publishes_lifecycle_changes_without_network_status() {
+        let (_dir, store, cfg) = fixture();
+        publish_native_session(&store, "account-a");
+        let shared = crate::daemon::ipc::DaemonShared::load((*store).clone()).unwrap();
+        let mut events = shared.events.subscribe();
+        crate::daemon::account_admission::refresh(&shared, chrono::Utc::now(), false).await;
+        assert_eq!(
+            events.try_recv().unwrap().event,
+            crate::daemon::ipc::EVENT_STATUS_CHANGED
+        );
+        let first = shared.status_value()["account_scope"].clone();
+        account_auth::clear_token(&store).unwrap();
+        publish_native_session(&store, "account-b");
+        crate::daemon::account_admission::refresh(&shared, chrono::Utc::now(), false).await;
+        assert_eq!(
+            events.try_recv().unwrap().event,
+            crate::daemon::ipc::EVENT_STATUS_CHANGED
+        );
+        let fresh = shared.status_value();
+        assert_ne!(fresh["account_scope"], first);
+        assert_eq!(fresh["tenant_id"], cfg.tenant_id);
     }
     #[test]
     fn account_limit_copy_is_shared_and_has_no_invented_quota() {

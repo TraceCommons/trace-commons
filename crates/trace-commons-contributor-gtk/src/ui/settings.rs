@@ -212,7 +212,7 @@ pub struct SettingsView {
     invite_redeem: gtk::Button,
     invite_attempt: RefCell<Option<(String, String)>>,
     contribution_busy: std::cell::Cell<bool>,
-    contribution_scope: RefCell<Option<(Option<String>, bool)>>,
+    contribution_scope: RefCell<Option<String>>,
     token_status: gtk::Label,
     token_storage_status: gtk::Label,
     token_capture: gtk::Button,
@@ -1009,9 +1009,9 @@ fn render_background(app: &Rc<App>) {
 }
 
 pub fn render_status(app: &Rc<App>, status: &Status) {
-    let scope = (status.tenant_id.clone(), status.logged_in);
-    if app.settings.contribution_scope.borrow().as_ref() != Some(&scope) {
-        *app.settings.contribution_scope.borrow_mut() = Some(scope);
+    let scope = status.account_scope.clone();
+    if *app.settings.contribution_scope.borrow() != scope {
+        *app.settings.contribution_scope.borrow_mut() = scope;
         app.settings.contribution_status.set_text(REFRESH_LINE);
         app.settings.invite_code.set_text("");
         *app.settings.invite_attempt.borrow_mut() = None;
@@ -5339,7 +5339,10 @@ fn contribution_request(app: &Rc<App>, redeem: bool) {
         view.contribution_busy.set(false);
         return;
     }
-    let scope = view.contribution_scope.borrow().clone();
+    let Some(scope) = view.contribution_scope.borrow().clone() else {
+        view.contribution_busy.set(false);
+        return;
+    };
     let params = if redeem {
         let mut attempt = view.invite_attempt.borrow_mut();
         if attempt
@@ -5348,9 +5351,9 @@ fn contribution_request(app: &Rc<App>, redeem: bool) {
         {
             *attempt = Some((code.clone(), uuid::Uuid::new_v4().to_string()));
         }
-        serde_json::json!({"invite_code": code, "idempotency_key": attempt.as_ref().unwrap().1})
+        serde_json::json!({"invite_code": code, "idempotency_key": attempt.as_ref().unwrap().1, "account_scope":scope})
     } else {
-        serde_json::json!({})
+        serde_json::json!({"account_scope":scope})
     };
     view.contribution_status.set_text(CHECKING_LINE);
     view.invite_code.set_sensitive(false);
@@ -5369,11 +5372,15 @@ fn contribution_request(app: &Rc<App>, redeem: bool) {
             view.invite_code.set_sensitive(true);
             view.invite_redeem.set_sensitive(true);
             view.contribution_refresh.set_sensitive(true);
-            if *view.contribution_scope.borrow() != scope {
+            if view.contribution_scope.borrow().as_ref() != Some(&scope) {
                 return;
             }
             match result {
                 Ok(value) => {
+                    if value.get("account_scope").and_then(|v| v.as_str()) != Some(scope.as_str()) {
+                        view.contribution_status.set_text(UNAVAILABLE_LINE);
+                        return;
+                    }
                     view.contribution_status.set_text(
                         value
                             .get("line")

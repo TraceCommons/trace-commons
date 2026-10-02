@@ -96,15 +96,26 @@ final class DaemonClient {
             let policyVersion: String?
             let refusalLabel: String?
             let retryAfterSeconds: Int?
+            private enum CodingKeys: String, CodingKey {
+                case authority, ready
+                case policyVersion = "policy_version"
+                case refusalLabel = "refusal_label"
+                case retryAfterSeconds = "retry_after_seconds"
+            }
         }
         let status: Status
         let line: String
+        let accountScope: String
+        private enum CodingKeys: String, CodingKey {
+            case status, line
+            case accountScope = "account_scope"
+        }
     }
-    func contributionStatus() throws -> ContributionAccount {
-        try call("account_contribution_status", as: ContributionAccount.self)
+    func contributionStatus(scope: String) throws -> ContributionAccount {
+        try call("account_contribution_status", params: ["account_scope":scope], as: ContributionAccount.self)
     }
-    func redeemInvite(code: String, idempotencyKey: String) throws -> ContributionAccount {
-        try call("account_invite_redeem", params: ["invite_code": code, "idempotency_key": idempotencyKey], as: ContributionAccount.self)
+    func redeemInvite(code: String, idempotencyKey: String, scope: String) throws -> ContributionAccount {
+        try call("account_invite_redeem", params: ["invite_code": code, "idempotency_key": idempotencyKey, "account_scope":scope], as: ContributionAccount.self)
     }
 
     func status() throws -> DaemonStatus {
