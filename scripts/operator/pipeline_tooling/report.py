@@ -23,9 +23,15 @@ port's declared drills:
   attestations are separate files, signed and verified on their own. A failed
   report is never attested, and a failed run leaves no attestation file at all
   (`pipeline.qualify` stages the files and removes them on any failure). The
-  schema stays `v1`: a report without the two keys (one written before they
-  existed, or by `main`'s tool) is valid and reads as unattested
-  (`report_attestation`); a report that has one must have both.
+  schema stays `v1`. A `v1` report without the two keys validates and reads as
+  unsigned (`report_attestation`: `attested: false`, `attestation_count: 0`);
+  a report that has one of the two must have both. That a report without them
+  validates is not a promise that every report of `main`'s tool does: a FAIL
+  report from `main`'s tool validates; a PASS report from `main`'s tool does
+  not, because its evidence names more than one package (the minimal corpus
+  check and each mechanics check carry a package of their own, and a run names
+  many), which `_require_one_package` refuses: such a result set could never
+  back a promotion.
 
 Not carried from the port: `base_revision_hash` (the code revision hash
 already binds the tree) and the fixed `acceptance_layers` list, which no

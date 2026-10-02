@@ -50,7 +50,7 @@ from pipeline_tooling.corpus import (
 from pipeline_tooling.environment import ROOT, Environment, Run, child_environment, run_child
 from pipeline_tooling.errors import StepFailed, ToolingError, require
 from pipeline_tooling.files import atomic_write, sha256_digest
-from pipeline_tooling.report import REPORT_NAME, SAFE_BLOCKERS, corpus_run_input, write_report
+from pipeline_tooling.report import REPORT_NAME, RUN_REPORT_NAME, SAFE_BLOCKERS, corpus_run_input, write_report
 from pipeline_tooling.results import (
     load_results,
     require_attestations,
@@ -84,6 +84,9 @@ EVIDENCE_AGE_CEILING_SECONDS = 7 * 24 * 60 * 60
 # The signing step writes into this directory of the run directory; the files
 # move to the results directory only once every later check has passed.
 ATTESTATION_STAGING = "attestations-staging"
+# A failed run that could not remove what it signed: shown beside the original
+# failure label (`<original>.<this label>` in the failure report).
+DISCARD_FAILED_LABEL = "check_attestation_discard_failed"
 
 # Commands that keep nothing: their run directory is removed when they succeed
 # (or fail before they wrote anything).
@@ -917,19 +920,51 @@ def _staging_dir(run):
     return run.run_dir / ATTESTATION_STAGING
 
 
+def _attestations_remain(run):
+    """Whether the staging directory, or any attestation file, is in the run
+    directory."""
+    return os.path.lexists(_staging_dir(run)) or any(run.run_dir.rglob("*.attestation.json"))
+
+
 def discard_attestations(run):
     """Removes the staging directory and every attestation file of the run's
     results directory: the two places this tool writes them. Called before a
     failed run writes its report, so that a failed run leaves no attestation
     file anywhere in its directory (the server accepts an attestation set
     for the revision it names). Best effort, file by file: one that cannot be
-    removed does not stop the others, nor replace the failure."""
+    removed does not stop the others, nor replace the failure. Then it looks
+    again, and returns whether nothing is left: a removal that failed without
+    a sign would leave a valid attestation behind a report that says there is
+    none."""
     shutil.rmtree(_staging_dir(run), ignore_errors=True)
     for path in run.results_dir.glob("*.attestation.json"):
         try:
             path.unlink(missing_ok=True)
         except OSError:
             pass
+    return not _attestations_remain(run)
+
+
+def _fail_closed(run, inputs, label):
+    """The start of every failure path of `qualify`, before it re-raises.
+    It removes what the run signed, then both copies of this run's report (an
+    attested pass report is written before the files are published and the
+    archive is made, so a step that fails after it must not leave it behind,
+    even when the failed report cannot be written), then writes the failed
+    report. If anything signed could not be removed, the terminal gets a line
+    `PipelineFailure: check_attestation_discard_failed` and the failure
+    report carries `<label>.check_attestation_discard_failed`: the original
+    label is still shown, by the caller's re-raise and in the report."""
+    clean = discard_attestations(run)
+    for path in (LOCAL_DIR / REPORT_NAME, run.run_dir / RUN_REPORT_NAME):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if not clean:
+        print(f"PipelineFailure: {DISCARD_FAILED_LABEL}", file=sys.stderr)
+        label = f"{label}.{DISCARD_FAILED_LABEL}"
+    _write_failed_report(run, inputs, label)
 
 
 def attest_results(run, accepted, signing):
@@ -1003,9 +1038,13 @@ def qualify(args, run):
     files are signed into a staging directory and moved to their final names
     (`publish_attestations`) only once the report is written, so a run that
     fails after signing started removes the staging directory and every
-    attestation file before it writes its failed report: a failed run leaves
-    none, as its report says (`attested: false`). The report of a pass counts
-    them. Flags that are wrong are refused before anything runs."""
+    attestation file before it writes its failed report (`_fail_closed`): a
+    failed run leaves none, as its report says (`attested: false`), or, when
+    a removal fails, says `check_attestation_discard_failed` beside the
+    original label. It also removes this run's own pass report first, so a
+    failed run cannot leave that behind when its failed report cannot be
+    written. The report of a pass counts them. Flags that are wrong are
+    refused before anything runs."""
     signing = signing_options(args)
     inputs = {
         "code_revision_hash": run.code_revision_hash,
@@ -1036,16 +1075,13 @@ def qualify(args, run):
             catalog_path = LOCAL_DIR / CATALOG_NAME
             update_catalog(catalog_path, report_path, records=corpus_records(run))
     except ToolingError as error:
-        discard_attestations(run)
-        _write_failed_report(run, inputs, str(error))
+        _fail_closed(run, inputs, str(error))
         raise
     except KeyboardInterrupt:
-        discard_attestations(run)
-        _write_failed_report(run, inputs, "qualify_interrupted")
+        _fail_closed(run, inputs, "qualify_interrupted")
         raise
     except Exception:
-        discard_attestations(run)
-        _write_failed_report(run, inputs, "qualify_internal_error")
+        _fail_closed(run, inputs, "qualify_internal_error")
         raise
     line = f"PipelineQualificationOK: report={_shown(report_path)} checks={len(results)}"
     if attested:

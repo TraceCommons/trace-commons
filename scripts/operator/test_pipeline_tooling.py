@@ -3157,10 +3157,13 @@ class QualifyTests(_QualifyCase):
             self.assertFalse(self.catalog_path.exists())
 
     def test_a_v1_report_without_the_attestation_keys_validates_and_is_archived(self):
-        """The report keeps schema `v1`. A report written by `main`'s tool has
-        neither `attested` nor `attestation_count`: it validates, reads as
-        unattested, and `qualify --archive` archives such a report. A report
-        with one of the two keys must have both, and they must agree."""
+        """The report keeps schema `v1`. A `v1` report without `attested` and
+        `attestation_count` (here: this tool's own pass report with the two
+        keys taken out) validates, reads as unsigned (`attested: false`,
+        `attestation_count: 0`), and `qualify --archive` archives it. A report
+        with one of the two keys must have both, and they must agree. That a
+        key-less report is valid does not make every report of `main`'s tool
+        valid: see `test_a_pass_report_shaped_as_mains_tool_writes_it_...`."""
         self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
         written = json.loads(self.report_path.read_text())
         self.assertEqual((written["attested"], written["attestation_count"]), (False, 0), "the tool writes both keys")
@@ -3205,6 +3208,66 @@ class QualifyTests(_QualifyCase):
         report_module.validate_qualification_report({**failed, "attested": False, "attestation_count": 0})
         with self.assertRaises(errors.ToolingError):
             report_module.validate_qualification_report({**main_style, "unknown_key": 1})
+
+    def test_a_pass_report_shaped_as_mains_tool_writes_it_is_refused_and_its_fail_report_validates(self):
+        """A `v1` report without the two keys validates and reads as unsigned.
+        That holds for a FAIL report of `main`'s tool. It does not hold for a
+        PASS report of `main`'s tool: its evidence names more than one package
+        (the minimal corpus check carries a package, and so does each
+        mechanics check: a run names many), which `_require_one_package`
+        refuses, because such a result set could never back a promotion."""
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        written = json.loads(self.report_path.read_text())
+
+        def main_shaped(candidate_only=False, **changes):
+            """`written` as `main`'s tool writes a report: no attestation keys,
+            and each check (every one, or only the four candidate checks)
+            naming a package of its own."""
+            shaped_checks = []
+            for item in written["checks"]:
+                own = candidate_only is False or item["check_id"] in _CANDIDATE_CHECKS
+                shaped_checks.append(
+                    {
+                        **item,
+                        "package_hash": _fake_hash(f"package:{item['check_id']}") if own else None,
+                        "configuration_digest": _fake_hash(f"configuration:{item['check_id']}") if own else None,
+                        "dependency_digest": _fake_hash(f"dependency:{item['check_id']}") if own else None,
+                    }
+                )
+            shaped = {key: value for key, value in written.items() if key not in ("attested", "attestation_count")}
+            shaped.update(changes)
+            shaped["checks"] = shaped_checks
+            shaped["evidence_hash"] = _digest(results.canonical({"inputs": shaped["inputs"], "checks": shaped_checks}))
+            return shaped
+
+        everything_named = main_shaped()
+        packages = {item["package_hash"] for item in everything_named["checks"]}
+        self.assertGreater(len(packages), 11, "a run of `main`'s tool names many packages")
+        first_mechanics = next(item["check_id"] for item in everything_named["checks"] if item["check_id"] not in _CANDIDATE_CHECKS)
+        for label, report, expected in (
+            (
+                "each check names its own package",
+                everything_named,
+                f"pipeline_check_digests_unexpected:{first_mechanics}",
+            ),
+            (
+                "the four candidate checks name four packages",
+                main_shaped(candidate_only=True),
+                "qualification_evidence_mixed_package",
+            ),
+        ):
+            with self.subTest(label):
+                self.assertNotIn("attested", report)
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    report_module.validate_qualification_report(report)
+                self.assertEqual(str(ctx.exception), expected)
+
+        failed = main_shaped(status="fail", failure="check_result_failed:pipeline_crash_matrix")
+        report_module.validate_qualification_report(failed)  # a fail report of the same shape validates
+        self.assertEqual(report_module.report_attestation(failed), (False, 0))
+        failed_path = self.tmp / "main-style-fail-report.json"
+        failed_path.write_text(json.dumps(failed))
+        catalog.update_catalog(self.catalog_path, failed_path)
 
     def _key(self):
         key = self.tmp / "tcsecretkey-report-test.pk8"
@@ -3494,6 +3557,112 @@ class SignedQualifyTests(_QualifyCase):
         )
         self.assertFalse((self.run.run_dir / "attestations-staging").exists())
         self.assertEqual(self.tree_hash_calls, 2, "checked before the signing step and again after it")
+
+    def test_a_failed_run_that_cannot_remove_its_attestations_says_so(self):
+        """`discard_attestations` looks again after it removed: anything left
+        (the staging directory, or an attestation file) is
+        `check_attestation_discard_failed`, shown on the terminal and carried
+        by the failure report beside the original label."""
+
+        class ShutilWithoutRmtree:
+            def __getattr__(self, name):
+                return getattr(shutil, name)
+
+            @staticmethod
+            def rmtree(path, ignore_errors=False):
+                return None
+
+        real_unlink = Path.unlink
+
+        def stubborn_unlink(path, missing_ok=False):
+            if path.name.endswith(".attestation.json"):
+                raise PermissionError("denied")
+            return real_unlink(path, missing_ok=missing_ok)
+
+        def edit_the_tree(env):
+            self.tree_edited = True
+
+        def conflicting_archive(*args, **kwargs):
+            raise errors.ToolingError("immutable_record_conflict")
+
+        discard_failed = "check_attestation_discard_failed"
+        cases = (
+            # The tree changes while the results are signed: the files are in
+            # the staging directory, which cannot be removed.
+            ("a staging directory that stays", "code_revision_changed", {"during_signing": edit_the_tree},
+             [("shutil", ShutilWithoutRmtree())], True),
+            # The archive fails after the files were published: they cannot be
+            # unlinked.
+            ("published files that stay", "immutable_record_conflict", {},
+             [("update_catalog", conflicting_archive)], False),
+        )
+        for label, original, hooks, replaced, staged in cases:
+            with self.subTest(label):
+                self._fresh_run()
+                self.during_signing = hooks.get("during_signing")
+                self.tree_edited = False
+                with contextlib.ExitStack() as stack:
+                    for name, replacement in replaced:
+                        stack.enter_context(mock.patch.object(pipeline, name, replacement))
+                    stack.enter_context(mock.patch.object(Path, "unlink", stubborn_unlink))
+                    self.assertEqual(self._signed("--archive"), 1)
+                lines = self.stderr.getvalue().splitlines()
+                self.assertIn(f"PipelineFailure: {original}", lines, "the original label is still shown")
+                self.assertIn(f"PipelineFailure: {discard_failed}", lines)
+                value = json.loads(self.report_path.read_text())
+                self.assertEqual((value["status"], value["failure"]), ("fail", f"{original}.{discard_failed}"))
+                self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
+                report_module.validate_qualification_report(value)
+                # The premise: what could not be removed is really still there.
+                self.assertEqual((self.run.run_dir / "attestations-staging").exists(), staged)
+                self.assertEqual(
+                    bool(list(self.run.run_dir.rglob("*.attestation.json"))), True, "an attestation file remains"
+                )
+        self.during_signing = None
+
+    def test_a_failure_that_cannot_write_its_failed_report_leaves_no_pass_report(self):
+        """An attested pass report is written before the files are published
+        and the archive is made. If a later step fails and the failed report
+        cannot be written either, this run's pass report must not stay, in
+        either place it was written."""
+        real_write = pipeline.write_report
+
+        def pass_reports_only(*args, **kwargs):
+            if kwargs.get("failure") is not None:
+                raise OSError("disk full")
+            return real_write(*args, **kwargs)
+
+        published = []
+        real_publish = pipeline._publish_file
+
+        def failing_publish(source, destination):
+            published.append(destination.name)
+            if len(published) == 5:
+                raise OSError("disk full")
+            real_publish(source, destination)
+
+        def conflicting_archive(*args, **kwargs):
+            raise errors.ToolingError("immutable_record_conflict")
+
+        cases = (
+            ("the publish fails", "check_attestation_publish_failed", True, ("_publish_file", failing_publish)),
+            ("the archive fails", "immutable_record_conflict", True, ("update_catalog", conflicting_archive)),
+            ("the archive fails without a signing key", "immutable_record_conflict", False,
+             ("update_catalog", conflicting_archive)),
+        )
+        for label, original, signed, (name, replacement) in cases:
+            with self.subTest(label):
+                self._fresh_run()
+                published.clear()
+                with mock.patch.object(pipeline, name, replacement), mock.patch.object(
+                    pipeline, "write_report", pass_reports_only
+                ):
+                    code = self._signed("--archive") if signed else self._qualify("--archive")
+                self.assertEqual(code, 1)
+                self.assertIn(f"PipelineFailure: {original}", self.stderr.getvalue())
+                self.assertFalse(self.report_path.exists(), "no pass report in the latest-report place")
+                self.assertFalse((self.run.run_dir / "qualification-report.json").exists(), "none in the run directory")
+                self._assert_no_attestation_anywhere()
 
     def test_a_result_file_changed_before_the_signer_reads_it_is_not_signed(self):
         """The attestations are compared with the results that
