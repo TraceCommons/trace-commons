@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{RoutedExchange, RoutingLedger};
 
@@ -43,6 +43,141 @@ const MAX_REFRESH_PAGES: usize = 50;
 struct LogView {
     #[serde(default)]
     exchanges: Vec<serde_json::Value>,
+}
+
+/// Maximum summary response size, including unknown upstream fields.
+const MAX_SUMMARY_BYTES: usize = 1024 * 1024;
+const MAX_SUMMARY_GROUPS: usize = 4096;
+
+/// The upstream shape, narrowed to content-free fields this build understands.
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct SummaryView {
+    pub enabled: bool,
+    pub receipts: bool,
+    pub since: DateTime<Utc>,
+    pub groups: Vec<SummaryGroup>,
+    pub routed: SummaryTotal,
+    pub outside: SummaryTotal,
+    pub unknown: SummaryTotal,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct SummaryGroup {
+    pub model: Option<String>,
+    pub backend: String,
+    pub route: String,
+    pub work_kind: Option<String>,
+    #[serde(flatten)]
+    pub total: SummaryTotal,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct SummaryTotal {
+    pub calls: u64,
+    pub priced_calls: u64,
+    pub cost_usd: f64,
+    pub proof: SummaryProofCounts,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct SummaryProofCounts {
+    pub verified: u64,
+    pub gateway_only: u64,
+    pub unattested: u64,
+    pub pending: u64,
+    pub unavailable: u64,
+    pub failed: u64,
+    pub outside: u64,
+    pub unrecorded: u64,
+}
+
+impl SummaryProofCounts {
+    fn counts(&self) -> [u64; 8] {
+        [
+            self.verified,
+            self.gateway_only,
+            self.unattested,
+            self.pending,
+            self.unavailable,
+            self.failed,
+            self.outside,
+            self.unrecorded,
+        ]
+    }
+}
+
+impl SummaryTotal {
+    fn valid(&self) -> bool {
+        let counts = self.proof.counts();
+        counts.into_iter().try_fold(0_u64, u64::checked_add) == Some(self.calls)
+            && self.priced_calls <= self.calls
+            && self.cost_usd.is_finite()
+            && self.cost_usd >= 0.0
+            && self.cost_usd * 1_000_000.0 < u64::MAX as f64
+            && (self.priced_calls != 0 || self.cost_usd == 0.0)
+    }
+}
+
+impl SummaryView {
+    fn valid(&self, since: DateTime<Utc>) -> bool {
+        if self.since != since
+            || self.groups.len() > MAX_SUMMARY_GROUPS
+            || !self.routed.valid()
+            || !self.outside.valid()
+            || !self.unknown.valid()
+        {
+            return false;
+        }
+        for (route, total) in [
+            ("routed", &self.routed),
+            ("outside", &self.outside),
+            ("unknown", &self.unknown),
+        ] {
+            let mut calls = 0_u64;
+            let mut priced = 0_u64;
+            let mut cost = 0.0;
+            let mut proof = [0_u64; 8];
+            for group in self.groups.iter().filter(|g| g.route == route) {
+                let Some(next_calls) = calls.checked_add(group.total.calls) else {
+                    return false;
+                };
+                let Some(next_priced) = priced.checked_add(group.total.priced_calls) else {
+                    return false;
+                };
+                for (sum, count) in proof.iter_mut().zip(group.total.proof.counts()) {
+                    let Some(next) = sum.checked_add(count) else {
+                        return false;
+                    };
+                    *sum = next;
+                }
+                calls = next_calls;
+                priced = next_priced;
+                cost += group.total.cost_usd;
+            }
+            if proof != total.proof.counts()
+                || calls != total.calls
+                || priced != total.priced_calls
+                || (cost - total.cost_usd).abs() > 1e-9 * cost.abs().max(1.0)
+            {
+                return false;
+            }
+        }
+        self.groups.iter().all(|g| {
+            g.total.valid()
+                && matches!(g.route.as_str(), "routed" | "outside" | "unknown")
+                && g.work_kind.is_none()
+                && match g.route.as_str() {
+                    "routed" => g.total.proof.outside == 0 && g.total.proof.unrecorded == 0,
+                    "outside" => g.total.proof.outside == g.total.calls,
+                    "unknown" => g.total.proof.unrecorded == g.total.calls,
+                    _ => false,
+                }
+        }) && (self.enabled
+            || (self.groups.is_empty()
+                && self.routed.calls == 0
+                && self.outside.calls == 0
+                && self.unknown.calls == 0))
+    }
 }
 
 /// The proxy's status object. Only the one field this reads.
@@ -205,6 +340,7 @@ pub struct IronWireLedger {
     /// known", which is distinct from `Some(false)`: one is a proxy that did
     /// not answer, the other is a proxy that answered and said no.
     nearai_authenticated: Arc<RwLock<Option<bool>>>,
+    last_summary_at: RwLock<Option<DateTime<Utc>>>,
 }
 
 impl std::fmt::Debug for IronWireLedger {
@@ -262,9 +398,14 @@ impl IronWireLedger {
             snapshot: Arc::new(RwLock::new(Vec::new())),
             last_refresh_at: Arc::new(RwLock::new(None)),
             unreadable_rows: Arc::new(RwLock::new(0)),
-            client: reqwest::Client::builder().build().ok(),
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .ok(),
             spend_today_micros: Arc::new(RwLock::new(None)),
             nearai_authenticated: Arc::new(RwLock::new(None)),
+            last_summary_at: RwLock::new(None),
         }
     }
 
@@ -362,6 +503,49 @@ impl IronWireLedger {
         // serve `/status` still serves the log, and losing the amount must
         // not lose the window as well.
         self.refresh_spend(client).await;
+    }
+
+    /// Read a complete, bounded summary without following a redirect or reading bodies.
+    /// A failed read never becomes a measured empty window.
+    pub(crate) async fn read_summary(&self, since: DateTime<Utc>) -> Option<SummaryView> {
+        let client = self.client.as_ref()?;
+        let view = tokio::time::timeout(REFRESH_TIMEOUT, async {
+            let mut response = client
+                .get(format!("http://127.0.0.1:{}/_ironwire/summary", self.port))
+                .query(&[("since", since.to_rfc3339())])
+                .header("authorization", format!("Bearer {}", self.token))
+                .timeout(REFRESH_TIMEOUT)
+                .send()
+                .await
+                .ok()?;
+            if !response.status().is_success()
+                || response
+                    .content_length()
+                    .is_some_and(|n| n > MAX_SUMMARY_BYTES as u64)
+            {
+                return None;
+            }
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await.ok()? {
+                if chunk.len() > MAX_SUMMARY_BYTES.saturating_sub(body.len()) {
+                    return None;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            let view: SummaryView = serde_json::from_slice(&body).ok()?;
+            view.valid(since).then_some(view)
+        })
+        .await
+        .ok()
+        .flatten()?;
+        if let Ok(mut at) = self.last_summary_at.write() {
+            *at = Some(Utc::now());
+        }
+        Some(view)
+    }
+
+    pub(crate) fn last_summary_at(&self) -> Option<DateTime<Utc>> {
+        self.last_summary_at.read().ok().and_then(|at| *at)
     }
 
     /// Read what the proxy says has been spent on this computer today.
@@ -621,6 +805,7 @@ mod tests {
             client: None,
             spend_today_micros: Arc::new(RwLock::new(None)),
             nearai_authenticated: Arc::new(RwLock::new(None)),
+            last_summary_at: RwLock::new(None),
         };
         ledger.refresh().await;
         assert!(

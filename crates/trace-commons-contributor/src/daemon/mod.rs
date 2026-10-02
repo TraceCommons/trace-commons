@@ -54,6 +54,7 @@ pub(crate) mod legacy_migration;
 pub mod native_flow;
 pub mod nearai_credential;
 pub mod nearai_onboarding;
+mod network_data;
 pub mod notify;
 #[cfg(feature = "test-credential-store")]
 pub(crate) mod test_credential_store;

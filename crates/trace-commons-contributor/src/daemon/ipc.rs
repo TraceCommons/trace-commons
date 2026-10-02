@@ -341,6 +341,12 @@ pub const METHODS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "inference_calls",
+    "inference_summary",
+    "inference_call_proof",
+    "model_spend",
+    "private_ai",
+    "set_private_ai",
+    "invite_lookup",
     "tool_destinations",
     "list_audit",
     "list_history",
@@ -1225,7 +1231,7 @@ impl DaemonShared {
     /// contributor asked for; this is what actually happened, and a shell
     /// that renders the boolean alone would show a proxy as on while it was
     /// refusing to start.
-    fn private_inference_value(&self) -> serde_json::Value {
+    pub(crate) fn private_inference_value(&self) -> serde_json::Value {
         let state = self
             .private_inference_state
             .lock()
@@ -2342,6 +2348,9 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    ("inference_summary", "inference-summary-requires-async"),
+    ("set_private_ai", "private-ai-requires-async"),
+    ("invite_lookup", "invite-lookup-requires-async"),
     (
         "prepare_admission_session",
         "admission-setup-requires-async",
@@ -2446,6 +2455,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "route_disclosure" => handle_route_disclosure(shared, req),
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "inference_call_proof" => super::network_data::handle_proof(shared, req),
+        "model_spend" => super::network_data::handle_model_spend(req),
+        "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_kept" => handle_list_kept(shared, req),
         "keep" => handle_keep(shared, req),
@@ -4016,7 +4028,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
 /// the same friction `rebuild_effective_routing` exists to avoid for a typed port.
 /// The reported state is re-read after the reconcile so the answer describes
 /// what happened rather than what was true a moment before it.
-async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
+pub(crate) async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
     shared.absorb_near_ai_credential_change().await;
     let mut response = handle_set_settings(shared, req);
     if response.error.is_some() {
@@ -4045,6 +4057,9 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
+        "inference_summary" => super::network_data::handle_summary(shared, req).await,
+        "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
+        "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
         "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
         "prepare_admission_session" => super::native_flow::admission_response(
             super::admission_setup::handle_prepare_admission_session(shared, req).await,
@@ -13251,9 +13266,48 @@ mod tests {
     }
 
     #[test]
+    fn network_methods_are_reachable_and_unknown_is_not_zero() {
+        let s = shared();
+        for method in [
+            "inference_summary",
+            "inference_call_proof",
+            "model_spend",
+            "private_ai",
+            "set_private_ai",
+            "invite_lookup",
+        ] {
+            assert!(METHODS.contains(&method), "{method} must be advertised");
+        }
+        let spend = handle_local(&s, "model_spend", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(spend["known"], false);
+        assert_eq!(spend["reason_label"], "billed-model-spend-unavailable");
+        let summary = handle_local(&s, "inference_summary", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(summary["readable"], false);
+        assert!(summary["summary"].is_null());
+        let proof = handle_local(&s, "inference_call_proof", serde_json::json!({"call_id":1}))
+            .result
+            .unwrap();
+        assert_eq!(proof["readable"], false);
+        assert_eq!(proof["found"], false);
+        let private = handle_local(&s, "private_ai", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(private["on"], false);
+        assert_eq!(private["state"], "off");
+        assert_eq!(
+            private["disclosure"],
+            crate::private_inference_copy::OFFER_EXPOSURE
+        );
+    }
+
+    #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 36);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 39);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -13682,8 +13736,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 55, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 58, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 46, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
