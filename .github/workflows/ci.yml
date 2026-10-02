@@ -72,6 +72,9 @@ jobs:
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
 
+      - name: Offline network recording privacy projections
+        run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
+
   postgres-suites:
     name: database suites against a real PostgreSQL
     runs-on: ubuntu-latest
