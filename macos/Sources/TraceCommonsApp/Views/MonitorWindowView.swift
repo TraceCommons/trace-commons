@@ -47,9 +47,13 @@ struct MonitorWindowView: View {
         let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] ?? ""
         return DaemonDataWiring.sample(SampleDaemonClient.SampleSet(rawValue: name) ?? .normalDay)
     }
+    /// False until this window has seeded the two preferences from its
+    /// width (map from 1100pt, inspector from 900pt). After that the
+    /// window restores whatever the person chose.
+    @SceneStorage("monitor.panesSeeded") private var panesSeeded = false
 
     var body: some View {
-        GlassThreePane(showsMap: showsMap, showsInspector: showsInspector) {
+        GlassThreePane(showsMap: showsMap, showsInspector: showsInspector, onFirstLayout: seedPanes) {
             MonitorMainPane(
                 tab: $tab, inferenceDot: inferenceDot,
                 showsMap: $showsMap, showsInspector: $showsInspector,
@@ -82,6 +86,15 @@ struct MonitorWindowView: View {
         traces.tree.allSessions.first { $0.entryId == selectedSession }
     }
 
+    /// The first time this window lays out, open the panes its width suits.
+    private func seedPanes(windowWidth: CGFloat) {
+        guard !panesSeeded else { return }
+        let seed = GlassPaneLayout.firstLaunch(windowWidth: windowWidth)
+        showsMap = seed.showsMap
+        showsInspector = seed.showsInspector
+        panesSeeded = true
+    }
+
     /// Inference's dot: Private AI on or off, and none while the daemon has
     /// not said. Unknown is never drawn as off.
     private var inferenceDot: GlassStatus? {
@@ -101,6 +114,9 @@ private struct MonitorMainPane<Content: View>: View {
     @Binding var showsInspector: Bool
     let onSettings: () -> Void
     @ViewBuilder let content: () -> Content
+    /// The window is too narrow for the map: the toggle shows it hidden and
+    /// cannot show it, and widening the window brings back the preference.
+    @Environment(\.glassMapCompacted) private var mapCompacted
     /// Half the unified title bar's 52pt height.
     static var lightsCentre: CGFloat { 26 }
 
@@ -110,9 +126,10 @@ private struct MonitorMainPane<Content: View>: View {
                 HStack(spacing: GlassTokens.Space.s4) {
                     Spacer(minLength: 0)
                     GlassToolbarGroup {
-                        GlassToolbarButton("Map", systemImage: "map", pressed: showsMap) {
+                        GlassToolbarButton("Map", systemImage: "map", pressed: showsMap && !mapCompacted) {
                             showsMap.toggle()
                         }
+                        .disabled(mapCompacted)
                         GlassToolbarButton("Inspector", systemImage: "sidebar.right", pressed: showsInspector) {
                             showsInspector.toggle()
                         }

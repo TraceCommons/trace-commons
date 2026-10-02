@@ -210,6 +210,7 @@
     "paneLeftMinWidth": 320,
     "paneLeftWindowShare": 0.34,
     "mapBreakpoint": 1100,
+    "inspectorBreakpoint": 900,
     "windowMinWidth": 760,
     "windowMinHeight": 560,
     "nodeCardWidth": 260
