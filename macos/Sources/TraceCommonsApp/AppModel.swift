@@ -996,6 +996,15 @@ final class AppModel: ObservableObject {
     /// contributor who is not told that meets it as a dead control.
     var isAttachedDaemon: Bool { daemon?.isAttached ?? false }
 
+    /// The quit prompt that is true for this process, from the core
+    /// (`tc_quit_prompt_json`): the ABI reads off the daemon handle whether
+    /// this app hosts the watcher, is attached to one, or has none, and
+    /// chooses the sentence. Nil only on a caught panic.
+    var quitPrompt: QuitPrompt? {
+        QuitPrompt.decode(fromJSON: daemon?.quitPromptJSON()
+            ?? TCCoreCopy.quitPromptWithoutWatcherJSON())
+    }
+
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
         return status.loggedIn && isOnboardingComplete
@@ -1329,13 +1338,13 @@ final class AppModel: ObservableObject {
     /// the authority: the queue is live, and a poll or an approval between
     /// the render and the click moves it. When the two disagree the
     /// contributor is told rather than left to notice -- see
-    /// `ProjectIgnoreCopy.reconciliation`.
+    /// `tc_project_ignore_reconciled_text`.
     func ignoreProject(id projectID: String, label: String, promised: Int) {
         perform(
             "set_project_mode",
             work: { try $0.setProjectMode(projectID: projectID, mode: .ignore) }
         ) { purged in
-            self.lastActionNotice = ProjectIgnoreCopy.reconciliation(
+            self.lastActionNotice = TCCoreCopy.projectIgnoreReconciled(
                 project: label,
                 promised: promised,
                 purged: purged

@@ -520,7 +520,24 @@ mod tests {
             explanation: vec!["held for privacy review".into()],
             delayed_credit_explanations: vec![],
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            pipeline: None,
         }
+    }
+
+    /// K9: a queue entry's title is the one bulk exception to the preview
+    /// content boundary, and only while the entry is queued. It is never
+    /// carried onto a receipt or a history row, which outlive the entry
+    /// (see "The preview content boundary" in the IPC doc). A field named
+    /// `title` on either fails this.
+    #[test]
+    fn receipts_and_history_rows_never_carry_a_title() {
+        let id = Uuid::new_v4();
+        let receipt =
+            serde_json::to_value(receipt(id, "sha256:aa", "accepted", "2026-09-30T09:00:00Z"))
+                .unwrap();
+        assert!(receipt.get("title").is_none(), "{receipt}");
+        let row = serde_json::to_value(record("accepted", "2026-09-30T09:00:00Z")).unwrap();
+        assert!(row.get("title").is_none(), "{row}");
     }
 
     fn record(status: &str, when: &str) -> HistoryRecord {

@@ -1,243 +1,179 @@
-# Local pipeline lab
+# Local pipeline corpus runs
 
-> **Status: design stage.** This runbook describes tooling that is not in this
-> repository yet: the lab scripts and `trace-commons-pipeline-local`. It
-> arrives with the pipeline runtime and qualification changes, and its
-> commands can change before then. Do not follow it on a deployment.
+> **Status: the tooling exists.** `pipeline.py run` and `pipeline.py package`
+> run today against a real, disposable PostgreSQL server and the shared
+> `trace-commons-ingest` app. There is no separate lab binary or service:
+> `run` hosts the app in-process for the run's duration, through an ignored
+> Rust test, and tears everything down when it finishes. Production
+> routing of live tenants through the pipeline is still off; see
+> [pipeline-activation.md](pipeline-activation.md).
 
-## Purpose
+Use `pipeline.py run` to send a fixed corpus through the shared
+`trace-commons-ingest` app over real HTTP and check the graded result.
+Use `pipeline.py package` to build and sign a reusable bundle package first.
+`pipeline.py qualify` (see [pipeline-qualification.md](pipeline-qualification.md))
+runs these same corpus checks as part of the full required-check set.
 
-Use the lab to run a fixed corpus, inspect a graded report, build a signed
-package, and keep development evidence in a catalog. The lab is a local
-command. It starts the existing pipeline test runner for the duration of a
-corpus run. It does not add an HTTP service, database, table, or run identifier
-to ingest.
-
-The five commands are `corpus-run`, `report`, `catalog`, `qualify`, and
-`package`. Calibration is not implemented.
-
-## Run the corpus
-
-Prerequisites: Rust, Cargo, Python 3.10 or later, Docker, and an available
-Docker daemon. Docker must be able to load `postgres:17-alpine`.
-
-From the repository root, run:
+## Run a corpus
 
 ```bash
-bash scripts/operator/lab/run.sh corpus-run
+python3 scripts/operator/pipeline.py run --bundle minimal
+python3 scripts/operator/pipeline.py run --bundle compatibility
 ```
 
-The command does these operations:
+`--bundle` selects one of the two built-in bundles (`minimal` or
+`compatibility`); pass a signed package instead with `--package PATH
+--trusted-key PATH` (the outputs of `pipeline.py package` below) -- exactly
+one of `--bundle` or the package pair is required. `--corpus PATH` selects
+another corpus file (default:
+[`versioned-pipeline-minimal-corpus-v1.json`](../superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json),
+five fixtures: `clean_tool_plan`, `locally_redacted_secret`,
+`privacy_quarantine_approved`, `privacy_quarantine_rejected`,
+`privacy_risk_rejected`). `--corpus-digest sha256:HEX` refuses a corpus file
+whose bytes do not hash to that digest -- checked before any database
+starts. `--postgres-admin-url URL` and `--archive` work as in
+[pipeline-qualification.md](pipeline-qualification.md).
 
-1. Read and validate the git corpus. Snapshot its bytes and compute SHA-256.
-2. Build and sign the minimal Rust policy package with a disposable local key.
-3. Start a new PostgreSQL container on a loopback port.
-4. Apply the same migrations as production, including the versioned pipeline migrations and existing
-   tables. Run the corpus with a separate `NOBYPASSRLS` runtime role.
-5. Run each fixture in array order. Check replay, changed-content refusal,
-   phase order, typed decisions, evidence and evaluation, expected Admission
-   decisions, outcome counts, and contributor processing state.
-6. Check that another tenant cannot read the first pipeline run.
-7. Write the report and update the catalog. Stop the processes and remove the
-   container, encrypted objects, and temporary inputs.
+The command checks the corpus file, starts one `Environment` (its own
+scenario database and encrypted artifact root), runs every fixture through
+the shared ingest app in array order over real HTTP, requires the check to
+show at least 5 committed transactions and a current pass result, and
+writes the latest report under `.local/`. Corpus fixture order, labels,
+trace ids, and submission ids must be unique; a report file is refused as a
+corpus input.
 
-The command writes:
+## The HF pin
 
-- `.local/lab/report.json`: the latest graded report.
-- `.local/lab/report.md`: the readable report.
-- `.local/pipeline-lab-catalog-v1.json`: the catalog.
-- `.local/lab-records/`: immutable copies of reports, signed packages, public
-  keys, and qualification evidence, named by their file digests.
+`--corpus` also accepts an HF pin descriptor
+(`trace_commons.pipeline_hf_corpus_pin.v1`) in place of a direct corpus
+file. `qualify`'s third corpus run always uses the local fixture pin:
 
-The catalog preserves earlier reports, including runs of another corpus or
-bundle. Repeating a catalog update for the same records does not add duplicates.
-The latest report files can be replaced. Use the archived files for evidence.
-A graded failure is recorded and returns a nonzero exit status. A startup or
-submission failure returns a safe error label and does not claim a graded run.
+```bash
+python3 scripts/operator/pipeline.py run --bundle compatibility \
+  --corpus crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-local.json
+```
 
-## What traces run
+This pin names a `local_jsonl_dir`
+(`crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/`, two
+committed `.jsonl` files) instead of a live Hugging Face download: the
+export binary (`trace-commons-pipeline-corpus-export`) reads the fixture
+files from that directory and checks the result against the pin's own
+`source_digest` and `order_digest` fields, the same way it would check a
+real remote export. No PR 4 check makes a network call.
 
-The default input is
-[`versioned-pipeline-minimal-corpus-v1.json`](../superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json).
-It contains five synthetic traces in this order:
+Every PR 4 pin, including this one, names the dataset
+`jedisct1/security-audits` as its `repository` field for consistency with
+the eventual remote pin. The real network pin -- the one an export actually
+downloads from Hugging Face -- arrives with the PR that needs the network
+canary (ruling HF-1), and this runbook does not print `pin-local.json`'s
+digest fields; read the file itself if you need them.
 
-| Label | Admission | Final result | Outcomes |
-| --- | --- | --- | --- |
-| `clean_tool_plan` | Admit | Complete | 4 |
-| `locally_redacted_secret` | Admit | Complete after local redaction | 4 |
-| `privacy_quarantine_approved` | Quarantine | Approve in Review, then complete | 4 |
-| `privacy_quarantine_rejected` | Quarantine | Reject in Review | 2 |
-| `privacy_risk_rejected` | Reject | Reject in Admission | 1 |
+## Build a package
 
-The corpus digest covers the exact file bytes, including fixture order. To
-select another version, use `--corpus PATH`. To require specific bytes, also
-use `--corpus-digest sha256:HEX`. Keep the fixture array order fixed. Labels,
-trace IDs, and submission IDs must be unique. Reports are rejected as corpus
-inputs. In particular, `.local/pipeline-restore-corpus.json` is an output
-report from the restore drill.
+```bash
+python3 scripts/operator/pipeline.py package --bundle minimal \
+  --output .local/lab/package.json --public-key-output .local/lab/trusted-key.json
+python3 scripts/operator/pipeline.py run --bundle minimal \
+  --package .local/lab/package.json --trusted-key .local/lab/trusted-key.json
+```
 
-The git corpus stays the fast CI corpus. The lab does not download Hugging
-Face data. A later HF JSONL adapter can emit this same input schema.
-`trace-commons-pilot-bootstrap` downloads JSONL and submits to ingest; it is
-not the pipeline lab. `trace-commons-gate-calibrate` calibrates the old gate;
-it does not calibrate these four policies.
+By default this builds a disposable Ed25519 key and writes only its public
+half. Pass `--signing-key PATH --key-id LABEL` for a controlled key
+(`PATH` must be Ed25519 PKCS#8 DER). `--output` and `--public-key-output`
+must differ. Building and signing a package does not qualify it for
+production -- see
+[pipeline-qualification.md](pipeline-qualification.md#package-trust-and-qualify_bundle).
+
+## Report fields
+
+Each corpus run writes `trace_commons.pipeline_corpus_report.v1` to the run
+directory and the latest copy to `.local/pipeline-<label>-corpus-report.json`
+(plus a `.md` rendering), where `<label>` is the bundle name, `package`, or
+`hf_local`. The report's `report_digest` is the SHA-256 of its own canonical
+bytes with that field excluded (timing fields are never in the report at
+all, so digests are stable across runs of the same bundle and corpus).
+
+Top-level fields: `schema`, `check_id` (`pipeline_http_corpus_<label>`),
+`scope: "local_test"`, `production_ready: false`,
+`external_payout_enabled: false`, `safe_blockers` (exactly
+`local_test_only`, `local_reference_scorer`, `local_reference_embedder`,
+`synthetic_index`, `synthetic_settlement`, `static_bearer_authentication`),
+`bundle_id`, `package_hash`, `configuration_digest`, `dependency_digest`,
+`policy_manifest` (one entry per phase -- `admission`, `review`, `score`,
+`settle` -- each with its `implementation_id` and `configuration_hash`),
+`fixture_count`, `completed_fixture_count`, `failure_count`,
+`replay_same_run_count`, `changed_content_refused_count`,
+`tenant_isolation`, and `partitions`: one section per corpus partition
+(`corpus`, or `bootstrap` then `holdout` for an HF pin), each with its own
+`corpus_digest` and ordered `fixtures`. Each fixture carries its admission
+decision against the expectation, its final state, outcome and instrument
+counts against expectations, the replay and changed-content-refusal checks,
+tenant isolation, and a `mismatches` list -- empty on a passing fixture,
+naming exactly which expectation failed otherwise. A report with recorded
+fixture failures is still a *valid* report; `pipeline.py` keeps a failed
+harness run's report (when it validates) and prints
+`PipelineRunReport: failures=<n> report=<path>` before re-raising the step
+failure.
 
 ## Isolation and privacy
 
-The schema is production-shaped. The PostgreSQL instance is throwaway.
-`corpus-run` always creates its own Docker container. It never uses or migrates
-`DATABASE_URL`, `TRACE_COMMONS_DATABASE_URL`, or a shared development instance.
-There is no external database option on this command. The integration tests
-retain their explicit `TRACE_COMMONS_PG_TEST_DATABASE_URL` option.
-The direct local runner also accepts that test variable or `--database-url`.
-It no longer reads the ingest database variable. An explicitly configured test
-database that cannot connect or migrate fails the integration tests.
+Every corpus run gets its own scenario database and its own encrypted
+artifact root, created fresh and dropped when the environment closes.
+Nothing here ever points at `DATABASE_URL`, a shared development database,
+or any variable but `TRACE_COMMONS_PG_TEST_DATABASE_URL` /
+`--postgres-admin-url`. The artifact master key is random per corpus run
+and is only ever set in the child process's own environment
+(`TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX`); `pipeline.py` never logs it
+and never prints a child's stdout or stderr, only the step label, exit
+code, and protected log path.
 
-Each corpus run uses a new encrypted artifact directory and a new in-memory
-index. The index starts empty. The default ports are selected for the run.
-`TRACE_COMMONS_PIPELINE_PORT` and `TRACE_COMMONS_PIPELINE_PG_PORT` can select
-fixed loopback ports when needed. An occupied port causes failure.
+Fixture secret probes never leave the run. Every corpus fixture is required
+to carry a non-empty `secret_probe`, and the report validator refuses any
+report containing a raw UUID (hashed instead), any of the private field
+names (`input`, `text`, `trace_text`, `secret`, `secret_probe`, `token`,
+`account_id`, `email`), or a secret-shaped string value -- the same rule
+`validate_evidence` applies to check evidence. This is exercised, not just
+asserted: injecting one fixture's `secret_probe` into a corpus report makes
+the harness itself panic with `corpus_probe_in_report` before any report is
+written, rather than relying on the tooling to catch a leak after the fact.
 
-The runner receives only the local test configuration. Inherited ingest,
-telemetry, authentication, and payout settings do not reach that process.
-External payout stays disabled. The settlement adapter records test operations.
-The runner produces no stored server log. Private temporary files are removed
-on normal exit, failure, and handled interruption. A forced process kill or
-host failure can require removal of a `trace-commons-lab-*` container.
+Over HTTP, the harness checks the probes (each fixture's `secret_probe` and
+`server_privacy_probe`, and its own bearer tokens) in every request body it
+sends and every response body it receives, success bodies included. It does
+not check headers: the bearer tokens travel in the `Authorization` header by
+design.
 
-Stored corpus reports contain structured decisions, numbers, labels, and
-hashes. Pipeline UUIDs are hashed. Trace text, fixture secret probes, raw
-account IDs, credentials, and artifact bytes do not enter these reports.
-Packages contain the policy configuration and referenced artifact bytes;
-they contain no corpus or report.
+## Failure labels
 
-## Select policies and build a package
+`pipeline.py` never prints a child command's own output. A failure is
+always one safe label to stderr, printed once, as
+`PipelineFailure: <label>`; a step that ran a test or a subprocess and
+exited nonzero (`StepFailed`) adds ` exit=<n> log=<run dir>/logs/<step>.log`
+after the label, naming its own protected log file -- never the log's
+contents.
 
-The default profile is `minimal`. Use `--policies compatibility` for the
-existing compatibility policies with local reference dependencies.
-
-| Phase | Minimal implementation | Compatibility implementation |
-| --- | --- | --- |
-| Admission | `trace_commons.admission.authority_privacy.v1` | Same |
-| Review | `trace_commons.review.authority_privacy.v1` | Same |
-| Score | `trace_commons.score.minimal.v1` | `trace_commons.score.compatibility.v1` |
-| Settle | `trace_commons.settle.minimal.v1` | `trace_commons.settle.compatibility.v1` |
-
-Every report includes the complete four-policy manifest, `bundle_id`,
-`package_hash`, per-policy configuration hashes, and `configuration_digest`.
-The configuration digest is SHA-256 of the compact, sorted JSON map from each
-phase name to its configuration hash. Storage settings remain separate in
-`configuration_identities`. `runner_artifact_hash` identifies the actual
-compiled local executable used for the run.
-
-Build a reusable signed package first:
-
-```bash
-bash scripts/operator/lab/run.sh package --policies compatibility
-bash scripts/operator/lab/run.sh corpus-run \
-  --package .local/lab/package.json \
-  --trusted-key .local/lab/trusted-key.json
-```
-
-The runner verifies the signature and artifact hashes before using the
-package. Every fixture must bind to that exact bundle. The catalog archives
-that package and its public key with the report. Do not also pass `--policies`
-when selecting a package.
-
-`package` uses the existing `BundlePackage`, canonical hashing, Ed25519
-signature format, and `BundlePackageTrustStore` verifier. By default it creates
-a disposable key and writes only the public key. For a controlled signing key,
-pass `--signing-key PATH --key-id LABEL`. The key file must contain Ed25519
-PKCS#8 DER. Use `--output` and `--public-key-output` to select output paths.
-Protect signing keys outside the catalog. A public key emitted by this command
-is a local verification input; it is not automatically a trusted release key.
-
-The package names each policy's `implementation_id`. Policies remain Rust code
-in the server. The package does not hash or contain that code. The report's
-executable hash is separate build evidence, and qualification binds a package
-to the code revision that it tested. A new algorithm requires a server
-implementation, a new `implementation_id`, and tests. Editing JSON cannot
-install a new algorithm.
-
-Both bundled profiles are local/test candidates. Signing does not make them
-production-selectable. Production qualification rejects minimal implementations
-and reference or synthetic dependencies. A production candidate must use the
-approved implementations and dependency profile, pass the existing qualification
-checks, and be signed by a key already approved in the release trust store.
-Ingest receives the signed package and the existing qualification metadata;
-it does not load this catalog, corpus, or report files. Activation remains the
-qualification and tenant activation process.
-
-## Read a report and update the catalog
-
-```bash
-bash scripts/operator/lab/run.sh report .local/lab/report.json
-bash scripts/operator/lab/run.sh catalog --report .local/lab/report.json
-```
-
-The report schema is `trace_commons.pipeline_corpus_report.v5`. Its
-`report_digest` covers canonical report content, excluding that field itself.
-Timing fields are omitted. Actual outcome and command identities can change
-between runs, so archived reports can have different digests.
-
-`result_digest` compares graded behavior for a bundle and ordered corpus. It
-covers fixture labels, expected and observed processing results, phases,
-decisions, evidence, evaluation, and replay checks. In this comparison only,
-provenance hashes become the label `hash` and outcome IDs are omitted. Use the
-full report to inspect the actual hashes. A matching result digest does not
-establish production readiness.
-
-The catalog schema is `trace_commons.pipeline_lab_catalog.v1`. Each `bundles`
-entry is keyed by `bundle_id`. It contains:
-
-- The most recently indexed corpus and configuration digests.
-- `development_records`: paths to archived records, relative to the catalog.
-- `reports`: each report's digests, pass/fail status, report path, and package
-  and public-key paths when supplied.
-- `production_ready: false` and explicit local dependency blockers.
-
-Each report record retains its own corpus and configuration digests. Updating
-one entry does not remove other bundles or earlier records. Catalog writes use
-an exclusive file lock and atomic replacement. Existing qualification entries are
-preserved; their older development-record paths retain their original meaning.
-
-For a manual catalog import, use `--package PATH --trusted-key PATH` to attach
-a signed package. Use repeated `--record PATH` options to attach matching
-qualification, inventory, or restore evidence. The command checks supported
-schemas and rejects qualification evidence for another bundle, corpus, or
-configuration. Use `--catalog PATH` to keep a separate catalog.
-
-## Qualification and test levels
-
-```bash
-bash scripts/operator/lab/run.sh qualify
-```
-
-This command wraps the existing pipeline qualification script. It runs package
-and lab checks, the full `versioned_pipeline_pg` integration suite, the
-compatibility corpus, and the backup/restore drill. That integration suite
-includes activation coverage. It writes the existing qualification reports and updates the same
-catalog through the standalone `catalog` command.
-
-The old minimal, compatibility, and product corpus scripts remain supported.
-They call the shared lab workflow and retain their report filenames. Their
-filename version numbers do not select the report schema.
-
-`versioned_pipeline_pg` remains the integration suite for schema contracts,
-transactions, crashes, fenced leases, RLS, and activation. The lab supplies
-corpus, qualification, and package evidence. It does not replace those tests.
-For lab file-handling tests only, run:
-
-```bash
-python3 -m unittest discover -s scripts/operator/lab -p 'test_*.py'
-RUSTFLAGS='-D warnings' cargo test -p trace-commons-server --bin trace-commons-pipeline-local
-```
-
-## Deferred work
-
-There is no calibration command or automatic bootstrap/holdout split. A later
-calibration command must keep bootstrap and holdout data separate, record both
-input digests and fixed orders, evaluate the holdout, and emit changed Score
-or Admission configuration. Changed configuration must produce a new
-`bundle_id`, package, and report. Moving the old scripts does not implement
-this behavior. Multi-party valuation (`SCR-005`) remains out of scope.
+Common labels from a corpus run: `corpus_digest_mismatch` (the file's bytes
+do not match `--corpus-digest`), `corpus_not_json` /
+`unsupported_corpus_schema` / `empty_corpus` / `unsafe_fixture_label` /
+`duplicate_corpus_identity` / `empty_secret_probe` (a malformed corpus
+file), `corpus_package_and_bundle_conflict` /
+`corpus_package_and_key_required` / `corpus_bundle_or_package_required` (an
+invalid `--bundle`/`--package`/`--trusted-key` combination),
+`hf_manifest_contains_raw_trace_text` (the export produced a manifest that
+admits raw trace text), `database_check_executed_nothing:<step>` (the
+scenario database shows fewer than 5 committed transactions),
+`corpus_report_missing` / `corpus_report_malformed` /
+`corpus_report_has_failures` / `corpus_evidence_mismatch` (the harness's own
+report or evidence did not check out), `step_failed:<step>` for any test
+or export step that exited nonzero -- its log is at the path the failure
+line names -- and `cargo_test_list_failed:<step>` when the step's
+`cargo test -- --list` exited nonzero (usually a compile error: the list
+builds the test binary); its log, at the path the line names, holds the
+list's own output. A pin whose source or sample order no longer matches the
+recorded digest fails this way too: the export binary itself refuses with
+"source digest changed" or "sample order digest changed", which surfaces as
+`step_failed:hf_corpus_export`; the step's protected log holds the export's
+own message. See
+[pipeline-qualification.md](pipeline-qualification.md#the-environment-container-digest---postgres-admin-url-one-server-at-a-time)
+for the environment-level labels (`pipeline_tooling_container_*`,
+`pipeline_tooling_admin_url_invalid`, `pipeline_tooling_server_busy`).

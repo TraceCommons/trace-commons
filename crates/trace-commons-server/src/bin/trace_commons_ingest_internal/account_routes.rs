@@ -121,6 +121,13 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
             "/v1/account/traces/{submission_id}/withdraw",
             Refused,
         ),
+        // The pipeline withdrawal (versioned pipeline), an account route like
+        // the one above.
+        (
+            "POST",
+            "/v1/contributors/me/pipeline-submissions/{submission_id}/withdraw",
+            Refused,
+        ),
         (
             "GET",
             "/v1/account/traces/{submission_id}/publication",
