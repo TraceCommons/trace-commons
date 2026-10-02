@@ -279,8 +279,13 @@ enum AccountAction {
         #[arg(long)]
         no_browser: bool,
     },
-    /// Whether a live account session is stored, and when it expires
+    /// Read current contribution readiness from your account
     Status,
+    /// Redeem an invite; retain the same idempotency key when retrying
+    Redeem {
+        #[arg(long)]
+        idempotency_key: uuid::Uuid,
+    },
     /// Revoke the account session and forget it locally
     Logout,
 }
@@ -534,7 +539,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             AccountAction::Login { no_browser } => {
                 commands::account_login(&store, no_browser, cli.json).await
             }
-            AccountAction::Status => commands::account_status(&store, cli.json),
+            AccountAction::Status => commands::account_status(&store, cli.json).await,
+            AccountAction::Redeem { idempotency_key } => {
+                eprintln!("Invite code (read from standard input):");
+                let mut code = String::new();
+                std::io::stdin().read_line(&mut code)?;
+                commands::account_redeem(&store, &code, idempotency_key, cli.json).await
+            }
             AccountAction::Logout => commands::account_logout(&store).await,
         },
         Command::Daemon { action } => match action {

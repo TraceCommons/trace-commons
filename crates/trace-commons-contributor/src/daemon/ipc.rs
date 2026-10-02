@@ -290,6 +290,8 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "account_contribution_status",
+    "account_invite_redeem",
     "acknowledge_arming_rewordings",
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
@@ -2346,6 +2348,14 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "prepare_admission_session",
         "admission-setup-requires-async",
     ),
+    (
+        "account_contribution_status",
+        "account-contribution-requires-async",
+    ),
+    (
+        "account_invite_redeem",
+        "account-contribution-requires-async",
+    ),
     ("near_account_start", "near-signup-requires-async"),
     ("near_ai_account_enroll", "near-signup-requires-async"),
     ("legacy_invite_migrate", "legacy-migration-requires-async"),
@@ -4045,6 +4055,8 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
+        "account_contribution_status" => crate::account_contribution::handle(shared, req).await,
+        "account_invite_redeem" => crate::account_contribution::handle(shared, req).await,
         "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
         "prepare_admission_session" => super::native_flow::admission_response(
             super::admission_setup::handle_prepare_admission_session(shared, req).await,
@@ -13253,7 +13265,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 36);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 38);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -13683,7 +13695,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 55, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 45, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

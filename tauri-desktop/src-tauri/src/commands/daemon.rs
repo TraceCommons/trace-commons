@@ -343,3 +343,18 @@ pub(crate) async fn search_original(
     )
     .await
 }
+
+#[cfg(test)]
+mod account_limit_tests {
+    #[test]
+    fn account_limit_refusal_uses_core_copy() {
+        let line = super::queue_outcome_line("account_limit_reached".into());
+        assert_eq!(
+            line,
+            trace_commons_contributor::private_inference_copy::queue_outcome_line(
+                "account_limit_reached"
+            )
+        );
+        assert!(!line.is_empty());
+    }
+}

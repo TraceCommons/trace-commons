@@ -343,6 +343,8 @@ pub struct SessionTranscript {
     /// attribution only, never a gate or scoring input (issue #298 S4a).
     /// `None` when a source cannot resolve one.
     pub conversation_id: Option<String>,
+    /// Validated identity supplied only by a native loader, never attribution/import metadata.
+    pub source_session: Option<trace_commons_protocol::trace_contribution::SourceSessionIdentity>,
     pub events: Vec<SessionEvent>,
     /// How many delegated transcripts were merged into this one, and how
     /// many were left out because the group exceeded the raw byte budget.
@@ -1360,5 +1362,31 @@ mod tests {
         assert_ne!(preview, submission_id_for("sha256:aa"));
         assert_eq!(preview.get_version_num(), 8);
         assert_eq!(submission_id_for("sha256:aa").get_version_num(), 5);
+    }
+}
+
+/// Native adapters alone call this syntax validator. Imported attribution is not an identity.
+pub(crate) fn native_session_identity(
+    adapter: &str,
+    native_id: Option<&str>,
+) -> Option<trace_commons_protocol::trace_contribution::SourceSessionIdentity> {
+    let identity = trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+        adapter: adapter.to_owned(),
+        native_id: native_id?.to_owned(),
+    };
+    trace_commons_protocol::trace_contribution::validate_source_session_identity(&identity).ok()?;
+    Some(identity)
+}
+
+#[cfg(test)]
+mod native_identity_tests {
+    #[test]
+    fn malformed_and_missing_native_ids_do_not_qualify() {
+        for adapter in ["codex", "claude-code", "opencode", "cline", "gemini-cli"] {
+            for id in [None, Some(""), Some("../secret"), Some("id with spaces")] {
+                assert!(super::native_session_identity(adapter, id).is_none());
+            }
+        }
+        assert!(super::native_session_identity("trajectory", Some("native_id")).is_none());
     }
 }

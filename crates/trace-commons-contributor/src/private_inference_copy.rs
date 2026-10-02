@@ -537,6 +537,10 @@ pub struct PrivateInferenceCopy {
     pub near_ai_enroll_working: &'static str,
     /// [`NEAR_AI_ENROLL_DONE`].
     pub near_ai_enroll_done: &'static str,
+    pub account_contribution_refresh: &'static str,
+    pub account_contribution_checking: &'static str,
+    pub account_contribution_unavailable: &'static str,
+    pub account_contribution_pending_credit: &'static str,
     /// The ten refusals, in the daemon's order.
     pub near_ai_enroll_already_enrolled: &'static str,
     /// [`NEAR_AI_ENROLL_NO_SESSION_LINE`].
@@ -2035,6 +2039,10 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         near_ai_enroll_needs_login: NEAR_AI_ENROLL_NEEDS_LOGIN,
         near_ai_enroll_working: NEAR_AI_ENROLL_WORKING,
         near_ai_enroll_done: NEAR_AI_ENROLL_DONE,
+        account_contribution_refresh: crate::account_contribution::REFRESH_LINE,
+        account_contribution_checking: crate::account_contribution::CHECKING_LINE,
+        account_contribution_unavailable: crate::account_contribution::UNAVAILABLE_LINE,
+        account_contribution_pending_credit: crate::account_contribution::PENDING_CREDIT_LINE,
         near_ai_enroll_already_enrolled: NEAR_AI_ENROLL_ALREADY_ENROLLED_LINE,
         near_ai_enroll_no_session: NEAR_AI_ENROLL_NO_SESSION_LINE,
         near_ai_enroll_endpoint_refused: NEAR_AI_ENROLL_ENDPOINT_REFUSED_LINE,
@@ -2438,7 +2446,8 @@ pub const NEAR_AI_ENROLL_NEEDS_LOGIN: &str = "Sign in to NEAR AI, then choose th
 pub const NEAR_AI_ENROLL_WORKING: &str = "Joining with your NEAR AI account...";
 
 /// After it lands.
-pub const NEAR_AI_ENROLL_DONE: &str = "This device is joined. You can contribute sessions now.";
+pub const NEAR_AI_ENROLL_DONE: &str =
+    "This device is joined. Check your contribution status before sending sessions.";
 
 /// `already_enrolled`. Not a failure a contributor caused or can fix by
 /// retrying, and it must not read as one.

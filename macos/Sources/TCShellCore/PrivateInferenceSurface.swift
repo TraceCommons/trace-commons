@@ -84,6 +84,10 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let nearAiEnrollNeedsLogin: String
     public let nearAiEnrollWorking: String
     public let nearAiEnrollDone: String
+    public let accountContributionRefresh: String?
+    public let accountContributionChecking: String?
+    public let accountContributionUnavailable: String?
+    public let accountContributionPendingCredit: String?
     public let nearAiEnrollAlreadyEnrolled: String
     public let nearAiEnrollNoSession: String
     public let nearAiEnrollEndpointRefused: String
@@ -299,6 +303,10 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case nearAiEnrollNeedsLogin = "near_ai_enroll_needs_login"
         case nearAiEnrollWorking = "near_ai_enroll_working"
         case nearAiEnrollDone = "near_ai_enroll_done"
+        case accountContributionRefresh = "account_contribution_refresh"
+        case accountContributionChecking = "account_contribution_checking"
+        case accountContributionUnavailable = "account_contribution_unavailable"
+        case accountContributionPendingCredit = "account_contribution_pending_credit"
         case nearAiEnrollAlreadyEnrolled = "near_ai_enroll_already_enrolled"
         case nearAiEnrollNoSession = "near_ai_enroll_no_session"
         case nearAiEnrollEndpointRefused = "near_ai_enroll_endpoint_refused"

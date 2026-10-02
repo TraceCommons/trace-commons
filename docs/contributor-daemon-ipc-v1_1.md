@@ -5022,3 +5022,18 @@ per folder, `legacy-invite-migrated`), and
 through its copy commands, macOS and Windows through
 `tc_legacy_migration_notice`, GTK directly; each passes the `notice` object
 through unread and acknowledges with `acknowledge_legacy_invite_migration`.
+
+### Explicit account contribution controls
+
+`account_contribution_status` takes no parameters and fetches fresh authenticated
+contribution readiness even when no automatic folder is armed. Its result contains
+`status` (`authority`, `policy_version`, `ready`, `refusal_label`, and
+`retry_after_seconds`) and the shared user-facing `line`. It does not report a
+numeric remaining allowance.
+
+`account_invite_redeem` takes `invite_code` and a UUID `idempotency_key`. Keep the
+same key when retrying the same code after an uncertain transport outcome. On
+success the daemon refreshes contribution status and returns the same status
+shape. Both methods require an account session and discard responses when the
+local account or ingest configuration changes. Neither returns an invite code or
+session token. Acceptance can earn pending credit; this is not credit redemption.

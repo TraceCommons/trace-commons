@@ -433,6 +433,7 @@ fn parse_export_with_record_budget(
         }
     }
     Ok(SessionTranscript {
+        source_session: super::native_session_identity(SOURCE_OPENCODE, Some(session_id)),
         source: Cow::Borrowed(SOURCE_OPENCODE),
         agent_version: Some(QUALIFIED_VERSION.into()),
         model: if models.len() == 1 {
@@ -474,6 +475,11 @@ mod tests {
     fn export_preserves_observed_identity_roles_and_tool_outcome_without_evidence() {
         let t = parse_export(FIXTURE).unwrap();
         assert_eq!(t.conversation_id.as_deref(), Some("ses_synthetic"));
+        assert_eq!(t.source_session.as_ref().unwrap().adapter, "opencode");
+        assert_eq!(
+            t.source_session.as_ref().unwrap().native_id,
+            "ses_synthetic"
+        );
         assert_eq!(t.model.as_deref(), Some("fixture/model"));
         assert_eq!(t.session_hash, session_hash(FIXTURE));
         assert_eq!(

@@ -89,6 +89,24 @@ final class DaemonClient {
         try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
     }
 
+    struct ContributionAccount: Decodable {
+        struct Status: Decodable {
+            let authority: String
+            let ready: Bool
+            let policyVersion: String?
+            let refusalLabel: String?
+            let retryAfterSeconds: Int?
+        }
+        let status: Status
+        let line: String
+    }
+    func contributionStatus() throws -> ContributionAccount {
+        try call("account_contribution_status", as: ContributionAccount.self)
+    }
+    func redeemInvite(code: String, idempotencyKey: String) throws -> ContributionAccount {
+        try call("account_invite_redeem", params: ["invite_code": code, "idempotency_key": idempotencyKey], as: ContributionAccount.self)
+    }
+
     func status() throws -> DaemonStatus {
         try call("status", as: DaemonStatus.self)
     }

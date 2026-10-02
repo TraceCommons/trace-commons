@@ -397,8 +397,16 @@ pub async fn account_login(store: &ConfigStore, no_browser: bool, json: bool) ->
 }
 
 /// Report whether a live account session is stored, WITHOUT printing it.
-pub fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
+pub async fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
     let expires_at = crate::account_auth::session_status(store);
+    let contribution_status = if expires_at.is_some() {
+        match store.load_config()? {
+            Some(cfg) => Some(crate::account_contribution::status(store, &cfg).await?),
+            None => None,
+        }
+    } else {
+        None
+    };
     if json {
         println!(
             "{}",
@@ -406,8 +414,11 @@ pub fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
                 "schema_version": "trace_commons.account_status.v1",
                 "signed_in": expires_at.is_some(),
                 "expires_at": expires_at,
+                "contribution_status": contribution_status,
             }))?
         );
+    } else if let Some(status) = contribution_status {
+        println!("{}", status.line());
     } else {
         match expires_at {
             Some(at) => println!("signed in; session expires {at}"),
@@ -2428,6 +2439,7 @@ mod tests {
             success: None,
         };
         let mut t = crate::source::SessionTranscript {
+            source_session: None,
             source: std::borrow::Cow::Borrowed("claude-code"),
             agent_version: None,
             model: None,
@@ -4917,4 +4929,17 @@ pub fn daemon_token_storage(
             println!("{line}");
         }
     })
+}
+
+pub async fn account_redeem(
+    store: &ConfigStore,
+    code: &str,
+    key: uuid::Uuid,
+    json: bool,
+) -> Result<()> {
+    let cfg = store
+        .load_config()?
+        .context("account-enrollment-required")?;
+    crate::account_contribution::redeem(store, &cfg, code, key).await?;
+    account_status(store, json).await
 }

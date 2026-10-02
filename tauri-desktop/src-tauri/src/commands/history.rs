@@ -292,3 +292,35 @@ mod tests {
         assert!(missing_permission["error"].is_string());
     }
 }
+
+#[tauri::command]
+pub(crate) async fn account_contribution_status(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "account_contribution_status",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn account_invite_redeem(
+    state: State<'_, AppState>,
+    invite_code: String,
+    idempotency_key: String,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "account_invite_redeem",
+        serde_json::json!({"invite_code": invite_code, "idempotency_key": idempotency_key}),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) fn account_contribution_copy() -> serde_json::Value {
+    use trace_commons_contributor::account_contribution as copy;
+    serde_json::json!({"refresh": copy::REFRESH_LINE, "checking": copy::CHECKING_LINE, "unavailable": copy::UNAVAILABLE_LINE, "pendingCredit": copy::PENDING_CREDIT_LINE})
+}
