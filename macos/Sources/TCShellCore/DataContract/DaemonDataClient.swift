@@ -182,6 +182,11 @@ public protocol DaemonDataClient: Sendable {
 
     /// The daemon's events, for screens that refresh live. Each call returns
     /// a fresh stream. On `.resyncRequired`, refetch `status` and `listPending`.
+    ///
+    /// A stream that finishes means the core is down (or the app is tearing
+    /// down): an unreachable daemon ends it with no events at all, not with
+    /// an empty snapshot. Draw a finished stream as core-down, never as
+    /// "nothing to show".
     func events() -> AsyncStream<DaemonDataEvent>
 }
 
@@ -209,8 +214,8 @@ public enum DaemonDataEvent: Equatable, Sendable {
     /// Fell behind: refetch `status` and `listPending`.
     case resyncRequired
     /// `inference_call_added`, so the map pulses per real call.
-    // PROVISIONAL: event not on main yet; shape follows `inference_calls` rows.
-    case inferenceCallAdded(DaemonData.InferenceCall)
+    // PROVISIONAL: event not on main yet; shape follows #1203's `call_added`.
+    case inferenceCallAdded(DaemonData.InferenceCallAdded)
     case unknown(String)
 }
 
@@ -250,7 +255,7 @@ public enum DaemonDataEventParser {
             return .previewReady(outcome)
         case "resync_required", "lagged": return .resyncRequired
         case "inference_call_added":
-            guard let call = try? decoder.decode(DaemonData.InferenceCall.self, from: payloadData) else {
+            guard let call = try? decoder.decode(DaemonData.InferenceCallAdded.self, from: payloadData) else {
                 return .unknown(name)
             }
             return .inferenceCallAdded(call)

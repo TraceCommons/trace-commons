@@ -7,7 +7,7 @@ import XCTest
 /// conformance on `TCDaemon` itself (`DaemonCalling.swift`); declaring it
 /// again here would be a second conformance in the one test bundle
 /// `swift test` links, so this forwards instead.
-private final class Pipe: DaemonTransport, @unchecked Sendable {
+private final class DaemonPipe: DaemonTransport, @unchecked Sendable {
     let daemon: TCDaemon
     init(_ daemon: TCDaemon) { self.daemon = daemon }
     func call(_ method: String, params paramsJSON: String) -> String {
@@ -23,7 +23,7 @@ private struct Owned: @unchecked Sendable {
 }
 
 private func live(_ daemon: TCDaemon) -> LiveDaemonClient {
-    LiveDaemonClient(transport: Pipe(daemon))
+    LiveDaemonClient(transport: DaemonPipe(daemon))
 }
 
 /// K1 of #1173: `LiveDaemonClient` against the real dylib and a real daemon
@@ -129,6 +129,14 @@ final class LiveDaemonClientIntegrationTests: XCTestCase {
         let client = live(daemon)
         let subscription = try XCTUnwrap(daemon.subscribe { client.deliver(eventJSON: $0) })
         defer { daemon.unsubscribe(subscription) }
+        // A daemon that never sends a frame would otherwise hang the job
+        // until its timeout. Ending the stream turns that into a nil event,
+        // which fails the assertions below.
+        let watchdog = Task {
+            try? await Task.sleep(for: .seconds(30))
+            client.finishEvents()
+        }
+        defer { watchdog.cancel() }
 
         var iterator = client.events().makeAsyncIterator()
         guard case .snapshot(let pending, let status)? = await iterator.next() else {

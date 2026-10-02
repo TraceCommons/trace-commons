@@ -228,6 +228,10 @@ extension DaemonData {
         public var heldForSecondLook: Bool { reasonLabel == ReasonLabel.secondLookReviewRequired }
         /// held because Scrub check is Manual.
         public var heldByManualScrubCheck: Bool { reasonLabel == ReasonLabel.scrubCheckManual }
+        /// waiting for a person even in an armed folder, and left out of a
+        /// folder approve: the daemon's `held_for_review`. Manual Scrub check
+        /// is not one of these.
+        public var heldForReview: Bool { reasonLabel.map(ReasonLabel.needingAPerson.contains) ?? false }
     }
 
     /// A queue entry's `attested_inference`
@@ -245,6 +249,17 @@ extension DaemonData {
         public static let returnedFromKeep = "returned-from-keep"
         public static let secondLookReviewRequired = "second-look-review-required"
         public static let scrubCheckManual = "scrub-check-manual"
+        public static let tokenDistributionReviewRequired = "token-distribution-review-required"
+        public static let witnessRiskReviewRequired = "witness-risk-review-required"
+        public static let privacyFilterTransientExhausted = "privacy-filter-transient-exhausted"
+
+        /// `queue.rs` `REASONS_NEEDING_A_PERSON`, in its order.
+        public static let needingAPerson: Set<String> = [
+            tokenDistributionReviewRequired,
+            witnessRiskReviewRequired,
+            privacyFilterTransientExhausted,
+            secondLookReviewRequired,
+        ]
     }
 
     public enum QueueStateLabel: String, Sendable, CaseIterable {
@@ -988,6 +1003,26 @@ extension DaemonData {
         public let cost: PricedCost?
         /// IronWire's proof label, passed through. See `proofLabel`.
         public let proof: String
+
+        public var proofLabel: ProofLabel { ProofLabel(rawValue: proof) ?? .unrecorded }
+    }
+
+    /// An `inference_call_added` event (`inference_map::call_added`). A
+    /// pulse, not a row: it carries no time, family, route or cost, so a
+    /// screen re-reads `inference_calls` and `tool_destinations` rather
+    /// than adding it to what it holds.
+    public struct InferenceCallAdded: Codable, Equatable, Sendable {
+        public let id: Int64
+        public let tool: String
+        public let model: String
+        public let proof: String
+
+        public init(id: Int64, tool: String, model: String, proof: String) {
+            self.id = id
+            self.tool = tool
+            self.model = model
+            self.proof = proof
+        }
 
         public var proofLabel: ProofLabel { ProofLabel(rawValue: proof) ?? .unrecorded }
     }
