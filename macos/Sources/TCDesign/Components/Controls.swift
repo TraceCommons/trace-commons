@@ -345,7 +345,10 @@ public struct GlassPicker<Value: Hashable>: View {
             .frame(minHeight: GlassTokens.Size.controlLarge)
             .glassSurface(.control)
         }
-        .menuStyle(.borderlessButton)
+        // A plain-button menu draws the label as given. The borderless
+        // style keeps only its text, tinted, and drops the pill.
+        .menuStyle(.button)
+        .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel(label)

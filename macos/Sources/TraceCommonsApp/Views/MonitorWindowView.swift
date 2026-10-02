@@ -74,7 +74,7 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
-        .task { traces.start() }
+        .task { await traces.run() }
     }
 
     /// The Traces badge (R7): decisions owed, a dash when the core did not

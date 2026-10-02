@@ -31,6 +31,9 @@ struct TracesTree: Equatable {
         let label: String
         /// `nil` for a folder the queue names but `list_projects` does not.
         let mode: ProjectMode?
+        /// The modes this folder can be set to (`ProjectRow.offerableModes`):
+        /// a folder that cannot be armed is never offered automatic.
+        var offerableModes: [ProjectMode] = []
         var sessions: [DaemonData.QueueEntry]
     }
 
@@ -54,16 +57,16 @@ struct TracesTree: Equatable {
     ) -> TracesTree {
         var folders: [String: FolderNode] = [:]
         var order: [String] = []
-        func folder(_ id: String, _ label: String, _ mode: ProjectMode?) {
+        func folder(_ id: String, _ label: String, _ mode: ProjectMode?, _ modes: [ProjectMode]) {
             guard folders[id] == nil else { return }
-            folders[id] = FolderNode(id: id, label: label, mode: mode, sessions: [])
+            folders[id] = FolderNode(id: id, label: label, mode: mode, offerableModes: modes, sessions: [])
             order.append(id)
         }
         for project in projects where !project.isUnresolvedBucket {
-            folder(project.projectId, project.displayLabel, project.mode)
+            folder(project.projectId, project.displayLabel, project.mode, project.offerableModes)
         }
         for entry in entries {
-            folder(entry.projectId, entry.projectLabel, nil)
+            folder(entry.projectId, entry.projectLabel, nil, [])
             folders[entry.projectId]?.sessions.append(entry)
         }
 
