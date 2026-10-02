@@ -52,11 +52,27 @@ struct MonitorWindowView: View {
     /// The screens' data (C1). Sample data in this debug window until K1
     /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
     /// the set (`normalDay` by default).
-    @State private var traces = TracesStore(client: MonitorWindowView.dataClient())
+    @State private var traces = MonitorWindowView.tracesStore()
 
-    static func dataClient() -> any DaemonDataClient {
-        let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] ?? ""
-        return DaemonDataWiring.sample(SampleDaemonClient.SampleSet(rawValue: name) ?? .normalDay)
+    /// The Traces store over the sample set `TRACE_COMMONS_SAMPLE` names. A
+    /// name that is not a set falls back to `normalDay`, and says so: the tab
+    /// marks the data as sample, and an unknown name both in the marker and
+    /// in the log.
+    static func tracesStore() -> TracesStore {
+        let choice = sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"])
+        if choice.unknown {
+            NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue)
+        }
+        return TracesStore(
+            client: DaemonDataWiring.sample(choice.set), sample: choice.set.rawValue, sampleUnknown: choice.unknown)
+    }
+
+    /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
+    /// none (unset or empty is the default, not unknown).
+    static func sampleChoice(_ name: String?) -> (set: SampleDaemonClient.SampleSet, unknown: Bool) {
+        guard let name, !name.isEmpty else { return (.normalDay, false) }
+        guard let set = SampleDaemonClient.SampleSet(rawValue: name) else { return (.normalDay, true) }
+        return (set, false)
     }
     /// False until this window has seeded the two preferences from its
     /// width (map from 1100pt, inspector from 900pt). After that the

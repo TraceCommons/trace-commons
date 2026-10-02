@@ -129,6 +129,15 @@ pub struct MonitorTracesCopy {
     pub sends: &'static str,
     pub marks: &'static str,
     pub unsure: &'static str,
+    /// The inspector's rows for whether the session may be contributed and
+    /// what the privacy witness attested; their values are the core's own
+    /// state and reason lines.
+    pub eligibility: &'static str,
+    pub attestation: &'static str,
+    /// A row's hold flag in words, so the amber flag is never colour only.
+    pub held: &'static str,
+    /// The marker a debug build shows over sample data.
+    pub sample: &'static str,
     /// The review's actions.
     pub contribute: &'static str,
     pub keep: &'static str,
@@ -158,6 +167,10 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         sends: "Sends",
         marks: "Marks",
         unsure: "Unsure",
+        eligibility: "Eligibility",
+        attestation: "Attestation",
+        held: "Held",
+        sample: "Sample",
         contribute: "Contribute",
         keep: customize.keep,
         dismiss: "Not this one",
