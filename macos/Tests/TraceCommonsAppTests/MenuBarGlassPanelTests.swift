@@ -103,4 +103,12 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(source.contains("modeOptions"))
         XCTAssertTrue(source.contains(".disabled(true)"), "the mode overrides must stay disabled until the core has them")
     }
+
+    /// The popover's words come from the core's table, not from Swift.
+    func test_theWordsComeFromTheCore() {
+        XCTAssertNotNil(MonitorWords.table)
+        XCTAssertEqual(MenuWords.on, MonitorWords.table?.on)
+        XCTAssertEqual(MenuBarGlassPanel.modeCaption, MonitorWords.table?.contributionMode)
+        XCTAssertFalse(MenuWords.quit.isEmpty)
+    }
 }

@@ -1,0 +1,194 @@
+import Foundation
+
+/// The glass monitor's other screens' words (the map, Inference, Home,
+/// History, Missions and the menu-bar popover), decoded from
+/// `tc_monitor_screens_copy_json` (`preview_copy::monitor_screens_copy`).
+///
+/// They were Swift (`MonitorWords`, `InferenceWords`, `MenuWords`); the core
+/// holds them now, as it holds the Traces tab's (`MonitorTracesCopy`), so no
+/// shell writes its own. Decoding is here so it is testable without the
+/// dylib; `TCBridgeTests` checks it against the real export.
+public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
+    public let computer: String
+    public let commons: String
+    public let waiting: String
+    public let folders: String
+    public let watched: String
+    public let off: String
+    public let on: String
+    public let connected: String
+    public let reduce: String
+    public let enlarge: String
+    public let calls: String
+    public let models: String
+    public let priced: String
+    public let unknown: String
+    public let proofVerified: String
+    public let proofGatewayOnly: String
+    public let proofUnattested: String
+    public let proofPending: String
+    public let proofUnavailable: String
+    public let proofFailed: String
+    public let proofOutside: String
+    public let proofUnrecorded: String
+    public let history: String
+    public let contributed: String
+    public let watching: String
+    public let paused: String
+    public let summary: String
+    public let week: String
+    public let month: String
+    public let total: String
+    public let held: String
+    public let withdrawn: String
+    public let credit: String
+    public let creditFinal: String
+    public let pending: String
+    public let community: String
+    public let rank: String
+    public let window: String
+    public let approved: String
+    public let unrecorded: String
+    public let missions: String
+    public let contributionMode: String
+    public let mixed: String
+    public let shared: String
+    public let kept: String
+    public let recentActivity: String
+    public let flagged: String
+    public let manageRules: String
+    public let settings: String
+    public let quit: String
+    public let coreUnreachable: String
+    public let requestFailed: String
+
+    enum CodingKeys: String, CodingKey {
+        case computer
+        case commons
+        case waiting
+        case folders
+        case watched
+        case off
+        case on
+        case connected
+        case reduce
+        case enlarge
+        case calls
+        case models
+        case priced
+        case unknown
+        case proofVerified = "proof_verified"
+        case proofGatewayOnly = "proof_gateway_only"
+        case proofUnattested = "proof_unattested"
+        case proofPending = "proof_pending"
+        case proofUnavailable = "proof_unavailable"
+        case proofFailed = "proof_failed"
+        case proofOutside = "proof_outside"
+        case proofUnrecorded = "proof_unrecorded"
+        case history
+        case contributed
+        case watching
+        case paused
+        case summary
+        case week
+        case month
+        case total
+        case held
+        case withdrawn
+        case credit
+        case creditFinal = "credit_final"
+        case pending
+        case community
+        case rank
+        case window
+        case approved
+        case unrecorded
+        case missions
+        case contributionMode = "contribution_mode"
+        case mixed
+        case shared
+        case kept
+        case recentActivity = "recent_activity"
+        case flagged
+        case manageRules = "manage_rules"
+        case settings
+        case quit
+        case coreUnreachable = "core_unreachable"
+        case requestFailed = "request_failed"
+    }
+
+    /// The payload fields this shell decodes, by wire name.
+    public static let consumedFields = [
+        "computer",
+        "commons",
+        "waiting",
+        "folders",
+        "watched",
+        "off",
+        "on",
+        "connected",
+        "reduce",
+        "enlarge",
+        "calls",
+        "models",
+        "priced",
+        "unknown",
+        "proof_verified",
+        "proof_gateway_only",
+        "proof_unattested",
+        "proof_pending",
+        "proof_unavailable",
+        "proof_failed",
+        "proof_outside",
+        "proof_unrecorded",
+        "history",
+        "contributed",
+        "watching",
+        "paused",
+        "summary",
+        "week",
+        "month",
+        "total",
+        "held",
+        "withdrawn",
+        "credit",
+        "credit_final",
+        "pending",
+        "community",
+        "rank",
+        "window",
+        "approved",
+        "unrecorded",
+        "missions",
+        "contribution_mode",
+        "mixed",
+        "shared",
+        "kept",
+        "recent_activity",
+        "flagged",
+        "manage_rules",
+        "settings",
+        "quit",
+        "core_unreachable",
+        "request_failed",
+    ]
+
+    /// Decode the payload, or nil if it will not parse or a field is empty.
+    public static func decode(fromJSON json: String?) -> MonitorScreensCopy? {
+        guard let data = json?.data(using: .utf8),
+            let copy = try? JSONDecoder().decode(MonitorScreensCopy.self, from: data)
+        else {
+            return nil
+        }
+        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.quit, copy.coreUnreachable, copy.requestFailed]
+        return words.contains(where: \.isEmpty) ? nil : copy
+    }
+
+    /// What a screen says for a failed read: the core's line for a core that
+    /// does not answer, or for a request that failed. Never the error's own
+    /// fixed label, which is for logs.
+    public func line(for error: DaemonDataError) -> String {
+        if case .unreachable = error { return coreUnreachable }
+        return requestFailed
+    }
+}

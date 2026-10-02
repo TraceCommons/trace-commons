@@ -124,6 +124,12 @@ public enum TCCoreCopy {
         take(tc_monitor_traces_copy_json())
     }
 
+    /// `tc_monitor_screens_copy_json`: the monitor's other screens' words.
+    /// Decoded by `TCShellCore.MonitorScreensCopy`.
+    public static func monitorScreensCopyJSON() -> String? {
+        take(tc_monitor_screens_copy_json())
+    }
+
     /// `tc_decisions_owed_text`: the Traces badge's text equivalent. Nil
     /// `decisionsOwed` is an unknown count, which the core never words as
     /// zero; the empty string is zero (no badge).

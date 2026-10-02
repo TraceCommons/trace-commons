@@ -16,6 +16,10 @@ struct FlowMapView: View {
     let legend: [ProjectMode]
     let zoomable: Bool
     let accessibilityName: String
+    /// The stack-wide state (ScreenState). Only `ready` draws anything as
+    /// moving: paused, unknown and core-down arcs are drawn still, so a
+    /// missing or stale signal never reads as live.
+    var state: ScreenState = .ready
 
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
@@ -30,7 +34,7 @@ struct FlowMapView: View {
         GeometryReader { proxy in
             let fit = FlowMapGeometry(size: proxy.size, zoom: zoom)
             ZStack(alignment: .topLeading) {
-                TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion || !scene.flows)) { timeline in
+                TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion || !scene.flows || !state.isHealthy)) { timeline in
                     Canvas { context, _ in
                         draw(in: &context, fit: fit, phase: reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate * 18)
                     }
@@ -76,6 +80,10 @@ struct FlowMapView: View {
                 context.stroke(path, with: .color(GlassColor.ink((strong ? 0.5 : 0.2) * arc.dim)), lineWidth: width)
             case .dashed:
                 context.stroke(path, with: .color(GlassColor.ink((strong ? 0.45 : 0.18) * arc.dim)),
+                               style: StrokeStyle(lineWidth: width, dash: [5 * fit.scale, 5 * fit.scale]))
+            case .flowing where !state.isHealthy:
+                // Paused, unknown or stale: still, and dashed, not live.
+                context.stroke(path, with: .color(GlassColor.ink((strong ? 0.45 : 0.25) * arc.dim)),
                                style: StrokeStyle(lineWidth: width, dash: [5 * fit.scale, 5 * fit.scale]))
             case .flowing:
                 context.stroke(path, with: .color(GlassTokens.Color.statusOn.color.opacity(0.35 * arc.dim)), lineWidth: width)

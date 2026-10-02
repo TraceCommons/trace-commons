@@ -63,13 +63,13 @@ struct MenuBarGlassPanel: View {
     private var pills: some View {
         HStack(spacing: GlassTokens.Space.s3) {
             pill(.mode, caption: Self.modeCaption, value: modeValue, image: "bell.fill", fill: modeFill)
-            pill(.watch, caption: MonitorWords.watching, value: paused ? MonitorWords.paused : MenuWords.on,
-                 image: paused ? "eye.slash" : "eye",
-                 fill: .solid(paused ? GlassTokens.Color.menuPillOff : GlassTokens.Color.blue))
+            pill(.watch, caption: MonitorWords.watching, value: watchValue,
+                 image: watchState == .paused ? "eye.slash" : "eye",
+                 fill: .solid(watchState == .ready ? GlassTokens.Color.blue : GlassTokens.Color.menuPillOff))
             if let label = model.privateInferenceCopy?.destination {
-                pill(.privateAI, caption: label, value: privateAIOn ? MenuWords.on : MonitorWords.off,
+                pill(.privateAI, caption: label, value: privateAIValue,
                      image: "arrow.left.arrow.right",
-                     fill: .solid(privateAIOn ? GlassTokens.Color.dataShared : GlassTokens.Color.menuPillOff))
+                     fill: .solid(privateAIOn == true ? GlassTokens.Color.dataShared : GlassTokens.Color.menuPillOff))
             }
         }
         .frame(height: 44)
@@ -83,8 +83,40 @@ struct MenuBarGlassPanel: View {
         .onHover { if $0 { expanded = which } }
     }
 
-    private var paused: Bool { model.status.paused }
-    private var privateAIOn: Bool { model.daemonSettings?.privateInferenceOn ?? false }
+    private var paused: Bool { watchState == .paused }
+
+    /// The Watching pill's state (the stack-wide ScreenState rule): a core
+    /// that is not running is core down, and never reads as On.
+    private var watchState: ScreenState {
+        switch model.startup {
+        case .running:
+            return ScreenState.resolve(failure: nil, loaded: true, paused: model.status.paused, known: true)
+        case .starting:
+            return .loading
+        default:
+            return .coreDown
+        }
+    }
+
+    private var watchValue: String {
+        switch watchState {
+        case .ready: MenuWords.on
+        case .paused: MonitorWords.paused
+        case .coreDown, .loading, .unknown: "—"
+        }
+    }
+
+    /// Private AI on or off as the core reported it; nil when it did not
+    /// say, which is drawn as unknown, never as off.
+    private var privateAIOn: Bool? { model.daemonSettings?.privateInferenceOn }
+
+    private var privateAIValue: String {
+        switch privateAIOn {
+        case true?: MenuWords.on
+        case false?: MonitorWords.off
+        case nil: "—"
+        }
+    }
 
     private var rollup: MenuPanelData.ModeRollup {
         guard let projects = store.projects else { return .none }
@@ -111,7 +143,7 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    static let modeCaption = "Contribution mode"
+    static var modeCaption: String { MonitorWords.table?.contributionMode ?? "" }
 
     // MARK: Sub-lists
 
@@ -177,19 +209,19 @@ struct MenuBarGlassPanel: View {
     @ViewBuilder
     private var privateAIOptions: some View {
         if let copy = model.privateInferenceCopy {
-            GlassOptionRow(MenuWords.on, sub: privateAIOn ? nil : copy.trayOpenToTurnOn,
-                           fill: .solid(GlassTokens.Color.menuModeArmed), checked: privateAIOn) {
+            GlassOptionRow(MenuWords.on, sub: privateAIOn == true ? nil : copy.trayOpenToTurnOn,
+                           fill: .solid(GlassTokens.Color.menuModeArmed), checked: privateAIOn == true) {
                 openMain(.privateInference)
                 sub = nil
             }
-            GlassOptionRow(MonitorWords.off, sub: privateAIOn ? copy.trayTurnOff : nil,
-                           fill: .solid(GlassTokens.Color.menuPillOff), checked: !privateAIOn) {
+            GlassOptionRow(MonitorWords.off, sub: privateAIOn == true ? copy.trayTurnOff : nil,
+                           fill: .solid(GlassTokens.Color.menuPillOff), checked: privateAIOn == false) {
                 MenuBarContent.performPrivateInferenceTray(
-                    on: privateAIOn, turnOff: { model.applyPrivateInference(false) },
+                    on: privateAIOn == true, turnOff: { model.applyPrivateInference(false) },
                     open: { openMain(.privateInference) })
                 sub = nil
             }
-            .disabled(privateAIOn && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
+            .disabled(privateAIOn == true && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
         }
     }
 
@@ -319,16 +351,18 @@ enum MenuPanelStatus {
 }
 
 /// The popover's single words and short labels, beside the core's copy.
+/// The popover's words, from the core's table (`MonitorWords.table`). This
+/// shell holds none of its own.
 enum MenuWords {
-    static let on = "On"
-    static let mixed = "Mixed"
-    static let shared = "shared"
-    static let kept = "kept"
-    static let recentActivity = "Recent activity"
-    static let flagged = "Flagged"
-    static let manageRules = "Manage rules…"
-    static let settings = "Trace Commons Settings…"
-    static let quit = "Quit…"
+    static var on: String { MonitorWords.table?.on ?? "" }
+    static var mixed: String { MonitorWords.table?.mixed ?? "" }
+    static var shared: String { MonitorWords.table?.shared ?? "" }
+    static var kept: String { MonitorWords.table?.kept ?? "" }
+    static var recentActivity: String { MonitorWords.table?.recentActivity ?? "" }
+    static var flagged: String { MonitorWords.table?.flagged ?? "" }
+    static var manageRules: String { MonitorWords.table?.manageRules ?? "" }
+    static var settings: String { MonitorWords.table?.settings ?? "" }
+    static var quit: String { MonitorWords.table?.quit ?? "" }
 }
 #endif
 

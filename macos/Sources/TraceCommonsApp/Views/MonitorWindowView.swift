@@ -263,6 +263,8 @@ private struct MonitorMapPane: View {
                     GlassSegmentedTabs("Map", selection: $mapTab, segments: segments, floating: true)
                         .padding(GlassTokens.Space.panePadding)
                 }
+                stateLine
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
         }
     }
@@ -273,7 +275,7 @@ private struct MonitorMapPane: View {
         case .traces:
             FlowMapView(
                 scene: .traces(traces.tree), legend: [.autoUpload, .ask, .ignore], zoomable: true,
-                accessibilityName: MonitorWindowView.Tab.traces.rawValue)
+                accessibilityName: MonitorWindowView.Tab.traces.rawValue, state: tracesState)
         case .privateAI:
             if let harnesses = inference.harnesses, let privateAILabel {
                 FlowMapView(
@@ -284,6 +286,33 @@ private struct MonitorMapPane: View {
             } else {
                 Color.clear
             }
+        }
+    }
+
+    /// The Traces map's state (the stack-wide ScreenState rule): core down
+    /// over the last tree, loading before the first, paused or unknown when
+    /// the core's status says so or says nothing.
+    private var tracesState: ScreenState {
+        var failure: DaemonDataError?
+        if case .failed(let error) = traces.phase { failure = error }
+        return ScreenState.resolve(
+            failure: failure, loaded: traces.phase != .loading,
+            paused: traces.status?.paused, known: traces.status != nil)
+    }
+
+    /// The core's line when the map's state is not current, else nothing.
+    @ViewBuilder
+    private var stateLine: some View {
+        if case .failed(let error) = traces.phase, shownTab == .traces {
+            GlassFloatingGroup {
+                Text(MonitorWords.table?.line(for: error) ?? "")
+                    .glassType(GlassTokens.TypeScale.label)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .padding(.horizontal, GlassTokens.Space.s6)
+                    .padding(.vertical, GlassTokens.Space.s3)
+                    .glassSurface(.nodeCard)
+            }
+            .padding(GlassTokens.Space.panePadding)
         }
     }
 
