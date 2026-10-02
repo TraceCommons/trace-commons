@@ -207,7 +207,7 @@
   },
   "opacity": {
     "disabled": 0.45,
-    "rowOff": 0.6
+    "rowOff": 0.7
   },
   "type": {
     "eyebrow": { "size": 10, "weight": "bold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },

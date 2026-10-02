@@ -312,7 +312,7 @@ public enum GlassTokens {
 
     public enum Opacity {
         public static let disabled: Double = 0.45
-        public static let rowOff: Double = 0.6
+        public static let rowOff: Double = 0.7
 
         /// Every opacity token by its JSON name.
         public static let all: [String: Double] = [

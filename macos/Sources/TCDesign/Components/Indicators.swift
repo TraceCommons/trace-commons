@@ -288,7 +288,7 @@ public struct GlassBarGraph: View {
                     .frame(height: 96)
                     Text(bucket.label)
                         .font(.system(size: thin ? 9 : 11))
-                        .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
+                        .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassColor.textTertiary)
                         .frame(height: 12)
                 }
                 .onHover { hovered = $0 ? bucket.id : nil }
