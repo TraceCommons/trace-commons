@@ -345,8 +345,17 @@ struct SessionInspectorView: View {
     let client: any DaemonDataClient
     let entry: DaemonData.QueueEntry?
 
-    @State private var summary: DaemonData.PreviewSummary?
-    @State private var failure: DaemonDataError?
+    /// The preview, keyed by the session it was asked for. Only the
+    /// selected session's answer is ever read out of it.
+    @State private var slot = PreviewSlot()
+    private var summary: DaemonData.PreviewSummary? { slot.summary(for: entry?.entryId) }
+    private var failure: DaemonDataError? { slot.failure(for: entry?.entryId) }
+
+    /// How long a selection must rest before its preview is asked for. Each
+    /// arrow-key step cancels the wait, so stepping through the tree starts
+    /// no preview until it stops; `preview` is a full read-parse-redact pass
+    /// the daemon cannot cancel.
+    static let previewSettle: Duration = .milliseconds(300)
 
     var body: some View {
         Group {
@@ -379,13 +388,21 @@ struct SessionInspectorView: View {
     }
 
     private func load(_ entryId: String) async {
-        summary = nil
-        failure = nil
+        slot.begin(entryId)
         do {
-            summary = try await client.preview(entryId: entryId)
+            try await Task.sleep(for: Self.previewSettle)
         } catch {
-            failure = error as? DaemonDataError ?? .undecodable(method: "preview")
+            return
         }
+        let result: Result<DaemonData.PreviewSummary, DaemonDataError>
+        do {
+            result = .success(try await client.preview(entryId: entryId))
+        } catch {
+            result = .failure(error as? DaemonDataError ?? .undecodable(method: "preview"))
+        }
+        // A late answer for a session no longer selected is dropped.
+        guard !Task.isCancelled else { return }
+        slot.accept(entryId, result)
     }
 
     /// One word a row, and only what the daemon reported. Unknown is a dash.
@@ -412,6 +429,41 @@ struct SessionInspectorView: View {
         ]
     }
 }
+/// The inspector's one preview, keyed by the session it was asked for. A
+/// result for any other session -- one that was selected, then left before
+/// its blocking `preview` returned -- is refused, so it can never be shown,
+/// or reviewed, as the selected session's.
+struct PreviewSlot: Equatable {
+    private(set) var entryId: String?
+    private var summary: DaemonData.PreviewSummary?
+    private var failure: DaemonDataError?
+
+    mutating func begin(_ entryId: String) {
+        self.entryId = entryId
+        summary = nil
+        failure = nil
+    }
+
+    /// Takes `result` if it is for the session asked for last.
+    @discardableResult
+    mutating func accept(_ entryId: String, _ result: Result<DaemonData.PreviewSummary, DaemonDataError>) -> Bool {
+        guard entryId == self.entryId else { return false }
+        switch result {
+        case .success(let value): summary = value
+        case .failure(let error): failure = error
+        }
+        return true
+    }
+
+    func summary(for entryId: String?) -> DaemonData.PreviewSummary? {
+        entryId != nil && entryId == self.entryId ? summary : nil
+    }
+
+    func failure(for entryId: String?) -> DaemonDataError? {
+        entryId != nil && entryId == self.entryId ? failure : nil
+    }
+}
+
 /// The monitor's own words, in one place, while the core has none for
 /// them. TODO(K4): every one of these moves to the Rust core's copy and is
 /// read across the ABI, like the consent words already are; this enum is
