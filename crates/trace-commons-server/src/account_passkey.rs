@@ -124,6 +124,11 @@ pub enum CeremonyState {
     /// Pending discoverable authentication (consumed by
     /// `finish_discoverable_authentication`).
     DiscoverableAuthentication(DiscoverableAuthentication),
+    /// Pending browser discoverable sign-in for the step-up page (Z2 S7): the
+    /// same ceremony as [`Self::DiscoverableAuthentication`], started with
+    /// `purpose=step_up`, so its `finish` mints a short-lived session. The
+    /// purpose is bound here at `start` and cannot be chosen at `finish`.
+    StepUpDiscoverable(DiscoverableAuthentication),
     /// Pending NEAR sign-in (Slice 3a): the server-issued NEP-413 challenge
     /// nonce and the `recipient` the signed message must bind to. Issued by the
     /// NEAR login-begin handler and consumed by login-finish in later Slice 3a

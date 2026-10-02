@@ -8,6 +8,7 @@ pub(crate) mod antigravity;
 pub mod attach_copy;
 pub mod brand;
 pub mod commands;
+pub mod commons_credit;
 pub mod compute;
 pub mod config;
 pub mod consent;

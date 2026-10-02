@@ -39,6 +39,24 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+# tauri.release.conf.json signs the app with the keychain access group the
+# contributor crate stores Private AI credentials under, and embeds this
+# profile as Contents/embedded.provisionprofile. An app carrying that
+# entitlement without a profile granting it is killed by the kernel at exec,
+# so there is no degraded build to fall back to: refuse before building.
+# The profile is not secret (it ships inside every bundle) and is committed
+# beside the config, like macos/TraceCommons-DeveloperID.provisionprofile.
+REPO_ROOT="$(cd "$DESKTOP_DIR/.." && pwd)"
+PROVISIONING_PROFILE="$DESKTOP_DIR/src-tauri/TraceCommonsDesktop-DeveloperID.provisionprofile"
+if [[ ! -f "$PROVISIONING_PROFILE" ]]; then
+  echo "Missing $PROVISIONING_PROFILE." >&2
+  echo "Create a Developer ID provisioning profile for the App ID" >&2
+  echo "KXSWJN7WY8.ai.tracecommons.desktop (see" >&2
+  echo "docs/operator/private-ai-credential-storage.md) and commit it there." >&2
+  echo "Without it the signed app cannot reach its credential store." >&2
+  exit 1
+fi
+
 mkdir -p "$OUT_DIR"
 NOTARY_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/trace-commons-notary.XXXXXX")"
 NOTARY_KEY="$NOTARY_WORK_DIR/notary.p8"
@@ -68,6 +86,12 @@ if [[ -z "$APP_PATH" ]]; then
 fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+# Before notarization, so a bundle that would be killed at exec does not cost
+# a notary round trip. The last check launches the signed binary with
+# TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT set; the app answers it from main()
+# (src/credential_store_check.rs) before opening any window, and exits.
+bash "$REPO_ROOT/scripts/ci/verify-macos-entitlements.sh" "$APP_PATH"
 
 APP_NAME="$(basename "$APP_PATH" .app)"
 NOTARY_UPLOAD="$OUT_DIR/$APP_NAME.notary-upload.zip"

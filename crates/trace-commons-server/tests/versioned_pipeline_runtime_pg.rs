@@ -8,7 +8,7 @@ mod pilot_runtime_grants;
 #[path = "support/pilot_runtime_login.rs"]
 mod pilot_runtime_login;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -18,46 +18,64 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor,
-    InstrumentId, InstrumentKind, InstrumentSettlementOutcome, Phase, PhaseResult, ReasonCode,
-    ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision,
-    SettleEvidence, TRACE_CREDIT_DECIMALS,
+    InstrumentId, InstrumentKind, InstrumentSettlement, InstrumentSettlementOutcome, Microcredits,
+    Phase, PhaseResult, ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
+    ReviewRecommendation, ScoreEvidence, SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS,
+    TenantStorageRef, UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
-    Embedder, IdentifiedEmbedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder,
-    ReferencePerplexityScorer, SettlementAdapter, SettlementError, SettlementReceipt,
-    SettlementRequest, VectorIndexWriter,
+    Embedder, IdentifiedEmbedder, IdentifiedIndexWriter, IndexEntryKey, IndexUpsertResult,
+    IndexWriteError, ReferenceEmbedder, ReferencePerplexityScorer, SettlementAdapter,
+    SettlementError, SettlementReceipt, SettlementRequest, VectorIndexReader, VectorIndexWriter,
 };
 use trace_commons_protocol::trace_contribution::{
-    DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
-    RecordedTraceContributionOptions, ResidualPiiRisk, TraceContributionEnvelope, TraceRedactor,
-    retention_policy_for_trace,
+    ConsentScope, DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
+    RecordedTraceContributionOptions, ResidualPiiRisk, ResidualRiskCondition, TraceAllowedUse,
+    TraceContributionEnvelope, TraceRedactor, retention_policy_for_trace,
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::postgres::PgBackend;
+use trace_commons_server::error::DatabaseError;
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
     PreparedSerializedJsonArtifact, TraceArtifactKind, TraceArtifactStore,
 };
+use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::trace_corpus_storage::{
-    TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite, TraceObjectArtifactKind,
-    TraceObjectRefWrite,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite,
+    TraceObjectArtifactKind, TraceObjectRefWrite, TraceSourceSessionStatus, TraceSubmissionWrite,
 };
 use trace_commons_server::versioned_pipeline::*;
+use trace_commons_server::versioned_pipeline_authority::{
+    PipelineAuthorityProvider, PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
+};
 use trace_commons_server::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle, PipelineBundleConfig,
     PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
     pipeline_result_ref,
 };
+use trace_commons_server::versioned_pipeline_compat::{
+    COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
+};
 use trace_commons_server::versioned_pipeline_credit::{
-    RecordingSettlementAdapter, SettlementAdapterRegistry, credit_account_hash,
+    DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter,
+    PIPELINE_SETTLEMENT_POLICY_VERSION, RecordingNearAdapter, RecordingSettlementAdapter,
+    SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
+use trace_commons_server::versioned_pipeline_product::{
+    PIPELINE_EXPORT_ITEM_MAX, PipelineContributorStatus, PipelineCreditStatus,
+    PipelineExportConsentScopes, PipelineExportSnapshot, PipelineProcessingStatus,
+    PipelineProductStore, pipeline_control_health,
+};
 
-use pilot_runtime_login::{migrate_like_the_pilot, provision_member_only_login};
+use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
 
-/// The login every test here connects as. Its only privilege source is
-/// membership in `trace_ingest_runtime`, the ingest runtime group V90 names.
+/// The login every test here connects as. Its only privilege sources are
+/// membership in `trace_ingest_runtime`, the ingest runtime group V90 names,
+/// and in `trace_account_admission_runtime` (V77), as the pilot's ingest
+/// login holds both.
 const RUNTIME_ROLE: &str = "trace_pipeline_runtime_test";
 static PROVISIONED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
@@ -66,7 +84,8 @@ static PROVISIONED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new
 /// The pipeline service connects as the pilot's least-privilege runtime, not
 /// as a role with blanket grants: the database is migrated the way the
 /// pilot's was (`migrate_like_the_pilot`), and the login holds nothing but
-/// membership in `trace_ingest_runtime` (`provision_member_only_login`). The
+/// membership in `trace_ingest_runtime` and `trace_account_admission_runtime`,
+/// the pilot ingest login's two groups (`provision_runtime_login`). The
 /// pipeline tables are created after V62, so the runtime reaches them only
 /// through the grants their own migrations make, and a missing grant fails
 /// here with `permission denied`, as it would on the pilot.
@@ -75,7 +94,12 @@ async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     PROVISIONED
         .get_or_init(|| async {
             migrate_like_the_pilot(&url).await;
-            provision_member_only_login(&url, RUNTIME_ROLE).await;
+            // withdrawal_of_either_session_submission_withdraws_the_session
+            // withdraws through a mapped source session: main's withdrawal
+            // path reads trace_account_admission_submissions, which only
+            // trace_account_admission_runtime may read (owner ruling RB-11).
+            // Granted before the login's membership check runs.
+            provision_runtime_login(&url, RUNTIME_ROLE, &["trace_account_admission_runtime"]).await;
         })
         .await;
     let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
@@ -1514,6 +1538,18 @@ async fn envelope(submission_id: uuid::Uuid) -> TraceContributionEnvelope {
     envelope
 }
 
+/// `envelope`, with consent that allows model training: the allowed use
+/// `main`'s `NoveltyUtility` credit requires (Ruling T15-8). `envelope`'s
+/// own consent is the default scope, debugging and evaluation.
+async fn model_training_envelope(submission_id: uuid::Uuid) -> TraceContributionEnvelope {
+    let mut envelope = envelope(submission_id).await;
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses =
+        vec![TraceAllowedUse::Evaluation, TraceAllowedUse::ModelTraining];
+    envelope
+}
+
 /// Like `envelope`, but with a long capture turn so the serialized envelope
 /// is well over 768 bytes -- the minimal Score policy chunks the approved
 /// bytes at 256 bytes each, and the Score tests below need at least three
@@ -1574,6 +1610,56 @@ fn scored_config(include_index: bool) -> PipelineBundleConfig {
         include_index,
         variant: None,
     }
+}
+
+/// An authority provider whose `SubmissionAuthority` permits everything: no
+/// tenant or policy allowlist, and `require_policy: false`. Every harness
+/// service below defaults to this, so every test written before Task 2
+/// keeps passing unchanged; `authority_allowlist_rejects_a_disallowed_use`
+/// builds its own restrictive authority instead.
+fn allow_all_authority() -> Arc<dyn PipelineAuthorityProvider> {
+    Arc::new(StaticPipelineAuthorityProvider::test_only(
+        SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: None,
+            require_policy: false,
+        },
+    ))
+}
+
+/// A privacy boundary that transforms nothing and finds nothing.
+///
+/// Ruling T2-4: the harness default is this, not
+/// `DeterministicPipelinePrivacyBoundary`. The production residual-risk
+/// model applies a Medium floor whenever message content is present (the
+/// port's own comment at `ef97a459:crates/trace-commons-server/src/
+/// versioned_pipeline.rs` around line 3963: "That consent fact is
+/// persisted, but it is not a PII finding. Admission quarantines only when
+/// another server-computed condition accompanies the content flag."), so a
+/// real rescrub gives every message-bearing fixture envelope a
+/// `ConsentContentFlag` finding whether or not the test wants one --
+/// intended production behaviour, but it silently overrides a fixture that
+/// force-sets `residual_pii_risk` to simulate Quarantine/Reject without a
+/// real finding. `DeterministicPipelinePrivacyBoundary` keeps its own unit
+/// tests in `versioned_pipeline_authority.rs`; the four Task 2 tests below
+/// that need a specific boundary (`FailingPrivacyBoundary`,
+/// `MarkerRedactingBoundary`) still build their own.
+struct PassThroughPipelinePrivacyBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+}
+
+/// The Task 2 privacy boundary every harness service below defaults to: see
+/// `PassThroughPipelinePrivacyBoundary`.
+fn default_privacy_boundary() -> Arc<dyn PipelinePrivacyBoundary> {
+    Arc::new(PassThroughPipelinePrivacyBoundary)
 }
 
 /// Builds a service over an isolated index (as both reader and writer), the
@@ -1639,7 +1725,9 @@ async fn test_service(
         caps,
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary());
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -1705,6 +1793,8 @@ async fn test_service_with_adapters_and_caps(
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
     .build()
     .expect("build pipeline service");
     Arc::new(service)
@@ -1753,7 +1843,9 @@ async fn test_service_with_adapters_and_index(
         caps,
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary());
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -1812,9 +1904,54 @@ async fn test_service_with_embedder(
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
     .build()
     .expect("build pipeline service");
     Arc::new(service)
+}
+
+/// Task 2: like `test_service`, but the caller supplies the authority and
+/// privacy controls directly instead of the allow-all/deterministic
+/// defaults every other harness variant uses -- for a test that needs a
+/// missing or failing control rather than one that lets everything through.
+/// `None` leaves the corresponding builder call out entirely (a service
+/// with no control at all), matching what `submit` sees when ingest boots
+/// one without an assembler wiring it up.
+async fn test_service_with_controls(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    authority: Option<Arc<dyn PipelineAuthorityProvider>>,
+    privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(Vec::new()).expect("build settlement adapter registry");
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(authority) = authority {
+        builder = builder.with_authority(authority);
+    }
+    if let Some(privacy) = privacy {
+        builder = builder.with_privacy(privacy);
+    }
+    Arc::new(builder.build().expect("build pipeline service"))
 }
 
 /// An embedder whose descriptor is chosen by the test and which counts
@@ -2008,6 +2145,8 @@ async fn score_lease_test_service(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_lease_config(lease_config)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
     .build()
     .expect("build pipeline service");
     Arc::new(service)
@@ -2208,6 +2347,7 @@ fn receipt<'a>(
     limits: PipelineAdmissionLimits,
 ) -> PipelineReceiptRequest<'a> {
     PipelineReceiptRequest {
+        source_session: None,
         tenant_id: tenant,
         actor_principal_ref: "principal_sha256:test",
         counts_toward_quota: true,
@@ -2236,6 +2376,27 @@ async fn submit_registered(
 ) -> anyhow::Result<PipelineReceiptResult> {
     service.register_default_bundle(request.tenant_id).await?;
     service.submit(request).await
+}
+
+/// `SELECT COUNT(*) FROM {table} WHERE tenant_id = $1`, in its own
+/// tenant-scoped transaction on an owner connection: this is an observer,
+/// not the runtime under test, and it counts tables the runtime login holds
+/// no SELECT on. `table` must be a literal table name, never external input
+/// -- it is interpolated into the query text because PostgreSQL does not
+/// allow a table name as a bind parameter.
+async fn count_tenant_rows(tenant_id: &str, table: &str) -> i64 {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            &format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = $1"),
+            &[&tenant_id],
+        )
+        .await
+        .expect("count tenant rows")
+        .get(0);
+    tx.commit().await.expect("commit count_tenant_rows");
+    count
 }
 
 /// `SELECT COUNT(*)` over `pipeline_runs` for `tenant_id`, in its own
@@ -2933,6 +3094,753 @@ async fn a_quarantined_receipt_waits_for_review_without_retrying() {
     assert_eq!(still_parked.attempt_count, 0);
 }
 
+// Task 3: human review claims, assessments, and routes. Every test below
+// starts from a run quarantined (Medium risk) and parked in
+// `awaiting_review` -- the same fixture shape as
+// `a_quarantined_receipt_waits_for_review_without_retrying` above, factored
+// into `quarantined_and_parked` so each test starts from the same place a
+// reviewer would find the run in `list_review_queue`.
+
+/// A Medium-risk envelope, receipted and run once through Review so it
+/// parks in `awaiting_review` under `review_assessment_required` (Ruling
+/// T3-1): the fixture every Task 3 review test starts from.
+async fn quarantined_and_parked(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let created = quarantined_and_pending(service, tenant).await;
+    let parked = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs and parks the run awaiting a human assessment");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    parked
+}
+
+/// A Medium-risk envelope, receipted but never run through Review yet:
+/// `pending`, `next_phase = Review`, `admission_decision = quarantine`, no
+/// assessment. The precondition `quarantined_and_parked` starts from, and
+/// the shape Finding I1's worker-race tests need (a run a worker has not
+/// leased yet, so `claim_run` can still take it deterministically).
+async fn quarantined_and_pending(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    assert_eq!(created.admission_decision, "quarantine");
+    assert_eq!(created.state, PipelineRunState::Pending);
+    assert_eq!(created.next_phase, Some(Phase::Review));
+    created
+}
+
+/// A syntactically valid `reviewer_sha256:` principal ref (64 lowercase hex
+/// digits), distinct per `tag` byte so two reviewers in the same test never
+/// collide.
+fn reviewer_principal_ref(tag: char) -> String {
+    format!("reviewer_sha256:{}", tag.to_string().repeat(64))
+}
+
+/// Expires a live review claim directly, in a tenant-scoped transaction --
+/// the shape `claim_is_exclusive_until_expiry` needs to prove a second
+/// reviewer can claim only once the first lease has actually elapsed.
+async fn expire_review_claim(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_review_claims
+            SET lease_expires_at = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id],
+    )
+    .await
+    .expect("expire the review claim");
+    tx.commit().await.expect("commit review claim expiry");
+}
+
+/// Pushes a run's `next_attempt_at` an hour into the future, in a
+/// tenant-scoped transaction -- so a test can prove
+/// `record_review_assessment`'s release actually resets it to `NOW()`
+/// (Ruling T3-9(a)) rather than merely relying on it already being due from
+/// parking, which is what `awaiting_review` otherwise leaves it at
+/// (`mark_awaiting_review` never touches `next_attempt_at`).
+async fn set_next_attempt_at_in_the_future(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET next_attempt_at = NOW() + INTERVAL '1 hour'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id],
+    )
+    .await
+    .expect("push next_attempt_at into the future");
+    tx.commit().await.expect("commit next_attempt_at push");
+}
+
+/// Ruling T3-1 (parking) plus T3-2/T3-3 (claim, approve, resolve): the run
+/// parks in `awaiting_review` uncharged; a second pass does nothing while it
+/// waits; `list_review_queue` finds it; a claim and an approving assessment
+/// resolve the quarantine and release it back to `pending`; Review then
+/// completes with no further wait, and its outcome evidence carries the
+/// assessment's own evidence hash.
+#[tokio::test]
+async fn quarantined_run_completes_after_an_approving_assessment() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-approve-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    assert_eq!(
+        parked.admission_reason.as_deref(),
+        Some("privacy_review_required"),
+        "the receipt stores the Quarantine reason label on the run"
+    );
+    assert_eq!(
+        parked.last_error_label.as_deref(),
+        Some("review_assessment_required")
+    );
+    assert_eq!(parked.attempt_count, 0, "parking is not a charged attempt");
+
+    // Ruling T3-1: a second pass does no work while the run waits.
+    assert!(
+        service
+            .process_run(&tenant, parked.run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a run awaiting review is never claimed on its own"
+    );
+
+    let store = service.store();
+    let queue = store.list_review_queue(&tenant, 10).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].run_id, parked.run_id);
+
+    let reviewer = reviewer_principal_ref('a');
+    // A claim attempt does no work on the parked run beyond the claim
+    // itself either -- the run stays `awaiting_review` until an assessment
+    // resolves it.
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the queued run is claimable");
+    assert_eq!(claim.run_id, parked.run_id);
+    assert_eq!(claim.reviewer_principal_ref, reviewer);
+    let still_parked = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_parked.state, PipelineRunState::AwaitingReview);
+
+    // Ruling T3-9(a): push `next_attempt_at` into the future first, so the
+    // assertion below proves `record_review_assessment` itself resets it to
+    // `NOW()` rather than merely inheriting a due timestamp
+    // `mark_awaiting_review` happened to leave behind.
+    set_next_attempt_at_in_the_future(&backend, &tenant, parked.run_id).await;
+
+    let reason = ReasonCode::new("privacy_review_required").unwrap();
+    let assessment = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            reason.clone(),
+            vec![reason],
+        )
+        .await
+        .expect("an approval that resolves the admission reason succeeds");
+    assert_eq!(assessment.recommendation, ReviewRecommendation::Approve);
+
+    // Ruling T3-3: released back to `pending`, due at once, label cleared.
+    let released = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+    assert_eq!(released.last_error_label, None);
+    assert!(
+        released.next_attempt_at <= chrono::Utc::now(),
+        "Ruling T3-9(a): the release must set next_attempt_at to now, even \
+         though it was just pushed into the future"
+    );
+
+    let completed = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("Review now resolves the quarantine with no further wait");
+    assert_eq!(completed.next_phase, Some(Phase::Score));
+    assert_eq!(completed.state, PipelineRunState::Pending);
+
+    let outcomes = store.list_outcomes(&tenant, parked.run_id).await.unwrap();
+    let review_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .expect("Review committed an outcome");
+    assert_eq!(
+        review_outcome
+            .evidence
+            .get("human_assessment_hash")
+            .and_then(serde_json::Value::as_str),
+        Some(assessment.evidence_hash.as_str()),
+        "the Review outcome evidence records the assessment"
+    );
+}
+
+/// A `Reject` recommendation ends the run: Review's decision is `Rejected`,
+/// there is no next phase, and the submission's status moves to `rejected`.
+#[tokio::test]
+async fn rejecting_assessment_ends_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-reject-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer = reviewer_principal_ref('b');
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the queued run is claimable");
+    let reason = ReasonCode::new("reviewer_declined").unwrap();
+    store
+        .record_review_assessment(&claim, ReviewRecommendation::Reject, reason, vec![])
+        .await
+        .expect("a rejection needs no resolved reason");
+
+    let ended = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("Review now ends the run with the rejection");
+    assert_eq!(ended.next_phase, None);
+    assert_eq!(ended.state, PipelineRunState::Complete);
+    assert_eq!(
+        submission_status(&backend, &tenant, parked.submission_id).await,
+        "rejected"
+    );
+
+    let outcomes = store.list_outcomes(&tenant, parked.run_id).await.unwrap();
+    let review_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .expect("Review committed an outcome");
+    let decision: ReviewDecision = serde_json::from_value(review_outcome.decision).unwrap();
+    assert!(matches!(decision, ReviewDecision::Rejected { .. }));
+}
+
+/// An `Approve` recommendation that resolves nothing is refused before any
+/// assessment row is written.
+#[tokio::test]
+async fn approval_without_resolving_the_reason_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-unresolved-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer = reviewer_principal_ref('c');
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the queued run is claimable");
+    let reason = ReasonCode::new("privacy_review_required").unwrap();
+    let error = store
+        .record_review_assessment(&claim, ReviewRecommendation::Approve, reason, Vec::new())
+        .await
+        .expect_err("approval with nothing resolved must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("quarantine reason is unresolved"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_assessments").await,
+        0,
+        "no assessment row on refusal"
+    );
+}
+
+/// A second reviewer cannot claim a run while the first reviewer's claim is
+/// live; once that lease has expired, the second claim succeeds with a
+/// fresh lease token.
+#[tokio::test]
+async fn claim_is_exclusive_until_expiry() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-exclusive-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer_a = reviewer_principal_ref('d');
+    let reviewer_b = reviewer_principal_ref('e');
+    let claim_a = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer_a,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the first reviewer claims the parked run");
+
+    let second = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer_b,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        second,
+        PipelineReviewClaimOutcome::HeldByAnotherReviewer,
+        "a live claim blocks a second reviewer"
+    );
+
+    expire_review_claim(&backend, &tenant, parked.run_id).await;
+
+    let claim_b = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer_b,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the second reviewer claims it once the first lease has expired");
+    assert_eq!(claim_b.reviewer_principal_ref, reviewer_b);
+    assert_ne!(claim_a.lease_token, claim_b.lease_token);
+}
+
+/// A withdrawal landing after a reviewer has already claimed the run
+/// refuses the assessment (Ruling T3-6), and releases the parked run back
+/// to `pending` the same way `claim_review`'s own refusal would.
+#[tokio::test]
+async fn assessment_after_withdrawal_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-withdrawn-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer = reviewer_principal_ref('f');
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the queued run is claimable");
+
+    withdraw_submission(&backend, &tenant, parked.submission_id).await;
+
+    let reason = ReasonCode::new("privacy_review_required").unwrap();
+    let error = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            reason.clone(),
+            vec![reason],
+        )
+        .await
+        .expect_err("a withdrawn submission's claim must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("review claim is stale or inoperable"),
+        "unexpected error: {error}"
+    );
+
+    // Ruling T3-6: released the same way `claim_review`'s own refusal
+    // would release it.
+    let released = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+}
+
+/// Ruling T3-6: a parked run whose submission becomes inoperable while it
+/// waits is excluded from the queue, refuses a claim, and is released back
+/// to `pending` -- the three behaviours `list_review_queue`, `claim_review`,
+/// and `record_review_assessment` themselves own.
+///
+/// Ruling T3-7: the runner then ends the released run under the Review
+/// routing of `submission_inoperable` (failed on that pass) and does not
+/// park it again. The withdrawal here is a `trace_withdrawals` row only, so
+/// `trace_submissions.status` stays `quarantined`: Review's source read
+/// (`load_source_bytes`) refuses it because the content-read predicate
+/// (`load_object_bytes`) also excludes a submission with a
+/// `trace_withdrawals` row. Without that, Review would run again with no
+/// assessment and park the run in `awaiting_review` once more.
+#[tokio::test]
+async fn parked_run_with_an_inoperable_submission_is_released() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-inoperable-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+
+    withdraw_submission(&backend, &tenant, parked.submission_id).await;
+
+    let store = service.store();
+    let queue = store.list_review_queue(&tenant, 10).await.unwrap();
+    assert!(
+        queue.is_empty(),
+        "an inoperable submission's run is excluded from the queue"
+    );
+
+    let reviewer = reviewer_principal_ref('9');
+    let error = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .expect_err("an inoperable submission refuses the claim");
+    assert!(
+        error
+            .to_string()
+            .contains("review claim is stale or inoperable"),
+        "unexpected error: {error}"
+    );
+
+    let released = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        released.state,
+        PipelineRunState::Pending,
+        "released so the runner can reach it"
+    );
+
+    let processed = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("the runner claims the released run");
+    assert_eq!(
+        processed.state,
+        PipelineRunState::Failed,
+        "Review ends the run on this pass and does not park it again"
+    );
+    assert_eq!(
+        processed.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+}
+
+// Fix round 1, finding I1: without an eligibility predicate on the row a
+// reviewer's claim/assessment locks, a reviewer could claim or assess a run
+// a worker is actively processing, a run that already failed, or a run
+// that already has an assessment. The three tests below cover each gap
+// deterministically (no real concurrency needed: the store methods
+// themselves are orchestrated in the racy order by hand).
+
+/// The race the finding describes: a reviewer claims a run while it is
+/// still `pending`, then a worker leases it for its own Review attempt
+/// (allowed -- a review claim and a worker lease are different tables).
+/// Both a fresh claim attempt and the original reviewer's own assessment
+/// must now be refused while the worker holds the lease, so the worker's
+/// own attempt is the only thing that can resolve this pass -- the
+/// assessment can never land mid-attempt and be silently ignored (or worse,
+/// collide with `pipeline_review_assessments`'s `UNIQUE (tenant_id,
+/// run_id)` once the worker's own park re-attempt runs).
+#[tokio::test]
+async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-worker-race-{}", uuid::Uuid::new_v4());
+    let pending = quarantined_and_pending(&service, &tenant).await;
+    let store = service.store();
+
+    let reviewer = reviewer_principal_ref('1');
+    let claim = store
+        .claim_review(
+            &tenant,
+            pending.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("a pending, quarantined, unassessed run is claimable");
+
+    let leased = store
+        .claim_run(&tenant, pending.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("a worker can still lease the run under a live review claim");
+    assert_eq!(leased.state, PipelineRunState::Leased);
+
+    let other_reviewer = reviewer_principal_ref('2');
+    let blocked = store
+        .claim_review(
+            &tenant,
+            pending.run_id,
+            &other_reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked,
+        PipelineReviewClaimOutcome::Ineligible,
+        "a run a worker holds leased is not claimable"
+    );
+
+    let reason = ReasonCode::new("privacy_review_required").unwrap();
+    let error = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            reason.clone(),
+            vec![reason],
+        )
+        .await
+        .expect_err("an assessment must be refused while a worker holds the lease");
+    assert!(
+        error
+            .to_string()
+            .contains("review claim is stale or inoperable"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_assessments").await,
+        0,
+        "no assessment row while the worker holds the run"
+    );
+}
+
+/// `mark_failed` never clears `next_phase` (Finding I1), so a run that
+/// failed while at Review still reads `next_phase = Review` forever after.
+/// Without a state predicate, `claim_review` would accept it as if it were
+/// still waiting for a human.
+#[tokio::test]
+async fn claim_refuses_a_run_that_already_failed_at_review() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-failed-{}", uuid::Uuid::new_v4());
+    let pending = quarantined_and_pending(&service, &tenant).await;
+    let store = service.store();
+
+    let leased = store
+        .claim_run(&tenant, pending.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the pending run is claimable by a worker");
+    store
+        .mark_failed(&leased, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("fail the run under its own lease");
+    let failed = store
+        .get_run(&tenant, pending.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.next_phase,
+        Some(Phase::Review),
+        "mark_failed leaves next_phase untouched"
+    );
+
+    let reviewer = reviewer_principal_ref('3');
+    let claimed = store
+        .claim_review(
+            &tenant,
+            pending.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed,
+        PipelineReviewClaimOutcome::Ineligible,
+        "a run that already failed at Review is never claimable for review"
+    );
+}
+
+/// Without an assessment-exists predicate, a reviewer could re-claim a run
+/// that already has one (Finding I1), and a second assessment attempt would
+/// then hit `pipeline_review_assessments`'s `UNIQUE (tenant_id, run_id)`
+/// instead of refusing cleanly.
+#[tokio::test]
+async fn claim_refuses_a_run_that_already_has_an_assessment() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-reassess-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer = reviewer_principal_ref('4');
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the parked run is claimable");
+    let reason = ReasonCode::new("reviewer_declined").unwrap();
+    store
+        .record_review_assessment(&claim, ReviewRecommendation::Reject, reason, Vec::new())
+        .await
+        .expect("the rejection records an assessment");
+
+    // Released to `pending` by the assessment (Ruling T3-3), but not yet
+    // reprocessed, so it still shows `next_phase = Review` -- exactly the
+    // shape a re-claim must refuse.
+    let released = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+    assert_eq!(released.next_phase, Some(Phase::Review));
+
+    let other_reviewer = reviewer_principal_ref('5');
+    let reclaimed = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &other_reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reclaimed,
+        PipelineReviewClaimOutcome::Ineligible,
+        "a run that already has an assessment is never claimable again"
+    );
+}
+
 #[tokio::test]
 async fn tombstoned_content_is_refused_before_the_store() {
     let Some(backend) = runtime_backend(4).await else {
@@ -2966,6 +3874,328 @@ async fn tombstoned_content_is_refused_before_the_store() {
         count_files_under(dir.path()),
         0,
         "a tombstoned receipt writes no artifact file"
+    );
+}
+
+/// Task 2: a service built without `with_authority` fails every receipt
+/// closed before any database work -- no run, no staged artifact.
+#[tokio::test]
+async fn receipt_without_authority_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+        Some(default_privacy_boundary()),
+    )
+    .await;
+    let tenant = format!("authority-missing-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let error = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect_err("a service with no authority control fails every receipt closed");
+    assert_eq!(error.to_string(), "authority_control_missing");
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+    assert_eq!(count_staged_artifacts(&backend, &tenant).await, 0);
+}
+
+/// Task 2: an authority that allows only a use the envelope does not carry
+/// denies the submission -- but it is a normal Admission Reject, exactly
+/// like `a_rejected_receipt_records_the_decision_and_creates_no_review_work`
+/// for a high-risk envelope, not a hard failure of `submit` itself.
+#[tokio::test]
+async fn authority_allowlist_rejects_a_disallowed_use() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // The fixture envelope's consent scope is DebuggingEvaluation, whose
+    // default allowed uses are Debugging/Evaluation/AggregateAnalytics
+    // (trace_contribution.rs's `default_allowed_uses_for_scope`).
+    // `RankingModelTraining` is not among them, so this allowlist denies it.
+    let authority: Arc<dyn PipelineAuthorityProvider> = Arc::new(
+        StaticPipelineAuthorityProvider::test_only(SubmissionAuthority {
+            tenant: SubmissionAllowlists {
+                allowed_consent_scopes: BTreeSet::new(),
+                allowed_uses: BTreeSet::from([TraceAllowedUse::RankingModelTraining]),
+            },
+            policy: None,
+            require_policy: false,
+        }),
+    );
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(authority),
+        Some(default_privacy_boundary()),
+    )
+    .await;
+    let tenant = format!("authority-denied-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("a denied receipt still creates its run record")
+    };
+    assert_eq!(created.admission_decision, "reject");
+    assert_eq!(created.state, PipelineRunState::Complete);
+    assert_eq!(created.next_phase, None);
+    assert_eq!(
+        submission_status(&backend, &tenant, env.submission_id).await,
+        "rejected"
+    );
+
+    // Ruling T2-3: a denial by a resolved authority is an ordinary
+    // Admission Reject with reason `grant_invalid`, not the permanent
+    // `authority_missing` failure `MinimalAdmissionPolicy` reserves for a
+    // missing authority source.
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1, "only the Admission outcome");
+    assert_eq!(outcomes[0].phase, Phase::Admission);
+    let decision: AdmissionDecision = serde_json::from_value(outcomes[0].decision.clone()).unwrap();
+    match decision {
+        AdmissionDecision::Reject { reason } => {
+            assert_eq!(reason.as_str(), "grant_invalid");
+        }
+        other => panic!("expected an Admission Reject, got {other:?}"),
+    }
+
+    // No Review work: nothing is claimable, for this run or the tenant.
+    assert!(
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(service.process_one(&tenant).await.unwrap().is_none());
+}
+
+/// A privacy boundary whose rescrub always fails -- the classifier-outage
+/// case `submit` must fail closed on, storing nothing.
+struct FailingPrivacyBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        anyhow::bail!("privacy classifier unavailable (test double)")
+    }
+}
+
+/// Task 2: a rescrub failure fails the receipt closed -- no run, no staged
+/// artifact, no artifact file. The rescrub runs before the attempt's object
+/// is even prepared, so a failing classifier costs no encryption either.
+#[tokio::test]
+async fn privacy_boundary_failure_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(allow_all_authority()),
+        Some(Arc::new(FailingPrivacyBoundary)),
+    )
+    .await;
+    let tenant = format!("privacy-failure-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let error = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect_err("a failing privacy boundary fails the receipt closed");
+    assert_eq!(error.to_string(), "privacy_classification_failed");
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+    assert_eq!(count_staged_artifacts(&backend, &tenant).await, 0);
+    assert_eq!(
+        count_files_under(dir.path()),
+        0,
+        "a rescrub failure writes no artifact file"
+    );
+}
+
+/// Replaces a marker token in the envelope, as a redacting classifier would.
+struct MarkerRedactingBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
+    async fn rescrub(
+        &self,
+        envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        let text = serde_json::to_string(envelope)?;
+        *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
+        Ok(Vec::new())
+    }
+}
+
+/// An embedder that records every chunk of plaintext Score asks it to
+/// embed, concatenated -- so a test can inspect exactly what bytes Score
+/// fed it, rather than merely counting calls (`CountingEmbedder` above).
+struct CapturingEmbedder {
+    seen: std::sync::Mutex<Vec<u8>>,
+}
+
+impl Embedder for CapturingEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.seen.lock().unwrap().extend_from_slice(plaintext);
+        ReferenceEmbedder::new().embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for CapturingEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "capturing_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "capturing-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"capturing-embedder-test-descriptor-v1".to_vec()
+    }
+}
+
+/// Review Focus 2 (Task 2): content the privacy boundary transforms. The
+/// stored source is the transformed content, not the raw request -- Score
+/// reads the rescrubbed bytes, and a replay of the identical raw request
+/// bytes still replays the same run (the classifier never runs twice for
+/// one key, since `submit`'s replay check runs before the rescrub).
+#[tokio::test]
+async fn transformed_content_flows_to_score_and_replay_stays_exact() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(CapturingEmbedder {
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(true),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(Vec::new()).expect("build settlement adapter registry");
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        artifact_store(&dir),
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder.clone())
+    .with_authority(allow_all_authority())
+    .with_privacy(Arc::new(MarkerRedactingBoundary))
+    .build()
+    .expect("build pipeline service");
+
+    let tenant = format!("privacy-transform-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    for event in &mut env.events {
+        if let Some(content) = event.redacted_content.as_mut() {
+            content.push_str(" MARKER_SECRET");
+        }
+    }
+    let raw = serde_json::to_vec(&env).unwrap();
+    assert!(
+        String::from_utf8_lossy(&raw).contains("MARKER_SECRET"),
+        "the raw request the caller submits carries the marker"
+    );
+    let key = env.submission_id.to_string();
+
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let processed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the newly created run");
+    assert_eq!(processed.next_phase, Some(Phase::Score));
+    let approved_content_hash = processed
+        .approved_content_hash
+        .clone()
+        .expect("Review approval records a content hash");
+    assert_ne!(
+        approved_content_hash, created.request_content_hash,
+        "the approved content is the rescrubbed envelope, not the raw request"
+    );
+
+    let approved_bytes = service.load_approved_bytes(&processed).await.unwrap();
+    let approved_text = String::from_utf8(approved_bytes).unwrap();
+    assert!(
+        !approved_text.contains("MARKER_SECRET"),
+        "the stored source is the transformed content, not the raw request"
+    );
+    assert!(
+        approved_text.contains("[redacted]"),
+        "the transform's replacement text reaches storage"
+    );
+
+    // A replay of the identical raw request bytes still replays the same
+    // run: the replay check in `submit` runs before the rescrub, so a
+    // replay never calls the privacy boundary again.
+    let PipelineReceiptResult::Replayed(replayed) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("identical raw bytes replay the same run")
+    };
+    assert_eq!(replayed.run_id, created.run_id);
+
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs the reviewed run");
+    let seen = embedder.seen.lock().unwrap().clone();
+    let seen_text = String::from_utf8_lossy(&seen);
+    assert!(
+        !seen_text.contains("MARKER_SECRET"),
+        "Score never embeds the raw marker"
+    );
+    assert!(
+        seen_text.contains("[redacted]"),
+        "Score embeds the transformed bytes"
     );
 }
 
@@ -4194,6 +5424,22 @@ async fn tenant_tx<'a>(
     )
     .await
     .expect("set tenant for tx");
+    tx
+}
+
+/// `tenant_tx` on an owner connection (`owner_client`), for test setup and
+/// observation outside the runtime login's grants.
+async fn owner_tenant_tx<'a>(
+    owner: &'a mut tokio_postgres::Client,
+    tenant_id: &str,
+) -> tokio_postgres::Transaction<'a> {
+    let tx = owner.transaction().await.expect("open owner tenant tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for owner tx");
     tx
 }
 
@@ -5577,7 +6823,8 @@ async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
 
 /// The service-level race window: withdraws the submission
 /// *after* the approved object is written and *before* `commit_review`
-/// runs. `put_serialized_json` is a synchronous call the Review arm makes
+/// runs (or, with another `trigger_object_id_prefix`, after that phase
+/// artifact is written and before its phase commits). `put_serialized_json` is a synchronous call the Review arm makes
 /// mid-transaction-free (there is no open database transaction while it
 /// runs), so a wrapper that intercepts exactly that write and drives the
 /// real withdrawal to completion before returning makes the race
@@ -5600,6 +6847,9 @@ struct WithdrawOnApprovedWriteStore {
     tenant_id: String,
     submission_id: uuid::Uuid,
     triggered: AtomicBool,
+    /// The object id prefix of the write that triggers the withdrawal:
+    /// `pipeline-approved-` for Review's approved object.
+    trigger_object_id_prefix: &'static str,
 }
 
 impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
@@ -5616,7 +6866,7 @@ impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
             object_id,
             serialized_json,
         )?;
-        if object_id.starts_with("pipeline-approved-")
+        if object_id.starts_with(self.trigger_object_id_prefix)
             && !self.triggered.swap(true, Ordering::SeqCst)
         {
             let runtime_url = self.runtime_url.clone();
@@ -5737,6 +6987,7 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
         tenant_id: tenant.clone(),
         submission_id,
         triggered: AtomicBool::new(false),
+        trigger_object_id_prefix: "pipeline-approved-",
     });
     let (service, _, _) = test_service(
         backend.clone(),
@@ -5796,6 +7047,75 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
         1,
         "the approved object this attempt wrote must be deleted, leaving only \
          the source envelope"
+    );
+}
+
+/// Zaki review 1, item 1: the Score counterpart of the Review race above. The
+/// submission is withdrawn after the Score attempt stored its last object
+/// (the neighbour set, written after the index command) and before
+/// `commit_score`. The commit refuses, and the attempt deletes both objects
+/// it wrote, as Review deletes its approved object: only the source and the
+/// approved revision stay stored.
+#[tokio::test]
+async fn a_refused_score_commit_deletes_the_objects_its_attempt_wrote() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner_url =
+        std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("score-withdraw-race-{}", uuid::Uuid::new_v4());
+    let submission_id = uuid::Uuid::new_v4();
+    let wrapper = Arc::new(WithdrawOnApprovedWriteStore {
+        inner: artifact_store(&dir),
+        runtime_url: runtime_role_url(&owner_url),
+        tenant_id: tenant.clone(),
+        submission_id,
+        triggered: AtomicBool::new(false),
+        trigger_object_id_prefix: "pipeline-score-neighbors-",
+    });
+    let service = compatibility_test_service(
+        backend.clone(),
+        wrapper as Arc<dyn TraceArtifactStore>,
+        CompatibilityBundleConfig::local_reference(),
+    )
+    .await;
+    let env = large_envelope(submission_id).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "before Score, the source and the approved revision are stored"
+    );
+
+    let refused = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert_score_refused_as_inoperable(&service, &tenant, &refused).await;
+    assert!(
+        refused.score_neighbor_ref.is_none(),
+        "no neighbour set recorded"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "both objects the refused Score attempt wrote are deleted"
     );
 }
 
@@ -5938,6 +7258,66 @@ async fn withdrawal_between_score_and_settle_excludes_the_index() {
     );
 }
 
+/// Zaki review 1, item 1: a withdrawal's follow-up deletes the objects Score
+/// stored, and it can do so before Settle runs. Settle then has no index
+/// command to read. For a submission that is no longer operable it settles
+/// without one, as it would with the command still stored: the index is
+/// excluded, nothing is written to it, and every leg is forfeited.
+#[tokio::test]
+async fn settle_completes_a_withdrawn_run_whose_score_objects_are_deleted() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-score-objects-deleted-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    // The follow-up's payload deletion, done here directly.
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (command_key, _) = run
+        .index_command_ref
+        .as_deref()
+        .expect("Score recorded an index command")
+        .rsplit_once('#')
+        .unwrap();
+    std::fs::remove_file(artifact_file_path(
+        dir.path(),
+        tenant_ref.as_str(),
+        command_key,
+    ))
+    .expect("delete the stored index command");
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.last_error_label, None);
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(settled.index_write_state, "none");
+    assert_eq!(index.writer_calls(), 0, "nothing is written to the index");
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert_eq!(settlements.len(), 2);
+    assert!(
+        settlements
+            .iter()
+            .all(|settlement| settlement.operation_state == "forfeited"),
+        "every leg is forfeited: {settlements:?}"
+    );
+}
+
 /// The second case: the guard can newly fail *between*
 /// `persist_settle_selection` and dispatch -- a crash right after the
 /// selection persists (leaving `index_membership = "included"`,
@@ -6038,6 +7418,1204 @@ async fn withdrawal_during_dispatch_cancels_the_index_write() {
         0,
         "dispatch was cancelled before any upsert call"
     );
+}
+
+/// The longest a held call waits for the test to release it, and the
+/// longest a test waits for a held call to be entered or for a task to
+/// finish. It is a bound, not a synchronization: the order of events in the
+/// tests that use it is set by channels, and the bound only turns a
+/// regression into a failure instead of a hang.
+const HELD_CALL_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A test double's side of one held call. The first call that reaches
+/// `hold_first_call` tells the test it has started and then blocks its
+/// thread until the test releases it; every later call passes through at
+/// once. The dependency calls it holds (`VectorIndexWriter::upsert`,
+/// `Embedder::embed`) are synchronous, so a test that holds one needs a
+/// multi-thread runtime: the held call blocks one worker thread.
+struct CallHold {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+/// The test's side of a `CallHold`.
+struct HeldCall {
+    entered: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+impl CallHold {
+    fn new() -> (Self, HeldCall) {
+        let (entered_sender, entered_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        (
+            Self {
+                entered: std::sync::Mutex::new(Some(entered_sender)),
+                release: std::sync::Mutex::new(Some(release_receiver)),
+            },
+            HeldCall {
+                entered: Some(entered_receiver),
+                release: release_sender,
+            },
+        )
+    }
+
+    fn hold_first_call(&self) {
+        let Some(entered) = self.entered.lock().unwrap().take() else {
+            return;
+        };
+        let release = self
+            .release
+            .lock()
+            .unwrap()
+            .take()
+            .expect("only the first call is held");
+        let _ = entered.send(());
+        release
+            .recv_timeout(HELD_CALL_BOUND)
+            .expect("the test releases the held call within the bound");
+    }
+}
+
+impl HeldCall {
+    /// Returns once the held call has started. It does not continue (and
+    /// has not yet called through) until `release`.
+    async fn wait_until_entered(&mut self) {
+        let entered = self
+            .entered
+            .take()
+            .expect("wait for the held call only once");
+        tokio::time::timeout(HELD_CALL_BOUND, entered)
+            .await
+            .expect("the held call starts within the bound")
+            .expect("the double signals before it blocks");
+    }
+
+    /// Lets the held call continue.
+    fn release(&self) {
+        self.release
+            .send(())
+            .expect("the held call is still waiting for its release");
+    }
+}
+
+/// An index writer over a real `IsolatedPipelineIndex` whose first `upsert`
+/// is held (`CallHold`) until the test releases it, so a test can act while
+/// Settle's index dispatch is in the middle of its write. Every later call
+/// goes straight to the index underneath. `held_index_test_service` builds
+/// a service over it.
+struct BlockingIndexWriter {
+    inner: Arc<IsolatedPipelineIndex>,
+    hold: CallHold,
+}
+
+impl VectorIndexWriter for BlockingIndexWriter {
+    fn upsert(
+        &self,
+        key: &IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<IndexUpsertResult, IndexWriteError> {
+        self.hold.hold_first_call();
+        self.inner.upsert(key, embedding, content_hash)
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        revision_id: uuid::Uuid,
+    ) -> Result<bool, IndexWriteError> {
+        self.inner
+            .invalidate_revision(tenant_storage_ref, index_id, revision_id)
+    }
+}
+
+impl IdentifiedIndexWriter for BlockingIndexWriter {
+    fn dependency_identity(&self) -> &str {
+        "blocking_index_writer_test_only"
+    }
+}
+
+/// Like `test_service`, but Settle writes to the index through a
+/// `BlockingIndexWriter`. The returned index is the one underneath it (and
+/// the service's index reader); the returned `HeldCall` controls the first
+/// `upsert`.
+async fn held_index_test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
+    held_index_test_service_with_leases(
+        backend,
+        artifact_store,
+        config,
+        PipelineLeaseConfig::default(),
+    )
+    .await
+}
+
+/// `held_index_test_service` with `lease_config`.
+async fn held_index_test_service_with_leases(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    lease_config: PipelineLeaseConfig,
+) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let (hold, held) = CallHold::new();
+    let writer = Arc::new(BlockingIndexWriter {
+        inner: index.clone(),
+        hold,
+    });
+    let registry = SettlementAdapterRegistry::new(vec![
+        RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+        RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+    ])
+    .expect("build settlement adapter registry");
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        writer,
+        registry,
+        uncapped_caps(&["storage_rebate", InstrumentId::trace_credit().as_str()]),
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .with_lease_config(lease_config)
+    .build()
+    .expect("build pipeline service");
+    (Arc::new(service), index, held)
+}
+
+/// Multi-lens review L4-3 and the PR 4 review: Settle's index writes run in
+/// a task of their own that holds the run and submission rows, so a dropped
+/// Settle future (`join_or_abort` at shutdown) does not roll the
+/// transaction back while the blocking writes go on. The rows stay locked
+/// while the held write runs, and the task commits the write when it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_settle_keeps_its_rows_locked_until_its_index_writes_end() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) =
+        held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
+    let tenant = format!("dispatch-dropped-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    settle.abort();
+    let _ = settle.await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+        .await
+        .unwrap();
+    let locked = tx
+        .query_opt(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await;
+    assert!(
+        locked.is_err(),
+        "the run row stays locked while the dropped Settle's write runs"
+    );
+    drop(tx);
+    drop(client);
+
+    held.release();
+    let runs = PgPipelineStore::new(backend.clone());
+    let written = tokio::time::timeout(HELD_CALL_BOUND, async {
+        loop {
+            let current = runs.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+            if current.index_write_state == "complete" {
+                return current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the write's own task commits it once the write ends");
+    assert_eq!(written.index_write_state, "complete");
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+}
+
+/// Multi-lens review L4-3: the index write stops at its lease's deadline. A
+/// write held past a one-second Settle lease applies the entry already in
+/// flight and no other, so a dispatch whose locks were lost cannot keep
+/// writing a withdrawn revision's entries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_write_stops_at_its_lease_deadline() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) = held_index_test_service_with_leases(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap(),
+    )
+    .await;
+    let tenant = format!("dispatch-deadline-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
+    let entry_count = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command")
+        .keyed_entries(&tenant_ref)
+        .count();
+    assert!(entry_count >= 2, "the command has entries after the first");
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    held.release();
+    let _ = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle ends once released");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        1,
+        "only the entry in flight at the deadline is written"
+    );
+    let current = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.index_write_state, "pending");
+}
+
+/// Multi-lens review L4-1 (Zaki review 3, Z3-M2): the index dispatch does
+/// not hold the run and submission rows past its deadline (the lease's end,
+/// or 30 seconds). A write held past a one-second Settle lease leaves the
+/// run row free while the held call still runs, and the run is released only
+/// once that call returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_write_past_its_deadline_releases_the_rows() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) = held_index_test_service_with_leases(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap(),
+    )
+    .await;
+    let tenant = format!("dispatch-timeout-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+        .await
+        .unwrap();
+    let state: String = tx
+        .query_one(
+            "SELECT state FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect("the run row is free once the dispatch's deadline passed")
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        state, "leased",
+        "the run is not released while its write runs"
+    );
+
+    held.release();
+    let _ = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle ends once released");
+    let current = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (current.state, current.index_write_state.as_str()),
+        (PipelineRunState::Retry, "pending")
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+}
+
+/// Multi-lens review L4-1 and L4-6(a): `claim_next`'s sweep of expired,
+/// exhausted leases skips a run row another transaction holds (it locks in
+/// run id order, `SKIP LOCKED`), so a claim never waits behind it, and a
+/// later claim sweeps it.
+#[tokio::test]
+async fn the_claim_sweep_skips_a_locked_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("sweep-skip-locked-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = PgPipelineStore::new(backend.clone());
+    store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("a worker claims the Settle");
+    set_attempt_count(&backend, &tenant, run.run_id, run.max_attempts as i32).await;
+    expire_lease(&backend, &tenant, run.run_id).await;
+
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let held = tenant_tx(&mut holder, &tenant).await;
+    held.query_one(
+        "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    let claimed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.claim_next(&tenant, PipelineLeaseConfig::default()),
+    )
+    .await
+    .expect("the sweep does not wait for the locked run")
+    .unwrap();
+    assert!(claimed.is_none());
+    held.rollback().await.unwrap();
+    drop(holder);
+    assert_eq!(
+        store
+            .get_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        PipelineRunState::Leased,
+        "the locked run was skipped"
+    );
+
+    store
+        .claim_next(&tenant, PipelineLeaseConfig::default())
+        .await
+        .unwrap();
+    let swept = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(
+        (swept.state, swept.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        )
+    );
+}
+
+/// Multi-lens review L4-3: a withdrawal that finds a `pending` index write
+/// on a run another Settle holds the lease of queues the revision's
+/// invalidation no earlier than that lease's end plus the fence margin, so
+/// an upsert still in flight cannot land after the invalidation ran.
+#[tokio::test]
+async fn a_withdrawal_delays_the_invalidation_of_a_write_a_live_lease_may_make() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("dispatch-invalidation-floor-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = PgPipelineStore::new(backend.clone());
+    let leased = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(120))
+        .await
+        .unwrap()
+        .expect("another Settle holds the lease");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET index_write_state = 'pending'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+
+    service
+        .withdraw_submission(&tenant, run.submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner withdraws the submission");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let due: chrono::DateTime<chrono::Utc> = tx
+        .query_one(
+            "SELECT next_attempt_at FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    let floor = leased.lease_expires_at.unwrap()
+        + chrono::Duration::seconds(PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS);
+    assert!(
+        due >= floor - chrono::Duration::seconds(1),
+        "due {due} is before the lease's end plus the margin, {floor}"
+    );
+}
+
+/// An embedder whose first `embed` call is held (`CallHold`) until the test
+/// releases it; otherwise it embeds as the reference embedder does. Score
+/// embeds after it has read the approved content and before it commits, so
+/// a test can act between Score's read and its commit.
+struct HoldingEmbedder {
+    hold: CallHold,
+}
+
+impl Embedder for HoldingEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.hold.hold_first_call();
+        ReferenceEmbedder::new().embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for HoldingEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "holding_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "holding-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"holding-embedder-test-descriptor-v1".to_vec()
+    }
+}
+
+/// Submits a Low-risk envelope and runs Review, so the run waits for Score
+/// with approved content.
+async fn run_past_review(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    reviewed
+}
+
+/// Expires a run's lease directly: a time shortcut for a test whose attempt
+/// crashed and left the run `leased`, not a processor call.
+async fn expire_lease(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id],
+    )
+    .await
+    .expect("expire the lease");
+    tx.commit().await.expect("commit the lease expiry");
+}
+
+/// The content read (`load_object_bytes`, behind `load_approved_bytes` and
+/// `load_source_bytes`) refuses a submission with a `trace_withdrawals`
+/// row, even while `trace_submissions.status` is unchanged.
+#[tokio::test]
+async fn content_reads_refuse_withdrawn_submissions() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("content-read-withdrawn-{}", uuid::Uuid::new_v4());
+    let reviewed = run_past_review(&service, &tenant).await;
+    service
+        .load_approved_bytes(&reviewed)
+        .await
+        .expect("the approved content reads before the withdrawal");
+    service
+        .load_source_bytes(&reviewed)
+        .await
+        .expect("the source content reads before the withdrawal");
+
+    withdraw_submission(&backend, &tenant, reviewed.submission_id).await;
+
+    // `let ... else` rather than `expect_err`, which would print the
+    // decoded trace bytes on a failure.
+    let Err(error) = service.load_approved_bytes(&reviewed).await else {
+        panic!("a withdrawn submission's approved content is not read");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error}"
+    );
+    let Err(error) = service.load_source_bytes(&reviewed).await else {
+        panic!("a withdrawn submission's source content is not read");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error}"
+    );
+}
+
+/// Asserts that Score committed nothing for `run`: no Score outcome and
+/// no settlement rows, and the run still waits for Score, in a charged
+/// retry under `submission_inoperable` (the P2 allowlist routes that label
+/// to a charged retry outside Review).
+async fn assert_score_refused_as_inoperable(
+    service: &PipelineService,
+    tenant: &str,
+    run: &PipelineRunRecord,
+) {
+    assert_eq!(run.state, PipelineRunState::Retry);
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+    assert_eq!(run.next_phase, Some(Phase::Score));
+    assert!(run.index_command_ref.is_none(), "no index command recorded");
+    let outcomes = service
+        .store()
+        .list_outcomes(tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !outcomes.iter().any(|outcome| outcome.phase == Phase::Score),
+        "no Score outcome is committed"
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(tenant, run.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no settlement rows are seeded"
+    );
+}
+
+/// `commit_score` re-checks the submission under its own transaction: a
+/// withdrawal after Score read its input gets no Score outcome and no
+/// settlement rows, and the run ends under the routing of
+/// `submission_inoperable` for Score.
+///
+/// First case: Score crashes after it read the approved content and stored
+/// its artifacts (`AfterScoreArtifactStorage`); the submission is
+/// withdrawn; the run resumes. The resumed attempt reads the content again
+/// and is refused there, so this case does not reach the commit. Second
+/// case: the withdrawal lands inside one Score attempt, after its read
+/// (Score's first `embed` call is held until the withdrawal has committed),
+/// so the commit itself must refuse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn score_commit_refuses_a_submission_withdrawn_after_the_read() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+
+    // First case: crash after the read, withdraw, resume.
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        Some(PipelineCrashPoint::AfterScoreArtifactStorage),
+    )
+    .await;
+    let tenant = format!("score-withdrawn-resume-{}", uuid::Uuid::new_v4());
+    let reviewed = run_past_review(&service, &tenant).await;
+    let crashed = service.process_run(&tenant, reviewed.run_id).await;
+    let error = crashed.expect_err("the injected crash must propagate as an error");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    withdraw_submission(&backend, &tenant, reviewed.submission_id).await;
+    expire_lease(&backend, &tenant, reviewed.run_id).await;
+    let resumed = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the resumed Score attempt runs");
+    assert_score_refused_as_inoperable(&service, &tenant, &resumed).await;
+
+    // Second case: the withdrawal commits between Score's read and its
+    // commit, inside one attempt.
+    let dir = tempfile::tempdir().unwrap();
+    let (hold, mut held) = CallHold::new();
+    let service = test_service_with_embedder(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        Arc::new(HoldingEmbedder { hold }),
+    )
+    .await;
+    let tenant = format!("score-withdrawn-mid-attempt-{}", uuid::Uuid::new_v4());
+    let reviewed = run_past_review(&service, &tenant).await;
+    let score = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = reviewed.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    withdraw_submission(&backend, &tenant, reviewed.submission_id).await;
+    held.release();
+    let refused = tokio::time::timeout(HELD_CALL_BOUND, score)
+        .await
+        .expect("Score finishes once released")
+        .expect("the Score task did not panic")
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert_score_refused_as_inoperable(&service, &tenant, &refused).await;
+}
+
+/// Brief section 2 (M9): Settle's index dispatch holds the submission lock
+/// from its guard read until the transaction that records the write
+/// commits.
+///
+/// First case: while an `upsert` is held, a withdrawal's first statement
+/// (`SELECT ... FOR UPDATE` on the submission) must wait; once the write
+/// is released it gets the lock, and by then the dispatch has committed
+/// `index_write_state = 'complete'`. The upsert is held by a channel, not a
+/// timer, so the dispatch is inside its write for the whole 300 ms window;
+/// the withdrawal's connection and transaction are opened before the
+/// window, so only the lock is timed. A dispatch that did not hold the lock
+/// fails both the 300 ms check and the `complete` check, whatever the
+/// timing.
+///
+/// Second case: a withdrawal that already holds the lock (`FOR UPDATE`
+/// and its `trace_withdrawals` row, not yet committed) makes the dispatch
+/// wait; once it commits, the dispatch sees the submission inoperable,
+/// writes nothing, and records `cancelled`. The withdrawal commits only
+/// once PostgreSQL reports the guard read blocked behind it
+/// (`pg_blocking_pids`), so that read always starts before the commit: a
+/// guard that reads the `trace_withdrawals` row with the snapshot it took
+/// before the wait misses it and fails the `cancelled` check every time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_dispatch_holds_the_guard_until_the_write_commits() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+
+    // First case: the withdrawal waits for the write in progress.
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) =
+        held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
+    let tenant = format!("dispatch-guard-held-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
+    let entry_count = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command")
+        .keyed_entries(&tenant_ref)
+        .count();
+    assert!(entry_count > 0);
+
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+
+    let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
+    let (locked_sender, mut locked_receiver) = tokio::sync::oneshot::channel::<String>();
+    let withdrawal = tokio::spawn({
+        let backend = backend.clone();
+        let tenant = tenant.clone();
+        let submission_id = run.submission_id;
+        let run_id = run.run_id;
+        async move {
+            let mut client = backend.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, &tenant).await;
+            ready_sender.send(()).unwrap();
+            tx.query_one(
+                "SELECT 1 FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  FOR UPDATE",
+                &[&tenant, &submission_id],
+            )
+            .await
+            .unwrap();
+            let index_write_state: String = tx
+                .query_one(
+                    "SELECT index_write_state FROM pipeline_runs
+                      WHERE tenant_id = $1 AND run_id = $2",
+                    &[&tenant, &run_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            locked_sender.send(index_write_state).unwrap();
+            tx.commit().await.unwrap();
+        }
+    });
+    tokio::time::timeout(HELD_CALL_BOUND, ready_receiver)
+        .await
+        .expect("the withdrawal's transaction opens within the bound")
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut locked_receiver)
+            .await
+            .is_err(),
+        "the withdrawal's FOR UPDATE must wait while the index write is in progress"
+    );
+
+    held.release();
+    let settled = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle finishes once released")
+        .expect("the Settle task did not panic")
+        .unwrap()
+        .expect("Settle runs");
+    let seen_by_withdrawal = tokio::time::timeout(HELD_CALL_BOUND, locked_receiver)
+        .await
+        .expect("the withdrawal gets the lock once the write commits")
+        .unwrap();
+    tokio::time::timeout(HELD_CALL_BOUND, withdrawal)
+        .await
+        .expect("the withdrawal finishes")
+        .expect("the withdrawal task did not panic");
+    assert_eq!(
+        seen_by_withdrawal, "complete",
+        "the lock is granted only after the index write committed"
+    );
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_membership, "included");
+    assert_eq!(settled.index_write_state, "complete");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        entry_count
+    );
+
+    // Second case: the dispatch waits for a withdrawal that holds the lock,
+    // then cancels. A crash right after the selection persists leaves the
+    // index write `pending`, so the retry goes straight to the dispatch.
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterSettleSelection),
+    )
+    .await;
+    let tenant = format!("dispatch-guard-waits-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let crashed = service.process_run(&tenant, run.run_id).await;
+    let error = crashed.expect_err("the injected crash must propagate as an error");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    let pending = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("run exists");
+    assert_eq!(pending.index_write_state, "pending");
+    expire_lease(&backend, &tenant, run.run_id).await;
+
+    let mut withdrawal_client = backend.trace_pool_for_test().get().await.unwrap();
+    let withdrawal = tenant_tx(&mut withdrawal_client, &tenant).await;
+    let withdrawal_pid: i32 = withdrawal
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    withdrawal
+        .query_one(
+            "SELECT 1 FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR UPDATE",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    withdrawal
+        .execute(
+            "INSERT INTO trace_withdrawals (
+                tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+             ) VALUES ($1, $2, NOW(), 'accepted', 'not_distributed')",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    // Commit only once PostgreSQL reports a session blocked by the
+    // withdrawal's: the dispatch's guard read, the only statement on this
+    // path that waits for the submission lock. So the guard read has
+    // started before the withdrawal commits, whatever the timing.
+    let observer = backend.trace_pool_for_test().get().await.unwrap();
+    let deadline = std::time::Instant::now() + HELD_CALL_BOUND;
+    loop {
+        let blocked: i64 = observer
+            .query_one(
+                "SELECT COUNT(*) FROM pg_locks
+                  WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid))",
+                &[&withdrawal_pid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if blocked > 0 {
+            break;
+        }
+        assert!(
+            !settle.is_finished(),
+            "the dispatch must wait for the withdrawal that holds the submission lock"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dispatch's guard read never waited for the withdrawal's lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    drop(observer);
+    withdrawal.commit().await.unwrap();
+
+    let settled = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle finishes once the withdrawal commits")
+        .expect("the Settle task did not panic")
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "cancelled");
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(index.writer_calls(), 0, "no index entry is written");
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// Ruling S5 and the pool-size-one rule, for Settle's index dispatch: its
+/// transaction holds the one pooled connection, and nothing checks out a
+/// second one while it is open -- on the write path, in the index-outage
+/// branch, and in the content-conflict branch (each error branch drops the
+/// transaction and its client before it records the result). With a pool
+/// of one, a second checkout would wait for the first forever; each pass is
+/// bounded, so that shows as a failure.
+#[tokio::test]
+async fn index_dispatch_never_holds_two_pooled_connections() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+
+    // The index-outage branch, then the write path.
+    let tenant = format!("dispatch-pool-one-{}", uuid::Uuid::new_v4());
+    let (run, _) = tokio::time::timeout(HELD_CALL_BOUND, run_to_settle_ready(&service, &tenant))
+        .await
+        .expect("Review and Score finish on a pool of one");
+    index.set_fault(IndexFault::FailBeforeApply);
+    let retried = tokio::time::timeout(HELD_CALL_BOUND, service.process_run(&tenant, run.run_id))
+        .await
+        .expect("the index-outage branch never waits for a second connection")
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(retried.state, PipelineRunState::Retry);
+    assert_eq!(
+        retried.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+    );
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = tokio::time::timeout(HELD_CALL_BOUND, service.process_run(&tenant, run.run_id))
+        .await
+        .expect("the write path never waits for a second connection")
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "complete");
+
+    // The content-conflict branch.
+    let tenant = format!("dispatch-pool-one-conflict-{}", uuid::Uuid::new_v4());
+    let (run, evidence) =
+        tokio::time::timeout(HELD_CALL_BOUND, run_to_settle_ready(&service, &tenant))
+            .await
+            .expect("Review and Score finish on a pool of one");
+    let command = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command");
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (key, first_entry) = command
+        .keyed_entries(&tenant_ref)
+        .next()
+        .expect("at least one chunk");
+    index
+        .upsert(
+            &key,
+            &vec![9.9_f32; first_entry.embedding.len()],
+            &dependency_content_hash(b"conflicting-content"),
+        )
+        .unwrap();
+    let failed = tokio::time::timeout(HELD_CALL_BOUND, service.process_run(&tenant, run.run_id))
+        .await
+        .expect("the content-conflict branch never waits for a second connection")
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_CONFLICT_LABEL)
+    );
+    assert_eq!(failed.index_write_state, "failed");
+}
+
+/// The run's `pipeline_index_invalidations` rows, as `(registry_revision_id,
+/// reason_code, state, due now)`, and its invalidation state (`none` with no
+/// row).
+async fn index_invalidation_rows(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> (Vec<(uuid::Uuid, String, String, bool)>, String) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT registry_revision_id, reason_code, state, next_attempt_at <= NOW()
+               FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+        .collect();
+    let run_state: String = tx
+        .query_one(
+            "SELECT COALESCE((SELECT x.state FROM pipeline_index_invalidations x
+                                WHERE x.tenant_id = r.tenant_id AND x.run_id = r.run_id),
+                             'none')
+               FROM pipeline_runs r
+              WHERE r.tenant_id = $1 AND r.run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    (rows, run_state)
+}
+
+/// `index_write_state = 'pending'` may be partly written. Here a dispatch
+/// attempt writes the first entry and then rolls back: the index stores it
+/// and answers `Uncertain` (`IndexFault::LostAfterApply`), so the run
+/// retries under `index_unavailable` with `pending` kept and the entry
+/// live. A withdrawal then commits. The retry's guard reads the submission
+/// inoperable and records `cancelled`, and in the same transaction it
+/// queues an invalidation of the revision (due at once); queueing it again
+/// changes nothing. `process_index_invalidations` then removes the entry the
+/// earlier attempt wrote, so it does not stay visible. The cancel wakes the
+/// worker's invalidation step (Zaki review 1, round 2, item 4); the
+/// withdrawal here, written straight to the database, woke nothing.
+#[tokio::test]
+async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("dispatch-partial-cancel-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let revision_id = run.approved_revision_id.expect("an approved revision");
+
+    index.set_fault(IndexFault::LostAfterApply);
+    let retried = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(retried.state, PipelineRunState::Retry);
+    assert_eq!(
+        retried.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+    );
+    assert_eq!(retried.index_write_state, "pending");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        1,
+        "the attempt wrote its first entry before it rolled back"
+    );
+
+    withdraw_submission(&backend, &tenant, run.submission_id).await;
+    force_due(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        service.take_follow_ups(&tenant),
+        PipelineFollowUps::default()
+    );
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "cancelled");
+    assert_eq!(settled.index_membership, "excluded");
+    assert!(
+        service.take_follow_ups(&tenant).index_invalidations,
+        "the cancel woke the invalidation step"
+    );
+
+    let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        rows,
+        vec![(
+            revision_id,
+            PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            "pending".to_string(),
+            true,
+        )],
+        "one invalidation of the revision is queued, due at once"
+    );
+    assert_eq!(run_state, "pending");
+
+    // Queueing it again (the withdrawal path does the same) keeps the one
+    // row and the run's state as they are.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    PgPipelineStore::enqueue_index_invalidation_on_tx(&tx, &settled, "withdrawn", None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        index_invalidation_rows(&backend, &tenant, run.run_id).await,
+        (rows, run_state)
+    );
+
+    // The queued invalidation removes the entry the earlier attempt wrote.
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "the partly written entry does not stay visible"
+    );
+    let (processed_rows, processed_run_state) =
+        index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        processed_rows
+            .iter()
+            .map(|(revision, reason, state, _)| (*revision, reason.as_str(), state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(
+            revision_id,
+            PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+            "complete"
+        )]
+    );
+    assert_eq!(processed_run_state, "complete");
 }
 
 /// Amendments-971 A9: each instrument settles as an independent leg with no
@@ -6549,6 +9127,72 @@ async fn a_conflict_leg_forfeited_on_withdrawal_keeps_submission_inoperable() {
         leg_state(&rows, "trace_credit"),
         "complete",
         "a leg completed earlier stays complete: no leg reverses another"
+    );
+}
+
+/// Ruling RB-6: a `trace_credit` leg that a Settle run forfeits (here, via
+/// the same withdrawal-after-Score path
+/// `withdrawal_after_score_forfeits_pending_operations_and_settle_completes`
+/// above drives) must read as `Forfeited`, not fall through to `Pending`
+/// forever -- it never settles and is never paid. `contributor_credit`'s
+/// `pending_microcredits` must not count it either.
+#[tokio::test]
+async fn a_forfeited_trace_credit_leg_reads_as_forfeited_not_pending() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-forfeit-status-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:test";
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    withdraw_submission(&backend, &tenant, run.submission_id).await;
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes despite the withdrawal");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let credit_leg = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit leg present");
+    assert_eq!(credit_leg.operation_state, "forfeited");
+
+    let product = PipelineProductStore::new(backend.clone());
+    let status = product
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        status.credit,
+        PipelineCreditStatus::Forfeited,
+        "a forfeited trace_credit leg must not read as Pending"
+    );
+
+    let credit_summary = product
+        .contributor_credit(&tenant, principal)
+        .await
+        .unwrap();
+    assert_eq!(
+        credit_summary.pending_microcredits, 0,
+        "a forfeited leg must not count toward pending credit"
     );
 }
 
@@ -8061,9 +10705,9 @@ async fn transient_policy_errors_do_not_exhaust_the_trace() {
     assert_eq!(scored.state, PipelineRunState::Pending);
     assert_eq!(scored.next_phase, Some(Phase::Settle));
     assert_eq!(
-        scored.attempt_count,
-        attempt_count_before_score + 1,
-        "the attempt that finally succeeds is the only one that charges the trace"
+        scored.attempt_count, 0,
+        "no failed attempt charged the trace (asserted above), and the Score \
+         commit leaves Settle the whole budget (multi-lens L2-1)"
     );
 }
 
@@ -8660,7 +11304,7 @@ impl SettlementAdapter for OutageThenRecordingAdapter {
     ) -> Result<SettlementReceipt, SettlementError> {
         let failing = self
             .failures_left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                 left.checked_sub(1)
             })
             .is_ok();
@@ -10538,8 +13182,13 @@ async fn an_unreconciled_leg_on_a_live_run_is_dispatched_again() {
 /// `trace_credit_settlement_batches` rows the Trace Credit leg creates),
 /// the tenant's `pipeline_bundle_packages` / `pipeline_active_bundles` /
 /// `pipeline_bundle_policy_status` rows (`register_default_bundle`, inside
-/// `submit_registered`), its committed `pipeline_receipt_artifacts` row,
-/// and its `pipeline_admission_usage` row.
+/// `submit_registered`), its committed `pipeline_receipt_artifacts` row, its
+/// `pipeline_admission_usage` row, and -- inserted directly by SQL through
+/// an owner connection, as fixtures: no product write path puts all of
+/// them on one admitted run -- one `pipeline_review_claims`,
+/// `pipeline_review_assessments`, and `pipeline_index_invalidations` row, and
+/// one `pipeline_export_snapshots` row with one
+/// `pipeline_export_snapshot_items` row.
 async fn run_with_every_pipeline_row_kind(
     service: &PipelineService,
     tenant: &str,
@@ -10551,13 +13200,145 @@ async fn run_with_every_pipeline_row_kind(
         .unwrap()
         .expect("Settle runs to completion");
     assert_eq!(settled.state, PipelineRunState::Complete);
+    insert_review_claim_and_assessment(tenant, settled.run_id).await;
+    insert_index_invalidation(tenant, &settled).await;
+    insert_export_snapshot_and_item(tenant, &settled).await;
     settled
 }
 
+/// Inserts one `pipeline_review_claims` row and one
+/// `pipeline_review_assessments` row for `run_id`, directly by SQL in the
+/// run's own tenant-scoped transaction, as a fixture: the product write
+/// paths claim and assess only a quarantined run. Test setup, not the
+/// runtime under test, so it writes through an owner connection. Returns
+/// the assessment's id.
+async fn insert_review_claim_and_assessment(tenant: &str, run_id: uuid::Uuid) -> uuid::Uuid {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant).await;
+    let reviewer = format!("reviewer_sha256:{}", "b".repeat(64));
+    tx.execute(
+        "INSERT INTO pipeline_review_claims (
+            tenant_id, run_id, reviewer_principal_ref, lease_token, lease_expires_at
+         ) VALUES ($1, $2, $3, $4, NOW() + INTERVAL '1 hour')",
+        &[&tenant, &run_id, &reviewer, &uuid::Uuid::new_v4()],
+    )
+    .await
+    .expect("insert a review claim");
+    let assessment_id = uuid::Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO pipeline_review_assessments (
+            tenant_id, assessment_id, run_id, reviewer_principal_ref, recommendation,
+            reason_code, evidence_hash
+         ) VALUES ($1, $2, $3, $4, 'approve', $5, $6)",
+        &[
+            &tenant,
+            &assessment_id,
+            &run_id,
+            &reviewer,
+            &"review_test_assessment",
+            &format!("sha256:{}", "c".repeat(64)),
+        ],
+    )
+    .await
+    .expect("insert a review assessment");
+    tx.commit().await.unwrap();
+    assessment_id
+}
+
+/// Inserts one `pipeline_index_invalidations` row for `run`, directly by
+/// SQL through an owner connection, for the same reason as
+/// `insert_review_claim_and_assessment`.
+async fn insert_index_invalidation(tenant: &str, run: &PipelineRunRecord) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant).await;
+    tx.execute(
+        "INSERT INTO pipeline_index_invalidations (
+            tenant_id, run_id, submission_id, registry_revision_id, reason_code
+         ) VALUES ($1, $2, $3, $4, $5)",
+        &[
+            &tenant,
+            &run.run_id,
+            &run.submission_id,
+            &uuid::Uuid::new_v4(),
+            &"review_test_invalidation",
+        ],
+    )
+    .await
+    .expect("insert an index invalidation");
+    tx.commit().await.unwrap();
+}
+
+/// Inserts one `pipeline_export_snapshots` row and one
+/// `pipeline_export_snapshot_items` row for `run`, directly by SQL through
+/// an owner connection, for the same reason as
+/// `insert_review_claim_and_assessment`. Returns
+/// `(snapshot_id, registry_revision_id)` so a caller that needs to name the
+/// item directly (a delete test) does not have to read them back.
+async fn insert_export_snapshot_and_item(
+    tenant: &str,
+    run: &PipelineRunRecord,
+) -> (uuid::Uuid, uuid::Uuid) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant).await;
+    let snapshot_id = uuid::Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO pipeline_export_snapshots (
+            tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        &[
+            &tenant,
+            &snapshot_id,
+            &format!("sha256:{}", "d".repeat(64)),
+            &"exporter_sha256:testexporter",
+            &"research",
+            &format!("sha256:{}", "e".repeat(64)),
+            &"policy-test-v1",
+            &format!("sha256:{}", "f".repeat(64)),
+        ],
+    )
+    .await
+    .expect("insert an export snapshot");
+    let registry_revision_id = uuid::Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO pipeline_export_snapshot_items (
+            tenant_id, snapshot_id, ordinal, run_id, submission_id, trace_id,
+            registry_revision_id, source_object_ref_id, source_content_hash, bundle_id,
+            outcome_schema_id, outcome_schema_version, authorized_view_schema_id,
+            consent_scopes, allowed_uses
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+        &[
+            &tenant,
+            &snapshot_id,
+            &0_i32,
+            &run.run_id,
+            &run.submission_id,
+            &run.trace_id,
+            &registry_revision_id,
+            &run.source_object_ref_id,
+            &format!("sha256:{}", "1".repeat(64)),
+            &run.bundle_id,
+            &"pipeline.outcome.test.v1",
+            &1_i32,
+            &"pipeline.view.test.v1",
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+        ],
+    )
+    .await
+    .expect("insert an export snapshot item");
+    tx.commit().await.unwrap();
+    (snapshot_id, registry_revision_id)
+}
+
 /// Deleting the submission that a fully-settled run belongs to must succeed
-/// and take every pipeline row for it along, not stop partway at an
-/// immutability trigger or a foreign key that has not yet seen its sibling
-/// cascade finish.
+/// and take every pipeline row for it along -- including a review claim, a
+/// review assessment, an index invalidation, and an export snapshot item
+/// (Ruling RB-5) -- not stop partway at an immutability trigger or a foreign
+/// key that has not yet seen its sibling cascade finish. The export
+/// snapshot itself is tenant-scoped, not submission-scoped, so it is not
+/// expected to disappear here; `deleting_a_tenant_with_pipeline_rows_succeeds`
+/// below covers it.
 #[tokio::test]
 async fn deleting_a_submission_with_pipeline_rows_succeeds() {
     let Some(backend) = runtime_backend(4).await else {
@@ -10589,13 +13370,35 @@ async fn deleting_a_submission_with_pipeline_rows_succeeds() {
         0,
         "the run cascaded away with its submission"
     );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_claims").await,
+        0,
+        "the review claim cascaded away with its run"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_assessments").await,
+        0,
+        "the review assessment cascaded away with its run"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_index_invalidations").await,
+        0,
+        "the index invalidation cascaded away with its run"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshot_items").await,
+        0,
+        "the export snapshot item cascaded away with its run"
+    );
 }
 
 /// The tenant-delete half of the same requirement: the cascade chain runs
 /// from `trace_tenants` instead of `trace_submissions`, and the tenant also
 /// owns `pipeline_bundle_packages` / `pipeline_active_bundles` /
 /// `pipeline_bundle_policy_status` / `pipeline_admission_usage` rows
-/// directly (not through a submission).
+/// directly (not through a submission). Here the export snapshot is also
+/// tenant-scoped, so (unlike the submission-delete half above) it is
+/// expected to disappear along with its item (Ruling RB-5).
 #[tokio::test]
 async fn deleting_a_tenant_with_pipeline_rows_succeeds() {
     let Some(backend) = runtime_backend(4).await else {
@@ -10631,6 +13434,21 @@ async fn deleting_a_tenant_with_pipeline_rows_succeeds() {
         .get(0);
     check_tx.commit().await.unwrap();
     assert_eq!(remaining, 0, "the tenant row itself is gone");
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_assessments").await,
+        0,
+        "the review assessment cascaded away with its tenant"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        0,
+        "the export snapshot cascaded away with its tenant"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshot_items").await,
+        0,
+        "the export snapshot item cascaded away with its tenant"
+    );
 }
 
 /// The append-only property the trigger exists for stays exactly as strict
@@ -10688,5 +13506,10775 @@ async fn a_direct_outcome_delete_is_still_refused_while_its_run_exists() {
     assert!(
         db_error_message(&error).contains("phase outcomes are immutable"),
         "unexpected owner error: {error:?}"
+    );
+}
+
+/// Ruling RB-5, the review-assessment half: `pipeline_review_assessments` is
+/// append-only like `phase_outcomes`, but its own direct delete must still
+/// be refused while its run exists -- only a cascade (the run going away
+/// with it) is let through.
+#[tokio::test]
+async fn a_direct_review_assessment_delete_is_still_refused_while_its_run_exists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("assessment-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let assessment_id = insert_review_claim_and_assessment(&tenant, run.run_id).await;
+
+    // The runtime login holds no DELETE on pipeline_review_assessments; the
+    // owner does, and the trigger refuses it.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let error = tx
+        .execute(
+            "DELETE FROM pipeline_review_assessments WHERE tenant_id = $1 AND assessment_id = $2",
+            &[&tenant, &assessment_id],
+        )
+        .await
+        .expect_err("a review assessment delete is refused while its run still exists");
+    assert!(
+        db_error_message(&error).contains("pipeline review assessments are immutable"),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// Ruling RB-5, the export-snapshot half: a direct delete of the snapshot
+/// itself is still refused while its run (and item) exist -- only a cascade
+/// (the tenant going away with it) is let through.
+#[tokio::test]
+async fn a_direct_export_snapshot_delete_is_still_refused_while_its_run_exists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("snapshot-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let (snapshot_id, _registry_revision_id) = insert_export_snapshot_and_item(&tenant, &run).await;
+
+    // The runtime login holds no DELETE on pipeline_export_snapshots; the
+    // owner does, and the trigger refuses it.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let error = tx
+        .execute(
+            "DELETE FROM pipeline_export_snapshots WHERE tenant_id = $1 AND snapshot_id = $2",
+            &[&tenant, &snapshot_id],
+        )
+        .await
+        .expect_err("an export snapshot delete is refused while its tenant still exists");
+    assert!(
+        db_error_message(&error).contains("pipeline export snapshots are retained"),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// Ruling RB-5, the export-snapshot-item half: a direct delete of the item
+/// itself is still refused while its run exists -- only a cascade (the run,
+/// submission, or tenant going away with it) is let through.
+#[tokio::test]
+async fn a_direct_export_snapshot_item_delete_is_still_refused_while_its_run_exists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("snapshot-item-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let (snapshot_id, registry_revision_id) = insert_export_snapshot_and_item(&tenant, &run).await;
+
+    // The runtime login holds no DELETE on pipeline_export_snapshot_items;
+    // the owner does, and the trigger refuses it.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let error = tx
+        .execute(
+            "DELETE FROM pipeline_export_snapshot_items
+             WHERE tenant_id = $1 AND snapshot_id = $2 AND registry_revision_id = $3",
+            &[&tenant, &snapshot_id, &registry_revision_id],
+        )
+        .await
+        .expect_err("an export snapshot item delete is refused while its run still exists");
+    assert!(
+        db_error_message(&error).contains("pipeline export snapshots are retained"),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// Finding I1 (round 1 of the RB-5 review): nothing guards a direct `DELETE
+/// FROM pipeline_runs` -- no trigger sits on that table -- so
+/// `pipeline_export_snapshot_items`' foreign key to it must be the deferred
+/// one, not the cascade one, or a lone run delete (no submission or tenant
+/// delete involved) could carry a retained export item away with it while
+/// the submission and tenant stayed live. The deferred check still refuses
+/// that at commit: the `DELETE` itself queues without error, and the
+/// violation surfaces only when the transaction tries to commit.
+#[tokio::test]
+async fn a_direct_pipeline_run_delete_is_still_refused_while_an_export_item_references_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("run-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    insert_export_snapshot_and_item(&tenant, &run).await;
+
+    // The runtime login holds no DELETE on pipeline_runs; the owner does,
+    // and the deferred foreign key refuses it.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "DELETE FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .expect("the delete itself queues fine; the deferred check fires at commit");
+    let error = tx
+        .commit()
+        .await
+        .expect_err("a lone run delete is refused at commit while an export item references it");
+    assert!(
+        db_error_message(&error).contains("violates foreign key constraint"),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// Submits one envelope as `principal` in `tenant` and drives it through
+/// Review, Score, and Settle to completion. Used by the product-read tests
+/// below, which do not care about the run's mechanics, only about its final
+/// (or, in `status_follows_outcomes`, intermediate) product-facing status.
+async fn submit_and_complete(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+) -> PipelineRunRecord {
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    submit_envelope_and_complete(service, tenant, principal, &env).await
+}
+
+/// `submit_and_complete` for an envelope the caller built.
+async fn submit_envelope_and_complete(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+    env: &TraceContributionEnvelope,
+) -> PipelineRunRecord {
+    let raw = serde_json::to_vec(env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = submit_registered(
+        service,
+        PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: env,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs")
+}
+
+/// Review Focus 4 (Task 11): status, credit, and attestation reads never
+/// return another tenant's runs, and a contributor sees only its own
+/// submissions -- even when another tenant's principal string is identical,
+/// and even when another tenant's own submission id is asked for directly.
+#[tokio::test]
+async fn product_reads_are_tenant_and_principal_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+
+    let tenant_a = format!("product-scope-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("product-scope-b-{}", uuid::Uuid::new_v4());
+    let principal_1 = "principal_sha256:product-scope-p1";
+    let principal_2 = "principal_sha256:product-scope-p2";
+
+    let run_a1 = submit_and_complete(&service, &tenant_a, principal_1).await;
+    let run_a2 = submit_and_complete(&service, &tenant_a, principal_2).await;
+    // Same principal string as tenant A's first submission, but tenant B.
+    let run_b1 = submit_and_complete(&service, &tenant_b, principal_1).await;
+
+    let product = PipelineProductStore::new(backend.clone());
+
+    let p1_statuses = product
+        .own_contributor_statuses(&tenant_a, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(p1_statuses.len(), 1);
+    assert_eq!(p1_statuses[0].submission_id, run_a1.submission_id);
+
+    let p2_statuses = product
+        .own_contributor_statuses(&tenant_a, principal_2)
+        .await
+        .unwrap();
+    assert_eq!(p2_statuses.len(), 1);
+    assert_eq!(p2_statuses[0].submission_id, run_a2.submission_id);
+
+    let b1_statuses = product
+        .own_contributor_statuses(&tenant_b, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(b1_statuses.len(), 1);
+    assert_eq!(
+        b1_statuses[0].submission_id, run_b1.submission_id,
+        "tenant B's own read must not return tenant A's submission for the same principal string"
+    );
+
+    // A submission id that belongs to tenant B, asked through tenant A,
+    // returns nothing -- not tenant B's row, not an error.
+    let cross_tenant = product
+        .contributor_statuses(&tenant_a, principal_1, &[run_b1.submission_id])
+        .await
+        .unwrap();
+    assert!(
+        cross_tenant.is_empty(),
+        "tenant A must not see tenant B's submission"
+    );
+
+    // Finding I2: within the SAME tenant, one contributor's submission id
+    // asked for by a different principal returns nothing -- not the other
+    // principal's row, not an error. Nothing above exercises this: it is
+    // the `auth_principal_ref` predicate specifically, not the tenant
+    // predicate, that has to hold here.
+    let cross_principal_same_tenant = product
+        .contributor_statuses(&tenant_a, principal_1, &[run_a2.submission_id])
+        .await
+        .unwrap();
+    assert!(
+        cross_principal_same_tenant.is_empty(),
+        "principal 1 must not see principal 2's submission in the same tenant"
+    );
+    let cross_principal_same_tenant_attestation = product
+        .score_attestation_entries(&tenant_a, principal_1, &[run_a2.submission_id])
+        .await
+        .unwrap();
+    assert!(
+        cross_principal_same_tenant_attestation.is_empty(),
+        "principal 1 must not see principal 2's score attestation in the same tenant"
+    );
+
+    // The admin-scoped read over both of tenant A's principals sees both of
+    // tenant A's submissions and never tenant B's, even when tenant B's
+    // submission id is requested in the same batch.
+    let both_in_a = product
+        .contributor_statuses_for_principals(
+            &tenant_a,
+            &[principal_1.to_string(), principal_2.to_string()],
+            &[
+                run_a1.submission_id,
+                run_a2.submission_id,
+                run_b1.submission_id,
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(both_in_a.len(), 2);
+    assert!(
+        both_in_a
+            .iter()
+            .all(|status| status.submission_id != run_b1.submission_id)
+    );
+
+    // Credit and attestation reads are scoped the same way.
+    let credit_a1 = product
+        .contributor_credit(&tenant_a, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(credit_a1.submission_count, 1);
+    let credit_b1 = product
+        .contributor_credit(&tenant_b, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(credit_b1.submission_count, 1);
+
+    let attestations_a1 = product
+        .own_score_attestation_entries(&tenant_a, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(attestations_a1.len(), 1);
+    assert_eq!(attestations_a1[0].submission_id, run_a1.submission_id);
+
+    let cross_attestation = product
+        .score_attestation_entries(&tenant_a, principal_1, &[run_b1.submission_id])
+        .await
+        .unwrap();
+    assert!(
+        cross_attestation.is_empty(),
+        "tenant A must not see tenant B's score attestation"
+    );
+}
+
+/// Task 11: status reads follow the run's outcomes, never a mutable status
+/// table (P3-D13). Covers: unscored before Score, the awards after Score,
+/// complete after Settle, the credit status moving from pending to
+/// finalized only once the Trace Credit batch actually finalizes (ruling
+/// T11-1), and a quarantined run's Review-phase wait.
+#[tokio::test]
+async fn status_follows_outcomes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let product = PipelineProductStore::new(backend.clone());
+
+    // -- Main progression: unscored -> scored -> settled/finalized. --
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("status-follows-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:status-follows";
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = submit_registered(
+        &service,
+        PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &env,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let before_score = product
+        .contributor_statuses(&tenant, principal, &[created.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(before_score.credit, PipelineCreditStatus::Unscored);
+    assert_eq!(before_score.score_microcredits, None);
+    assert!(
+        before_score.instruments.is_empty(),
+        "no settlement rows exist before Score seeds them"
+    );
+
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    let after_score = product
+        .contributor_statuses(&tenant, principal, &[created.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(after_score.score_microcredits, Some(1_000_000));
+    assert_eq!(after_score.instruments.len(), 2);
+    assert_eq!(
+        after_score.credit,
+        PipelineCreditStatus::Pending,
+        "scored but not yet settled"
+    );
+
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    let after_settle = product
+        .contributor_statuses(&tenant, principal, &[created.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(after_settle.processing, PipelineProcessingStatus::Complete);
+    assert_eq!(after_settle.credit, PipelineCreditStatus::Finalized);
+    let settled_trace_credit = after_settle
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .unwrap();
+    assert_eq!(settled_trace_credit.internal_settlement_state, "finalized");
+
+    // -- Ruling T11-1: pending before the batch is finalized. --
+    //
+    // PR 2's FR2 transaction (`settle_internal_credit`) commits the ledger
+    // row, the finalized batch, and the settlement completion together, so
+    // there is no fixture that leaves a ledger row without a batch for the
+    // minimal family -- instead, observe the state with a crash point that
+    // leaves the `trace_credit` settlement row untouched.
+    // `list_settlements` orders by `instrument_id`, so `storage_rebate`
+    // (which sorts first) completes and the crash fires right after,
+    // before `trace_credit` is dispatched at all.
+    let dir_pending = tempfile::tempdir().unwrap();
+    let (pending_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir_pending),
+        scored_config(false),
+        Some(PipelineCrashPoint::AfterInstrumentOperation),
+    )
+    .await;
+    let tenant_pending = format!("status-follows-pending-{}", uuid::Uuid::new_v4());
+    let principal_pending = "principal_sha256:status-follows-pending";
+    let env_pending = envelope(uuid::Uuid::new_v4()).await;
+    let raw_pending = serde_json::to_vec(&env_pending).unwrap();
+    let key_pending = env_pending.submission_id.to_string();
+    let PipelineReceiptResult::Created(created_pending) = submit_registered(
+        &pending_service,
+        PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant_pending,
+            actor_principal_ref: principal_pending,
+            counts_toward_quota: true,
+            request_idempotency_key: &key_pending,
+            request_bytes: &raw_pending,
+            server_envelope: &env_pending,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    pending_service
+        .process_run(&tenant_pending, created_pending.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    pending_service
+        .process_run(&tenant_pending, created_pending.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    let crash_error = pending_service
+        .process_run(&tenant_pending, created_pending.run_id)
+        .await
+        .expect_err("Settle crashes right after the first settlement leg completes");
+    assert_eq!(crash_error.to_string(), INJECTED_PIPELINE_CRASH);
+
+    let pending_status = product
+        .contributor_statuses(
+            &tenant_pending,
+            principal_pending,
+            &[created_pending.submission_id],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let pending_trace_credit = pending_status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .expect("trace_credit settlement row seeded at Score");
+    assert_eq!(pending_trace_credit.internal_settlement_state, "pending");
+    assert_ne!(pending_trace_credit.internal_settlement_state, "finalized");
+    assert_eq!(pending_status.credit, PipelineCreditStatus::Pending);
+
+    // Force the stale lease to expire (same technique as
+    // `crash_matrix_produces_one_logical_effect_per_point`), then resume
+    // with the same service -- `inject_crash` only fires once, so this call
+    // runs Settle to completion.
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant_pending).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+             WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+            &[&tenant_pending, &created_pending.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let resumed = pending_service
+        .process_run(&tenant_pending, created_pending.run_id)
+        .await
+        .unwrap()
+        .expect("Settle resumes and completes");
+    assert_eq!(resumed.state, PipelineRunState::Complete);
+
+    let finalized_status = product
+        .contributor_statuses(
+            &tenant_pending,
+            principal_pending,
+            &[created_pending.submission_id],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let finalized_trace_credit = finalized_status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .unwrap();
+    assert_eq!(
+        finalized_trace_credit.internal_settlement_state,
+        "finalized"
+    );
+    assert_eq!(finalized_status.credit, PipelineCreditStatus::Finalized);
+
+    // -- Ruling T11-4: a quarantined run shows Review as both the current
+    // and the responsible phase (Review's own wait set the label), not
+    // Admission (the phase that last committed an outcome). --
+    let dir_quarantine = tempfile::tempdir().unwrap();
+    let (quarantine_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir_quarantine),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant_quarantine = format!("status-follows-quarantine-{}", uuid::Uuid::new_v4());
+    let principal_quarantine = "principal_sha256:status-follows-quarantine";
+    let mut env_quarantine = envelope(uuid::Uuid::new_v4()).await;
+    env_quarantine.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw_quarantine = serde_json::to_vec(&env_quarantine).unwrap();
+    let key_quarantine = env_quarantine.submission_id.to_string();
+    let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
+        &quarantine_service,
+        PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant_quarantine,
+            actor_principal_ref: principal_quarantine,
+            counts_toward_quota: true,
+            request_idempotency_key: &key_quarantine,
+            request_bytes: &raw_quarantine,
+            server_envelope: &env_quarantine,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    quarantine_service
+        .process_run(&tenant_quarantine, created_quarantine.run_id)
+        .await
+        .unwrap()
+        .expect("Review waits for a human assessment");
+
+    let quarantine_status = product
+        .contributor_statuses(
+            &tenant_quarantine,
+            principal_quarantine,
+            &[created_quarantine.submission_id],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(quarantine_status.current_phase, Some(Phase::Review));
+    assert_eq!(quarantine_status.responsible_phase, Some(Phase::Review));
+    assert_eq!(
+        quarantine_status.reason_label.as_deref(),
+        Some("review_assessment_required")
+    );
+    assert_eq!(
+        quarantine_status.processing,
+        PipelineProcessingStatus::AwaitingReview
+    );
+}
+
+/// Task 11: `PipelineScoreAttestationEntry` carries no raw tenant id,
+/// principal, or trace text -- only ids, hashes, and the Score decision
+/// (itself only instrument ids and amounts).
+#[tokio::test]
+async fn attestation_entries_are_hash_only() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("attestation-hash-only-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:attestation-hash-only";
+    submit_and_complete(&service, &tenant, principal).await;
+
+    let product = PipelineProductStore::new(backend.clone());
+    let entries = product
+        .own_score_attestation_entries(&tenant, principal)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    let serialized = serde_json::to_string(&entries[0]).unwrap();
+    assert!(
+        !serialized.contains(&tenant),
+        "attestation entry must not carry the raw tenant id"
+    );
+    assert!(
+        !serialized.contains(principal),
+        "attestation entry must not carry the raw principal ref"
+    );
+    assert!(
+        !serialized.contains("Inspect the bounded runtime fixture"),
+        "attestation entry must not carry raw trace text"
+    );
+}
+
+/// Task 11: a `storage_rebate` award above `u64::MAX` round-trips through
+/// the status read as the exact decimal string, since
+/// `PipelineInstrumentStatus.atomic_units` is `AtomicUnits` (a `u128`, #971)
+/// serialized as a decimal string, not a JSON number. Also covers Finding
+/// I1: this run's awards have no `trace_credit` entry at all (only
+/// `storage_rebate`), so the credit status must read `Zero`/`Some(0)`, not
+/// fall through to `Pending`.
+#[tokio::test]
+async fn amounts_above_u64_round_trip_as_strings() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let large_amount = AtomicUnits::from_raw(u128::from(u64::MAX) + 1);
+    let config = PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: "storage_rebate".into(),
+            atomic_units: large_amount,
+            descriptor: storage_rebate_descriptor(),
+        }],
+        include_index: false,
+        variant: None,
+    };
+    let (service, _, _) = test_service(backend.clone(), artifact_store(&dir), config, None).await;
+    let tenant = format!("large-amount-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:large-amount";
+    let run = submit_and_complete(&service, &tenant, principal).await;
+
+    let product = PipelineProductStore::new(backend.clone());
+    let status = product
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.instruments.len(), 1);
+    let rebate = &status.instruments[0];
+    assert_eq!(rebate.instrument_id, "storage_rebate");
+    assert_eq!(rebate.atomic_units, large_amount);
+
+    // Finding I1: no `trace_credit` award in this run's Score decision, so
+    // the credit status must be `Zero` with `score_microcredits == Some(0)`
+    // -- not `Pending` (the pre-fix behavior, since `score_microcredits`
+    // used to return `None` whenever no `trace_credit` award was found).
+    assert_eq!(status.credit, PipelineCreditStatus::Zero);
+    assert_eq!(status.score_microcredits, Some(0));
+
+    let serialized = serde_json::to_value(rebate).unwrap();
+    assert_eq!(
+        serialized["atomic_units"],
+        serde_json::json!("18446744073709551616")
+    );
+}
+
+/// Finding I1: `minimal_config` awards nothing at all
+/// (`instrument_awards: vec![]`) -- `InstrumentAward::new` refuses a zero
+/// amount (`ZeroInstrumentAward`), so "no trace_credit award" is how main's
+/// compatibility policy represents a scored-but-zero run, not an error and
+/// not "unscored" (`score_outcome_id` is still `Some`; Score did commit).
+/// The status and attestation reads must show `Zero`/`Some(0)`/`0`, and the
+/// attestation read for the whole principal must not fail closed on this
+/// one run (the pre-fix `score_microcredits` returned `None` here, which
+/// `attestation_from_row` turned into a `Serialization` error that stopped
+/// `collect()` for the entire batch).
+#[tokio::test]
+async fn zero_credit_runs_read_as_zero_not_pending() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("zero-credit-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:zero-credit";
+    let run = submit_and_complete(&service, &tenant, principal).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    let product = PipelineProductStore::new(backend.clone());
+    let status = product
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.credit, PipelineCreditStatus::Zero);
+    assert_eq!(status.score_microcredits, Some(0));
+
+    let entries = product
+        .own_score_attestation_entries(&tenant, principal)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the zero-credit run's attestation entry must not be dropped by a batch-wide error"
+    );
+    assert_eq!(entries[0].scored_microcredits, 0);
+}
+
+/// Task 13: `operational_summary` counts runs per (phase, state,
+/// reason_label) bucket across every state a tenant's runs can be in --
+/// including a run parked awaiting a human assessment
+/// (`review_assessment_required`), a retry run (`embedder_unavailable`), and
+/// a run that exhausted its attempts (`attempts_exhausted`) -- and
+/// separately rolls up the retryable- and terminal-error counts.
+#[tokio::test]
+async fn operational_summary_counts_runs_by_state_and_label() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let tenant = format!("operational-summary-{}", uuid::Uuid::new_v4());
+    let store = PgPipelineStore::new(backend.clone());
+
+    // Pending: an admitted run waiting for Review to claim it.
+    let pending_run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+
+    // Awaiting review, labeled `review_assessment_required`: Review
+    // quarantines the run and parks it for a human assessment. A parked run
+    // is not a retry.
+    let dir_quarantine = tempfile::tempdir().unwrap();
+    let (quarantine_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir_quarantine),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let principal_quarantine = "principal_sha256:operational-summary-quarantine";
+    let mut env_quarantine = envelope(uuid::Uuid::new_v4()).await;
+    env_quarantine.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw_quarantine = serde_json::to_vec(&env_quarantine).unwrap();
+    let key_quarantine = env_quarantine.submission_id.to_string();
+    let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
+        &quarantine_service,
+        PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: principal_quarantine,
+            counts_toward_quota: true,
+            request_idempotency_key: &key_quarantine,
+            request_bytes: &raw_quarantine,
+            server_envelope: &env_quarantine,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    quarantine_service
+        .process_run(&tenant, created_quarantine.run_id)
+        .await
+        .unwrap()
+        .expect("Review waits for a human assessment");
+    let quarantined = store
+        .get_run(&tenant, created_quarantine.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        quarantined.last_error_label.as_deref(),
+        Some("review_assessment_required"),
+        "the fixture's parked run must actually carry the label the summary is expected to surface"
+    );
+
+    // Retry: an uncharged transient failure, labeled `embedder_unavailable`,
+    // same technique as
+    // `attempts_exhaust_to_failed_but_transient_retries_do_not_charge`.
+    let retry_run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed_retry = store
+        .claim_run(&tenant, retry_run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .mark_transient_retry(&claimed_retry, "embedder_unavailable")
+        .await
+        .unwrap();
+
+    // Complete: a full admission-review-score-settle run.
+    let dir_complete = tempfile::tempdir().unwrap();
+    let (complete_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir_complete),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let complete_run = submit_and_complete(
+        &complete_service,
+        &tenant,
+        "principal_sha256:operational-summary-complete",
+    )
+    .await;
+    assert_eq!(complete_run.state, PipelineRunState::Complete);
+
+    // Failed: attempts exhausted, same technique as
+    // `attempts_exhaust_to_failed_but_transient_retries_do_not_charge`.
+    let failed_run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    for _ in 0..3 {
+        let claimed = store
+            .claim_run(&tenant, failed_run.run_id, chrono::Duration::seconds(30))
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .mark_transient_retry(&claimed, "embedder_unavailable")
+            .await
+            .unwrap();
+        force_due(&backend, &tenant, failed_run.run_id).await;
+    }
+    for _ in 1..=5 {
+        let claimed = store
+            .claim_run(&tenant, failed_run.run_id, chrono::Duration::seconds(30))
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .mark_retry(&claimed, "minimal_policy_failed")
+            .await
+            .unwrap();
+        force_due(&backend, &tenant, failed_run.run_id).await;
+    }
+    let failed = store
+        .get_run(&tenant, failed_run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, PipelineRunState::Failed);
+
+    let product = PipelineProductStore::new(backend.clone());
+    let summary = product.operational_summary(&tenant).await.unwrap();
+
+    // Exact (phase, state, reason_label, count) buckets: grouping only by
+    // (phase, state) would let a retry or a failure surface under any
+    // reason label -- including no label at all -- and still pass, which is
+    // exactly the regression the label column exists to catch.
+    let mut buckets: Vec<(String, String, Option<String>, u64)> = summary
+        .work
+        .iter()
+        .map(|bucket| {
+            (
+                bucket.phase.clone(),
+                bucket.state.clone(),
+                bucket.reason_label.clone(),
+                bucket.count,
+            )
+        })
+        .collect();
+    buckets.sort();
+    let mut expected = vec![
+        ("review".to_string(), "pending".to_string(), None, 1u64),
+        (
+            "review".to_string(),
+            "awaiting_review".to_string(),
+            Some("review_assessment_required".to_string()),
+            1u64,
+        ),
+        (
+            "review".to_string(),
+            "retry".to_string(),
+            Some("embedder_unavailable".to_string()),
+            1u64,
+        ),
+        ("none".to_string(), "complete".to_string(), None, 1u64),
+        (
+            "review".to_string(),
+            "failed".to_string(),
+            Some("attempts_exhausted".to_string()),
+            1u64,
+        ),
+    ];
+    expected.sort();
+    assert_eq!(buckets, expected);
+    assert_eq!(summary.retryable_error_count, 1);
+    assert_eq!(summary.terminal_error_count, 1);
+
+    let serialized = serde_json::to_string(&summary).unwrap();
+    assert!(
+        !serialized.contains(&tenant),
+        "operational summary must not carry the raw tenant id"
+    );
+    assert!(
+        !serialized.contains(&pending_run.submission_id.to_string()),
+        "operational summary must not carry a raw submission id"
+    );
+}
+
+/// Task 13: a forensic trace read is hash-only -- it carries phase outcome
+/// hashes, the bundle id, and instrument/payout labels, never the tenant id,
+/// principal, request bytes, or trace text those hashes were computed over.
+#[tokio::test]
+async fn forensic_trace_is_hash_only() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("forensic-hash-only-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:forensic-hash-only";
+    let run = submit_and_complete(&service, &tenant, principal).await;
+
+    let product = PipelineProductStore::new(backend.clone());
+    let trace = product
+        .forensic_trace(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("a completed run has a forensic trace");
+    assert_eq!(trace.run_id, run.run_id);
+    assert_eq!(trace.bundle_id, run.bundle_id);
+    assert!(
+        !trace.phases.is_empty(),
+        "a completed run has committed phase outcomes"
+    );
+    for phase in &trace.phases {
+        assert!(phase.decision_hash.starts_with("sha256:"));
+        assert!(phase.evidence_hash.starts_with("sha256:"));
+        assert!(phase.evaluation_hash.starts_with("sha256:"));
+    }
+
+    let serialized = serde_json::to_string(&trace).unwrap();
+    assert!(
+        !serialized.contains(&tenant),
+        "forensic trace must not carry the raw tenant id"
+    );
+    assert!(
+        !serialized.contains(principal),
+        "forensic trace must not carry the raw principal ref"
+    );
+    assert!(
+        !serialized.contains("Inspect the bounded runtime fixture"),
+        "forensic trace must not carry raw trace text"
+    );
+}
+
+/// Review Focus 4: a forensic trace read never crosses tenants -- asking
+/// tenant B for tenant A's run id returns `None`, not tenant A's row.
+#[tokio::test]
+async fn forensic_trace_is_tenant_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant_a = format!("forensic-scope-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("forensic-scope-b-{}", uuid::Uuid::new_v4());
+    let run_a = submit_and_complete(&service, &tenant_a, "principal_sha256:forensic-scope-a").await;
+
+    let product = PipelineProductStore::new(backend.clone());
+    let cross_tenant = product
+        .forensic_trace(&tenant_b, run_a.run_id)
+        .await
+        .unwrap();
+    assert!(
+        cross_tenant.is_none(),
+        "tenant B must not see tenant A's run through its run id"
+    );
+
+    let own = product
+        .forensic_trace(&tenant_a, run_a.run_id)
+        .await
+        .unwrap();
+    assert!(
+        own.is_some(),
+        "tenant A can read its own run's forensic trace"
+    );
+}
+
+/// Builds a service over an isolated index and the reference scorer and
+/// embedder, with `config` as its default compatibility bundle and a
+/// `trace_credit` recording settlement adapter on payout rail `none`. Mirrors
+/// `test_service`, but for the compatibility family (Review Focus 3):
+/// `compatibility_package` pins only `trace_credit`, so no `storage_rebate`
+/// adapter or cap is needed here.
+async fn compatibility_test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+) -> Arc<PipelineService> {
+    compatibility_test_service_with_payout(backend, artifact_store, config, None).await
+}
+
+/// `compatibility_test_service`, and, when `near` is given, with its Trace
+/// Credit adapter on the `near` rail and NEAR payout enabled through `near`
+/// on `PAYOUT_TEST_NEAR_CONTRACT`.
+async fn compatibility_test_service_with_payout(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    near: Option<Arc<dyn NearPayoutAdapter>>,
+) -> Arc<PipelineService> {
+    compatibility_test_service_with(
+        backend,
+        artifact_store,
+        config,
+        near,
+        allow_all_authority(),
+        issuing_checks(),
+    )
+    .await
+}
+
+/// `compatibility_test_service_with_payout`, with `authority` as its tenant
+/// authority and `checks` as the configuration of `main`'s NoveltyUtility
+/// credit checks.
+async fn compatibility_test_service_with(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    near: Option<Arc<dyn NearPayoutAdapter>>,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
+    compatibility_test_service_on(
+        backend,
+        artifact_store,
+        config,
+        near,
+        authority,
+        checks,
+        IsolatedPipelineIndex::new(),
+    )
+    .await
+}
+
+/// `compatibility_test_service_with`, over `index`: services built over
+/// the same index and database act as workers of one deployment.
+async fn compatibility_test_service_on(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    near: Option<Arc<dyn NearPayoutAdapter>>,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+    index: Arc<IsolatedPipelineIndex>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        if near.is_some() { "near" } else { "none" },
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(authority)
+    .with_privacy(default_privacy_boundary())
+    .with_novelty_utility_checks(checks);
+    let service = match near {
+        Some(near) => service.with_payout(
+            near,
+            PipelinePayoutConfig {
+                near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
+                confirmation_interval: std::time::Duration::ZERO,
+                controls: HTTP_NEAR_PAYOUT_CONTROLS,
+            },
+        ),
+        None => service,
+    };
+    Arc::new(service.build().expect("build pipeline service"))
+}
+
+/// The `(event_type, points_delta)` of the one `trace_credit_ledger` row for
+/// `run_id`, or `None` if there is none.
+async fn credit_ledger_event_for_run(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Option<(String, String)> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for credit_ledger_event_for_run");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_opt(
+            "SELECT event_type, points_delta FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("query credit ledger event for run");
+    tx.commit()
+        .await
+        .expect("commit credit_ledger_event_for_run");
+    row.map(|row| (row.get("event_type"), row.get("points_delta")))
+}
+
+/// Count of `trace_near_credit_outbox` rows for `tenant_id` -- always zero
+/// while payout stays disabled (the default). A `NoveltyUtility` leg has no
+/// settlement batch, and this table's `settlement_batch_id` FK means no
+/// outbox row could reference one anyway.
+async fn count_near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for count_near_outbox_rows");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_near_credit_outbox WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count near outbox rows")
+        .get(0);
+    tx.commit().await.expect("commit count_near_outbox_rows");
+    count
+}
+
+/// Activates `bundle_id`, already registered for `tenant_id`, as the
+/// tenant's bundle. Switching a tenant's active bundle is an operator
+/// action: the runtime login holds no UPDATE on `pipeline_active_bundles`,
+/// so this runs `PgPipelineStore::activate_bundle`'s own statement through
+/// an owner connection, as `activation_does_not_rebind_an_existing_run`
+/// does.
+async fn activate_bundle_as_operator(tenant_id: &str, bundle_id: &str) {
+    let mut owner = owner_client().await;
+    let tx = owner
+        .transaction()
+        .await
+        .expect("tx for activating a bundle as the operator");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for activating a bundle");
+    let activated = tx
+        .execute(
+            "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
+             SELECT $1, bundle_id
+             FROM pipeline_bundle_packages
+             WHERE tenant_id = $1 AND bundle_id = $2
+             ON CONFLICT (tenant_id) DO UPDATE
+                SET bundle_id = EXCLUDED.bundle_id, selected_at = NOW()",
+            &[&tenant_id, &bundle_id],
+        )
+        .await
+        .expect("activate the bundle as the operator");
+    assert_eq!(activated, 1, "the bundle is registered for the tenant");
+    tx.commit().await.expect("commit activating the bundle");
+}
+
+/// Review Focus 3 / Ruling S11: a compatibility run's Trace Credit leg
+/// dispatches through the same adapter and the same `settle_internal_credit`
+/// transaction PR 2's minimal family uses, but writes a `NoveltyUtility`
+/// ledger event that `main` never batches or pays -- so it must read back as
+/// `not_settlement_eligible`, never `pending` forever. The default delta (0)
+/// makes no award at all: no settlement row, no ledger row.
+#[tokio::test]
+async fn compatibility_credit_matches_main_gate_path() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+
+    let zero_config = CompatibilityBundleConfig::local_reference();
+    assert_eq!(zero_config.novelty_utility_microcredits, 0);
+    let service =
+        compatibility_test_service(backend.clone(), artifact_store(&dir), zero_config).await;
+
+    let mut positive_config = CompatibilityBundleConfig::local_reference();
+    positive_config.novelty_utility_microcredits = 2_500_000;
+    let scorer = ReferencePerplexityScorer::new();
+    let embedder = ReferenceEmbedder::new();
+    let positive_package =
+        MinimalPolicyBundle::compatibility_package(&positive_config, &scorer, &embedder)
+            .expect("build the positive-delta compatibility package");
+
+    let tenant_zero = format!("compat-credit-zero-{}", uuid::Uuid::new_v4());
+    let tenant_positive = format!("compat-credit-positive-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-credit";
+
+    // Bind tenant_positive to the positive-delta package *before* its first
+    // submit -- `register_default_bundle`'s `activate_bundle_if_none` (which
+    // `submit_and_complete` calls through `submit_registered`) only
+    // activates the service's own default (the zero-delta package) when no
+    // bundle is active yet for the tenant.
+    service
+        .register_bundle(&tenant_positive, &positive_package)
+        .await
+        .expect("register the positive-delta package");
+    activate_bundle_as_operator(&tenant_positive, &positive_package.bundle_id).await;
+
+    let run_zero = submit_and_complete(&service, &tenant_zero, principal).await;
+    // Model-training consent: the allowed use `main`'s NoveltyUtility credit
+    // requires (Ruling T15-8).
+    let run_positive = submit_envelope_and_complete(
+        &service,
+        &tenant_positive,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+
+    assert_eq!(run_zero.state, PipelineRunState::Complete);
+    assert_eq!(run_positive.state, PipelineRunState::Complete);
+
+    let product = PipelineProductStore::new(backend.clone());
+
+    // Delta 0: no award, so Score seeds no settlement operations and Settle
+    // writes no ledger row.
+    let zero_settlements = service
+        .store()
+        .list_settlements(&tenant_zero, run_zero.run_id)
+        .await
+        .unwrap();
+    assert!(
+        zero_settlements.is_empty(),
+        "a zero-delta compatibility run seeds no settlement operations"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant_zero, run_zero.run_id).await,
+        0,
+        "a zero-delta compatibility run writes no ledger row"
+    );
+
+    // Finding I2: the brief requires "the Score awards are empty" for delta
+    // 0 -- assert the *stored Score decision* directly, not only its
+    // downstream effects, so a Score that somehow recorded a zero-unit
+    // `trace_credit` award (which settlement seeding might still skip)
+    // would be caught here.
+    let zero_score_outcome = service
+        .store()
+        .list_outcomes(&tenant_zero, run_zero.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Score)
+        .expect("the zero-delta run has a committed Score outcome");
+    // A stored Score decision loads unverified; verify it against the run's
+    // bound manifest, as Settle does, before reading its awards.
+    let zero_bound_package = service
+        .store()
+        .load_bundle(&tenant_zero, &run_zero.bundle_id)
+        .await
+        .unwrap()
+        .expect("the zero-delta run's bound package is on file");
+    let zero_score_decision =
+        serde_json::from_value::<UnverifiedScoreDecision>(zero_score_outcome.decision)
+            .unwrap()
+            .verify(&zero_bound_package.manifest)
+            .expect("the stored Score decision verifies against the run's bound manifest");
+    assert!(
+        zero_score_decision.awards().is_empty(),
+        "a zero-delta compatibility run's Score decision has no awards"
+    );
+
+    // And the product status agrees: Zero, not Unscored or Pending.
+    let zero_status = product
+        .contributor_statuses(&tenant_zero, principal, &[run_zero.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(zero_status.credit, PipelineCreditStatus::Zero);
+    assert_eq!(zero_status.score_microcredits, Some(0));
+
+    // Delta 2_500_000: one complete `trace_credit` settlement row, with no
+    // settlement batch (Ruling S8).
+    let positive_settlements = service
+        .store()
+        .list_settlements(&tenant_positive, run_positive.run_id)
+        .await
+        .unwrap();
+    assert_eq!(positive_settlements.len(), 1);
+    let credit_row = &positive_settlements[0];
+    assert_eq!(
+        credit_row.instrument_id,
+        InstrumentId::trace_credit().as_str()
+    );
+    assert_eq!(credit_row.operation_state, "complete");
+    assert_eq!(credit_row.atomic_units, AtomicUnits::from_raw(2_500_000));
+    assert!(
+        credit_row.settlement_batch_id.is_none(),
+        "a NoveltyUtility leg is never composed into a batch"
+    );
+    let event_id = credit_row
+        .credit_event_id
+        .expect("a completed leg records its credit event");
+
+    // Exactly one ledger row, with the `NoveltyUtility` event type and the
+    // configured delta, and carried by no finalized batch.
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant_positive, run_positive.run_id).await,
+        1
+    );
+    let (event_type, points_delta) =
+        credit_ledger_event_for_run(&backend, &tenant_positive, run_positive.run_id)
+            .await
+            .expect("the run's ledger row exists");
+    assert_eq!(event_type, "novelty_utility");
+    assert_eq!(
+        Microcredits::from_credit_decimal(&points_delta)
+            .expect("points_delta is a valid credit decimal")
+            .get(),
+        2_500_000
+    );
+    assert!(
+        finalized_batches_carrying(&backend, &tenant_positive, event_id)
+            .await
+            .is_empty(),
+        "a NoveltyUtility ledger event is in no settlement batch"
+    );
+    // Rulings T15-1 and T15-2: the row is written as `main`'s gate path
+    // writes this event -- `final`, under `main`'s reason shape
+    // `novelty_utility:<version>` with the compatibility Score rule as the
+    // version, and with the gate caller's actor role.
+    assert_eq!(
+        credit_event_state(&backend, &tenant_positive, event_id)
+            .await
+            .as_deref(),
+        Some("final"),
+        "a NoveltyUtility ledger row is written final, as main writes it"
+    );
+    assert_eq!(
+        credit_event_reason_and_actor(&backend, &tenant_positive, event_id).await,
+        (
+            format!("novelty_utility:{COMPATIBILITY_SCORE_RULE}"),
+            "vector_worker".to_string()
+        )
+    );
+
+    // No NEAR outbox row: payout is disabled by default (Review Focus 5).
+    assert_eq!(count_near_outbox_rows(&backend, &tenant_positive).await, 0);
+
+    // Product read (Ruling S11): the contributor status reports this leg as
+    // not_settlement_eligible, never pending forever.
+    let status = product
+        .contributor_statuses(&tenant_positive, principal, &[run_positive.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.credit, PipelineCreditStatus::NotSettlementEligible);
+    let instrument_status = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit instrument status is present");
+    assert_eq!(
+        instrument_status.internal_settlement_state,
+        "not_settlement_eligible"
+    );
+
+    // Ruling T5-2: the forensic trace of the delta run shows the same state
+    // through `forensic_trace`'s copy of the shared CASE/join, not just
+    // through the contributor-facing status read above.
+    let forensic = product
+        .forensic_trace(&tenant_positive, run_positive.run_id)
+        .await
+        .unwrap()
+        .expect("a completed run has a forensic trace");
+    let forensic_trace_credit = forensic
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit instrument status is present in the forensic trace");
+    assert_eq!(
+        forensic_trace_credit.internal_settlement_state,
+        "not_settlement_eligible"
+    );
+
+    // Ruling T5-1: switch tenant_positive to a minimal bundle with its own
+    // positive trace_credit award, and run it for the SAME principal (hence
+    // the same credit_account_ref, `credit_account_ref` being the
+    // submission's `auth_principal_ref`) as the NoveltyUtility run above.
+    // Batch composition for this minimal run must not sweep in the
+    // NoveltyUtility event, which stays in no batch forever.
+    let minimal_config = PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+            atomic_units: AtomicUnits::from_raw(750_000),
+            descriptor: trace_credit_descriptor(),
+        }],
+        include_index: false,
+        variant: None,
+    };
+    let minimal_package = MinimalPolicyBundle::minimal_package(&minimal_config, &scorer, &embedder)
+        .expect("build the minimal package for the batching check");
+    service
+        .register_bundle(&tenant_positive, &minimal_package)
+        .await
+        .expect("register the minimal package");
+    activate_bundle_as_operator(&tenant_positive, &minimal_package.bundle_id).await;
+
+    let run_minimal = submit_and_complete(&service, &tenant_positive, principal).await;
+    assert_eq!(run_minimal.state, PipelineRunState::Complete);
+
+    let minimal_settlements = service
+        .store()
+        .list_settlements(&tenant_positive, run_minimal.run_id)
+        .await
+        .unwrap();
+    assert_eq!(minimal_settlements.len(), 1);
+    let minimal_credit_row = &minimal_settlements[0];
+    assert_eq!(minimal_credit_row.operation_state, "complete");
+    let minimal_event_id = minimal_credit_row
+        .credit_event_id
+        .expect("the minimal run's leg records its credit event");
+    let minimal_batch_id = minimal_credit_row
+        .settlement_batch_id
+        .expect("the minimal run's own leg is composed into a batch");
+
+    let carrying_minimal_event =
+        finalized_batches_carrying(&backend, &tenant_positive, minimal_event_id).await;
+    assert_eq!(
+        carrying_minimal_event.len(),
+        1,
+        "the minimal run's own event is in its batch"
+    );
+    assert_eq!(carrying_minimal_event[0].0, minimal_batch_id);
+    assert_eq!(
+        carrying_minimal_event[0].1.as_deref(),
+        Some("trace_credit"),
+        "the minimal batch carries the trace_credit instrument"
+    );
+
+    // The NoveltyUtility event stays out of the minimal run's batch...
+    assert!(
+        finalized_batches_carrying(&backend, &tenant_positive, event_id)
+            .await
+            .is_empty(),
+        "the NoveltyUtility event must still be in no batch after a later minimal run's batch composition"
+    );
+    // ...and its ledger row is untouched: still `final` from its insert,
+    // with no batch -- the batch composition's event-type filter (Ruling
+    // T5-1), not its settlement state, keeps it out.
+    assert_eq!(
+        credit_event_state(&backend, &tenant_positive, event_id)
+            .await
+            .as_deref(),
+        Some("final"),
+        "a later batch composition leaves the NoveltyUtility row as it was"
+    );
+}
+
+/// The `NoveltyUtility` delta the credit-check tests below award.
+const CHECKED_DELTA_MICROCREDITS: u64 = 2_500_000;
+
+/// A compatibility service awarding `CHECKED_DELTA_MICROCREDITS`, with
+/// `authority` and `checks`.
+async fn checked_compatibility_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    compatibility_test_service_with(
+        backend.clone(),
+        artifact_store(dir),
+        config,
+        None,
+        authority,
+        checks,
+    )
+    .await
+}
+
+/// A settled compatibility award, as the credit-check tests read it: the
+/// Trace Credit leg's settlement row, its ledger row count, the owner's
+/// contributor status, and the `trace_credit` operation of the committed
+/// Settle outcome.
+type SettledCompatibilityAward = (
+    PipelineSettlementRecord,
+    i64,
+    PipelineContributorStatus,
+    InstrumentSettlement,
+);
+
+/// The `trace_credit` operation of the run's committed Settle outcome.
+async fn committed_trace_credit_operation(
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> InstrumentSettlement {
+    let outcome = service
+        .store()
+        .outcome_for_phase(tenant_id, run_id, Phase::Settle)
+        .await
+        .unwrap()
+        .expect("Settle committed its outcome");
+    let decision: SettleDecision = serde_json::from_value(outcome.decision).unwrap();
+    decision
+        .settlement_operations()
+        .iter()
+        .find(|operation| operation.instrument_id() == &InstrumentId::trace_credit())
+        .cloned()
+        .expect("the committed outcome has a trace_credit operation")
+}
+
+/// Runs `env` to completion for a fresh tenant of `service`, and returns its
+/// settled award.
+async fn settled_compatibility_award(
+    service: &PipelineService,
+    backend: &Arc<PgBackend>,
+    env: &TraceContributionEnvelope,
+) -> SettledCompatibilityAward {
+    let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-checks";
+    let run = submit_envelope_and_complete(service, &tenant, principal, env).await;
+    assert_eq!(
+        run.state,
+        PipelineRunState::Complete,
+        "{:?}",
+        run.last_error_label
+    );
+    let leg = trace_credit_settlement(service, &tenant, run.run_id).await;
+    let rows = count_credit_ledger_rows_for_run(backend, &tenant, run.run_id).await;
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .expect("the owner reads the run's status");
+    let committed = committed_trace_credit_operation(service, &tenant, run.run_id).await;
+    (leg, rows, status, committed)
+}
+
+/// Ruling T15-12: a withheld leg completed with no ledger row under `label`,
+/// its product status reads `Withheld` with that label, and Score's decision
+/// still holds its award. The committed Settle outcome records the leg as
+/// `Forfeited` under `label`, for the award's amount: no credit was issued.
+fn assert_withheld((leg, rows, status, committed): &SettledCompatibilityAward, label: &str) {
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert_eq!(leg.credit_event_id, None, "{leg:?}");
+    assert_eq!(leg.last_error_label.as_deref(), Some(label), "{leg:?}");
+    assert_eq!(*rows, 0, "a withheld leg writes no ledger row");
+    assert_eq!(
+        committed.atomic_units(),
+        AtomicUnits::from_raw(u128::from(CHECKED_DELTA_MICROCREDITS))
+    );
+    match committed.outcome() {
+        InstrumentSettlementOutcome::Forfeited { reason } => {
+            assert_eq!(reason.as_str(), label, "{committed:?}");
+        }
+        InstrumentSettlementOutcome::Completed { .. } => {
+            panic!("a withheld leg is not a completed settlement: {committed:?}")
+        }
+    }
+    assert_eq!(status.credit, PipelineCreditStatus::Withheld);
+    assert_eq!(
+        status.score_microcredits,
+        Some(CHECKED_DELTA_MICROCREDITS),
+        "Score's decision is unchanged"
+    );
+    let trace_credit = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("the trace_credit instrument");
+    assert_eq!(trace_credit.internal_settlement_state, "withheld");
+    assert_eq!(trace_credit.reason_label.as_deref(), Some(label));
+}
+
+/// The leg wrote its one `NoveltyUtility` ledger row, and the committed
+/// Settle outcome records it completed for the award's amount.
+fn assert_credited((leg, rows, status, committed): &SettledCompatibilityAward) {
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert!(leg.credit_event_id.is_some(), "{leg:?}");
+    assert_eq!(leg.last_error_label, None, "{leg:?}");
+    assert_eq!(*rows, 1);
+    assert_eq!(status.credit, PipelineCreditStatus::NotSettlementEligible);
+    assert_eq!(
+        committed.atomic_units(),
+        AtomicUnits::from_raw(u128::from(CHECKED_DELTA_MICROCREDITS))
+    );
+    assert!(
+        matches!(
+            committed.outcome(),
+            InstrumentSettlementOutcome::Completed { .. }
+        ),
+        "{committed:?}"
+    );
+}
+
+/// Ruling T15-8: `main` credits `NoveltyUtility` only to a submission whose
+/// allowed uses include model training. A default-consent submission
+/// (debugging and evaluation) is withheld `policy_mismatch`, with no ledger
+/// row and a `Withheld` product status; a model-training one gets its row.
+#[tokio::test]
+async fn a_compatibility_award_needs_the_model_training_allowed_use() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service =
+        checked_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
+            .await;
+    let default_consent = envelope(uuid::Uuid::new_v4()).await;
+    assert!(
+        !default_consent
+            .trace_card
+            .allowed_uses
+            .contains(&TraceAllowedUse::ModelTraining)
+    );
+    assert_withheld(
+        &settled_compatibility_award(&service, &backend, &default_consent).await,
+        PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL,
+    );
+    assert_credited(
+        &settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await,
+    );
+}
+
+/// Ruling T15-10: with a non-empty central-issuer allowlist, a positive
+/// compatibility award needs the pipeline's configured issuer on it, where
+/// `main` needs its calling gate worker there. No issuer, or one not on the
+/// list, is withheld `central_issuer_denied`; the listed issuer is credited.
+/// An empty list allows (the test above).
+#[tokio::test]
+async fn a_compatibility_award_needs_the_pipeline_issuer_on_the_central_issuer_list() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let listed = format!("principal_sha256:{}", "a".repeat(64));
+    let unlisted = format!("principal_sha256:{}", "b".repeat(64));
+    for (issuer, credited) in [
+        (None, false),
+        (Some(unlisted.clone()), false),
+        (Some(listed.clone()), true),
+    ] {
+        let service = checked_compatibility_service(
+            &backend,
+            &dir,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks {
+                central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
+                issuer_principal_ref: issuer,
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+        )
+        .await;
+        let outcome = settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await;
+        if credited {
+            assert_credited(&outcome);
+        } else {
+            assert_withheld(
+                &outcome,
+                PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL,
+            );
+        }
+    }
+}
+
+/// Ruling T15-11: with `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`
+/// set, a compatibility award needs a production-qualified scorer and
+/// embedder, where `main` needs a production gate service. The reference
+/// scorer and embedder are not, so the award is withheld
+/// `non_production_gate`.
+#[tokio::test]
+async fn the_production_gate_flag_withholds_an_award_from_unqualified_dependencies() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks {
+            require_production_gate: true,
+            ..issuing_checks()
+        },
+    )
+    .await;
+    let qualification = service.dependency_qualification();
+    assert!(!qualification.scorer && !qualification.embedder);
+    assert_withheld(
+        &settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await,
+        PIPELINE_NOVELTY_UTILITY_NON_PRODUCTION_GATE_LABEL,
+    );
+}
+
+/// A tenant authority a test replaces between phases, so the receipt and
+/// Settle can read different ones.
+struct SwitchableAuthority(std::sync::Mutex<SubmissionAuthority>);
+
+impl PipelineAuthorityProvider for SwitchableAuthority {
+    fn authority_for_tenant(&self, _tenant_id: &str) -> Option<SubmissionAuthority> {
+        Some(self.0.lock().unwrap().clone())
+    }
+}
+
+/// Ruling T15-8: Settle reads the tenant policy from the authority provider,
+/// the source the receipt uses.
+/// - A policy that does not allow model training (the receipt admits the
+///   submission, since its evaluation use is allowed) is withheld
+///   `policy_mismatch`.
+/// - A policy removed after the receipt, while one is required, is withheld
+///   `credit_check_error` -- not a charged Settle error.
+#[tokio::test]
+async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let evaluation_only = Arc::new(SwitchableAuthority(std::sync::Mutex::new(
+        SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: Some(SubmissionAllowlists {
+                allowed_consent_scopes: BTreeSet::new(),
+                allowed_uses: BTreeSet::from([TraceAllowedUse::Evaluation]),
+            }),
+            require_policy: true,
+        },
+    )));
+    let service =
+        checked_compatibility_service(&backend, &dir, evaluation_only.clone(), issuing_checks())
+            .await;
+    assert_withheld(
+        &settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await,
+        PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL,
+    );
+
+    // The policy allows model training at the receipt and is gone by Settle.
+    *evaluation_only.0.lock().unwrap() = SubmissionAuthority {
+        tenant: SubmissionAllowlists::default(),
+        policy: Some(SubmissionAllowlists::default()),
+        require_policy: true,
+    };
+    let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    *evaluation_only.0.lock().unwrap() = SubmissionAuthority {
+        tenant: SubmissionAllowlists::default(),
+        policy: None,
+        require_policy: true,
+    };
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(
+        settled.attempt_count, 1,
+        "the withheld leg charged nothing extra: Settle's claim is its phase's \
+         one attempt (each phase commit resets the count, multi-lens L2-1)"
+    );
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    let rows = count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await;
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, RECEIPT_PRINCIPAL, &[env.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let committed = committed_trace_credit_operation(&service, &tenant, created.run_id).await;
+    assert_withheld(
+        &(leg, rows, status, committed),
+        PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL,
+    );
+}
+
+/// Ruling T15-8: a tenant policy's non-empty consent-scope allowlist must
+/// hold one of the submission's consent scopes, as `main`'s policy check
+/// requires (any one of them). A policy that allows model training as a use
+/// but lists only another consent scope is withheld `policy_mismatch`; the
+/// same policy listing the submission's scope credits the award. The policy
+/// is set after the receipt, so the receipt admits the submission either way
+/// and only Settle's check decides.
+#[tokio::test]
+async fn a_compatibility_award_needs_a_consent_scope_the_tenant_policy_allows() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (allowed_consent_scope, credited) in [
+        (ConsentScope::DebuggingEvaluation, false),
+        (ConsentScope::ModelTraining, true),
+    ] {
+        let authority = Arc::new(SwitchableAuthority(std::sync::Mutex::new(
+            SubmissionAuthority {
+                tenant: SubmissionAllowlists::default(),
+                policy: Some(SubmissionAllowlists::default()),
+                require_policy: true,
+            },
+        )));
+        let service =
+            checked_compatibility_service(&backend, &dir, authority.clone(), issuing_checks())
+                .await;
+        let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
+        let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+        assert_eq!(env.consent.scopes, vec![ConsentScope::ModelTraining]);
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) =
+            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+        else {
+            panic!("the receipt creates a run")
+        };
+        for phase in ["Review", "Score"] {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{phase} runs"));
+        }
+        *authority.0.lock().unwrap() = SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: Some(SubmissionAllowlists {
+                allowed_consent_scopes: BTreeSet::from([allowed_consent_scope]),
+                allowed_uses: BTreeSet::from([TraceAllowedUse::ModelTraining]),
+            }),
+            require_policy: true,
+        };
+        let settled = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs");
+        assert_eq!(settled.state, PipelineRunState::Complete);
+        let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+        let rows = count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await;
+        let status = PipelineProductStore::new(backend.clone())
+            .contributor_statuses(&tenant, RECEIPT_PRINCIPAL, &[env.submission_id])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let committed = committed_trace_credit_operation(&service, &tenant, created.run_id).await;
+        let award = (leg, rows, status, committed);
+        if credited {
+            assert_credited(&award);
+        } else {
+            assert_withheld(&award, PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL);
+        }
+    }
+}
+
+/// The `(reason, actor_role)` of `credit_event_id`'s `trace_credit_ledger`
+/// row.
+async fn credit_event_reason_and_actor(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    credit_event_id: uuid::Uuid,
+) -> (String, String) {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for credit_event_reason_and_actor");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT reason, actor_role FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND credit_event_id = $2",
+            &[&tenant_id, &credit_event_id],
+        )
+        .await
+        .expect("the credit event exists");
+    tx.commit()
+        .await
+        .expect("commit credit_event_reason_and_actor");
+    (row.get("reason"), row.get("actor_role"))
+}
+
+// ---------------------------------------------------------------------------
+// Withdrawal (`PipelineService::withdraw_submission`)
+// ---------------------------------------------------------------------------
+
+/// The principal `receipt` submits as: the owner of every run this suite
+/// creates through a receipt.
+const RECEIPT_PRINCIPAL: &str = "principal_sha256:test";
+
+/// Withdraws `submission_id` as its owner, outside any source session.
+async fn withdraw(
+    service: &PipelineService,
+    tenant: &str,
+    submission_id: uuid::Uuid,
+) -> PipelineWithdrawalOutcome {
+    service
+        .withdraw_submission(tenant, submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner's withdrawal succeeds")
+}
+
+/// The run row's `xmax`, as text. While a transaction holds the row locked
+/// `FOR UPDATE`, this is that transaction's id.
+async fn run_row_locker(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) -> String {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let xid: String = tx
+        .query_one(
+            "SELECT xmax::text FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("read the run row's locker")
+        .get(0);
+    tx.commit().await.unwrap();
+    xid
+}
+
+/// Returns once PostgreSQL reports a session waiting for transaction `xid`
+/// to end, that is, a session blocked on a row lock `xid` holds. Panics if
+/// `task` finishes first, or if no session waits within the bound.
+async fn wait_for_a_waiter_on<T>(
+    backend: &PgBackend,
+    xid: &str,
+    task: &tokio::task::JoinHandle<T>,
+) {
+    let deadline = std::time::Instant::now() + HELD_CALL_BOUND;
+    loop {
+        let waiting: i64 = backend
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT COUNT(*) FROM pg_locks
+                  WHERE locktype = 'transactionid' AND NOT granted
+                    AND transactionid::text = $1",
+                &[&xid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting > 0 {
+            return;
+        }
+        assert!(
+            !task.is_finished(),
+            "the withdrawal finished without waiting for the lock holder"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no session waited for the lock holder within the bound"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Review Focus 1. Settle's index dispatch holds the run row and then the
+/// submission row for its whole write. A withdrawal that arrives during
+/// the write waits for it: PostgreSQL reports the withdrawal waiting for the
+/// dispatch's transaction, and the withdrawal has not finished 300 ms later.
+/// Only then is the write released. The withdrawal therefore reads the run
+/// after the dispatch committed `complete`, and it queues an invalidation of
+/// the revision; `process_index_invalidations` then removes the entries the
+/// write left, so none stays visible. Neither side fails: a deadlock would
+/// fail the withdrawal or send Settle to `retry` as `database_unavailable`.
+///
+/// It cannot pass by luck: the release waits for PostgreSQL's own report of
+/// the lock wait, not for a sleep, so the order of the two commits is fixed
+/// in every run; and a withdrawal that read the run before the dispatch
+/// committed would see `pending`, cancel it, and fail the
+/// `index_write_state` assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdrawal_blocks_until_the_index_commit_and_then_invalidates() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) =
+        held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
+    let tenant = format!("withdraw-during-write-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let revision_id = run.approved_revision_id.expect("an approved revision");
+
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    let dispatch_xid = run_row_locker(&backend, &tenant, run.run_id).await;
+
+    let mut withdrawal = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let submission_id = run.submission_id;
+        async move {
+            service
+                .withdraw_submission(&tenant, submission_id, RECEIPT_PRINCIPAL, None)
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &dispatch_xid, &withdrawal).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut withdrawal)
+            .await
+            .is_err(),
+        "the withdrawal must wait while the index write is in progress"
+    );
+
+    held.release();
+    let settled = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle finishes once released")
+        .expect("the Settle task did not panic")
+        .expect("Settle does not fail")
+        .expect("Settle runs");
+    let outcome = tokio::time::timeout(HELD_CALL_BOUND, withdrawal)
+        .await
+        .expect("the withdrawal finishes once the write commits")
+        .expect("the withdrawal task did not panic")
+        .expect("the withdrawal does not fail, with a deadlock or otherwise");
+
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_ne!(
+        settled.last_error_label.as_deref(),
+        Some(PIPELINE_DATABASE_UNAVAILABLE_LABEL),
+        "Settle was never a deadlock victim"
+    );
+    assert_eq!(settled.index_write_state, "complete");
+    assert!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
+        "the write finished before the withdrawal"
+    );
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert_eq!(outcome.affected_submission_ids, vec![run.submission_id]);
+    let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        rows,
+        vec![(
+            revision_id,
+            "withdrawn".to_string(),
+            "pending".to_string(),
+            true
+        )],
+        "one invalidation of the revision is queued, due at once"
+    );
+    assert_eq!(run_state, "pending");
+    let current = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.index_write_state, "complete");
+
+    // The queued invalidation removes every entry the write left.
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "no entry of the withdrawn revision stays visible"
+    );
+    let (processed_rows, processed_run_state) =
+        index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        processed_rows
+            .iter()
+            .map(|(revision, reason, state, _)| (*revision, reason.as_str(), state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(revision_id, "withdrawn", "complete")]
+    );
+    assert_eq!(processed_run_state, "complete");
+}
+
+/// Zaki review 1, item 5: the receipt's final transaction takes the upload's
+/// source-session row lock (the lock order stays session, then run, then
+/// submission) and refuses the receipt when the session is withdrawn, as
+/// `main`'s receipt refuses it (`source_session_withdrawn`). A session
+/// withdrawal holds the session row and has recorded the upload's withdrawal
+/// but not committed; the receipt reaches its final transaction and waits
+/// for it (PostgreSQL reports the wait), and once the withdrawal commits,
+/// the receipt records nothing: no submission, no run, no staged attempt,
+/// no stored object. Without the lock the receipt commits a live submission
+/// and run behind the withdrawal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_withdrawal_before_the_final_receipt_transaction_refuses_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("receipt-session-race-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+        .as_slice()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        owner
+            .claim_trace_source_session(&tenant, account_id, &digest, env.submission_id)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+
+    // `main`'s session withdrawal, in progress: the session row is locked
+    // and the upload's withdrawal recorded, uncommitted.
+    let mut withdrawal_client = owner_client().await;
+    let withdrawal = owner_tenant_tx(&mut withdrawal_client, &tenant).await;
+    withdrawal
+        .execute(
+            "UPDATE trace_source_sessions SET withdrawn_at = NOW()
+              WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3",
+            &[&tenant, &account_id, &digest.as_slice()],
+        )
+        .await
+        .unwrap();
+    withdrawal
+        .execute(
+            "INSERT INTO trace_withdrawals (
+                tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+             ) VALUES ($1, $2, NOW(), 'purged', 'commons_not_distributed')",
+            &[&tenant, &env.submission_id],
+        )
+        .await
+        .unwrap();
+    let xid: String = withdrawal
+        .query_one(
+            "SELECT backend_xid::text FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    let receipt_task = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            let raw = serde_json::to_vec(&env).unwrap();
+            let key = env.submission_id.to_string();
+            let mut request = receipt(&tenant, &key, &raw, &env, NO_LIMITS);
+            request.source_session = Some((account_id, digest));
+            service.submit(request).await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &xid, &receipt_task).await;
+    withdrawal.commit().await.unwrap();
+    let result = tokio::time::timeout(HELD_CALL_BOUND, receipt_task)
+        .await
+        .expect("the receipt finishes once the withdrawal commits")
+        .expect("the receipt task did not panic")
+        .expect("the receipt returns a result");
+    assert!(
+        matches!(result, PipelineReceiptResult::SourceSessionWithdrawn),
+        "{result:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_submissions").await,
+        0,
+        "no submission"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_runs").await,
+        0,
+        "no run"
+    );
+    assert_eq!(
+        count_staged_artifacts(&backend, &tenant).await,
+        0,
+        "no staged attempt"
+    );
+    assert_eq!(count_files_under(dir.path()), 0, "no stored object");
+}
+
+/// Ruling T7-2: the withdrawal locks the run rows before the submission
+/// row, the order Settle's index dispatch uses. A transaction here plays the
+/// dispatch: it locks the run row, the withdrawal then waits for it, and
+/// the transaction then takes the submission row `FOR SHARE` as the
+/// dispatch's guard does. The share lock is granted at once, because the
+/// waiting withdrawal holds nothing yet. A withdrawal that locked the
+/// submission row first would hold it here, the share lock would wait for
+/// the withdrawal, and PostgreSQL would abort one side as a deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdrawal_locks_the_run_before_the_submission() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-lock-order-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let mut holder_client = backend.trace_pool_for_test().get().await.unwrap();
+    let holder = tenant_tx(&mut holder_client, &tenant).await;
+    holder
+        .query_one(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+    let holder_xid: String = holder
+        .query_one("SELECT pg_current_xact_id()::text", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    let withdrawal = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let submission_id = run.submission_id;
+        async move {
+            service
+                .withdraw_submission(&tenant, submission_id, RECEIPT_PRINCIPAL, None)
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &holder_xid, &withdrawal).await;
+
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        holder.query_one(
+            "SELECT 1 FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR SHARE",
+            &[&tenant, &run.submission_id],
+        ),
+    )
+    .await
+    .expect("the submission row is not held by the waiting withdrawal")
+    .expect("the share lock is granted, not a deadlock victim");
+    holder
+        .commit()
+        .await
+        .expect("the dispatch's stand-in commits");
+    drop(holder_client);
+
+    let outcome = tokio::time::timeout(HELD_CALL_BOUND, withdrawal)
+        .await
+        .expect("the withdrawal finishes once the run row is free")
+        .expect("the withdrawal task did not panic")
+        .expect("the withdrawal is not a deadlock victim");
+    assert_eq!(outcome.affected_submission_ids, vec![run.submission_id]);
+}
+
+/// A withdrawal after Score and before Settle selects: nothing was written
+/// to the index, so there is nothing to invalidate. Settle then excludes
+/// the index with `submission_inoperable` and never calls the writer. The
+/// unsettled Trace Credit award is reported as forfeited, and a second call
+/// after Settle forfeited it reports the same.
+#[tokio::test]
+async fn withdrawal_before_selection_excludes_the_index() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-before-selection-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::NotRequired
+    );
+    assert!(
+        outcome.trace_credit_forfeited,
+        "the Trace Credit award had not settled"
+    );
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(settled.index_write_state, "none");
+    assert_eq!(index.writer_calls(), 0, "the index writer is never called");
+    for adapter in &adapters {
+        assert_eq!(adapter.requests().len(), 0, "no settlement adapter call");
+    }
+    let settle_outcome = service
+        .store()
+        .outcome_for_phase(&tenant, run.run_id, Phase::Settle)
+        .await
+        .unwrap()
+        .expect("Settle outcome recorded");
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    match decision.index_membership {
+        IndexMembershipDecision::Exclude { reason } => {
+            assert_eq!(reason.as_str(), PIPELINE_SUBMISSION_INOPERABLE_LABEL);
+        }
+        IndexMembershipDecision::Include { .. } => {
+            panic!("a withdrawn submission must not commit an Include decision")
+        }
+    }
+    let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert!(rows.is_empty(), "no invalidation is queued");
+    assert_eq!(run_state, "none");
+
+    let again = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        again.index_invalidation,
+        PipelineWithdrawalFollowUpState::NotRequired
+    );
+    assert!(
+        again.trace_credit_forfeited,
+        "a retry after Settle forfeited the award reports the same"
+    );
+    assert_eq!(again.withdrawal, outcome.withdrawal);
+}
+
+/// Ruling T7-3: a run whose index write is `pending` may be partly written.
+/// A withdrawal cancels the write, excludes the run from the index, and
+/// queues an invalidation in the same transaction (due after the leased
+/// run's lease plus the fence margin, multi-lens review L4-3). Settle then
+/// finishes without writing.
+#[tokio::test]
+async fn withdrawal_during_pending_index_work_cancels_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterSettleSelection),
+    )
+    .await;
+    let tenant = format!("withdraw-pending-write-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let revision_id = run.approved_revision_id.expect("an approved revision");
+    let crashed = service.process_run(&tenant, run.run_id).await;
+    assert_eq!(
+        crashed
+            .expect_err("the injected crash must propagate as an error")
+            .to_string(),
+        INJECTED_PIPELINE_CRASH
+    );
+    let pending = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.index_write_state, "pending");
+    assert_eq!(pending.index_membership, "included");
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    let cancelled = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.index_write_state, "cancelled");
+    assert_eq!(cancelled.index_membership, "excluded");
+    // Multi-lens review L4-3: the crashed worker's run is still leased, and
+    // a dispatch on that lease could still be writing, so the invalidation is
+    // queued but not due before the lease's end plus the fence margin.
+    let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        rows,
+        vec![(
+            revision_id,
+            "withdrawn".to_string(),
+            "pending".to_string(),
+            false
+        )]
+    );
+    assert_eq!(run_state, "pending");
+
+    expire_lease(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "cancelled");
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(index.writer_calls(), 0, "no index entry is written");
+}
+
+/// PR 2's rule: a withdrawal changes no settlement row, and Settle's next
+/// pass forfeits every leg that is not complete without an adapter call.
+/// Here the `trace_credit` leg completed and the `storage_rebate` adapter
+/// answered `Unavailable` once, so that leg waits in `retry` with
+/// `dispatched_at` set. `withdrawal_forfeit_label` flags a dispatched leg of
+/// an external instrument whose label does not say "no effect"
+/// (`Unavailable` is not `Conflict` or `Rejected`) as
+/// `settlement_unreconciled`. The Trace Credit leg stays complete, in its
+/// finalized batch.
+#[tokio::test]
+async fn withdrawal_forfeits_unsettled_and_keeps_settled_credit() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let rebate = adapters[0].clone();
+    let tenant = format!("withdraw-forfeit-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    rebate.fail_next();
+    let waiting = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(waiting.state, PipelineRunState::Retry);
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "retry");
+    assert!(leg_dispatched(&rows, "storage_rebate"));
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(SettlementError::Unavailable.label())
+    );
+    assert_eq!(leg_state(&rows, "trace_credit"), "complete");
+    let rebate_calls = rebate.requests().len();
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert!(
+        !outcome.trace_credit_forfeited,
+        "the Trace Credit leg had already settled"
+    );
+    assert_eq!(
+        settlement_rows(&backend, &tenant, run.run_id).await,
+        rows,
+        "the withdrawal itself changes no settlement row"
+    );
+
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(
+        rebate.requests().len(),
+        rebate_calls,
+        "no adapter call for a forfeited leg"
+    );
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+    );
+    assert!(
+        leg_dispatched(&rows, "storage_rebate"),
+        "dispatched_at is kept"
+    );
+    assert_credit_settled_once(
+        &backend,
+        &service,
+        &tenant,
+        run.run_id,
+        "settled before the withdrawal",
+    )
+    .await;
+}
+
+/// Another principal's withdrawal, and a withdrawal of a submission that
+/// does not exist, are both `NotFound`, and neither writes anything.
+#[tokio::test]
+async fn withdrawal_by_another_principal_is_not_found() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-not-owner-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    for (submission_id, principal) in [
+        (run.submission_id, "principal_sha256:someone_else"),
+        (uuid::Uuid::new_v4(), RECEIPT_PRINCIPAL),
+    ] {
+        let error = service
+            .withdraw_submission(&tenant, submission_id, principal, None)
+            .await
+            .expect_err("not the owner's submission");
+        assert!(
+            matches!(
+                error.downcast_ref::<DatabaseError>(),
+                Some(DatabaseError::NotFound { .. })
+            ),
+            "unexpected error: {error}"
+        );
+    }
+    assert_eq!(count_tenant_rows(&tenant, "trace_withdrawals").await, 0);
+    assert_eq!(count_tenant_rows(&tenant, "trace_tombstones").await, 0);
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_revocation_propagation_items").await,
+        0
+    );
+    let current = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current, run, "the run is unchanged");
+}
+
+/// `(status, withdrawn_at, revoked_at, purged_at)` of one submission, the
+/// three timestamps as "is set".
+async fn submission_withdrawal_columns(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+) -> (String, bool, bool, bool) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT status, withdrawn_at IS NOT NULL, revoked_at IS NOT NULL,
+                    purged_at IS NOT NULL
+               FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1), row.get(2), row.get(3))
+}
+
+/// `SELECT COUNT(*) FROM {table} WHERE tenant_id = $1 AND {predicate}` for
+/// one submission (`$2`). `table` and `predicate` are literals, never input.
+async fn count_submission_rows(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+    table: &str,
+    predicate: &str,
+) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            &format!(
+                "SELECT COUNT(*) FROM {table}
+                  WHERE tenant_id = $1 AND submission_id = $2 AND {predicate}"
+            ),
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+/// The withdrawal's rows and follow-up for a run that finished with an
+/// index write, and a second call: the same answer and no new rows.
+#[tokio::test]
+async fn withdrawal_is_idempotent() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-idempotent-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.index_write_state, "complete");
+    let submission_id = run.submission_id;
+    let live_object_refs = count_submission_rows(
+        &backend,
+        &tenant,
+        submission_id,
+        "trace_object_refs",
+        "deleted_at IS NULL",
+    )
+    .await;
+    assert!(live_object_refs >= 2, "the source and the approved object");
+
+    let first = withdraw(&service, &tenant, submission_id).await;
+    assert_eq!(first.withdrawal.submission_id, submission_id);
+    assert_eq!(first.withdrawal.prior_status, "accepted");
+    assert_eq!(
+        first.withdrawal.distribution_reach,
+        "commons_not_distributed"
+    );
+    assert_eq!(first.affected_submission_ids, vec![submission_id]);
+    assert_eq!(
+        first.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert_eq!(
+        first.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert!(!first.trace_credit_forfeited);
+    assert_eq!(
+        submission_withdrawal_columns(&backend, &tenant, submission_id).await,
+        ("revoked".to_string(), true, true, true)
+    );
+    let counts = || async {
+        (
+            count_tenant_rows(&tenant, "trace_withdrawals").await,
+            count_tenant_rows(&tenant, "trace_tombstones").await,
+            count_tenant_rows(&tenant, "trace_revocation_propagation_items").await,
+            count_tenant_rows(&tenant, "pipeline_index_invalidations").await,
+            count_submission_rows(
+                &backend,
+                &tenant,
+                submission_id,
+                "trace_object_refs",
+                "invalidated_at IS NOT NULL",
+            )
+            .await,
+            count_submission_rows(
+                &backend,
+                &tenant,
+                submission_id,
+                "trace_derived_records",
+                "status = 'revoked'",
+            )
+            .await,
+        )
+    };
+    let after_first = counts().await;
+    assert_eq!(
+        after_first,
+        (1, 1, live_object_refs, 1, live_object_refs, 1),
+        "one withdrawal, one tombstone, one payload deletion per live object, one \
+         index invalidation, every object ref invalidated, the derived record revoked"
+    );
+
+    let second = withdraw(&service, &tenant, submission_id).await;
+    assert_eq!(second, first, "the same withdrawal and follow-up states");
+    assert_eq!(counts().await, after_first, "no rows added");
+}
+
+/// Submits `envelope` as `RECEIPT_PRINCIPAL` and runs Review and Score, so
+/// the run waits for Settle.
+async fn run_envelope_to_settle_ready(
+    service: &PipelineService,
+    tenant: &str,
+    envelope: &TraceContributionEnvelope,
+) -> PipelineRunRecord {
+    let raw = serde_json::to_vec(envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(tenant, &key, &raw, envelope, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    let scored = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    scored
+}
+
+/// The object keys of the two objects Score stored for `run`: the index
+/// command and the neighbour set. Both must be recorded.
+fn score_object_keys(run: &PipelineRunRecord) -> [String; 2] {
+    let key = |stored: Option<&String>, name: &str| {
+        stored
+            .unwrap_or_else(|| panic!("Score recorded no {name}"))
+            .rsplit_once('#')
+            .expect("a stored ref is `{object_key}#{ciphertext_sha256}`")
+            .0
+            .to_string()
+    };
+    [
+        key(run.index_command_ref.as_ref(), "index command"),
+        key(run.score_neighbor_ref.as_ref(), "neighbour set"),
+    ]
+}
+
+/// For the object ref of `submission_id` at `object_key`: whether it is
+/// invalidated, and how many `delete_object_payload` propagation items name
+/// it, and how many of those are `pending`. `None` when the submission has
+/// no object ref at that key. Read on an owner connection, as an observer.
+async fn object_deletion_state(
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+    object_key: &str,
+) -> Option<(bool, i64, i64)> {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let row = tx
+        .query_opt(
+            "SELECT object_ref.invalidated_at IS NOT NULL,
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items item
+                      WHERE item.tenant_id = object_ref.tenant_id
+                        AND item.source_submission_id = object_ref.submission_id
+                        AND item.action = 'delete_object_payload'
+                        AND item.target_json->>'object_ref_id'
+                            = object_ref.object_ref_id::text),
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items item
+                      WHERE item.tenant_id = object_ref.tenant_id
+                        AND item.source_submission_id = object_ref.submission_id
+                        AND item.action = 'delete_object_payload'
+                        AND item.status = 'pending'
+                        AND item.target_json->>'object_ref_id'
+                            = object_ref.object_ref_id::text)
+               FROM trace_object_refs object_ref
+              WHERE object_ref.tenant_id = $1 AND object_ref.submission_id = $2
+                AND object_ref.object_key = $3",
+            &[&tenant_id, &submission_id, &object_key],
+        )
+        .await
+        .expect("read the object ref's deletion state");
+    tx.commit().await.expect("commit the deletion-state read");
+    row.map(|row| (row.get(0), row.get(1), row.get(2)))
+}
+
+/// Zaki review 1, item 1: Score stores the index command (embeddings and
+/// content hashes) and the neighbour set as objects of their own. They are
+/// object refs of the submission, as the source and the approved revision
+/// are, so the withdrawal invalidates each and queues the deletion of its
+/// payload in the same transaction as the tombstone: by the time the
+/// withdrawal returns, both deletions are durably queued. A second
+/// withdrawal queues nothing more.
+#[tokio::test]
+async fn withdrawal_queues_the_deletion_of_the_score_objects() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+    )
+    .await;
+    let tenant = format!("withdraw-score-objects-{}", uuid::Uuid::new_v4());
+    let scored = run_envelope_to_settle_ready(
+        &service,
+        &tenant,
+        &large_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    let keys = score_object_keys(&scored);
+
+    let first = withdraw(&service, &tenant, scored.submission_id).await;
+    assert_eq!(
+        first.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    for key in &keys {
+        assert_eq!(
+            object_deletion_state(&tenant, scored.submission_id, key).await,
+            Some((true, 1, 1)),
+            "the Score object is an invalidated object ref with one pending payload deletion"
+        );
+    }
+
+    let second = withdraw(&service, &tenant, scored.submission_id).await;
+    assert_eq!(second, first, "the same withdrawal and follow-up states");
+    for key in &keys {
+        assert_eq!(
+            object_deletion_state(&tenant, scored.submission_id, key).await,
+            Some((true, 1, 1)),
+            "a second withdrawal queues no second deletion"
+        );
+    }
+}
+
+/// Ruling T7-1: a withdrawal releases a run parked for review, due at once,
+/// so the runner ends it under PR 2's Review routing of
+/// `submission_inoperable` instead of leaving it parked forever. It is no
+/// longer in the review queue.
+#[tokio::test]
+async fn withdrawal_releases_a_parked_review_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-parked-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    set_next_attempt_at_in_the_future(&backend, &tenant, parked.run_id).await;
+
+    let outcome = withdraw(&service, &tenant, parked.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::NotRequired
+    );
+    assert_eq!(outcome.withdrawal.prior_status, "quarantined");
+    assert_eq!(outcome.withdrawal.distribution_reach, "not_distributed");
+    let released = service
+        .store()
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+    assert!(
+        released.next_attempt_at <= chrono::Utc::now(),
+        "released due at once"
+    );
+    assert!(
+        service
+            .store()
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a withdrawn run is not waiting for review"
+    );
+
+    let processed = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("the runner claims the released run");
+    assert_eq!(processed.state, PipelineRunState::Failed);
+    assert_eq!(
+        processed.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+}
+
+/// Inserts a pipeline export snapshot carrying `run`'s approved revision,
+/// `complete` (delivered) or `ready`. Test setup through an owner
+/// connection, written directly rather than through
+/// `create_export_snapshot`, so a test can place a delivered snapshot
+/// without running the export path.
+async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid::Uuid {
+    let snapshot_id = uuid::Uuid::new_v4();
+    let hash = |seed: &str| format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())));
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &run.tenant_id).await;
+    tx.execute(
+        "INSERT INTO pipeline_export_snapshots (
+            tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash,
+            state, export_manifest_id, completed_at
+         ) VALUES ($1,$2,$3,'exporter_sha256:test','model_training',$4,'pipeline_export_v1',
+                   $5,$6,$7,$8)",
+        &[
+            &run.tenant_id,
+            &snapshot_id,
+            &hash(&format!("key-{snapshot_id}")),
+            &hash("purpose"),
+            &hash(&format!("sources-{snapshot_id}")),
+            &(if complete { "complete" } else { "ready" }),
+            &complete.then(uuid::Uuid::new_v4),
+            &complete.then(chrono::Utc::now),
+        ],
+    )
+    .await
+    .expect("insert the snapshot");
+    tx.execute(
+        "INSERT INTO pipeline_export_snapshot_items (
+            tenant_id, snapshot_id, ordinal, run_id, submission_id, trace_id,
+            registry_revision_id, source_object_ref_id, source_content_hash, bundle_id,
+            outcome_schema_id, outcome_schema_version, authorized_view_schema_id,
+            consent_scopes, allowed_uses
+         ) VALUES ($1,$2,0,$3,$4,$5,$6,$7,$8,$9,'pipeline_outcome',1,'pipeline_view',
+                   '[]'::jsonb,'[]'::jsonb)",
+        &[
+            &run.tenant_id,
+            &snapshot_id,
+            &run.run_id,
+            &run.submission_id,
+            &run.trace_id,
+            &run.approved_revision_id.expect("an approved revision"),
+            &run.approved_object_ref_id.expect("an approved object"),
+            &run.approved_content_hash.clone().expect("an approved hash"),
+            &run.bundle_id,
+        ],
+    )
+    .await
+    .expect("insert the snapshot item");
+    tx.commit().await.unwrap();
+    snapshot_id
+}
+
+/// The withdrawal invalidates every pipeline export snapshot and item that
+/// carries the submission, in its own transaction. A delivered (`complete`)
+/// snapshot put copies out, so the withdrawal reports `commons_distributed`,
+/// as `main` does for a legacy export.
+#[tokio::test]
+async fn withdrawal_invalidates_pipeline_exports_and_reports_them_distributed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-exported-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let delivered = insert_export_snapshot(&run, true).await;
+    let ready = insert_export_snapshot(&run, false).await;
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(outcome.withdrawal.distribution_reach, "commons_distributed");
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    for snapshot_id in [delivered, ready] {
+        let snapshot = tx
+            .query_one(
+                "SELECT state, invalidated_at IS NOT NULL FROM pipeline_export_snapshots
+                  WHERE tenant_id = $1 AND snapshot_id = $2",
+                &[&tenant, &snapshot_id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.get::<_, String>(0), "invalidated");
+        assert!(snapshot.get::<_, bool>(1));
+        let item = tx
+            .query_one(
+                "SELECT invalidated_at IS NOT NULL, invalidation_reason
+                   FROM pipeline_export_snapshot_items
+                  WHERE tenant_id = $1 AND snapshot_id = $2",
+                &[&tenant, &snapshot_id],
+            )
+            .await
+            .unwrap();
+        assert!(item.get::<_, bool>(0));
+        assert_eq!(
+            item.get::<_, Option<String>>(1).as_deref(),
+            Some("withdrawn")
+        );
+    }
+    tx.commit().await.unwrap();
+}
+
+/// Adds an account to `tenant_id` and links the receipt principal to it, so
+/// the submissions that principal owns belong to the account
+/// (`source_submission_owned_by_account`).
+async fn link_receipt_principal_to_a_new_account(
+    backend: &PgBackend,
+    tenant_id: &str,
+) -> uuid::Uuid {
+    let account_id = uuid::Uuid::new_v4();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&tenant_id, &account_id],
+    )
+    .await
+    .expect("insert the account");
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&tenant_id, &account_id, &RECEIPT_PRINCIPAL],
+    )
+    .await
+    .expect("link the receipt principal");
+    tx.commit().await.unwrap();
+    account_id
+}
+
+/// A `PgBackend` connected as the database owner (the configured URL's own
+/// user), for fixture writes through `main`'s store methods that the
+/// runtime login does not hold the grants for.
+async fn owner_backend() -> PgBackend {
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("TRACE_COMMONS_PG_TEST_DATABASE_URL must be set for this test");
+    PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+        .await
+        .expect("connect as the database owner")
+}
+
+/// A legacy submission owned by the receipt principal, with no pipeline run.
+async fn insert_submission_without_a_run(backend: &PgBackend, tenant_id: &str) -> uuid::Uuid {
+    let submission_id = uuid::Uuid::new_v4();
+    backend
+        .upsert_trace_submission(TraceSubmissionWrite {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            trace_id: uuid::Uuid::new_v4(),
+            auth_principal_ref: RECEIPT_PRINCIPAL.to_string(),
+            contributor_pseudonym: None,
+            submitted_tenant_scope_ref: None,
+            schema_version: "ironclaw.trace_contribution.v1".to_string(),
+            consent_policy_version: "2026-04-24".to_string(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            retention_policy_id: "private_corpus_revocable".to_string(),
+            status: TraceCorpusStatus::Quarantined,
+            privacy_risk: "low".to_string(),
+            redaction_pipeline_version: "deterministic-v1".to_string(),
+            redaction_counts: BTreeMap::new(),
+            redaction_hash: "sha256:redaction".to_string(),
+            canonical_summary_hash: None,
+            submission_score: None,
+            credit_points_pending: None,
+            credit_points_final: None,
+            expires_at: None,
+            residual_risk_basis: None,
+        })
+        .await
+        .expect("insert the submission");
+    submission_id
+}
+
+/// Owner ruling T7-7 (#1021): a withdrawal reaches the whole source
+/// session, as `main`'s does. The session holds a pipeline submission whose
+/// index write is `complete` and a sibling with no run. Withdrawing either
+/// one withdraws both, queues the invalidation of the pipeline revision,
+/// and marks the session withdrawn, so a later upload of the session is
+/// refused (the claim admission makes answers `Withdrawn`, which admission
+/// turns into `source_session_withdrawn`).
+#[tokio::test]
+async fn withdrawal_of_either_session_submission_withdraws_the_session() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    for withdraw_the_pipeline_submission in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let tenant = format!("withdraw-session-{}", uuid::Uuid::new_v4());
+        let (run, _) = run_to_settle_ready(&service, &tenant).await;
+        let settled = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs");
+        assert_eq!(settled.index_write_state, "complete");
+        let revision_id = run.approved_revision_id.expect("an approved revision");
+        let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+        let sibling = insert_submission_without_a_run(&backend, &tenant).await;
+        let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+            .as_slice()
+            .try_into()
+            .unwrap();
+        // Claiming a source session is account admission's write, not the
+        // ingest runtime's (V90), so the fixture claims it as the owner.
+        for submission_id in [run.submission_id, sibling] {
+            assert_eq!(
+                owner
+                    .claim_trace_source_session(&tenant, account_id, &digest, submission_id)
+                    .await
+                    .unwrap(),
+                TraceSourceSessionStatus::Active
+            );
+        }
+        let requested = if withdraw_the_pipeline_submission {
+            run.submission_id
+        } else {
+            sibling
+        };
+
+        let outcome = service
+            .withdraw_submission(&tenant, requested, RECEIPT_PRINCIPAL, Some(account_id))
+            .await
+            .expect("the owner's withdrawal succeeds");
+
+        let mut both = vec![run.submission_id, sibling];
+        both.sort();
+        assert_eq!(outcome.affected_submission_ids, both);
+        assert_eq!(outcome.withdrawal.submission_id, requested);
+        assert_eq!(
+            outcome.index_invalidation,
+            PipelineWithdrawalFollowUpState::Pending
+        );
+        for submission_id in [run.submission_id, sibling] {
+            assert_eq!(
+                count_submission_rows(
+                    &backend,
+                    &tenant,
+                    submission_id,
+                    "trace_withdrawals",
+                    "TRUE"
+                )
+                .await,
+                1
+            );
+            assert_eq!(
+                submission_withdrawal_columns(&backend, &tenant, submission_id).await,
+                ("revoked".to_string(), true, true, true)
+            );
+        }
+        let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+        assert_eq!(
+            rows,
+            vec![(
+                revision_id,
+                "withdrawn".to_string(),
+                "pending".to_string(),
+                true
+            )]
+        );
+        assert_eq!(run_state, "pending");
+        assert_eq!(
+            backend
+                .get_trace_source_session_status(&tenant, account_id, &digest)
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Withdrawn
+        );
+        assert_eq!(
+            owner
+                .claim_trace_source_session(&tenant, account_id, &digest, uuid::Uuid::new_v4())
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Withdrawn,
+            "a later upload of the session is refused"
+        );
+    }
+}
+
+/// One withdrawn submission's rows: its `trace_withdrawals` row
+/// (`prior_status`, `distribution_reach`), its withdrawal columns, its
+/// tombstones, its `trace_revocation_propagation_items` (id, idempotency
+/// key, target, trace id, action, status, reason, metadata; by id), and
+/// how many of its object refs, derived records, vector entries, legacy
+/// manifest items, and pipeline snapshot items are still live.
+#[derive(Debug, Clone, PartialEq)]
+struct WithdrawnVersion {
+    withdrawal: Option<(String, String)>,
+    submission: (String, bool, bool, bool),
+    tombstones: Vec<(
+        uuid::Uuid,
+        uuid::Uuid,
+        String,
+        Option<String>,
+        String,
+        String,
+    )>,
+    propagation_items: Vec<(
+        uuid::Uuid,
+        String,
+        serde_json::Value,
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        serde_json::Value,
+    )>,
+    live_object_refs: i64,
+    live_derived_records: i64,
+    live_vector_entries: i64,
+    live_manifest_items: i64,
+    live_snapshot_items: i64,
+}
+
+/// `WithdrawnVersion` as read now, on an owner connection.
+async fn withdrawn_version(tenant_id: &str, submission_id: uuid::Uuid) -> WithdrawnVersion {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let key = &[
+        &tenant_id as &(dyn tokio_postgres::types::ToSql + Sync),
+        &submission_id,
+    ];
+    let withdrawal = tx
+        .query_opt(
+            "SELECT prior_status, distribution_reach FROM trace_withdrawals
+              WHERE tenant_id = $1 AND submission_id = $2",
+            key,
+        )
+        .await
+        .unwrap()
+        .map(|row| (row.get(0), row.get(1)));
+    let submission = tx
+        .query_one(
+            "SELECT status, withdrawn_at IS NOT NULL, revoked_at IS NOT NULL,
+                    purged_at IS NOT NULL
+               FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+            key,
+        )
+        .await
+        .unwrap();
+    let tombstones = tx
+        .query(
+            "SELECT tombstone_id, trace_id, redaction_hash, canonical_summary_hash, reason,
+                    created_by_principal_ref
+               FROM trace_tombstones WHERE tenant_id = $1 AND submission_id = $2
+              ORDER BY tombstone_id",
+            key,
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+                row.get(4),
+                row.get(5),
+            )
+        })
+        .collect();
+    let propagation_items = tx
+        .query(
+            "SELECT propagation_item_id, idempotency_key, target_json, trace_id, action,
+                    status, reason, metadata_json
+               FROM trace_revocation_propagation_items
+              WHERE tenant_id = $1 AND source_submission_id = $2
+              ORDER BY propagation_item_id",
+            key,
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+                row.get(4),
+                row.get(5),
+                row.get(6),
+                row.get(7),
+            )
+        })
+        .collect();
+    let count = |sql: &'static str| {
+        let tx = &tx;
+        async move { tx.query_one(sql, key).await.unwrap().get::<_, i64>(0) }
+    };
+    let live_object_refs = count(
+        "SELECT COUNT(*) FROM trace_object_refs
+          WHERE tenant_id = $1 AND submission_id = $2 AND invalidated_at IS NULL",
+    )
+    .await;
+    let live_derived_records = count(
+        "SELECT COUNT(*) FROM trace_derived_records
+          WHERE tenant_id = $1 AND submission_id = $2 AND status <> 'revoked'",
+    )
+    .await;
+    let live_vector_entries = count(
+        "SELECT COUNT(*) FROM trace_vector_entries
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND status <> 'invalidated' AND deleted_at IS NULL",
+    )
+    .await;
+    let live_manifest_items = count(
+        "SELECT COUNT(*) FROM trace_export_manifest_items
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND (source_invalidated_at IS NULL
+                 OR source_invalidation_reason IS DISTINCT FROM 'revoked')",
+    )
+    .await;
+    let live_snapshot_items = count(
+        "SELECT COUNT(*) FROM pipeline_export_snapshot_items
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND (invalidated_at IS NULL
+                 OR invalidation_reason IS DISTINCT FROM 'withdrawn')",
+    )
+    .await;
+    tx.commit().await.unwrap();
+    WithdrawnVersion {
+        withdrawal,
+        submission: (
+            submission.get(0),
+            submission.get(1),
+            submission.get(2),
+            submission.get(3),
+        ),
+        tombstones,
+        propagation_items,
+        live_object_refs,
+        live_derived_records,
+        live_vector_entries,
+        live_manifest_items,
+        live_snapshot_items,
+    }
+}
+
+/// The rows a withdrawal of `submission_id` alone writes for it (with the
+/// tier given), computed from its row and its live object refs as read
+/// before the withdrawal: one tombstone under its fixed id, and one pending
+/// payload deletion under its fixed idempotency key per live object ref.
+async fn expected_withdrawn_version(
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+    prior_status: &str,
+    distribution_reach: &str,
+) -> WithdrawnVersion {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let submission = tx
+        .query_one(
+            "SELECT trace_id, redaction_hash, canonical_summary_hash FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap();
+    let object_ref_ids: Vec<uuid::Uuid> = tx
+        .query(
+            "SELECT object_ref_id FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2 AND deleted_at IS NULL",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    tx.commit().await.unwrap();
+    assert!(
+        object_ref_ids.len() >= 2,
+        "the source and the approved object at least"
+    );
+    let trace_id: uuid::Uuid = submission.get(0);
+    let mut propagation_items = object_ref_ids
+        .iter()
+        .map(|object_ref_id| {
+            let key = format!(
+                "sha256:{:x}",
+                Sha256::digest(
+                    format!(
+                        "pipeline-withdrawal-object-delete:v1:{tenant_id}:{submission_id}:{object_ref_id}"
+                    )
+                    .as_bytes()
+                )
+            );
+            (
+                uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()),
+                key,
+                serde_json::json!({"kind": "object_ref", "object_ref_id": object_ref_id}),
+                trace_id,
+                "delete_object_payload".to_string(),
+                "pending".to_string(),
+                "pipeline_withdrawal".to_string(),
+                serde_json::json!({"source": "versioned_pipeline"}),
+            )
+        })
+        .collect::<Vec<_>>();
+    propagation_items.sort_by_key(|item| item.0);
+    WithdrawnVersion {
+        withdrawal: Some((prior_status.to_string(), distribution_reach.to_string())),
+        submission: ("revoked".to_string(), true, true, true),
+        tombstones: vec![(
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("pipeline-withdrawal:{tenant_id}:{submission_id}").as_bytes(),
+            ),
+            trace_id,
+            submission.get(1),
+            submission.get(2),
+            "withdrawn".to_string(),
+            RECEIPT_PRINCIPAL.to_string(),
+        )],
+        propagation_items,
+        live_object_refs: 0,
+        live_derived_records: 0,
+        live_vector_entries: 0,
+        live_manifest_items: 0,
+        live_snapshot_items: 0,
+    }
+}
+
+/// Zaki review 1, round 2, item 5: the withdrawal writes the pipeline
+/// follow-up of every submission of a session in one set of statements.
+/// A session of three versions, each a complete pipeline run with its own
+/// object refs; the first two are in a delivered export (a pipeline
+/// snapshot and `main`'s manifest of both), the third only in a snapshot
+/// not yet delivered. Withdrawing the middle version withdraws all three,
+/// and each gets exactly the rows a withdrawal of it alone writes: its tier
+/// (the delivered two `commons_distributed`, the third
+/// `commons_not_distributed`), one tombstone, every object ref invalidated
+/// with one payload deletion each, its derived records, vector entries,
+/// manifest items and snapshot items invalidated. Every manifest and
+/// snapshot is invalidated. A second withdrawal changes nothing.
+#[tokio::test]
+async fn a_session_withdrawal_writes_each_versions_rows_as_its_own_withdrawal_would() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let product = PipelineProductStore::new(backend.clone());
+    let tenant = format!("withdraw-three-versions-{}", uuid::Uuid::new_v4());
+    let mut runs = Vec::new();
+    for version in 0..3 {
+        let (run, _) = run_to_settle_ready(&service, &tenant).await;
+        let settled = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs");
+        assert_eq!(settled.state, PipelineRunState::Complete);
+        runs.push(settled);
+        if version == 1 {
+            let snapshot = create_snapshot(
+                &product,
+                &tenant,
+                "three-versions",
+                TraceAllowedUse::Evaluation,
+            )
+            .await;
+            let mut exported = vec![runs[0].run_id, runs[1].run_id];
+            exported.sort();
+            assert_eq!(item_runs(&snapshot), exported);
+            product
+                .complete_export_snapshot(&tenant, EXPORTER, snapshot.snapshot_id)
+                .await
+                .expect("deliver the snapshot");
+        }
+    }
+    insert_export_snapshot(&runs[2], false).await;
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+        .as_slice()
+        .try_into()
+        .unwrap();
+    for run in &runs {
+        assert_eq!(
+            owner
+                .claim_trace_source_session(&tenant, account_id, &digest, run.submission_id)
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Active
+        );
+    }
+    let mut expected = BTreeMap::new();
+    for (index, run) in runs.iter().enumerate() {
+        let reach = if index < 2 {
+            "commons_distributed"
+        } else {
+            "commons_not_distributed"
+        };
+        expected.insert(
+            run.submission_id,
+            expected_withdrawn_version(&tenant, run.submission_id, "accepted", reach).await,
+        );
+    }
+    let mut all = runs.iter().map(|run| run.submission_id).collect::<Vec<_>>();
+    all.sort();
+
+    let outcome = service
+        .withdraw_submission(
+            &tenant,
+            runs[1].submission_id,
+            RECEIPT_PRINCIPAL,
+            Some(account_id),
+        )
+        .await
+        .expect("the owner's withdrawal succeeds");
+    assert_eq!(outcome.affected_submission_ids, all);
+    assert_eq!(
+        outcome.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    for run in &runs {
+        assert_eq!(
+            withdrawn_version(&tenant, run.submission_id).await,
+            expected[&run.submission_id]
+        );
+    }
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let live_exports: (i64, i64) = {
+        let row = tx
+            .query_one(
+                "SELECT
+                    (SELECT COUNT(*) FROM trace_export_manifests
+                      WHERE tenant_id = $1 AND invalidated_at IS NULL),
+                    (SELECT COUNT(*) FROM pipeline_export_snapshots
+                      WHERE tenant_id = $1 AND state <> 'invalidated')",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        (row.get(0), row.get(1))
+    };
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        live_exports,
+        (0, 0),
+        "every manifest and snapshot is invalidated"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_export_manifests").await,
+        1
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        2
+    );
+
+    let again = service
+        .withdraw_submission(
+            &tenant,
+            runs[0].submission_id,
+            RECEIPT_PRINCIPAL,
+            Some(account_id),
+        )
+        .await
+        .expect("a second withdrawal succeeds");
+    assert_eq!(again.affected_submission_ids, all);
+    for run in &runs {
+        assert_eq!(
+            withdrawn_version(&tenant, run.submission_id).await,
+            expected[&run.submission_id],
+            "a second withdrawal changes nothing"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Index invalidation (`PipelineService::process_index_invalidations`)
+// ---------------------------------------------------------------------------
+
+/// One index entry a run's Settle wrote: its entry id and its embedding.
+type RevisionEntry = (uuid::Uuid, Vec<f32>);
+
+/// Runs a receipt through Review, Score, and Settle with the index included,
+/// and returns the complete run and the entries its Settle wrote, read from
+/// the run's stored index command.
+async fn complete_indexed_run(
+    service: &PipelineService,
+    tenant: &str,
+) -> (PipelineRunRecord, Vec<RevisionEntry>) {
+    let (run, evidence) = run_to_settle_ready(service, tenant).await;
+    let command = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command");
+    let tenant_ref = pipeline_tenant_storage_ref(tenant);
+    let entries: Vec<RevisionEntry> = command
+        .keyed_entries(&tenant_ref)
+        .map(|(key, entry)| (key.entry_id(), entry.embedding.clone()))
+        .collect();
+    assert!(!entries.is_empty(), "the command has at least one entry");
+    let settled = service
+        .process_run(tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "complete");
+    (settled, entries)
+}
+
+/// The ids among `entries` that a `nearest` query by any of their own
+/// embeddings returns: the revision's entries a reader can still see.
+fn visible_revision_entries(
+    index: &IsolatedPipelineIndex,
+    tenant_ref: &TenantStorageRef,
+    entries: &[RevisionEntry],
+) -> BTreeSet<uuid::Uuid> {
+    let ids: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    let mut visible = BTreeSet::new();
+    for (_, embedding) in entries {
+        for neighbor in index
+            .nearest(tenant_ref, MINIMAL_INDEX_ID, embedding, 64, None)
+            .unwrap()
+        {
+            if ids.contains(&neighbor.entry_id) {
+                visible.insert(neighbor.entry_id);
+            }
+        }
+    }
+    visible
+}
+
+/// A run's `pipeline_index_invalidations` row; `run_state` is that row's
+/// state, the run's invalidation state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InvalidationDetail {
+    state: String,
+    attempt_count: i32,
+    max_attempts: i32,
+    last_error_label: Option<String>,
+    requested_at: chrono::DateTime<chrono::Utc>,
+    next_attempt_at: chrono::DateTime<chrono::Utc>,
+    completed: bool,
+    run_state: String,
+}
+
+async fn invalidation_detail(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> InvalidationDetail {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT i.state, i.attempt_count, i.max_attempts, i.last_error_label,
+                    i.next_attempt_at, i.completed_at IS NOT NULL,
+                    i.state, i.requested_at
+               FROM pipeline_index_invalidations i
+               JOIN pipeline_runs r ON r.tenant_id = i.tenant_id AND r.run_id = i.run_id
+              WHERE i.tenant_id = $1 AND i.run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("the run has an invalidation row");
+    tx.commit().await.unwrap();
+    InvalidationDetail {
+        state: row.get(0),
+        attempt_count: row.get(1),
+        max_attempts: row.get(2),
+        last_error_label: row.get(3),
+        next_attempt_at: row.get(4),
+        completed: row.get(5),
+        run_state: row.get(6),
+        requested_at: row.get(7),
+    }
+}
+
+/// Makes a run's invalidation due now: a time shortcut, as the owner, not a
+/// processor call.
+async fn make_invalidation_due(tenant_id: &str, run_id: uuid::Uuid) {
+    owner_client()
+        .await
+        .execute(
+            "UPDATE pipeline_index_invalidations SET next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("make the invalidation due");
+}
+
+/// Review Focus 1: a run's revision is in the index and a reader finds its
+/// entries; the submission is withdrawn, which queues an invalidation; one
+/// pass of `process_index_invalidations` processes it, and after that no
+/// `nearest` query returns any entry of the revision. The invalidation and
+/// the run's invalidation state are `complete`, and a second pass
+/// finds nothing to do.
+#[tokio::test]
+async fn invalidation_removes_the_revision_after_withdrawal() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-withdrawn-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        visible_revision_entries(&index, &tenant_ref, &entries),
+        all,
+        "a reader finds every entry of the revision"
+    );
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+
+    assert!(
+        visible_revision_entries(&index, &tenant_ref, &entries).is_empty(),
+        "no entry of the withdrawn revision stays visible"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+    let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(detail.state, "complete");
+    assert!(detail.completed);
+    assert_eq!(detail.last_error_label, None);
+    assert_eq!(detail.run_state, "complete");
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "a complete invalidation is not processed again"
+    );
+}
+
+/// The database clock: `NOW()` of a transaction of its own. Read just
+/// before and just after a call, it brackets the `NOW()` of every
+/// transaction the call ran.
+async fn database_now(backend: &PgBackend) -> chrono::DateTime<chrono::Utc> {
+    backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one("SELECT NOW()", &[])
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// Moves a run's invalidation `requested_at` back by `hours`, as the owner:
+/// a time shortcut, so the invalidation is that much older.
+async fn age_invalidation(tenant_id: &str, run_id: uuid::Uuid, hours: i32) {
+    owner_client()
+        .await
+        .execute(
+            "UPDATE pipeline_index_invalidations
+                SET requested_at = requested_at - make_interval(hours => $3)
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id, &hours],
+        )
+        .await
+        .expect("age the invalidation");
+}
+
+/// Review Focus 1 and Ruling T8-2: an index outage never ends a queued
+/// invalidation. The index fails (`IndexFault::FailBeforeApply`, one-shot, so
+/// it is armed again before each attempt, and the row is made due between
+/// attempts) on more attempts than `max_attempts`. Each outage is an
+/// uncharged retry: the row stays `pending` with its attempt count
+/// unchanged, under `index_invalidation_unavailable`, and waits out the FR3
+/// backoff: the invalidation's age, at least one second (the first outage)
+/// and at most one hour (the last outage, on an invalidation aged three
+/// hours), each wait ending later than the one before; the run's
+/// invalidation state stays `pending` and every entry stays where
+/// it was. When the index answers again, the invalidation completes and the
+/// revision's entries are gone.
+///
+/// Ruling F-M6: the backoff is checked against the database clock read
+/// just before and just after each attempt, which brackets the `NOW()` the
+/// retry wrote from, and not against the time left when the test reads the
+/// row. However slow the runner, the row alone decides the result.
+#[tokio::test]
+async fn an_index_outage_keeps_the_invalidation_pending_until_it_completes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-outage-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    withdraw(&service, &tenant, run.submission_id).await;
+    let queued = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(queued.attempt_count, 0);
+    let outages = queued.max_attempts + 2;
+
+    let mut previous_wait_end = None;
+    for outage in 1..=outages {
+        if outage == outages {
+            age_invalidation(&tenant, run.run_id, 3).await;
+        }
+        index.set_fault(IndexFault::FailBeforeApply);
+        make_invalidation_due(&tenant, run.run_id).await;
+        let before = database_now(&backend).await;
+        assert_eq!(
+            service
+                .process_index_invalidations(&tenant, 32)
+                .await
+                .unwrap(),
+            1,
+            "outage {outage} is processed"
+        );
+        let after = database_now(&backend).await;
+        let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+        assert_eq!(detail.state, "pending", "outage {outage}");
+        assert_eq!(
+            detail.attempt_count, 0,
+            "outage {outage} consumed no attempt"
+        );
+        assert_eq!(
+            detail.last_error_label.as_deref(),
+            Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL),
+            "outage {outage}"
+        );
+        assert!(!detail.completed, "outage {outage}");
+        assert_eq!(detail.run_state, "pending", "outage {outage}");
+        // The retry wrote `next_attempt_at = t + wait` at a database time `t`
+        // between `before` and `after`, with `wait` its age clamped to
+        // [1 s, 1 h]: bounded, whatever the runner's speed.
+        let second = chrono::Duration::seconds(1);
+        let hour = chrono::Duration::hours(1);
+        assert!(
+            detail.next_attempt_at >= before + second && detail.next_attempt_at <= after + hour,
+            "outage {outage} waits out a bounded backoff \
+             (before {before}, after {after}, due {})",
+            detail.next_attempt_at
+        );
+        if outage == 1 {
+            // The wait is the age at `t`, or the one-second floor when that is
+            // longer: never past `after` plus the larger of the two.
+            let floor_or_age = std::cmp::max(after - detail.requested_at, second);
+            assert!(
+                detail.next_attempt_at <= after + floor_or_age,
+                "the first outage waits the one-second floor \
+                 (requested {}, after {after}, due {})",
+                detail.requested_at,
+                detail.next_attempt_at
+            );
+        }
+        if outage == outages {
+            // Three hours old: the wait is exactly the one-hour cap.
+            assert!(
+                detail.next_attempt_at >= before + hour,
+                "an outage of an old invalidation waits the one-hour cap \
+                 (before {before}, due {})",
+                detail.next_attempt_at
+            );
+        }
+        if let Some(previous) = previous_wait_end {
+            assert!(
+                detail.next_attempt_at > previous,
+                "outage {outage} waits until later than the outage before it"
+            );
+        }
+        previous_wait_end = Some(detail.next_attempt_at);
+        assert_eq!(
+            visible_revision_entries(&index, &tenant_ref, &entries),
+            all,
+            "an outage removed nothing (outage {outage})"
+        );
+    }
+
+    make_invalidation_due(&tenant, run.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    let complete = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(complete.state, "complete");
+    assert_eq!(complete.attempt_count, 0);
+    assert_eq!(complete.last_error_label, None);
+    assert!(complete.completed);
+    assert_eq!(complete.run_state, "complete");
+    assert!(
+        visible_revision_entries(&index, &tenant_ref, &entries).is_empty(),
+        "no entry of the withdrawn revision stays visible"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// Rulings T8-1 and T8-2: an `Uncertain` answer (`IndexFault::LostAfterApply`:
+/// the entries are removed, but the index cannot say so) is an uncharged
+/// retry, not a completion. The next attempt removes nothing, gets
+/// `Ok(false)`, and completes the invalidation.
+#[tokio::test]
+async fn an_uncertain_invalidation_is_retried_and_then_completes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-uncertain-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+
+    index.set_fault(IndexFault::LostAfterApply);
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        visible_revision_entries(&index, &tenant_ref, &entries).is_empty(),
+        "the uncertain attempt removed the entries"
+    );
+    let uncertain = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(uncertain.state, "pending");
+    assert_eq!(uncertain.attempt_count, 0, "an outage is not charged");
+    assert_eq!(
+        uncertain.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL)
+    );
+    assert!(!uncertain.completed);
+    assert_eq!(uncertain.run_state, "pending");
+
+    make_invalidation_due(&tenant, run.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    let complete = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(complete.state, "complete");
+    assert_eq!(complete.attempt_count, 0, "a success is not charged");
+    assert_eq!(complete.last_error_label, None);
+    assert!(complete.completed);
+    assert_eq!(complete.run_state, "complete");
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// Removes `index_id` from a run's stored Score evidence, as the owner, with
+/// the immutability trigger off for the one statement: stored data that no
+/// longer says which index the run's Settle wrote to. No service write can
+/// produce this (`phase_outcomes` rows are immutable).
+async fn tamper_stored_score_index_id_away(tenant_id: &str, run_id: uuid::Uuid) {
+    let mut client = owner_client().await;
+    let tx = client
+        .transaction()
+        .await
+        .expect("open owner transaction for tampering");
+    tx.batch_execute("ALTER TABLE phase_outcomes DISABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("disable the immutability trigger");
+    let updated = tx
+        .execute(
+            "UPDATE phase_outcomes SET evidence = evidence - 'index_id'
+              WHERE tenant_id = $1 AND run_id = $2 AND phase = 'score'
+                AND evidence ? 'index_id'",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("tamper the stored Score evidence");
+    assert_eq!(updated, 1, "one stored Score evidence named an index");
+    tx.batch_execute("ALTER TABLE phase_outcomes ENABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("enable the immutability trigger");
+    tx.commit().await.expect("commit the tampering transaction");
+}
+
+/// Ruling T8-2, the terminal path: a failure that waiting cannot heal is
+/// charged, and ends the invalidation. Here the run's stored Score evidence
+/// no longer names the index its Settle wrote to (only corrupted stored data
+/// can do this). Each attempt is charged one attempt; each but the last
+/// leaves the invalidation `pending` under `index_invalidation_unavailable`;
+/// the last leaves it, and the run's invalidation state, `failed`
+/// under `index_invalidation_failed`. Nothing was removed, so the entries
+/// stay, and the failure is on record for an operator. A failed
+/// invalidation is never claimed again, even when due.
+#[tokio::test]
+async fn an_invalidation_whose_index_cannot_be_read_fails_after_its_attempts() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-unreadable-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    withdraw(&service, &tenant, run.submission_id).await;
+    tamper_stored_score_index_id_away(&tenant, run.run_id).await;
+    let max_attempts = invalidation_detail(&backend, &tenant, run.run_id)
+        .await
+        .max_attempts;
+    assert!(max_attempts > 1, "the charged retry is exercised");
+
+    for attempt in 1..=max_attempts {
+        make_invalidation_due(&tenant, run.run_id).await;
+        assert_eq!(
+            service
+                .process_index_invalidations(&tenant, 32)
+                .await
+                .unwrap(),
+            1,
+            "attempt {attempt} is processed"
+        );
+        let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+        assert_eq!(detail.attempt_count, attempt, "each failure is charged");
+        assert!(!detail.completed);
+        if attempt < max_attempts {
+            assert_eq!(detail.state, "pending", "attempt {attempt}");
+            assert_eq!(
+                detail.last_error_label.as_deref(),
+                Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL),
+                "attempt {attempt}"
+            );
+            assert_eq!(detail.run_state, "pending", "attempt {attempt}");
+        } else {
+            assert_eq!(detail.state, "failed");
+            assert_eq!(
+                detail.last_error_label.as_deref(),
+                Some(PIPELINE_INDEX_INVALIDATION_FAILED_LABEL)
+            );
+            assert_eq!(detail.run_state, "failed");
+        }
+        assert_eq!(
+            visible_revision_entries(&index, &tenant_ref, &entries),
+            all,
+            "nothing was removed (attempt {attempt})"
+        );
+    }
+
+    let failed = invalidation_detail(&backend, &tenant, run.run_id).await;
+    make_invalidation_due(&tenant, run.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "a failed invalidation is not claimed again"
+    );
+    let after = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        (after.state, after.attempt_count, after.last_error_label),
+        (failed.state, failed.attempt_count, failed.last_error_label)
+    );
+}
+
+/// Ends `run_id`'s index invalidation `failed`, its attempts spent, as
+/// `an_invalidation_whose_index_cannot_be_read_fails_after_its_attempts`
+/// drives it there: a time shortcut, through an owner connection.
+async fn fail_invalidation_as_owner(tenant_id: &str, run_id: uuid::Uuid) {
+    let owner = owner_client().await;
+    owner
+        .execute(
+            "UPDATE pipeline_index_invalidations
+                SET state = 'failed', attempt_count = max_attempts,
+                    last_error_label = 'index_invalidation_failed'
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("fail the invalidation");
+}
+
+/// Zaki review 1, item 6: a `failed` invalidation is not terminal. Queuing
+/// the revision's invalidation again (here, a second withdrawal) resets it
+/// to `pending`, with no attempt charged and due at once, and the run's
+/// invalidation state with it; the next pass removes the revision.
+#[tokio::test]
+async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-requeue-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    fail_invalidation_as_owner(&tenant, run.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "a failed invalidation is not claimed"
+    );
+
+    withdraw(&service, &tenant, run.submission_id).await;
+    let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(detail.state, "pending");
+    assert_eq!(detail.attempt_count, 0);
+    assert_eq!(detail.last_error_label, None);
+    assert_eq!(detail.run_state, "pending");
+    assert!(detail.next_attempt_at <= chrono::Utc::now(), "due at once");
+
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "complete"
+    );
+    assert!(
+        visible_revision_entries(&index, &tenant_ref, &entries).is_empty(),
+        "the revision left the index"
+    );
+}
+
+/// Zaki review 1, fix round, item 3, after the round 2 simplification that
+/// removed the run's copy of the invalidation state: the re-enqueue writes
+/// only invalidation rows, so it takes no run lock and cannot wait in the
+/// opposite order to a withdrawal, Settle's cancel or the invalidation
+/// worker (each takes the run row, then the invalidation row). With a
+/// transaction holding the run row (as a second withdrawal would), the
+/// re-enqueue still finishes at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requeue_takes_no_run_row_lock() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("requeue-lock-order-{}", uuid::Uuid::new_v4());
+    let (run, _) = complete_indexed_run(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    fail_invalidation_as_owner(&tenant, run.run_id).await;
+
+    let mut holder_client = owner_client().await;
+    let holder = owner_tenant_tx(&mut holder_client, &tenant).await;
+    holder
+        .query_one(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+    let requeued = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.store().requeue_failed_index_invalidations(&tenant),
+    )
+    .await
+    .expect("the re-enqueue does not wait for the run row")
+    .unwrap();
+    holder.rollback().await.unwrap();
+    assert_eq!(requeued, 1);
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "pending"
+    );
+}
+
+/// Zaki review 1, item 6: the operator's re-enqueue resets every `failed`
+/// invalidation of the caller's tenant to `pending` and answers how many,
+/// and touches no other tenant's. A second call finds none.
+#[tokio::test]
+async fn requeue_failed_index_invalidations_resets_the_tenants_failed_ones() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant_a = format!("requeue-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("requeue-b-{}", uuid::Uuid::new_v4());
+    let mut runs = Vec::new();
+    for tenant in [&tenant_a, &tenant_b] {
+        let (run, _) = complete_indexed_run(&service, tenant).await;
+        withdraw(&service, tenant, run.submission_id).await;
+        fail_invalidation_as_owner(tenant, run.run_id).await;
+        runs.push(run);
+    }
+
+    assert_eq!(
+        service
+            .store()
+            .requeue_failed_index_invalidations(&tenant_a)
+            .await
+            .unwrap(),
+        1
+    );
+    let a = invalidation_detail(&backend, &tenant_a, runs[0].run_id).await;
+    assert_eq!(
+        (a.state.as_str(), a.attempt_count, a.run_state.as_str()),
+        ("pending", 0, "pending")
+    );
+    let b = invalidation_detail(&backend, &tenant_b, runs[1].run_id).await;
+    assert_eq!(
+        (b.state.as_str(), b.run_state.as_str()),
+        ("failed", "failed"),
+        "another tenant's invalidation is untouched"
+    );
+    assert_eq!(
+        service
+            .store()
+            .requeue_failed_index_invalidations(&tenant_a)
+            .await
+            .unwrap(),
+        0,
+        "nothing more to re-enqueue"
+    );
+}
+
+/// A pending invalidation of tenant A is not processed by tenant B's pass:
+/// B's pass returns 0 and A's row, and A's entries, are unchanged. A's own
+/// pass then processes it, so the row was due all along.
+#[tokio::test]
+async fn invalidation_is_tenant_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant_a = format!("invalidate-tenant-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("invalidate-tenant-b-{}", uuid::Uuid::new_v4());
+    let tenant_a_ref = pipeline_tenant_storage_ref(&tenant_a);
+    let (run, entries) = complete_indexed_run(&service, &tenant_a).await;
+    let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    withdraw(&service, &tenant_a, run.submission_id).await;
+    service.register_default_bundle(&tenant_b).await.unwrap();
+    let before = invalidation_detail(&backend, &tenant_a, run.run_id).await;
+    assert_eq!(before.state, "pending");
+
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant_b, 32)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        service
+            .store()
+            .claim_due_index_invalidations(&tenant_b, 32, chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        Vec::<PipelineIndexInvalidationClaim>::new(),
+        "tenant B's claim never reaches tenant A's invalidation"
+    );
+    assert_eq!(
+        invalidation_detail(&backend, &tenant_a, run.run_id).await,
+        before
+    );
+    assert_eq!(
+        visible_revision_entries(&index, &tenant_a_ref, &entries),
+        all
+    );
+
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant_a, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(visible_revision_entries(&index, &tenant_a_ref, &entries).is_empty());
+}
+
+/// A claim is exclusive: it holds the invalidation for its lease (the row's
+/// `next_attempt_at` moves to the lease's end), so a second claim, or two
+/// claims at once, get it only once. Once the lease has passed, another
+/// worker can claim it; the first claim can then no longer record a
+/// failure or an outage (it no longer holds the lease), while the new one
+/// can. Listing and claiming are one statement
+/// (`claim_due_index_invalidations`, Zaki review 1, round 2, item 4).
+#[tokio::test]
+async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-claim-{}", uuid::Uuid::new_v4());
+    let (run, _) = complete_indexed_run(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    let store = service.store();
+    let lease = chrono::Duration::minutes(5);
+
+    // Two claims at once: exactly one gets it.
+    let (left, right) = tokio::join!(
+        store.claim_due_index_invalidations(&tenant, 32, lease),
+        store.claim_due_index_invalidations(&tenant, 32, lease),
+    );
+    let claims: Vec<PipelineIndexInvalidationClaim> = [left.unwrap(), right.unwrap()]
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(
+        claims.len(),
+        1,
+        "exactly one of two claims at once succeeds"
+    );
+    let first = claims.into_iter().next().unwrap();
+    assert_eq!(first.run_id, run.run_id);
+    assert_eq!(Some(first.registry_revision_id), run.approved_revision_id);
+    assert_eq!(first.attempt_count, 0);
+    let held = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(held.next_attempt_at, first.lease_expires_at);
+    assert!(
+        store
+            .claim_due_index_invalidations(&tenant, 32, lease)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a claimed invalidation is not due, so a later claim within the lease gets nothing"
+    );
+
+    // The lease passes; another worker claims it.
+    make_invalidation_due(&tenant, run.run_id).await;
+    let second = store
+        .claim_due_index_invalidations(&tenant, 32, lease)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("a claim after the lease gets it");
+    assert_ne!(second.lease_expires_at, first.lease_expires_at);
+    let reclaimed = invalidation_detail(&backend, &tenant, run.run_id).await;
+
+    assert!(
+        !store.fail_index_invalidation(&first).await.unwrap(),
+        "the first claim no longer holds the invalidation"
+    );
+    assert!(
+        !store.retry_index_invalidation(&first).await.unwrap(),
+        "nor can it record an outage"
+    );
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id).await,
+        reclaimed,
+        "the stale failure and outage changed nothing"
+    );
+    assert!(
+        store.fail_index_invalidation(&second).await.unwrap(),
+        "the current claim records its failure"
+    );
+    let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(detail.state, "pending");
+    assert_eq!(detail.attempt_count, 1);
+    assert!(
+        !store.fail_index_invalidation(&second).await.unwrap(),
+        "one claim records one result"
+    );
+}
+
+/// Zaki review 1, round 2, item 4: one statement lists and claims, so one
+/// claim takes up to its limit of the tenant's due invalidations at once,
+/// the next claim takes the rest, and a claim with nothing due takes none.
+/// Each withdrawal that queued an invalidation woke this service's
+/// invalidation step, which the worker takes once. A pass then processes
+/// every claimed invalidation.
+#[tokio::test]
+async fn one_claim_takes_the_tenants_due_invalidations_up_to_its_limit() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-batch-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let mut run_ids = BTreeSet::new();
+    for _ in 0..3 {
+        let (run, _) = complete_indexed_run(&service, &tenant).await;
+        run_ids.insert(run.run_id);
+    }
+    assert!(
+        !service.take_follow_ups(&tenant).index_invalidations,
+        "nothing queued an invalidation yet"
+    );
+    for run_id in &run_ids {
+        let run = service
+            .store()
+            .get_run(&tenant, *run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        withdraw(&service, &tenant, run.submission_id).await;
+    }
+    assert_eq!(
+        service.take_follow_ups(&tenant),
+        PipelineFollowUps {
+            index_invalidations: true,
+            payouts: false,
+            credit_audits: false,
+        },
+        "the withdrawals woke the invalidation step"
+    );
+    assert_eq!(
+        service.take_follow_ups(&tenant),
+        PipelineFollowUps::default(),
+        "the worker takes a wakeup once"
+    );
+
+    let store = service.store();
+    let lease = chrono::Duration::minutes(5);
+    let first = store
+        .claim_due_index_invalidations(&tenant, 2, lease)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 2, "one claim takes up to its limit");
+    assert!(
+        first.windows(2).all(|pair| pair[0].run_id < pair[1].run_id),
+        "in run id order"
+    );
+    let rest = store
+        .claim_due_index_invalidations(&tenant, 2, lease)
+        .await
+        .unwrap();
+    assert_eq!(rest.len(), 1, "the next claim takes the rest");
+    let claimed: BTreeSet<uuid::Uuid> = first
+        .iter()
+        .chain(&rest)
+        .map(|claim| claim.run_id)
+        .collect();
+    assert_eq!(claimed, run_ids, "every invalidation was claimed once");
+    for claim in first.iter().chain(&rest) {
+        let detail = invalidation_detail(&backend, &tenant, claim.run_id).await;
+        assert_eq!(detail.next_attempt_at, claim.lease_expires_at);
+        assert_eq!(detail.attempt_count, 0, "a claim charges no attempt");
+    }
+    assert!(
+        store
+            .claim_due_index_invalidations(&tenant, 2, lease)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is due while the claims hold their leases"
+    );
+
+    for run_id in &run_ids {
+        make_invalidation_due(&tenant, *run_id).await;
+    }
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        3
+    );
+    for run_id in &run_ids {
+        assert_eq!(
+            invalidation_detail(&backend, &tenant, *run_id).await.state,
+            "complete"
+        );
+    }
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// The pass never holds two pooled connections at once: on a pool of one,
+/// a second checkout would wait for the first forever, and each pass is
+/// bounded. Both the outage path (an uncharged retry) and the completion
+/// path.
+#[tokio::test]
+async fn the_invalidation_pass_never_holds_two_pooled_connections() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-pool-one-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = tokio::time::timeout(HELD_CALL_BOUND, complete_indexed_run(&service, &tenant))
+        .await
+        .expect("the run completes on a pool of one");
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        withdraw(&service, &tenant, run.submission_id),
+    )
+    .await
+    .expect("the withdrawal finishes on a pool of one");
+
+    index.set_fault(IndexFault::FailBeforeApply);
+    let processed = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.process_index_invalidations(&tenant, 32),
+    )
+    .await
+    .expect("the outage path never waits for a second connection")
+    .unwrap();
+    assert_eq!(processed, 1);
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "pending"
+    );
+
+    make_invalidation_due(&tenant, run.run_id).await;
+    let processed = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.process_index_invalidations(&tenant, 32),
+    )
+    .await
+    .expect("the completion path never waits for a second connection")
+    .unwrap();
+    assert_eq!(processed, 1);
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "complete"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Approved exports (`PipelineProductStore::create_export_snapshot` and
+// `complete_export_snapshot`)
+// ---------------------------------------------------------------------------
+
+/// The requester every export test creates snapshots as, in the shape the
+/// snapshot table requires of `requester_principal_ref`.
+const EXPORTER: &str = "exporter_sha256:exporttest";
+
+/// A `sha256:` hash of `seed`, the shape the store takes for a request key
+/// and a purpose (the route hashes the raw values).
+fn export_hash(seed: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())))
+}
+
+/// Creates a snapshot of `tenant`'s approved revisions for `allowed_use`,
+/// as `EXPORTER`, keyed by `key_seed`, with the largest item bound.
+async fn create_snapshot(
+    product: &PipelineProductStore,
+    tenant: &str,
+    key_seed: &str,
+    allowed_use: TraceAllowedUse,
+) -> PipelineExportSnapshot {
+    product
+        .create_export_snapshot(
+            tenant,
+            EXPORTER,
+            &export_hash(key_seed),
+            allowed_use,
+            &PipelineExportConsentScopes::default(),
+            None,
+            &export_hash("purpose"),
+            PIPELINE_EXPORT_ITEM_MAX,
+        )
+        .await
+        .expect("create the export snapshot")
+}
+
+/// The snapshot's item run ids, sorted.
+fn item_runs(snapshot: &PipelineExportSnapshot) -> Vec<uuid::Uuid> {
+    let mut runs = snapshot
+        .items
+        .iter()
+        .map(|item| item.run_id)
+        .collect::<Vec<_>>();
+    runs.sort();
+    runs
+}
+
+/// Zaki review 1, round 2, item 3: creating and delivering a snapshot
+/// return exactly what a fresh read of it returns, for a snapshot of several
+/// items and for one of none. A replayed create (same key) and a repeated
+/// delivery read the snapshot back from the tables, so each is compared with
+/// the first answer.
+#[tokio::test]
+async fn export_snapshots_return_what_a_fresh_read_returns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let product = PipelineProductStore::new(backend.clone());
+    let tenant = format!("export-fresh-read-{}", uuid::Uuid::new_v4());
+    for _ in 0..3 {
+        submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    }
+    let empty_tenant = format!("export-fresh-read-empty-{}", uuid::Uuid::new_v4());
+    service
+        .register_default_bundle(&empty_tenant)
+        .await
+        .unwrap();
+
+    for (tenant, items) in [(&tenant, 3), (&empty_tenant, 0)] {
+        let created = create_snapshot(&product, tenant, "fresh", TraceAllowedUse::Evaluation).await;
+        assert_eq!(created.items.len(), items);
+        assert_eq!(
+            created
+                .items
+                .iter()
+                .map(|item| item.ordinal)
+                .collect::<Vec<_>>(),
+            (0..items as u32).collect::<Vec<_>>(),
+            "items in ordinal order"
+        );
+        let replayed =
+            create_snapshot(&product, tenant, "fresh", TraceAllowedUse::Evaluation).await;
+        assert_eq!(created, replayed, "{items} items: create");
+
+        let completed = product
+            .complete_export_snapshot(tenant, EXPORTER, created.snapshot_id)
+            .await
+            .expect("deliver the snapshot");
+        assert_eq!(completed.state, "complete");
+        assert_eq!(completed.export_manifest_id, Some(created.snapshot_id));
+        let again = product
+            .complete_export_snapshot(tenant, EXPORTER, created.snapshot_id)
+            .await
+            .expect("a delivered snapshot comes back unchanged");
+        assert_eq!(completed, again, "{items} items: complete");
+        assert_eq!(completed.items, created.items);
+    }
+}
+
+/// An export carries the approved revision, the bytes the privacy boundary
+/// transformed at receipt, and never the raw request. The run goes through
+/// `MarkerRedactingBoundary`, which replaces `MARKER_SECRET` with
+/// `[redacted]`. The item names the run's approved object and its
+/// `approved_content_hash`; that object reads back as the transformed bytes;
+/// no item carries the request's hash or its object. Completing the snapshot
+/// records `main`'s export manifest for it, which `main`'s own readers load.
+#[tokio::test]
+async fn export_items_carry_the_approved_revision_only() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(allow_all_authority()),
+        Some(Arc::new(MarkerRedactingBoundary)),
+    )
+    .await;
+    let tenant = format!("export-approved-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    for event in &mut env.events {
+        if let Some(content) = event.redacted_content.as_mut() {
+            content.push_str(" MARKER_SECRET");
+        }
+    }
+    let raw = serde_json::to_vec(&env).unwrap();
+    assert!(
+        String::from_utf8_lossy(&raw).contains("MARKER_SECRET"),
+        "the raw request carries the marker"
+    );
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let run = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(run.state, PipelineRunState::Complete);
+    let approved_content_hash = run
+        .approved_content_hash
+        .clone()
+        .expect("Review approval records a content hash");
+    assert_ne!(approved_content_hash, created.request_content_hash);
+
+    let product = PipelineProductStore::new(backend.clone());
+    let snapshot =
+        create_snapshot(&product, &tenant, "approved", TraceAllowedUse::Evaluation).await;
+    assert_eq!(snapshot.state, "ready");
+    let completed = product
+        .complete_export_snapshot(&tenant, EXPORTER, snapshot.snapshot_id)
+        .await
+        .expect("complete the snapshot");
+    assert_eq!(completed.state, "complete");
+    assert_eq!(completed.export_manifest_id, Some(snapshot.snapshot_id));
+    assert_eq!(completed.items, snapshot.items);
+    let [item] = completed.items.as_slice() else {
+        panic!("one item: {:?}", completed.items)
+    };
+    assert_eq!(item.run_id, run.run_id);
+    assert_eq!(item.submission_id, run.submission_id);
+    assert_eq!(
+        Some(item.registry_revision_id),
+        run.approved_revision_id,
+        "the item is the run's approved revision"
+    );
+    assert_eq!(Some(item.source_object_ref_id), run.approved_object_ref_id);
+    assert_ne!(
+        item.source_object_ref_id, run.source_object_ref_id,
+        "the raw request's object is never an item"
+    );
+    assert_eq!(item.source_content_hash, approved_content_hash);
+    assert!(
+        completed
+            .items
+            .iter()
+            .all(|item| item.source_content_hash != created.request_content_hash),
+        "no item carries the raw request's hash"
+    );
+
+    // The item's own object: it decodes to bytes whose hash is the item's
+    // hash, and those bytes are the transformed content.
+    let item_bytes = service
+        .load_approved_bytes(&PipelineRunRecord {
+            approved_object_ref_id: Some(item.source_object_ref_id),
+            approved_content_hash: Some(item.source_content_hash.clone()),
+            ..run.clone()
+        })
+        .await
+        .expect("the item's object reads back and hashes to the item's hash");
+    let item_text = String::from_utf8(item_bytes).unwrap();
+    assert!(item_text.contains("[redacted]"));
+    assert!(
+        !item_text.contains("MARKER_SECRET"),
+        "the exported bytes never carry the raw request's marker"
+    );
+
+    // `main`'s export manifest, read through `main`'s own store methods.
+    let manifests = backend
+        .list_trace_export_manifests(&tenant)
+        .await
+        .expect("main reads the tenant's export manifests");
+    let [manifest] = manifests.as_slice() else {
+        panic!("one export manifest: {manifests:?}")
+    };
+    assert_eq!(manifest.export_manifest_id, snapshot.snapshot_id);
+    assert_eq!(
+        manifest.artifact_kind,
+        TraceObjectArtifactKind::ExportArtifact
+    );
+    assert_eq!(manifest.source_submission_ids, vec![run.submission_id]);
+    assert_eq!(manifest.item_count, 1);
+    let manifest_items = backend
+        .list_trace_export_manifest_items(&tenant, snapshot.snapshot_id)
+        .await
+        .expect("main reads the manifest's items");
+    let [manifest_item] = manifest_items.as_slice() else {
+        panic!("one manifest item: {manifest_items:?}")
+    };
+    assert_eq!(manifest_item.submission_id, run.submission_id);
+    assert_eq!(manifest_item.derived_id, Some(item.registry_revision_id));
+    assert_eq!(manifest_item.object_ref_id, Some(item.source_object_ref_id));
+    assert_eq!(manifest_item.source_hash_at_export, approved_content_hash);
+}
+
+/// A snapshot holds only the requesting tenant's runs. Both tenants use the
+/// same request key, which each tenant holds on its own; each snapshot
+/// holds only its own tenant's run; and a tenant cannot complete another
+/// tenant's snapshot, which does not exist for it.
+#[tokio::test]
+async fn exports_never_include_another_tenants_runs() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant_a = format!("export-tenant-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("export-tenant-b-{}", uuid::Uuid::new_v4());
+    let run_a = submit_and_complete(&service, &tenant_a, RECEIPT_PRINCIPAL).await;
+    let run_b = submit_and_complete(&service, &tenant_b, RECEIPT_PRINCIPAL).await;
+    let product = PipelineProductStore::new(backend.clone());
+
+    let snapshot_a = create_snapshot(
+        &product,
+        &tenant_a,
+        "tenant-scope",
+        TraceAllowedUse::Evaluation,
+    )
+    .await;
+    let snapshot_b = create_snapshot(
+        &product,
+        &tenant_b,
+        "tenant-scope",
+        TraceAllowedUse::Evaluation,
+    )
+    .await;
+    assert_ne!(snapshot_a.snapshot_id, snapshot_b.snapshot_id);
+    assert_eq!(item_runs(&snapshot_a), vec![run_a.run_id]);
+    assert_eq!(item_runs(&snapshot_b), vec![run_b.run_id]);
+
+    let error = product
+        .complete_export_snapshot(&tenant_b, EXPORTER, snapshot_a.snapshot_id)
+        .await
+        .expect_err("tenant B cannot complete tenant A's snapshot");
+    assert!(
+        matches!(error, DatabaseError::NotFound { .. }),
+        "unexpected error: {error:?}"
+    );
+    let completed_a = product
+        .complete_export_snapshot(&tenant_a, EXPORTER, snapshot_a.snapshot_id)
+        .await
+        .expect("tenant A completes its own snapshot");
+    assert_eq!(item_runs(&completed_a), vec![run_a.run_id]);
+    assert!(
+        backend
+            .list_trace_export_manifests(&tenant_b)
+            .await
+            .unwrap()
+            .is_empty(),
+        "completing tenant A's snapshot writes nothing for tenant B"
+    );
+}
+
+/// A withdrawal reaches the whole source session. Two submissions of one
+/// session and a third, unrelated one all complete and enter a snapshot.
+/// Withdrawing one of the session's submissions invalidates the snapshot
+/// and marks both session items `withdrawn` in the withdrawal's own
+/// transaction, so the snapshot is never completed; a new snapshot leaves
+/// out the withdrawn submission and its sibling, and keeps the unrelated
+/// one.
+#[tokio::test]
+async fn withdrawn_submissions_are_excluded_and_invalidate_snapshots() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-withdrawn-{}", uuid::Uuid::new_v4());
+    let withdrawn = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let sibling = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let unrelated = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+        .as_slice()
+        .try_into()
+        .unwrap();
+    // Claiming a source session is account admission's write, not the
+    // ingest runtime's (V90), so the fixture claims it as the owner.
+    for submission_id in [withdrawn.submission_id, sibling.submission_id] {
+        assert_eq!(
+            owner
+                .claim_trace_source_session(&tenant, account_id, &digest, submission_id)
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Active
+        );
+    }
+    let product = PipelineProductStore::new(backend.clone());
+    let before = create_snapshot(&product, &tenant, "before", TraceAllowedUse::Evaluation).await;
+    let mut every_run = vec![withdrawn.run_id, sibling.run_id, unrelated.run_id];
+    every_run.sort();
+    assert_eq!(item_runs(&before), every_run);
+
+    let outcome = service
+        .withdraw_submission(
+            &tenant,
+            withdrawn.submission_id,
+            RECEIPT_PRINCIPAL,
+            Some(account_id),
+        )
+        .await
+        .expect("the owner's withdrawal succeeds");
+    let mut session = vec![withdrawn.submission_id, sibling.submission_id];
+    session.sort();
+    assert_eq!(outcome.affected_submission_ids, session);
+
+    // The same request again reads the stored snapshot back.
+    let invalidated =
+        create_snapshot(&product, &tenant, "before", TraceAllowedUse::Evaluation).await;
+    assert_eq!(invalidated.snapshot_id, before.snapshot_id);
+    assert_eq!(invalidated.state, "invalidated");
+    assert!(invalidated.invalidated_at.is_some());
+    for item in &invalidated.items {
+        let expected = (item.submission_id != unrelated.submission_id).then_some("withdrawn");
+        assert_eq!(
+            item.invalidation_reason.as_deref(),
+            expected,
+            "item for run {}",
+            item.run_id
+        );
+    }
+    let error = product
+        .complete_export_snapshot(&tenant, EXPORTER, before.snapshot_id)
+        .await
+        .expect_err("an invalidated snapshot is never completed");
+    assert!(
+        matches!(error, DatabaseError::Constraint(_)),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_export_manifests").await,
+        0
+    );
+
+    let after = create_snapshot(&product, &tenant, "after", TraceAllowedUse::Evaluation).await;
+    assert_eq!(
+        item_runs(&after),
+        vec![unrelated.run_id],
+        "neither the withdrawn submission nor its session sibling is exported again"
+    );
+}
+
+/// The request key makes creation idempotent. The same key returns the
+/// same snapshot, with the items it selected the first time, even after
+/// another run has completed; there is one snapshot row and one item row.
+/// The same key with a different request is refused, not answered with
+/// the stored snapshot.
+#[tokio::test]
+async fn export_request_key_is_idempotent() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-idempotent-{}", uuid::Uuid::new_v4());
+    let first_run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let product = PipelineProductStore::new(backend.clone());
+
+    let first = create_snapshot(&product, &tenant, "idempotent", TraceAllowedUse::Evaluation).await;
+    assert_eq!(item_runs(&first), vec![first_run.run_id]);
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let again = create_snapshot(&product, &tenant, "idempotent", TraceAllowedUse::Evaluation).await;
+    assert_eq!(again, first, "the same key returns the same snapshot");
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        1
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshot_items").await,
+        1
+    );
+
+    let conflict = product
+        .create_export_snapshot(
+            &tenant,
+            EXPORTER,
+            &export_hash("idempotent"),
+            TraceAllowedUse::Evaluation,
+            &PipelineExportConsentScopes::default(),
+            None,
+            &export_hash("another purpose"),
+            PIPELINE_EXPORT_ITEM_MAX,
+        )
+        .await
+        .expect_err("the same key with another purpose is refused");
+    assert!(
+        matches!(conflict, DatabaseError::Constraint(_)),
+        "unexpected error: {conflict:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        1
+    );
+}
+
+/// An export selects a submission only when the submission's own allowed
+/// uses hold the requested use (`main`'s record-level export rule). One
+/// submission allows the fixture default (debugging, evaluation, aggregate
+/// analytics), the other only debugging: an evaluation export holds the
+/// first alone, a debugging export holds both, and a model-training export
+/// holds neither.
+#[tokio::test]
+async fn exports_honor_allowed_uses() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-uses-{}", uuid::Uuid::new_v4());
+    let evaluation_run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let mut debugging_only = envelope(uuid::Uuid::new_v4()).await;
+    debugging_only.trace_card.allowed_uses = vec![TraceAllowedUse::Debugging];
+    let debugging_run =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &debugging_only).await;
+    let product = PipelineProductStore::new(backend.clone());
+
+    let evaluation =
+        create_snapshot(&product, &tenant, "evaluation", TraceAllowedUse::Evaluation).await;
+    assert_eq!(
+        item_runs(&evaluation),
+        vec![evaluation_run.run_id],
+        "a submission that does not allow evaluation is not exported for it"
+    );
+    assert_eq!(
+        evaluation.items[0].allowed_uses,
+        serde_json::json!(["debugging", "evaluation", "aggregate_analytics"])
+    );
+
+    let debugging =
+        create_snapshot(&product, &tenant, "debugging", TraceAllowedUse::Debugging).await;
+    let mut both = vec![evaluation_run.run_id, debugging_run.run_id];
+    both.sort();
+    assert_eq!(item_runs(&debugging), both);
+
+    let model_training = create_snapshot(
+        &product,
+        &tenant,
+        "model-training",
+        TraceAllowedUse::ModelTraining,
+    )
+    .await;
+    assert!(
+        model_training.items.is_empty(),
+        "no submission allows model training"
+    );
+}
+
+/// An export applies `main`'s consent-scope rule for each record
+/// (`record_matches_export_policy_abac`): the caller's scoped token and the
+/// tenant policy each hold an allowlist, a submission is selected only when
+/// its consent scopes meet every non-empty one, and an empty allowlist
+/// allows every scope. Three submissions consent to debugging and
+/// evaluation, to model training, and to both. The last one meets a token
+/// allowlist of debugging and a policy allowlist of model training through a
+/// different scope each: the two are checked one by one, not intersected.
+#[tokio::test]
+async fn exports_honor_consent_scope_allowlists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-consent-{}", uuid::Uuid::new_v4());
+    let with_scopes = |scopes: Vec<ConsentScope>| async move {
+        let mut env = envelope(uuid::Uuid::new_v4()).await;
+        env.trace_card.consent_scope = scopes[0];
+        env.consent.scopes = scopes;
+        env
+    };
+    let debugging = with_scopes(vec![ConsentScope::DebuggingEvaluation]).await;
+    let debugging_run =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &debugging).await;
+    let training = with_scopes(vec![ConsentScope::ModelTraining]).await;
+    let training_run =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &training).await;
+    let both = with_scopes(vec![
+        ConsentScope::DebuggingEvaluation,
+        ConsentScope::ModelTraining,
+    ])
+    .await;
+    let both_run = submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &both).await;
+    let product = PipelineProductStore::new(backend.clone());
+    let select = |key_seed: &'static str, token: &[ConsentScope], policy: &[ConsentScope]| {
+        let product = product.clone();
+        let tenant = tenant.clone();
+        let consent_scopes = PipelineExportConsentScopes {
+            token: token.iter().copied().collect(),
+            policy: policy.iter().copied().collect(),
+            requested: None,
+        };
+        async move {
+            let snapshot = product
+                .create_export_snapshot(
+                    &tenant,
+                    EXPORTER,
+                    &export_hash(key_seed),
+                    TraceAllowedUse::Evaluation,
+                    &consent_scopes,
+                    None,
+                    &export_hash("purpose"),
+                    PIPELINE_EXPORT_ITEM_MAX,
+                )
+                .await
+                .expect("create the export snapshot");
+            item_runs(&snapshot)
+        }
+    };
+    let sorted = |mut runs: Vec<uuid::Uuid>| {
+        runs.sort();
+        runs
+    };
+
+    assert_eq!(
+        select("unrestricted", &[], &[]).await,
+        sorted(vec![
+            debugging_run.run_id,
+            training_run.run_id,
+            both_run.run_id
+        ]),
+        "empty allowlists allow every scope"
+    );
+    assert_eq!(
+        select("token", &[ConsentScope::DebuggingEvaluation], &[]).await,
+        sorted(vec![debugging_run.run_id, both_run.run_id]),
+        "the token's allowlist leaves out the model-training submission"
+    );
+    assert_eq!(
+        select("policy", &[], &[ConsentScope::ModelTraining]).await,
+        sorted(vec![training_run.run_id, both_run.run_id]),
+        "the policy's allowlist leaves out the debugging submission"
+    );
+    assert_eq!(
+        select(
+            "token-and-policy",
+            &[ConsentScope::DebuggingEvaluation],
+            &[ConsentScope::ModelTraining],
+        )
+        .await,
+        vec![both_run.run_id],
+        "a submission must meet both allowlists, each through any of its scopes"
+    );
+    assert!(
+        select("disjoint", &[ConsentScope::BenchmarkOnly], &[])
+            .await
+            .is_empty(),
+        "no submission consents to benchmarks"
+    );
+
+    // A scope the request names narrows the allowlists: the submission must
+    // hold it.
+    let requested = product
+        .create_export_snapshot(
+            &tenant,
+            EXPORTER,
+            &export_hash("requested"),
+            TraceAllowedUse::Evaluation,
+            &PipelineExportConsentScopes {
+                token: BTreeSet::from([
+                    ConsentScope::DebuggingEvaluation,
+                    ConsentScope::ModelTraining,
+                ]),
+                policy: BTreeSet::new(),
+                requested: Some(ConsentScope::ModelTraining),
+            },
+            None,
+            &export_hash("purpose"),
+            PIPELINE_EXPORT_ITEM_MAX,
+        )
+        .await
+        .expect("create the export snapshot");
+    assert_eq!(
+        item_runs(&requested),
+        sorted(vec![training_run.run_id, both_run.run_id]),
+        "the requested scope leaves out the debugging-only submission"
+    );
+}
+
+/// A submission withdrawn while export creation waits on it is not exported,
+/// and the two do not deadlock. A transaction here plays a withdrawal, in
+/// the withdrawal's lock order: it holds the run row `FOR UPDATE`, and
+/// creation, which has read the run as exportable, waits for it there. The
+/// transaction then locks the submission row `FOR UPDATE`, granted at once
+/// because the waiting creation holds nothing on it yet, revokes the
+/// submission, and commits. Creation then reads the submission again under
+/// its own lock and leaves it out.
+///
+/// A creation that inserted its items before waiting would hold the
+/// submission row through the items' foreign key: the submission lock
+/// would wait for it, and it would wait for the run row at commit, a
+/// deadlock. One that trusted its first read would export the revoked
+/// submission after the revocation's transaction had ended, so nothing
+/// would ever mark that item.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_selection_rechecks_a_submission_revoked_while_it_waits() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-race-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+
+    let mut holder_client = backend.trace_pool_for_test().get().await.unwrap();
+    let holder = tenant_tx(&mut holder_client, &tenant).await;
+    holder
+        .query_one(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+    let holder_xid: String = holder
+        .query_one("SELECT pg_current_xact_id()::text", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    let product = PipelineProductStore::new(backend.clone());
+    let creation = tokio::spawn({
+        let product = product.clone();
+        let tenant = tenant.clone();
+        async move {
+            product
+                .create_export_snapshot(
+                    &tenant,
+                    EXPORTER,
+                    &export_hash("race"),
+                    TraceAllowedUse::Evaluation,
+                    &PipelineExportConsentScopes::default(),
+                    None,
+                    &export_hash("purpose"),
+                    PIPELINE_EXPORT_ITEM_MAX,
+                )
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &holder_xid, &creation).await;
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        holder.query_one(
+            "SELECT 1 FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR UPDATE",
+            &[&tenant, &run.submission_id],
+        ),
+    )
+    .await
+    .expect("the submission row is not held by the waiting creation")
+    .expect("the submission lock is granted, not a deadlock victim");
+    holder
+        .execute(
+            "UPDATE trace_submissions
+                SET status = 'revoked', revoked_at = NOW(), updated_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    holder
+        .commit()
+        .await
+        .expect("the withdrawal's stand-in commits");
+    drop(holder_client);
+
+    let snapshot = tokio::time::timeout(HELD_CALL_BOUND, creation)
+        .await
+        .expect("creation finishes once the withdrawal's stand-in commits")
+        .expect("the creation task did not panic")
+        .expect("creation is not a deadlock victim");
+    assert!(
+        snapshot.items.is_empty(),
+        "the submission revoked during creation is not exported: {:?}",
+        snapshot.items
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshot_items").await,
+        0
+    );
+}
+
+/// Completing a snapshot delivers it, so completion checks each item's
+/// submission again, under a lock, with the rule the selection applied. A
+/// submission that expired after the snapshot was created is refused with
+/// `submission_inoperable`, and nothing is delivered: no export manifest,
+/// and the snapshot stays `ready`. Only a withdrawal marks the items it
+/// reaches; an expiry marks none, so the items' own marks are not enough.
+#[tokio::test]
+async fn completing_a_snapshot_rechecks_that_its_submissions_are_exportable() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-expired-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let product = PipelineProductStore::new(backend.clone());
+    let snapshot = create_snapshot(&product, &tenant, "expired", TraceAllowedUse::Evaluation).await;
+    assert_eq!(item_runs(&snapshot), vec![run.run_id]);
+
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET expires_at = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &run.submission_id],
+    )
+    .await
+    .expect("expire the submission");
+    tx.commit().await.unwrap();
+
+    let error = product
+        .complete_export_snapshot(&tenant, EXPORTER, snapshot.snapshot_id)
+        .await
+        .expect_err("a snapshot with an expired submission is not delivered");
+    assert!(
+        matches!(&error, DatabaseError::Constraint(label) if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_export_manifests").await,
+        0
+    );
+    let stored = create_snapshot(&product, &tenant, "expired", TraceAllowedUse::Evaluation).await;
+    assert_eq!(stored.state, "ready");
+    assert!(stored.completed_at.is_none());
+}
+
+/// The item count is bounded: a request for 0 items or for more than
+/// `PIPELINE_EXPORT_ITEM_MAX` is refused before anything is written, and a
+/// request for one item, with two runs exportable, holds the older run only.
+#[tokio::test]
+async fn export_item_count_is_bounded() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-bound-{}", uuid::Uuid::new_v4());
+    let older = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let product = PipelineProductStore::new(backend.clone());
+    let create = |key_seed: &'static str, max_items: usize| {
+        let product = product.clone();
+        let tenant = tenant.clone();
+        async move {
+            product
+                .create_export_snapshot(
+                    &tenant,
+                    EXPORTER,
+                    &export_hash(key_seed),
+                    TraceAllowedUse::Evaluation,
+                    &PipelineExportConsentScopes::default(),
+                    None,
+                    &export_hash("purpose"),
+                    max_items,
+                )
+                .await
+        }
+    };
+
+    for (key_seed, max_items) in [("none", 0), ("too-many", PIPELINE_EXPORT_ITEM_MAX + 1)] {
+        let error = create(key_seed, max_items)
+            .await
+            .expect_err("an item bound outside 1..=PIPELINE_EXPORT_ITEM_MAX is refused");
+        assert!(
+            matches!(error, DatabaseError::Constraint(_)),
+            "unexpected error: {error:?}"
+        );
+    }
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        0
+    );
+
+    let one = create("one", 1).await.expect("create a one-item snapshot");
+    assert_eq!(item_runs(&one), vec![older.run_id], "the older run first");
+}
+
+// NEAR payout after Settle (Task 10, P3-D11).
+
+/// One `trace_credit` award of 1,000,000 atomic units (one Trace Credit).
+fn trace_credit_only_config() -> PipelineBundleConfig {
+    PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+            atomic_units: AtomicUnits::from_raw(1_000_000),
+            descriptor: trace_credit_descriptor(),
+        }],
+        include_index: false,
+        variant: None,
+    }
+}
+
+/// A recording Trace Credit adapter on payout rail `near`.
+fn near_rail_trace_credit_adapter() -> Arc<dyn SettlementAdapter> {
+    RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "near",
+    )
+}
+
+/// The NEAR credit contract the payout tests configure, as `main`'s own NEAR
+/// tests do (Ruling T10-4).
+const PAYOUT_TEST_NEAR_CONTRACT: &str = "trace-credits.testnet";
+
+/// Like `test_service_with_adapters`, with NEAR payout enabled through
+/// `near` on `PAYOUT_TEST_NEAR_CONTRACT`, and an optional crash point.
+async fn payout_test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    near: Arc<dyn NearPayoutAdapter>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
+    payout_test_service_on_contract(
+        backend,
+        artifact_store,
+        config,
+        adapters,
+        near,
+        crash_point,
+        PAYOUT_TEST_NEAR_CONTRACT,
+    )
+    .await
+}
+
+/// `payout_test_service` with the payout configured on `near_contract_id`,
+/// polling a `submitted` payout on every pass.
+async fn payout_test_service_on_contract(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    near: Arc<dyn NearPayoutAdapter>,
+    crash_point: Option<PipelineCrashPoint>,
+    near_contract_id: &str,
+) -> Arc<PipelineService> {
+    payout_test_service_with_config(
+        backend,
+        artifact_store,
+        config,
+        adapters,
+        near,
+        crash_point,
+        PipelinePayoutConfig {
+            near_contract_id: Some(near_contract_id.to_string()),
+            confirmation_interval: std::time::Duration::ZERO,
+            controls: HTTP_NEAR_PAYOUT_CONTROLS,
+        },
+    )
+    .await
+}
+
+/// `payout_test_service` with the payout configured as `payout`.
+async fn payout_test_service_with_config(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    near: Arc<dyn NearPayoutAdapter>,
+    crash_point: Option<PipelineCrashPoint>,
+    payout: PipelinePayoutConfig,
+) -> Arc<PipelineService> {
+    Arc::new(
+        payout_test_builder(
+            backend,
+            artifact_store,
+            config,
+            adapters,
+            near,
+            crash_point,
+            Some(payout),
+        )
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// The builder `payout_test_service_with_config` builds; with no `payout`,
+/// the service has no payout at all, the one way to leave it off.
+fn payout_test_builder(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    near: Arc<dyn NearPayoutAdapter>,
+    crash_point: Option<PipelineCrashPoint>,
+    payout: Option<PipelinePayoutConfig>,
+) -> PipelineServiceBuilder {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(adapters).expect("build settlement adapter registry");
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        uncapped_caps(&["storage_rebate", InstrumentId::trace_credit().as_str()]),
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary());
+    if let Some(payout) = payout {
+        builder = builder.with_payout(near, payout);
+    }
+    if let Some(crash_point) = crash_point {
+        builder = builder.with_crash_point(crash_point);
+    }
+    builder
+}
+
+/// `main`'s NEAR payout controls the payout tests run under: the injected
+/// adapter pays (`http`), and no adapter credential is required.
+const HTTP_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayoutControls {
+    settlement_mode: PipelineNearSettlementMode::Http,
+    require_adapter_auth: false,
+};
+
+/// The enabled payout the payout tests configure, on
+/// `PAYOUT_TEST_NEAR_CONTRACT`, polling a `submitted` payout on every pass.
+fn enabled_test_payout() -> PipelinePayoutConfig {
+    PipelinePayoutConfig {
+        near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
+        confirmation_interval: std::time::Duration::ZERO,
+        controls: HTTP_NEAR_PAYOUT_CONTROLS,
+    }
+}
+
+/// Zaki review 1, item 2: `main`'s issuer approval is evidence an operator
+/// records for one batch's source list and names in the settlement request
+/// that finalizes it (`require_recorded_credit_settlement_issuer_approval_if_configured`).
+/// A pipeline batch is finalized by Settle with no such request, so there is
+/// no evidence to name, and `main`'s own automated settlement refuses to run
+/// live under the same flag. The runtime therefore refuses to build with
+/// NEAR payout enabled while `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`
+/// is set, under `main`'s label for a missing approval. With payout
+/// disabled it builds.
+#[tokio::test]
+async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let checks = PipelineNoveltyUtilityChecks {
+        settlement_require_issuer_approval: true,
+        ..PipelineNoveltyUtilityChecks::default()
+    };
+    let near = Arc::new(RecordingNearAdapter::new());
+    let refused = payout_test_builder(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+        Some(enabled_test_payout()),
+    )
+    .with_novelty_utility_checks(checks.clone())
+    .build()
+    .err()
+    .expect("an enabled payout needs recorded issuer approval");
+    assert_eq!(refused.to_string(), "issuer_approval_evidence_hash_missing");
+
+    let disabled = payout_test_builder(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near,
+        None,
+        None,
+    )
+    .with_novelty_utility_checks(checks)
+    .build();
+    assert!(disabled.is_ok(), "a disabled payout pays nothing");
+}
+
+/// Zaki review 1, fix round, item 1: two more of `main`'s live settlement
+/// controls have no equivalent the payout can apply to a pipeline batch.
+/// `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY` gates each
+/// settlement run on recorded rollout-smoke evidence, and
+/// `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` caps an
+/// account's line per settlement run by leaving events for a later run. The
+/// runtime refuses to build with NEAR payout enabled while either is set,
+/// each under its own label; with payout disabled it builds.
+#[tokio::test]
+async fn an_enabled_payout_is_refused_while_main_requires_smoke_readiness_or_an_account_cap() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (checks, label) in [
+        (
+            PipelineNoveltyUtilityChecks {
+                settlement_require_rollout_smoke_ready: true,
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            "credit_settlement_rollout_smoke_not_ready",
+        ),
+        (
+            PipelineNoveltyUtilityChecks {
+                settlement_max_micros_per_account: Some(5_000_000),
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            "credit_settlement_account_cap_unsupported",
+        ),
+    ] {
+        let near = Arc::new(RecordingNearAdapter::new());
+        let refused = payout_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            None,
+            Some(enabled_test_payout()),
+        )
+        .with_novelty_utility_checks(checks.clone())
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("an enabled payout is refused ({label})"));
+        assert_eq!(refused.to_string(), label);
+
+        let disabled = payout_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near,
+            None,
+            None,
+        )
+        .with_novelty_utility_checks(checks)
+        .build();
+        assert!(disabled.is_ok(), "a disabled payout pays nothing ({label})");
+    }
+}
+
+/// Zaki review 1, round 2, item 2: `main`'s policy-version allowlist and
+/// central-issuer allowlist are process constants, and every pipeline batch
+/// carries `PIPELINE_SETTLEMENT_POLICY_VERSION` and settles as the one
+/// configured issuer. So the decision is made once, at build: an enabled
+/// payout is refused when the allowed list is non-empty and does not list
+/// the pipeline's version (`credit_settlement_policy_version_not_allowed`),
+/// or when the central-issuer list is non-empty and the pipeline's issuer is
+/// missing or not on it (`central_issuer_denied`). A listed version and a
+/// listed issuer build, and so does a disabled payout under either refusal.
+#[tokio::test]
+async fn an_enabled_payout_is_refused_when_mains_allowlists_leave_the_pipeline_out() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let listed = credit_account_hash("pipeline-issuer");
+    let versions = |allowed: &[&str]| {
+        allowed
+            .iter()
+            .map(|version| version.to_string())
+            .collect::<BTreeSet<_>>()
+    };
+    let build = |checks: PipelineNoveltyUtilityChecks, enabled: bool| {
+        payout_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            Arc::new(RecordingNearAdapter::new()),
+            None,
+            enabled.then(enabled_test_payout),
+        )
+        .with_novelty_utility_checks(checks)
+        .build()
+        .err()
+        .map(|error| error.to_string())
+    };
+    for (checks, refusal) in [
+        (
+            PipelineNoveltyUtilityChecks {
+                settlement_allowed_policy_versions: versions(&["main-policy-v1"]),
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            Some("credit_settlement_policy_version_not_allowed"),
+        ),
+        (
+            PipelineNoveltyUtilityChecks {
+                settlement_allowed_policy_versions: versions(&[
+                    "main-policy-v1",
+                    PIPELINE_SETTLEMENT_POLICY_VERSION,
+                ]),
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            None,
+        ),
+        (
+            PipelineNoveltyUtilityChecks {
+                central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
+                issuer_principal_ref: None,
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            Some("central_issuer_denied"),
+        ),
+        (
+            PipelineNoveltyUtilityChecks {
+                central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
+                issuer_principal_ref: Some(credit_account_hash("another-issuer")),
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            Some("central_issuer_denied"),
+        ),
+        (
+            PipelineNoveltyUtilityChecks {
+                central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
+                issuer_principal_ref: Some(listed.clone()),
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+            None,
+        ),
+    ] {
+        assert_eq!(
+            build(checks.clone(), true).as_deref(),
+            refusal,
+            "{checks:?}"
+        );
+        assert_eq!(build(checks, false), None, "a disabled payout builds");
+    }
+}
+
+/// Zaki review 1, round 2, item 2: a `pending` payout that carries a label
+/// (an account hold, `none_enrolled` or `ambiguous_no_designation`) is listed
+/// again only once the confirmation interval has passed, as a `submitted`
+/// one is: within the interval the pass does not resolve the account again,
+/// and after it the pass does -- and pays once the account has a target.
+/// The completed Trace Credit leg woke the worker's payout step (Zaki review
+/// 1, round 2, item 4).
+#[tokio::test]
+async fn a_held_payout_is_resolved_again_only_after_the_confirmation_interval() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service_with_config(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+        PipelinePayoutConfig {
+            confirmation_interval: std::time::Duration::from_secs(3600),
+            ..enabled_test_payout()
+        },
+    )
+    .await;
+    let tenant = format!("payout-held-interval-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert!(
+        service.take_follow_ups(&tenant).payouts,
+        "the completed Trace Credit leg woke the payout step"
+    );
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(
+        (leg.payout_state.as_str(), leg.last_error_label.as_deref()),
+        ("pending", Some("none_enrolled"))
+    );
+
+    add_near_identity(&tenant, account_id, "enrolled.testnet", false).await;
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a held payout is not listed again within the interval"
+    );
+    assert!(near.requests().is_empty());
+
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements
+            SET updated_at = NOW() - INTERVAL '2 hours'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .expect("age the held payout past the interval");
+    tx.commit().await.unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.requests().len(), 1, "resolved again and paid");
+}
+
+/// Adds a NEAR identity for `account_id`, designated for payout when
+/// `designated`, through an owner connection (a fixture write, as `main`'s
+/// NEAR enrolment makes).
+async fn add_near_identity(
+    tenant_id: &str,
+    account_id: uuid::Uuid,
+    near_account_id: &str,
+    designated: bool,
+) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    tx.execute(
+        "INSERT INTO trace_near_identities (
+            tenant_id, public_key, near_account_id, account_id, payout_designated_at
+         ) VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN NOW() END)",
+        &[
+            &tenant_id,
+            &format!("ed25519:{}", uuid::Uuid::new_v4().simple()),
+            &near_account_id,
+            &account_id,
+            &designated,
+        ],
+    )
+    .await
+    .expect("insert the NEAR identity");
+    tx.commit().await.expect("commit the NEAR identity");
+}
+
+/// The one line item of the run's Trace Credit batch.
+async fn trace_credit_batch_line(
+    backend: &Arc<PgBackend>,
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> serde_json::Value {
+    let batch_id = trace_credit_settlement(service, tenant_id, run_id)
+        .await
+        .settlement_batch_id
+        .expect("the leg has a batch");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let lines: serde_json::Value = tx
+        .query_one(
+            "SELECT line_items_json FROM trace_credit_settlement_batches
+              WHERE tenant_id = $1 AND settlement_batch_id = $2",
+            &[&tenant_id, &batch_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(lines.as_array().map(Vec::len), Some(1), "{lines}");
+    lines[0].clone()
+}
+
+/// The `credit_account_ref` of the run's one ledger row.
+async fn credit_ledger_account_ref(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> String {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let account_ref: String = tx
+        .query_one(
+            "SELECT credit_account_ref FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    account_ref
+}
+
+/// `(payout_near_account_id, credit_account_hash in the NEAR call)` of each
+/// of the tenant's NEAR outbox rows.
+async fn near_outbox_payout_targets(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+) -> Vec<(Option<String>, String)> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT payout_near_account_id,
+                    near_call_json -> 'args' ->> 'credit_account_hash'
+               FROM trace_near_credit_outbox
+              WHERE tenant_id = $1
+              ORDER BY created_at",
+            &[&tenant_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    rows.iter().map(|row| (row.get(0), row.get(1))).collect()
+}
+
+/// Zaki review 1, item 4 (owner: as `main`): an account-linked contributor's
+/// pipeline credit settles under `main`'s account key, `account:{account_id}`
+/// (`settlement_group_key`), so its line carries the same credit-account hash
+/// as the contributor's legacy credit, and the payout goes to the account's
+/// designated NEAR account (`resolve_payout_near_account_id`: a designated
+/// identity wins over another active one). The ledger row stays the
+/// principal's, as `main`'s event does.
+#[tokio::test]
+async fn an_account_linked_contributor_is_paid_under_the_account_and_its_near_account() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-account-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    add_near_identity(&tenant, account_id, "other.testnet", false).await;
+    add_near_identity(&tenant, account_id, "designated.testnet", true).await;
+
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let account_key = format!("account:{account_id}");
+    let line = trace_credit_batch_line(&backend, &service, &tenant, run.run_id).await;
+    assert_eq!(line["credit_account_ref"], account_key);
+    assert_eq!(
+        line["credit_account_hash"],
+        credit_account_hash(&account_key)
+    );
+    assert!(line.get("near_payout_hold_reason").is_none(), "{line}");
+    assert_eq!(
+        credit_ledger_account_ref(&backend, &tenant, run.run_id).await,
+        RECEIPT_PRINCIPAL,
+        "the event stays the principal's"
+    );
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.requests().len(), 1);
+    assert_eq!(
+        near_outbox_payout_targets(&backend, &tenant).await,
+        vec![(
+            Some("designated.testnet".to_string()),
+            credit_account_hash(&account_key)
+        )]
+    );
+}
+
+/// Zaki review 1, item 4 (owner: as `main`): where `main` holds an account's
+/// payout -- no active NEAR identity (`none_enrolled`), or several with none
+/// designated (`ambiguous_no_designation`) -- the pipeline holds it the same
+/// way: the batch line records the label, no outbox line is written and
+/// nothing is sent, and the payout stays `pending` under the label. Like
+/// `main`'s held-line repair, a later pass resolves the account again: once
+/// the account has one active identity, the line is paid to it.
+#[tokio::test]
+async fn the_pipeline_holds_an_account_payout_as_main_does() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for (identities, label) in [
+        (vec![], "none_enrolled"),
+        (
+            vec!["first.testnet", "second.testnet"],
+            "ambiguous_no_designation",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Arc::new(RecordingNearAdapter::new());
+        let service = payout_test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            None,
+        )
+        .await;
+        let tenant = format!("payout-held-{}", uuid::Uuid::new_v4());
+        service.register_default_bundle(&tenant).await.unwrap();
+        let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+        for identity in &identities {
+            add_near_identity(&tenant, account_id, identity, false).await;
+        }
+
+        let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+        let line = trace_credit_batch_line(&backend, &service, &tenant, run.run_id).await;
+        assert_eq!(line["near_payout_hold_reason"], label, "{line}");
+        assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+        assert!(near.requests().is_empty(), "nothing is sent ({label})");
+        assert!(
+            near_outbox_payout_targets(&backend, &tenant)
+                .await
+                .is_empty()
+        );
+        let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+        assert_eq!(leg.payout_state, "pending");
+        assert_eq!(leg.last_error_label.as_deref(), Some(label));
+
+        if identities.is_empty() {
+            add_near_identity(&tenant, account_id, "enrolled.testnet", false).await;
+            assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+            assert_eq!(
+                near.requests().len(),
+                1,
+                "the held line is paid once resolved"
+            );
+            assert_eq!(
+                near_outbox_payout_targets(&backend, &tenant).await[0]
+                    .0
+                    .as_deref(),
+                Some("enrolled.testnet")
+            );
+        }
+    }
+}
+
+/// Zaki review 1, item 2: the pipeline's batch records no issuer approval it
+/// did not get. It used to carry a hash derived from its own source list;
+/// it now carries none, as `main`'s batch does when no approval evidence was
+/// named, and the NEAR call's attestation and signature hashes are `main`'s
+/// for a batch without approval evidence.
+#[tokio::test]
+async fn the_pipeline_batch_records_no_derived_issuer_approval() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-no-derived-approval-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let batch_id = trace_credit_settlement(&service, &tenant, run.run_id)
+        .await
+        .settlement_batch_id
+        .expect("the leg has a batch");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT issuer_approval_evidence_hash, source_list_hash
+               FROM trace_credit_settlement_batches
+              WHERE tenant_id = $1 AND settlement_batch_id = $2",
+            &[&tenant, &batch_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let evidence: Option<String> = row.get(0);
+    let source_list_hash: String = row.get(1);
+    assert_eq!(evidence, None, "no issuer approval was recorded");
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let call = &near_outbox_rows(&backend, &tenant).await[0].near_call_json;
+    let digest = |text: String| format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
+    assert_eq!(
+        call["args"]["attestation_hash"],
+        digest(format!("trace-credit-attestation:v1:{source_list_hash}"))
+    );
+    assert_eq!(
+        call["args"]["issuer_signature_hash"],
+        digest(format!(
+            "trace-credit-settlement:v1:{batch_id}:{source_list_hash}"
+        ))
+    );
+}
+
+/// A NEAR adapter that counts every `submit` call and delegates to a shared
+/// `RecordingNearAdapter`. The recording adapter collapses a repeated
+/// idempotency key into one logical request; this count shows a repeated
+/// submit that the collapse would hide.
+struct CountingNearAdapter {
+    inner: Arc<RecordingNearAdapter>,
+    submits: AtomicUsize,
+    confirmations: AtomicUsize,
+}
+
+impl CountingNearAdapter {
+    fn new(inner: Arc<RecordingNearAdapter>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            submits: AtomicUsize::new(0),
+            confirmations: AtomicUsize::new(0),
+        })
+    }
+
+    fn submits(&self) -> usize {
+        self.submits.load(Ordering::SeqCst)
+    }
+
+    /// Every `confirmation` lookup, whether or not it found one.
+    fn confirmations(&self) -> usize {
+        self.confirmations.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl NearPayoutAdapter for CountingNearAdapter {
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        self.submits.fetch_add(1, Ordering::SeqCst);
+        NearPayoutAdapter::submit(self.inner.as_ref(), call).await
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        self.confirmations.fetch_add(1, Ordering::SeqCst);
+        NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
+    }
+}
+
+/// Records a hash-only confirmation for every request `near` has received.
+fn confirm_every_near_request(near: &RecordingNearAdapter) {
+    for request in near.requests() {
+        near.record_confirmation(
+            &request.idempotency_key,
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+        )
+        .expect("confirm a submitted NEAR request");
+    }
+}
+
+/// The run's `trace_credit` settlement row.
+async fn trace_credit_settlement(
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> PipelineSettlementRecord {
+    service
+        .store()
+        .list_settlements(tenant_id, run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("the run has a trace_credit settlement row")
+}
+
+/// One `trace_near_credit_outbox` row, as the payout tests read it.
+#[derive(Debug)]
+struct NearOutboxRow {
+    near_outbox_id: uuid::Uuid,
+    settlement_batch_id: uuid::Uuid,
+    status: String,
+    instrument_id: Option<String>,
+    amount_micros: Option<i64>,
+    near_call_json: serde_json::Value,
+}
+
+/// Every `trace_near_credit_outbox` row of `tenant_id`.
+async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<NearOutboxRow> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for near_outbox_rows");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT near_outbox_id, settlement_batch_id, status, instrument_id,
+                    (near_call_json -> 'args' ->> 'amount_micros')::BIGINT AS amount_micros,
+                    near_call_json
+               FROM trace_near_credit_outbox
+              WHERE tenant_id = $1
+              ORDER BY created_at, near_outbox_id",
+            &[&tenant_id],
+        )
+        .await
+        .expect("read near outbox rows");
+    tx.commit().await.expect("commit near_outbox_rows");
+    rows.iter()
+        .map(|row| NearOutboxRow {
+            near_outbox_id: row.get("near_outbox_id"),
+            settlement_batch_id: row.get("settlement_batch_id"),
+            status: row.get("status"),
+            instrument_id: row.get("instrument_id"),
+            amount_micros: row.get("amount_micros"),
+            near_call_json: row.get("near_call_json"),
+        })
+        .collect()
+}
+
+/// Every `phase_outcomes` row of the run, each as the text of its whole
+/// row, ordered by phase: a byte-for-byte snapshot of the recorded
+/// outcomes.
+async fn outcome_row_texts(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Vec<String> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for outcome_row_texts");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT to_jsonb(o)::TEXT AS row_text
+               FROM phase_outcomes o
+              WHERE tenant_id = $1 AND run_id = $2
+              ORDER BY phase",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("read outcome rows");
+    tx.commit().await.expect("commit outcome_row_texts");
+    rows.iter().map(|row| row.get("row_text")).collect()
+}
+
+/// With no `with_payout` (the default), Score seeds the `near` leg's payout
+/// as `disabled`, and nothing is ever submitted: `process_payouts` does
+/// nothing, and neither does a direct `process_payout` of the run.
+#[tokio::test]
+async fn payout_disabled_by_default_submits_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+    )
+    .await;
+    let tenant = format!("payout-disabled-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_credit_settled_once(&backend, &service, &tenant, run.run_id, "payout disabled").await;
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_rail, "near");
+    assert_eq!(settlement.payout_state, "disabled");
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty());
+}
+
+/// Payout enabled: one pass submits the run's settled Trace Credit once,
+/// through one outbox line keyed by `pipeline_near_outbox_line_id`, for the
+/// settled amount; once the confirmation is recorded, the next pass
+/// confirms it, and a confirmed payout is not listed again.
+#[tokio::test]
+async fn payout_submits_once_and_confirms() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-confirm-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "pending");
+    let batch_id = settlement
+        .settlement_batch_id
+        .expect("the settled leg carries its batch");
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let requests = near.requests();
+    assert_eq!(requests.len(), 1, "one logical NEAR request");
+    assert_eq!(requests[0].method_name, "settle_credit_receipt");
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1, "one outbox line");
+    assert_eq!(
+        outbox[0].near_outbox_id,
+        pipeline_near_outbox_line_id(&tenant, batch_id, &credit_account_hash(RECEIPT_PRINCIPAL))
+    );
+    assert_eq!(outbox[0].settlement_batch_id, batch_id);
+    assert_eq!(outbox[0].status, "submitted");
+    assert_eq!(
+        outbox[0].instrument_id.as_deref(),
+        Some(InstrumentId::trace_credit().as_str())
+    );
+    assert_eq!(outbox[0].amount_micros, Some(1_000_000));
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+
+    confirm_every_near_request(&near);
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "confirmed");
+    assert_eq!(near.requests().len(), 1, "still one logical NEAR request");
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a confirmed payout is not listed again"
+    );
+}
+
+/// Review Focus 5: a crash right after the outbox records the submit
+/// (`AfterNearSubmit`), or right after it records the confirmation
+/// (`AfterNearConfirm`), leaves one outbox line and one submit. A second
+/// service without the crash point, sharing the NEAR adapter, finishes the
+/// payout without submitting again, and the run's recorded outcomes --
+/// Settle's included -- stay byte-identical.
+#[tokio::test]
+async fn payout_crash_between_submit_and_confirm_submits_once() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for point in [
+        PipelineCrashPoint::AfterNearSubmit,
+        PipelineCrashPoint::AfterNearConfirm,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = Arc::new(RecordingNearAdapter::new());
+        let near = CountingNearAdapter::new(recording.clone());
+        let crashing = payout_test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            Some(point),
+        )
+        .await;
+        let tenant = format!("payout-crash-{point:?}-{}", uuid::Uuid::new_v4());
+        let run = submit_and_complete(&crashing, &tenant, RECEIPT_PRINCIPAL).await;
+        assert_eq!(run.state, PipelineRunState::Complete);
+        let outcomes_before = outcome_row_texts(&backend, &tenant, run.run_id).await;
+        assert_eq!(outcomes_before.len(), 4, "the run recorded every phase");
+
+        if point == PipelineCrashPoint::AfterNearConfirm {
+            assert_eq!(crashing.process_payouts(&tenant, 32).await.unwrap(), 1);
+            confirm_every_near_request(&recording);
+        }
+        let error = crashing
+            .process_payouts(&tenant, 32)
+            .await
+            .expect_err("the payout pass crashes at its crash point");
+        assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH, "{point:?}");
+        assert_eq!(near.submits(), 1, "{point:?}");
+        let recorded = near_outbox_rows(&backend, &tenant).await;
+        assert_eq!(recorded.len(), 1, "{point:?}");
+        assert_eq!(
+            recorded[0].status,
+            if point == PipelineCrashPoint::AfterNearSubmit {
+                "submitted"
+            } else {
+                "confirmed"
+            },
+            "the crash came after the outbox recorded the step ({point:?})"
+        );
+
+        let restarted = payout_test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
+        if point == PipelineCrashPoint::AfterNearSubmit {
+            assert_eq!(
+                trace_credit_settlement(&restarted, &tenant, run.run_id)
+                    .await
+                    .payout_state,
+                "submitted"
+            );
+            confirm_every_near_request(&recording);
+            assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
+        }
+        assert_eq!(
+            trace_credit_settlement(&restarted, &tenant, run.run_id)
+                .await
+                .payout_state,
+            "confirmed",
+            "{point:?}"
+        );
+        assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 0);
+
+        let outbox = near_outbox_rows(&backend, &tenant).await;
+        assert_eq!(outbox.len(), 1, "one outbox line ({point:?})");
+        assert_eq!(outbox[0].status, "confirmed", "{point:?}");
+        assert_eq!(
+            recording.requests().len(),
+            1,
+            "one logical request ({point:?})"
+        );
+        assert_eq!(near.submits(), 1, "one submit ({point:?})");
+        assert_eq!(
+            outcome_row_texts(&backend, &tenant, run.run_id).await,
+            outcomes_before,
+            "payout never writes an outcome ({point:?})"
+        );
+    }
+}
+
+/// Owner decision (Zaki review 1, item S): a withdrawal forfeits only the
+/// legs Settle has not completed. A Trace Credit leg Settle completed keeps
+/// its ledger row, and its payout is still submitted and confirmed after the
+/// withdrawal, as `main`'s submitter pays finalized credit. Once confirmed,
+/// it is not listed again.
+#[tokio::test]
+async fn a_withdrawal_after_settle_still_pays_and_confirms_the_payout() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-after-withdrawal-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "pending"
+    );
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert!(
+        !outcome.trace_credit_forfeited,
+        "the Trace Credit leg had already settled"
+    );
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.requests().len(), 1, "the settled credit is submitted");
+    confirm_every_near_request(&near);
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "confirmed");
+    assert_eq!(settlement.last_error_label, None);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "confirmed");
+    assert_credit_settled_once(
+        &backend,
+        &service,
+        &tenant,
+        run.run_id,
+        "settled before the withdrawal",
+    )
+    .await;
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a confirmed payout is not listed again"
+    );
+    assert_eq!(near.requests().len(), 1);
+}
+
+/// Owner decision (Zaki review 1, item S), the other side: a withdrawal
+/// before Settle completes the Trace Credit leg forfeits it. Settle writes
+/// no ledger row for it, and the payout pass has nothing to pay: no outbox
+/// line, no NEAR request.
+#[tokio::test]
+async fn a_withdrawal_before_settle_forfeits_the_leg_and_pays_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-withdrawn-before-settle-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert!(outcome.trace_credit_forfeited, "the leg had not settled");
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.operation_state, "forfeited");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "a forfeited leg writes no ledger row"
+    );
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty(), "nothing is paid");
+}
+
+/// NEAR ownership: only a `trace_credit` leg on the `near` rail is paid. A
+/// run with only a `storage_rebate` award (rail `none`) writes no outbox row
+/// and sends no NEAR request, even with payout enabled and a direct
+/// `process_payout` of the run.
+#[tokio::test]
+async fn other_instruments_never_touch_the_outbox() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let storage_rebate: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: false,
+            variant: None,
+        },
+        vec![storage_rebate, near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-other-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].instrument_id, "storage_rebate");
+    assert_eq!(settlements[0].operation_state, "complete");
+    assert_eq!(settlements[0].payout_state, "disabled");
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty());
+}
+
+/// A NEAR submit that fails ends the payout `failed` under
+/// `near_submit_failed`, and the pass does not list it again (Ruling S8),
+/// so an outage does not resubmit on every pass. A direct `process_payout`
+/// of the run takes it up again and submits it once.
+#[tokio::test]
+async fn a_failed_near_submit_fails_the_payout_until_the_run_is_paid_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-failed-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+
+    near.fail_next();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert!(near.requests().is_empty());
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed");
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL)
+    );
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a failed payout is not listed again"
+    );
+
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    assert_eq!(near.requests().len(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1, "the retry reuses the outbox line");
+    assert_eq!(outbox[0].status, "submitted");
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "submitted");
+    assert_eq!(settlement.last_error_label, None);
+}
+
+/// Ruling T10-4: every payout call names the NEAR credit contract the
+/// payout is configured with -- `main`'s configured contract -- and that
+/// contract is part of the call's idempotency key. An enabled payout with no
+/// contract is refused when the service is built.
+#[tokio::test]
+async fn payout_calls_name_the_configured_near_contract() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-contract-{}", uuid::Uuid::new_v4());
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    let call: trace_commons_server::near_credit::NearCreditReceiptCall =
+        serde_json::from_value(outbox[0].near_call_json.clone()).unwrap();
+    assert_eq!(call.contract_id, PAYOUT_TEST_NEAR_CONTRACT);
+    call.validate()
+        .expect("the stored call's idempotency key covers its contract");
+    let elsewhere = trace_commons_server::near_credit::NearCreditReceiptCall::raw(
+        "other-credits.testnet",
+        call.method_name.clone(),
+        call.args.clone(),
+    )
+    .unwrap();
+    assert_ne!(
+        elsewhere.idempotency_key, call.idempotency_key,
+        "another contract is another call"
+    );
+    assert_eq!(near.requests()[0].idempotency_key, call.idempotency_key);
+
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(
+        &trace_credit_only_config(),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let refused = PipelineServiceBuilder::new(
+        backend.clone(),
+        artifact_store(&dir),
+        package,
+        index.clone(),
+        index,
+        SettlementAdapterRegistry::new(vec![near_rail_trace_credit_adapter()]).unwrap(),
+        uncapped_caps(&[InstrumentId::trace_credit().as_str()]),
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_payout(
+        near,
+        PipelinePayoutConfig {
+            near_contract_id: None,
+            confirmation_interval: std::time::Duration::ZERO,
+            controls: HTTP_NEAR_PAYOUT_CONTROLS,
+        },
+    )
+    .build()
+    .err()
+    .expect("an enabled payout needs a NEAR contract");
+    assert_eq!(refused.to_string(), "payout_near_contract_missing");
+}
+
+/// Delegates to a shared `RecordingNearAdapter`, but answers the
+/// confirmation of any idempotency key in `bad_keys` with evidence that is
+/// not hash-only.
+struct BadEvidenceNearAdapter {
+    inner: Arc<RecordingNearAdapter>,
+    bad_keys: std::sync::Mutex<BTreeSet<String>>,
+}
+
+#[async_trait::async_trait]
+impl NearPayoutAdapter for BadEvidenceNearAdapter {
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        NearPayoutAdapter::submit(self.inner.as_ref(), call).await
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        if self.bad_keys.lock().unwrap().contains(idempotency_key) {
+            return Some(NearConfirmationEvidence {
+                transaction_hash_hash: "plain-transaction-reference".to_string(),
+                receipt_hash: format!("sha256:{}", "b".repeat(64)),
+            });
+        }
+        NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
+    }
+}
+
+/// Ruling T10-5: an error in one run's payout (here, confirmation evidence
+/// that is not hash-only) is recorded on that run's settlement row under a
+/// safe label, and the pass goes on: the next run is still paid in the same
+/// pass. The failed payout is not listed again.
+#[tokio::test]
+async fn a_payout_error_on_one_run_does_not_stop_the_pass() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = Arc::new(BadEvidenceNearAdapter {
+        inner: recording.clone(),
+        bad_keys: std::sync::Mutex::new(BTreeSet::new()),
+    });
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-error-{}", uuid::Uuid::new_v4());
+    let first = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let second = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 2);
+    assert_eq!(recording.requests().len(), 2);
+
+    let first_batch = trace_credit_settlement(&service, &tenant, first.run_id)
+        .await
+        .settlement_batch_id
+        .unwrap();
+    let first_key = near_outbox_rows(&backend, &tenant)
+        .await
+        .into_iter()
+        .find(|row| row.settlement_batch_id == first_batch)
+        .expect("the first run's outbox line")
+        .near_call_json["idempotency_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    near.bad_keys.lock().unwrap().insert(first_key);
+    confirm_every_near_request(&recording);
+
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        2,
+        "the pass goes on past the first run's error"
+    );
+    let first_leg = trace_credit_settlement(&service, &tenant, first.run_id).await;
+    assert_eq!(first_leg.payout_state, "failed");
+    assert_eq!(
+        first_leg.last_error_label.as_deref(),
+        Some("near_confirmation_invalid")
+    );
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, second.run_id)
+            .await
+            .payout_state,
+        "confirmed",
+        "the second run is paid in the same pass"
+    );
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert_eq!(recording.requests().len(), 2);
+}
+
+/// Owner decision (Zaki review 1, item S): a withdrawal after a NEAR submit
+/// (here, a crash right after the outbox recorded it) does not stop the
+/// payout of the settled credit. The next pass sends nothing again and
+/// confirms the line through its stored key.
+#[tokio::test]
+async fn a_withdrawal_after_a_near_submit_still_confirms_the_payout() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let crashing = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        Some(PipelineCrashPoint::AfterNearSubmit),
+    )
+    .await;
+    let tenant = format!("payout-submitted-withdrawn-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&crashing, &tenant, RECEIPT_PRINCIPAL).await;
+    let error = crashing
+        .process_payouts(&tenant, 32)
+        .await
+        .expect_err("the payout pass crashes after the submit");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    assert_eq!(near.submits(), 1);
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "submitted"
+    );
+
+    withdraw(&crashing, &tenant, run.submission_id).await;
+    confirm_every_near_request(&recording);
+
+    let restarted = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1, "nothing is submitted again");
+    assert_eq!(recording.requests().len(), 1);
+    let leg = trace_credit_settlement(&restarted, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "confirmed");
+    assert_eq!(leg.last_error_label, None);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "confirmed");
+    assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert_credit_settled_once(
+        &backend,
+        &restarted,
+        &tenant,
+        run.run_id,
+        "settled before the withdrawal",
+    )
+    .await;
+}
+
+/// Owner decision (Zaki review 1, item S): a failed NEAR submit before a
+/// withdrawal is taken up again by a direct `process_payout`, as it would be
+/// without the withdrawal: the same call is sent again (the adapter's
+/// idempotency key makes a repeat safe) and the line is confirmed.
+#[tokio::test]
+async fn a_withdrawal_after_a_failed_near_submit_does_not_stop_its_retry() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-failed-withdrawn-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    recording.fail_next();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1);
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "failed"
+    );
+
+    withdraw(&service, &tenant, run.submission_id).await;
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    assert_eq!(near.submits(), 2, "the failed call is sent again");
+    confirm_every_near_request(&recording);
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "confirmed");
+    assert_eq!(leg.last_error_label, None);
+    assert_eq!(near.submits(), 2);
+}
+
+/// A NEAR adapter that counts every `submit` call, delegates to a shared
+/// `RecordingNearAdapter`, and holds its first submit open until the test
+/// lets it go: a payout pass caught in the middle of its external call.
+struct HoldingNearAdapter {
+    inner: Arc<RecordingNearAdapter>,
+    submits: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl HoldingNearAdapter {
+    fn new(inner: Arc<RecordingNearAdapter>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            submits: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl NearPayoutAdapter for HoldingNearAdapter {
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        if self.submits.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        NearPayoutAdapter::submit(self.inner.as_ref(), call).await
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
+    }
+}
+
+/// Finding I1: two payout passes for one tenant at once -- two ingest
+/// replicas, or a pass and a direct `process_payout` -- submit a line once.
+/// The payout takes the tenant's NEAR submit lock (`main`'s key) across its
+/// external call; a second pass that finds it held does nothing, and a
+/// direct `process_payout` is refused with `payout_lock_held`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_payout_passes_at_once_submit_one_line_once() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = HoldingNearAdapter::new(recording.clone());
+    let first = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let second = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-overlap-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&first, &tenant, RECEIPT_PRINCIPAL).await;
+
+    let first_pass = {
+        let first = first.clone();
+        let tenant = tenant.clone();
+        tokio::spawn(async move { first.process_payouts(&tenant, 32).await })
+    };
+    tokio::time::timeout(HELD_CALL_BOUND, near.entered.notified())
+        .await
+        .expect("the first pass reaches its external submit");
+
+    let overlapping = tokio::time::timeout(HELD_CALL_BOUND, second.process_payouts(&tenant, 32))
+        .await
+        .expect("the second pass does not wait for the first")
+        .unwrap();
+    assert_eq!(
+        near.submits.load(Ordering::SeqCst),
+        1,
+        "the second pass submits nothing while the first is in its submit"
+    );
+    assert_eq!(overlapping, 0, "the second pass finds the lock held");
+    let direct = tokio::time::timeout(HELD_CALL_BOUND, second.process_payout(&tenant, run.run_id))
+        .await
+        .expect("a direct payout does not wait for the pass")
+        .expect_err("a direct payout is refused while a pass holds the lock");
+    assert_eq!(direct.to_string(), "payout_lock_held");
+
+    near.release.notify_one();
+    let paid = tokio::time::timeout(HELD_CALL_BOUND, first_pass)
+        .await
+        .expect("the first pass finishes")
+        .unwrap()
+        .unwrap();
+    assert_eq!(paid, 1);
+    assert_eq!(near.submits.load(Ordering::SeqCst), 1, "one raw submit");
+    assert_eq!(recording.requests().len(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "submitted");
+
+    // Released: the next pass runs again.
+    confirm_every_near_request(&recording);
+    assert_eq!(second.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&second, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+    assert_eq!(near.submits.load(Ordering::SeqCst), 1);
+}
+
+/// A NEAR adapter that counts every `submit` call, delegates to a shared
+/// `RecordingNearAdapter`, and holds its first confirmation lookup open until
+/// the test lets it go: a payout pass caught after it listed its work and
+/// before it took the tenant lock for its submits.
+struct ConfirmationHoldingNearAdapter {
+    inner: Arc<RecordingNearAdapter>,
+    submits: AtomicUsize,
+    lookups: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl ConfirmationHoldingNearAdapter {
+    fn new(inner: Arc<RecordingNearAdapter>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            submits: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl NearPayoutAdapter for ConfirmationHoldingNearAdapter {
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        self.submits.fetch_add(1, Ordering::SeqCst);
+        NearPayoutAdapter::submit(self.inner.as_ref(), call).await
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        if self.lookups.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
+    }
+}
+
+/// Ruling F-I3: the payout pass never submits a `failed` payout again, even
+/// one that failed after the pass listed it as `pending`. The pass lists its
+/// work, then polls a `submitted` payout's confirmation without the lock,
+/// and only then takes the tenant lock for its submits. Here it is held in
+/// that confirmation lookup while a second replica's pass submits the other
+/// run's payout, which fails: its line and its payout are `failed`. When the
+/// first pass takes the lock, it submits nothing: a `failed` payout is taken
+/// up again only by a direct `process_payout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_payout_that_fails_after_the_pass_listed_it_is_not_submitted_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let holding = ConfirmationHoldingNearAdapter::new(recording.clone());
+    let first = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        holding.clone(),
+        None,
+    )
+    .await;
+    let second = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        recording.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-failed-after-listing-{}", uuid::Uuid::new_v4());
+
+    // Run A's payout is submitted and not yet confirmed, so the next pass
+    // polls it before it takes the lock.
+    let submitted = submit_and_complete(&first, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(second.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&second, &tenant, submitted.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    assert_eq!(recording.requests().len(), 1);
+    // Run B's payout is still to make.
+    let pending = submit_and_complete(&first, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(
+        trace_credit_settlement(&first, &tenant, pending.run_id)
+            .await
+            .payout_state,
+        "pending"
+    );
+
+    // The first pass lists both, and is held in run A's confirmation lookup.
+    let first_pass = {
+        let first = first.clone();
+        let tenant = tenant.clone();
+        tokio::spawn(async move { first.process_payouts(&tenant, 32).await })
+    };
+    tokio::time::timeout(HELD_CALL_BOUND, holding.entered.notified())
+        .await
+        .expect("the first pass reaches its confirmation lookup");
+
+    // Meanwhile a second replica's pass submits run B's payout, which fails.
+    recording.fail_next();
+    second.process_payouts(&tenant, 32).await.unwrap();
+    let failed = trace_credit_settlement(&second, &tenant, pending.run_id).await;
+    assert_eq!(failed.payout_state, "failed");
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL)
+    );
+    let batch_id = failed
+        .settlement_batch_id
+        .expect("run B's leg carries its batch");
+    let line_status = |rows: Vec<NearOutboxRow>| {
+        rows.into_iter()
+            .find(|row| row.settlement_batch_id == batch_id)
+            .expect("run B's payout has its outbox line")
+            .status
+    };
+    assert_eq!(
+        line_status(near_outbox_rows(&backend, &tenant).await),
+        "failed"
+    );
+
+    // Released: the first pass takes the lock and submits nothing.
+    holding.release.notify_one();
+    tokio::time::timeout(HELD_CALL_BOUND, first_pass)
+        .await
+        .expect("the first pass finishes")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        holding.submits.load(Ordering::SeqCst),
+        0,
+        "the pass does not submit a payout that failed after it was listed"
+    );
+    assert_eq!(recording.requests().len(), 1, "only run A was ever sent");
+    let still_failed = trace_credit_settlement(&first, &tenant, pending.run_id).await;
+    assert_eq!(still_failed.payout_state, "failed");
+    assert_eq!(
+        still_failed.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL)
+    );
+    assert_eq!(
+        line_status(near_outbox_rows(&backend, &tenant).await),
+        "failed"
+    );
+}
+
+/// Finding I1: the payout shares the tenant's NEAR submit lock with `main`'s
+/// NEAR outbox submitter (`try_acquire_near_credit_submit_lock`), so the two
+/// never submit for one tenant at once: while `main` holds it, the payout
+/// pass does nothing.
+#[tokio::test]
+async fn payout_waits_while_mains_near_submitter_holds_the_tenant_lock() {
+    use trace_commons_server::db::Database;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-main-lock-{}", uuid::Uuid::new_v4());
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+
+    let mains = backend
+        .try_acquire_near_credit_submit_lock(&tenant)
+        .await
+        .unwrap()
+        .expect("main's submitter takes the tenant lock");
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert!(near.requests().is_empty());
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    mains.release().await.unwrap();
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.requests().len(), 1);
+}
+
+/// The pool-size-one rule: the payout pass holds its lock on one pooled
+/// connection and does all its own database work on that same connection,
+/// so on a pool of one it never waits for a second -- through a submit, a
+/// confirmation, a per-run error, and the payout of a run withdrawn after
+/// Settle (item S: it is paid).
+#[tokio::test]
+async fn payout_never_holds_two_pooled_connections() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = Arc::new(BadEvidenceNearAdapter {
+        inner: recording.clone(),
+        bad_keys: std::sync::Mutex::new(BTreeSet::new()),
+    });
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-pool-one-{}", uuid::Uuid::new_v4());
+    let paid = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL),
+    )
+    .await
+    .expect("the run completes on a pool of one");
+    let errored = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL),
+    )
+    .await
+    .expect("the run completes on a pool of one");
+    let withdrawn = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL),
+    )
+    .await
+    .expect("the run completes on a pool of one");
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        withdraw(&service, &tenant, withdrawn.submission_id),
+    )
+    .await
+    .expect("the withdrawal completes on a pool of one");
+
+    let submitted = tokio::time::timeout(HELD_CALL_BOUND, service.process_payouts(&tenant, 32))
+        .await
+        .expect("the submit pass never waits for a second connection")
+        .unwrap();
+    assert_eq!(submitted, 3);
+    let errored_batch = trace_credit_settlement(&service, &tenant, errored.run_id)
+        .await
+        .settlement_batch_id
+        .unwrap();
+    let errored_key = near_outbox_rows(&backend, &tenant)
+        .await
+        .into_iter()
+        .find(|row| row.settlement_batch_id == errored_batch)
+        .unwrap()
+        .near_call_json["idempotency_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    near.bad_keys.lock().unwrap().insert(errored_key);
+    confirm_every_near_request(&recording);
+    let confirmed = tokio::time::timeout(HELD_CALL_BOUND, service.process_payouts(&tenant, 32))
+        .await
+        .expect("the confirm pass never waits for a second connection")
+        .unwrap();
+    assert_eq!(confirmed, 3);
+    let direct = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.process_payout(&tenant, withdrawn.run_id),
+    )
+    .await
+    .expect("a direct payout never waits for a second connection");
+    assert!(direct.is_ok());
+
+    for (run, state, label) in [
+        (&paid, "confirmed", None),
+        (&errored, "failed", Some("near_confirmation_invalid")),
+        (&withdrawn, "confirmed", None),
+    ] {
+        let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+        assert_eq!(leg.payout_state, state);
+        assert_eq!(leg.last_error_label.as_deref(), label);
+    }
+}
+
+/// Finding I2: a line with an outbox row replays its stored call, never one
+/// rebuilt from the current configuration. After the configured contract
+/// changes, a failed line stored under the old contract is not submitted
+/// again (no second payout, on another contract) and its payout is
+/// `near_contract_changed`; a `submitted` line stored under the old contract
+/// is still confirmed through its stored idempotency key.
+#[tokio::test]
+async fn a_changed_near_contract_replays_the_stored_call_and_submits_nothing_new() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service_on = |contract: &'static str| {
+        payout_test_service_on_contract(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            None,
+            contract,
+        )
+    };
+    let on_a = service_on(PAYOUT_TEST_NEAR_CONTRACT).await;
+    let on_b = service_on("other-credits.testnet").await;
+
+    // A failed line, stored under contract A.
+    let tenant = format!("payout-contract-failed-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&on_a, &tenant, RECEIPT_PRINCIPAL).await;
+    recording.fail_next();
+    assert_eq!(on_a.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1);
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "failed"
+    );
+
+    on_b.process_payout(&tenant, run.run_id).await.unwrap();
+    assert_eq!(near.submits(), 1, "no submit under the new contract");
+    assert!(recording.requests().is_empty());
+    let leg = trace_credit_settlement(&on_b, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "failed");
+    assert_eq!(
+        leg.last_error_label.as_deref(),
+        Some("near_contract_changed")
+    );
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(
+        outbox[0].near_call_json["contract_id"],
+        PAYOUT_TEST_NEAR_CONTRACT
+    );
+
+    // A submitted line, stored under contract A, confirmed through its key.
+    let tenant = format!("payout-contract-submitted-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&on_a, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(on_a.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 2);
+    confirm_every_near_request(&recording);
+    assert_eq!(on_b.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 2, "a submitted line is never sent again");
+    assert_eq!(recording.requests().len(), 1);
+    assert_eq!(
+        trace_credit_settlement(&on_b, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+}
+
+/// Ruling T10-8: a withdrawal after NEAR confirmed the payout (here, a crash
+/// right after the confirmation was recorded, before the payout state) does
+/// not flag it: the payout is recorded `confirmed`, with no label.
+#[tokio::test]
+async fn a_withdrawal_after_a_confirmed_payout_records_it_confirmed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let crashing = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        Some(PipelineCrashPoint::AfterNearConfirm),
+    )
+    .await;
+    let tenant = format!("payout-confirmed-withdrawn-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&crashing, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(crashing.process_payouts(&tenant, 32).await.unwrap(), 1);
+    confirm_every_near_request(&recording);
+    let error = crashing
+        .process_payouts(&tenant, 32)
+        .await
+        .expect_err("the pass crashes after the confirmation");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "confirmed"
+    );
+    assert_eq!(
+        trace_credit_settlement(&crashing, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+
+    withdraw(&crashing, &tenant, run.submission_id).await;
+    let restarted = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let leg = trace_credit_settlement(&restarted, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "confirmed");
+    assert_eq!(leg.last_error_label, None);
+    assert_eq!(near.submits(), 1);
+}
+
+/// Ruling T10-9: with payout enabled, a compatibility run's Trace Credit leg
+/// (the `NoveltyUtility` event, never batched or paid) is seeded `disabled`
+/// even on the `near` rail, so it never reads as a pending payout.
+#[tokio::test]
+async fn a_compatibility_leg_is_never_a_pending_payout() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = 2_500_000;
+    let service = compatibility_test_service_with_payout(
+        backend.clone(),
+        artifact_store(&dir),
+        config,
+        Some(near.clone()),
+    )
+    .await;
+    assert!(service.payout_enabled());
+    let tenant = format!("compat-payout-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-payout";
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.operation_state, "complete");
+    assert!(
+        leg.credit_event_id.is_some(),
+        "the leg wrote its ledger row"
+    );
+    assert_eq!(leg.payout_rail, "near");
+    assert!(leg.settlement_batch_id.is_none());
+    assert_eq!(leg.payout_state, "disabled");
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert!(near.requests().is_empty());
+
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_ne!(status.payout.as_deref(), Some("pending"));
+    assert_eq!(status.payout.as_deref(), Some("disabled"));
+    assert!(
+        status
+            .instruments
+            .iter()
+            .all(|instrument| instrument.payout_state != "pending")
+    );
+}
+
+/// Ruling T10-10 (a): polling a `submitted` payout for its confirmation can
+/// submit nothing, so it does not take the tenant's NEAR submit lock: while
+/// `main`'s submitter holds that lock, a pass still confirms the payout.
+#[tokio::test]
+async fn confirmation_polling_does_not_take_the_near_submit_lock() {
+    use trace_commons_server::db::Database;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-poll-unlocked-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    confirm_every_near_request(&recording);
+
+    let mains = backend
+        .try_acquire_near_credit_submit_lock(&tenant)
+        .await
+        .unwrap()
+        .expect("main's submitter takes the tenant lock");
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed",
+        "the pass confirms the payout while main holds the lock"
+    );
+    assert_eq!(near.submits(), 1);
+    mains.release().await.unwrap();
+}
+
+/// Ruling T10-10 (b): a `submitted` payout is polled for its confirmation at
+/// most once per confirmation interval (`main`'s NEAR outbox scheduler
+/// cadence), measured from the leg's `updated_at`, which every payout write
+/// sets. Two passes inside one interval look the confirmation up once.
+#[tokio::test]
+async fn a_submitted_payout_is_polled_once_per_confirmation_interval() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service_with_config(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+        PipelinePayoutConfig {
+            near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
+            confirmation_interval: std::time::Duration::from_secs(60),
+            controls: HTTP_NEAR_PAYOUT_CONTROLS,
+        },
+    )
+    .await;
+    let tenant = format!("payout-poll-cadence-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1);
+    let after_submit = near.confirmations();
+
+    // The interval since the submit has passed: the next pass polls once.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements
+            SET updated_at = NOW() - INTERVAL '61 seconds'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.confirmations(), after_submit + 1);
+
+    // A second pass inside the same interval does not look it up again.
+    let second = service.process_payouts(&tenant, 32).await.unwrap();
+    assert_eq!(
+        near.confirmations(),
+        after_submit + 1,
+        "one confirmation lookup per interval"
+    );
+    assert_eq!(second, 0, "the payout is not due in the second pass");
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    assert_eq!(near.submits(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The operational summary's control checks (Ruling F-I4, P4-D21)
+// ---------------------------------------------------------------------------
+
+/// With the migrations as they are, the operational summary reports both
+/// controls passed: every versioned-pipeline table forces row-level
+/// security, and both of `phase_outcomes`' immutability triggers are
+/// enabled.
+#[tokio::test]
+async fn the_operational_summary_reports_both_controls_passed() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let tenant = format!("controls-{}", uuid::Uuid::new_v4());
+    let summary = PipelineProductStore::new(backend.clone())
+        .operational_summary(&tenant)
+        .await
+        .unwrap();
+    assert!(summary.tenant_isolation_control_passed);
+    assert!(summary.audit_immutability_control_passed);
+}
+
+/// A table the isolation control names but the catalog does not hold (a
+/// misspelled or missing name) fails the control: it checked nothing for
+/// that name. An empty list fails it too.
+#[tokio::test]
+async fn a_missing_table_fails_the_isolation_control() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    let present = pipeline_control_health(&tx, &["pipeline_runs", "phase_outcomes"])
+        .await
+        .unwrap();
+    assert!(present.tenant_isolation_passed);
+    let misspelled = pipeline_control_health(&tx, &["pipeline_runs", "pipeline_runz"])
+        .await
+        .unwrap();
+    assert!(
+        !misspelled.tenant_isolation_passed,
+        "a name the catalog does not hold fails the control"
+    );
+    let empty = pipeline_control_health(&tx, &[]).await.unwrap();
+    assert!(
+        !empty.tenant_isolation_passed,
+        "an empty list checks nothing"
+    );
+    tx.rollback().await.unwrap();
+}
+
+/// A disabled immutability trigger fails the audit control. The trigger is
+/// disabled inside a transaction this test rolls back, so no other test
+/// ever sees it disabled.
+#[tokio::test]
+async fn a_disabled_immutability_trigger_fails_the_audit_control() {
+    let Some(_backend) = runtime_backend(2).await else {
+        return;
+    };
+    let mut owner = owner_client().await;
+    let tx = owner.transaction().await.unwrap();
+    let enabled = pipeline_control_health(&tx, &["phase_outcomes"])
+        .await
+        .unwrap();
+    assert!(enabled.audit_immutability_passed);
+    tx.batch_execute("ALTER TABLE phase_outcomes DISABLE TRIGGER phase_outcomes_reject_update")
+        .await
+        .unwrap();
+    // The rest of the check runs as the runtime login, which cannot bypass
+    // row-level security, so the isolation control can pass.
+    tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+        .await
+        .unwrap();
+    let disabled = pipeline_control_health(&tx, &["phase_outcomes"])
+        .await
+        .unwrap();
+    assert!(
+        !disabled.audit_immutability_passed,
+        "a disabled immutability trigger fails the control"
+    );
+    assert!(disabled.tenant_isolation_passed);
+    tx.rollback().await.unwrap();
+}
+
+/// Finding 10: the controls check what makes them work, not only catalog
+/// flags. Each change is made in a transaction this test rolls back, and
+/// checked as the runtime login unless the case is the role itself:
+///
+/// - an immutability trigger switched to fire only for replica sessions
+///   (`ENABLE REPLICA`) fails the audit control;
+/// - an immutability trigger made to call another function (one that
+///   returns the row) fails it;
+/// - a `USING (true)` tenant policy fails the isolation control;
+/// - a role that bypasses row-level security (the owner superuser here)
+///   fails the isolation control, whatever the tables' flags.
+#[tokio::test]
+async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
+    let Some(_backend) = runtime_backend(2).await else {
+        return;
+    };
+    let tables = ["pipeline_runs", "phase_outcomes"];
+    let mut owner = owner_client().await;
+    for (case, change) in [
+        (
+            "replica-only trigger",
+            "ALTER TABLE phase_outcomes ENABLE REPLICA TRIGGER phase_outcomes_reject_update",
+        ),
+        (
+            "replaced trigger function",
+            "CREATE FUNCTION pipeline_control_test_pass_through() RETURNS trigger
+                 LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+             DROP TRIGGER phase_outcomes_reject_update ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_update
+                 BEFORE UPDATE ON phase_outcomes
+                 FOR EACH ROW EXECUTE FUNCTION pipeline_control_test_pass_through();",
+        ),
+        (
+            "USING (true) policy",
+            "DROP POLICY trace_corpus_tenant_isolation ON pipeline_runs;
+             CREATE POLICY trace_corpus_tenant_isolation ON pipeline_runs
+                 USING (true) WITH CHECK (true);",
+        ),
+    ] {
+        let tx = owner.transaction().await.unwrap();
+        tx.batch_execute(change)
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+            .await
+            .unwrap();
+        let controls = pipeline_control_health(&tx, &tables).await.unwrap();
+        if case == "USING (true) policy" {
+            assert!(!controls.tenant_isolation_passed, "{case}");
+            assert!(controls.audit_immutability_passed, "{case}");
+        } else {
+            assert!(!controls.audit_immutability_passed, "{case}");
+            assert!(controls.tenant_isolation_passed, "{case}");
+        }
+        tx.rollback().await.unwrap();
+    }
+
+    let tx = owner.transaction().await.unwrap();
+    let as_owner = pipeline_control_health(&tx, &tables).await.unwrap();
+    assert!(
+        !as_owner.tenant_isolation_passed,
+        "a role that bypasses row-level security fails the isolation control"
+    );
+    tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+        .await
+        .unwrap();
+    let as_runtime = pipeline_control_health(&tx, &tables).await.unwrap();
+    assert!(as_runtime.tenant_isolation_passed && as_runtime.audit_immutability_passed);
+    tx.rollback().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Zaki review 1, round 2: correctness findings
+// ---------------------------------------------------------------------------
+
+/// A login whose only privilege source is membership in `trace_gate_driver`,
+/// the role `main`'s gate driver pool connects as (V36, V45), and a backend
+/// whose gate driver pool connects as it. The enumeration then reads every
+/// table through that role's grants and policies, as it does in production.
+async fn gate_driver_backend() -> PgBackend {
+    const GATE_DRIVER_LOGIN: &str = "trace_gate_driver_pipeline_test";
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("runtime_backend read the same variable");
+    let owner = owner_client().await;
+    owner
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{GATE_DRIVER_LOGIN}') THEN
+                     CREATE ROLE {GATE_DRIVER_LOGIN} LOGIN;
+                 END IF;
+             END $$;
+             ALTER ROLE {GATE_DRIVER_LOGIN} LOGIN INHERIT NOSUPERUSER NOBYPASSRLS;
+             GRANT trace_gate_driver TO {GATE_DRIVER_LOGIN};"
+        ))
+        .await
+        .expect("provision the gate driver login");
+    let mut gate_url = reqwest::Url::parse(&url).expect("parse test URL");
+    gate_url
+        .set_username(GATE_DRIVER_LOGIN)
+        .expect("set the gate driver user");
+    let mut config = DatabaseConfig::from_postgres_url(&url, 2);
+    config.gate_driver_url = Some(SecretString::from(gate_url.to_string()));
+    PgBackend::new(&config)
+        .await
+        .expect("connect with a gate driver pool")
+}
+
+/// Finding 1: `main`'s gate enumeration (the in-process gate driver's work
+/// list and its backlog count) leaves out a submission that has a pipeline
+/// run, so `main` never scores a pipeline trace a second time. A legacy
+/// submission with a submitted envelope is still listed and counted. The
+/// enumeration runs as `trace_gate_driver`, which reads `pipeline_runs`
+/// across tenants only through the grant and policy V105 gives it.
+#[tokio::test]
+async fn mains_gate_enumeration_leaves_out_pipeline_submissions() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("gate-enumeration-{}", uuid::Uuid::new_v4());
+    let legacy = insert_submission_without_a_run(&owner, &tenant).await;
+    owner
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant.clone(),
+            object_ref_id: uuid::Uuid::new_v4(),
+            submission_id: legacy,
+            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+            object_store: "local".to_string(),
+            object_key: format!("{tenant}/legacy.json"),
+            content_sha256: "sha256:legacy".to_string(),
+            encryption_key_ref: "kms:legacy".to_string(),
+            size_bytes: 64,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("the legacy submission's envelope");
+    let before = gate
+        .count_submissions_needing_gate_decision(chrono::Utc::now(), 5, 30)
+        .await
+        .expect("count as the gate driver");
+
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let listed = gate
+        .list_submissions_needing_gate_decision(chrono::Utc::now(), 5, 30, 10_000)
+        .await
+        .expect("list as the gate driver");
+    let listed_ids: BTreeSet<uuid::Uuid> = listed
+        .iter()
+        .filter(|item| item.tenant_id == tenant)
+        .map(|item| item.submission_id)
+        .collect();
+    assert_eq!(
+        listed_ids,
+        BTreeSet::from([legacy]),
+        "the legacy submission is listed and the pipeline one is not"
+    );
+    assert_eq!(
+        gate.count_submissions_needing_gate_decision(chrono::Utc::now(), 5, 30)
+            .await
+            .expect("count as the gate driver"),
+        before,
+        "the pipeline submission is not counted"
+    );
+    assert_ne!(run.submission_id, legacy);
+}
+
+/// The payout test service under `main`'s NEAR payout `controls`.
+async fn payout_service_under(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    near: Arc<dyn NearPayoutAdapter>,
+    controls: PipelineNearPayoutControls,
+) -> Arc<PipelineService> {
+    payout_test_service_with_config(
+        backend.clone(),
+        artifact_store(dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near,
+        None,
+        PipelinePayoutConfig {
+            controls,
+            ..enabled_test_payout()
+        },
+    )
+    .await
+}
+
+/// Finding 2: with `main`'s NEAR settlement mode `disabled` (its default),
+/// `main`'s outbox worker advances nothing, and neither does the pipeline
+/// payout: a complete Trace Credit leg writes no outbox row, the adapter is
+/// never called, and the leg stays `pending`, by the pass and by a direct
+/// `process_payout` alike.
+#[tokio::test]
+async fn a_payout_under_mains_disabled_settlement_mode_advances_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_service_under(
+        &backend,
+        &dir,
+        near.clone(),
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::Disabled,
+            require_adapter_auth: false,
+        },
+    )
+    .await;
+    let tenant = format!("payout-mode-disabled-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    service
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("a direct payout under the disabled mode changes nothing");
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty());
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "pending"
+    );
+}
+
+/// Finding 2: with `main`'s NEAR settlement mode `dry_run`, the payout runs
+/// the full outbox state machine as `main`'s worker does in that mode: one
+/// pass submits through the in-process dry-run adapter, with the synthetic
+/// transaction hash derived from the call's idempotency key, and confirms
+/// with hash-only evidence. The injected adapter is never called.
+#[tokio::test]
+async fn a_payout_under_mains_dry_run_settlement_mode_confirms_without_the_adapter() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_service_under(
+        &backend,
+        &dir,
+        near.clone(),
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::DryRun,
+            require_adapter_auth: false,
+        },
+    )
+    .await;
+    let tenant = format!("payout-mode-dry-run-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert!(
+        near.requests().is_empty(),
+        "the injected adapter is not called"
+    );
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1, "one outbox line");
+    assert_eq!(outbox[0].status, "confirmed");
+    let idempotency_key = outbox[0].near_call_json["idempotency_key"]
+        .as_str()
+        .expect("the stored call's idempotency key")
+        .to_string();
+    let expected_hash = format!(
+        "sha256:{:x}",
+        Sha256::digest(DryRunNearPayoutAdapter::transaction_hash(&idempotency_key).as_bytes())
+    );
+    assert_eq!(
+        outbox[0].near_call_json["confirmation_evidence"]["transaction_hash_hash"],
+        serde_json::json!(expected_hash)
+    );
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+}
+
+/// Finding 2: under `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, as
+/// `main` refuses to start its NEAR adapters without their credentials, an
+/// enabled payout on an adapter that presents none is refused at build,
+/// whatever the settlement mode; one that presents one builds, and so does
+/// an unauthenticated adapter when the flag is off.
+#[tokio::test]
+async fn an_enabled_payout_needs_an_authenticated_adapter_when_main_requires_one() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let build = |near: RecordingNearAdapter, mode, require_adapter_auth| {
+        payout_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            Arc::new(near),
+            None,
+            Some(PipelinePayoutConfig {
+                controls: PipelineNearPayoutControls {
+                    settlement_mode: mode,
+                    require_adapter_auth,
+                },
+                ..enabled_test_payout()
+            }),
+        )
+        .build()
+    };
+    for mode in [
+        PipelineNearSettlementMode::Disabled,
+        PipelineNearSettlementMode::DryRun,
+        PipelineNearSettlementMode::Http,
+    ] {
+        let error = build(RecordingNearAdapter::new(), mode, true)
+            .err()
+            .expect("an unauthenticated adapter is refused");
+        assert_eq!(
+            error.to_string(),
+            PIPELINE_PAYOUT_ADAPTER_AUTH_MISSING_LABEL,
+            "{}",
+            mode.as_label()
+        );
+        build(RecordingNearAdapter::authenticated(), mode, true)
+            .expect("an authenticated adapter builds");
+        build(RecordingNearAdapter::new(), mode, false)
+            .expect("no credential is needed without the flag");
+    }
+}
+
+/// An artifact store that runs `hook` once, right after the first write whose
+/// object id starts with `trigger_object_id_prefix`, and before the write
+/// returns: between a phase's object write and its commit.
+struct RunOnWriteStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    trigger_object_id_prefix: &'static str,
+    triggered: AtomicBool,
+    hook: Box<dyn Fn() + Send + Sync>,
+}
+
+impl TraceArtifactStore for RunOnWriteStore {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let receipt = self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )?;
+        if object_id.starts_with(self.trigger_object_id_prefix)
+            && !self.triggered.swap(true, Ordering::SeqCst)
+        {
+            (self.hook)();
+        }
+        Ok(receipt)
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// A hook that expires `run_id`'s current lease, as the database owner, on a
+/// thread and runtime of its own (the write that runs it is called from
+/// inside the test's runtime): the phase's commit then finds its lease stale.
+fn expire_the_lease_hook(tenant_id: String, run_id: uuid::Uuid) -> Box<dyn Fn() + Send + Sync> {
+    Box::new(move || {
+        let tenant_id = tenant_id.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("build the expiry runtime");
+            runtime.block_on(async move {
+                owner_client()
+                    .await
+                    .execute(
+                        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+                          WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+                        &[&tenant_id, &run_id],
+                    )
+                    .await
+                    .expect("expire the run's lease");
+            });
+        })
+        .join()
+        .expect("the expiry thread completes");
+    })
+}
+
+/// Finding 4: a phase commit refused for any reason -- here a stale lease,
+/// not an inoperable submission -- deletes every object the attempt wrote,
+/// so no copy is left under a per-lease key no object ref names. Review's
+/// approved object goes; the attempt is recorded as an uncharged lease
+/// expiry, and the retry writes and commits its own.
+#[tokio::test]
+async fn a_review_commit_refused_for_a_stale_lease_leaves_no_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("review-stale-objects-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run_id_cell = Arc::new(std::sync::OnceLock::<uuid::Uuid>::new());
+    let hook_tenant = tenant.clone();
+    let hook_run = run_id_cell.clone();
+    let store = Arc::new(RunOnWriteStore {
+        inner: artifact_store(&dir),
+        trigger_object_id_prefix: "pipeline-approved-",
+        triggered: AtomicBool::new(false),
+        hook: Box::new(move || {
+            expire_the_lease_hook(hook_tenant.clone(), *hook_run.get().expect("the run id"))()
+        }),
+    });
+    let (service, _, _) = test_service(
+        backend.clone(),
+        store as Arc<dyn TraceArtifactStore>,
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    run_id_cell.set(created.run_id).unwrap();
+    assert_eq!(count_files_under(dir.path()), 1, "the source envelope");
+
+    let expired = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the stale Review commit is recorded");
+    assert_eq!(expired.state, PipelineRunState::Retry);
+    assert_eq!(
+        expired.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        1,
+        "the refused attempt's approved object is deleted"
+    );
+
+    force_due(&backend, &tenant, created.run_id).await;
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the retry commits Review");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the retry's approved object"
+    );
+}
+
+/// Finding 4, for Score: the objects it wrote (its index command, and its
+/// neighbour set when it has one) go when the commit is refused for a
+/// stale lease.
+#[tokio::test]
+async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("score-stale-objects-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run_id_cell = Arc::new(std::sync::OnceLock::<uuid::Uuid>::new());
+    let hook_tenant = tenant.clone();
+    let hook_run = run_id_cell.clone();
+    let store = Arc::new(RunOnWriteStore {
+        inner: artifact_store(&dir),
+        trigger_object_id_prefix: "pipeline-index-command-",
+        triggered: AtomicBool::new(false),
+        hook: Box::new(move || {
+            expire_the_lease_hook(hook_tenant.clone(), *hook_run.get().expect("the run id"))()
+        }),
+    });
+    let (service, _, _) = test_service(
+        backend.clone(),
+        store as Arc<dyn TraceArtifactStore>,
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    run_id_cell.set(created.run_id).unwrap();
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review commits");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the source envelope and the approved object"
+    );
+
+    let expired = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the stale Score commit is recorded");
+    assert_eq!(expired.state, PipelineRunState::Retry);
+    assert_eq!(
+        expired.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the refused attempt's Score objects are deleted"
+    );
+
+    force_due(&backend, &tenant, created.run_id).await;
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the retry commits Score");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(scored.index_command_ref.is_some());
+    assert_eq!(
+        count_files_under(dir.path()),
+        2 + usize::from(scored.index_command_ref.is_some())
+            + usize::from(scored.score_neighbor_ref.is_some()),
+        "only the retry's own Score objects"
+    );
+}
+
+/// Finding 6: the contributor status reads a Review rejection's reason from
+/// `ReviewDecision`'s serialized shape (`{"kind": "rejected", "reason": ..}`).
+/// Two runs Admission quarantined (`privacy_review_required`): the one a
+/// reviewer rejects shows Review's reason, `reviewer_declined`, from Review,
+/// never Admission's reason as if Review gave it; the one a reviewer
+/// approves shows no quarantine reason once Review has committed, and none
+/// once the run completes.
+#[tokio::test]
+async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarantine() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let product = PipelineProductStore::new(backend.clone());
+    let tenant = format!("review-status-reason-{}", uuid::Uuid::new_v4());
+    let store = service.store();
+    let quarantine_reason = ReasonCode::new("privacy_review_required").unwrap();
+    let status_of = |submission_id: uuid::Uuid| {
+        let product = &product;
+        let tenant = &tenant;
+        async move {
+            product
+                .contributor_statuses(tenant, RECEIPT_PRINCIPAL, &[submission_id])
+                .await
+                .unwrap()
+                .pop()
+                .expect("the submission's status")
+        }
+    };
+
+    let rejected = quarantined_and_parked(&service, &tenant).await;
+    let claim = store
+        .claim_review(
+            &tenant,
+            rejected.run_id,
+            &reviewer_principal_ref('d'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the parked run is claimable");
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Reject,
+            ReasonCode::new("reviewer_declined").unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    service
+        .process_run(&tenant, rejected.run_id)
+        .await
+        .unwrap()
+        .expect("Review ends the run with the rejection");
+    let status = status_of(rejected.submission_id).await;
+    assert_eq!(status.processing, PipelineProcessingStatus::Rejected);
+    assert_eq!(status.responsible_phase, Some(Phase::Review));
+    assert_eq!(
+        status.reason_label.as_deref(),
+        Some("reviewer_declined"),
+        "Review's own reason, not Admission's"
+    );
+
+    let approved = quarantined_and_parked(&service, &tenant).await;
+    let claim = store
+        .claim_review(
+            &tenant,
+            approved.run_id,
+            &reviewer_principal_ref('e'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the parked run is claimable");
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            quarantine_reason.clone(),
+            vec![quarantine_reason],
+        )
+        .await
+        .unwrap();
+    let reviewed = service
+        .process_run(&tenant, approved.run_id)
+        .await
+        .unwrap()
+        .expect("Review approves");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        status_of(approved.submission_id).await.reason_label,
+        None,
+        "an approved quarantine shows no reason"
+    );
+    for phase in ["Score", "Settle"] {
+        service
+            .process_run(&tenant, approved.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let status = status_of(approved.submission_id).await;
+    assert_eq!(status.processing, PipelineProcessingStatus::Complete);
+    assert_eq!(status.reason_label, None, "nor once the run completes");
+}
+
+/// Finding 8: `claim_review` checks for an assessment in a statement of its
+/// own, after it holds the run's lock. Here an assessment's transaction
+/// holds the run row, records the assessment, and commits only once a
+/// reviewer's claim is waiting on that lock. The claim then sees the
+/// committed assessment and is refused as ineligible -- it is not granted a
+/// claim whose assessment would break the one-assessment-per-run rule.
+#[tokio::test]
+async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-claim-after-lock-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let reviewer = reviewer_principal_ref('a');
+
+    let mut owner = owner_client().await;
+    let assessment = owner_tenant_tx(&mut owner, &tenant).await;
+    assessment
+        .execute(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &parked.run_id],
+        )
+        .await
+        .unwrap();
+    assessment
+        .execute(
+            "INSERT INTO pipeline_review_assessments (
+                tenant_id, assessment_id, run_id, reviewer_principal_ref,
+                recommendation, reason_code, resolved_quarantine_reasons, evidence_hash
+             ) VALUES ($1, $2, $3, $4, 'reject', 'reviewer_declined', '[]'::JSONB, $5)",
+            &[
+                &tenant,
+                &uuid::Uuid::new_v4(),
+                &parked.run_id,
+                &reviewer,
+                &format!("sha256:{}", "e".repeat(64)),
+            ],
+        )
+        .await
+        .unwrap();
+    assessment
+        .execute(
+            "UPDATE pipeline_runs SET state = 'pending', last_error_label = NULL
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &parked.run_id],
+        )
+        .await
+        .unwrap();
+    let xid: String = assessment
+        .query_one("SELECT txid_current()::text", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    let store = PgPipelineStore::new(backend.clone());
+    let claim_tenant = tenant.clone();
+    let claim = tokio::spawn(async move {
+        store
+            .claim_review(
+                &claim_tenant,
+                parked.run_id,
+                &reviewer,
+                chrono::Duration::minutes(30),
+            )
+            .await
+    });
+    wait_for_a_waiter_on(&backend, &xid, &claim).await;
+    assessment.commit().await.unwrap();
+
+    assert_eq!(
+        claim.await.unwrap().unwrap(),
+        PipelineReviewClaimOutcome::Ineligible,
+        "a claim on a run assessed while it waited is refused"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_claims").await,
+        0
+    );
+}
+
+/// Finding 9: a run parked in `awaiting_review` whose submission stops being
+/// operable while nobody claims or assesses it -- it expires, `main`'s
+/// retention purges it, `main` revokes it, or a withdrawal lands without
+/// the pipeline's follow-up -- is released by the worker
+/// (`release_inoperable_parked_runs`) and ended by Review as
+/// `submission_inoperable`, as `claim_review` and `record_review_assessment`
+/// would. A parked run whose submission is still operable stays parked.
+#[tokio::test]
+async fn the_worker_ends_a_parked_run_whose_submission_stopped_being_operable() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-parked-inoperable-{}", uuid::Uuid::new_v4());
+    let untouched = quarantined_and_parked(&service, &tenant).await;
+    for (cause, statement) in [
+        (
+            "expired",
+            "UPDATE trace_submissions SET expires_at = NOW() - INTERVAL '1 second'
+              WHERE tenant_id = $1 AND submission_id = $2",
+        ),
+        (
+            "purged",
+            "UPDATE trace_submissions SET status = 'purged', purged_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+        ),
+        (
+            "revoked",
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+        ),
+        (
+            "withdrawn",
+            "INSERT INTO trace_withdrawals (
+                tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+             ) VALUES ($1, $2, NOW(), 'quarantined', 'not_distributed')",
+        ),
+    ] {
+        let parked = quarantined_and_parked(&service, &tenant).await;
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(statement, &[&tenant, &parked.submission_id])
+            .await
+            .unwrap_or_else(|error| panic!("{cause}: {error}"));
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            service
+                .release_inoperable_parked_runs(&tenant)
+                .await
+                .unwrap(),
+            1,
+            "{cause}: the worker releases the parked run"
+        );
+        let ended = service
+            .process_run(&tenant, parked.run_id)
+            .await
+            .unwrap()
+            .expect("the runner claims the released run");
+        assert_eq!(ended.state, PipelineRunState::Failed, "{cause}");
+        assert_eq!(
+            ended.last_error_label.as_deref(),
+            Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+            "{cause}"
+        );
+    }
+    assert_eq!(
+        service
+            .store()
+            .get_run(&tenant, untouched.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        PipelineRunState::AwaitingReview,
+        "an operable submission's parked run stays parked"
+    );
+}
+
+/// Finding 13 (owner rulings 2026-09-30): a `NoveltyUtility` leg ignores
+/// credit holds, as `main` writes `NoveltyUtility` credit regardless of
+/// them -- its hold filter covers only settlement-eligible events, and
+/// holds gate settlement batches and payouts, which a `NoveltyUtility`
+/// event never reaches. A held principal's compatibility run with a
+/// positive delta completes, writes exactly one `NoveltyUtility` ledger
+/// row, and is export-eligible; a paid (`PipelineScore`) leg of a principal
+/// held the same way stays held.
+#[tokio::test]
+async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service =
+        checked_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
+            .await;
+    let tenant = format!("compat-held-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-held";
+    service.register_default_bundle(&tenant).await.unwrap();
+    backend
+        .upsert_trace_credit_hold(TraceCreditHoldWrite {
+            tenant_id: tenant.clone(),
+            hold_id: uuid::Uuid::new_v4(),
+            credit_account_ref: principal.to_string(),
+            credit_account_hash: credit_account_hash(principal),
+            reason: TraceCreditHoldReason::PolicyMigration,
+            reason_hash: credit_account_hash("pipeline-hold"),
+            actor_principal_ref: principal.to_string(),
+            released_at: None,
+        })
+        .await
+        .expect("hold the principal's credit");
+
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert!(leg.credit_event_id.is_some(), "{leg:?}");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        1,
+        "the NoveltyUtility ledger row is written despite the hold"
+    );
+    let snapshot = create_snapshot(
+        &PipelineProductStore::new(backend.clone()),
+        &tenant,
+        "held-compat",
+        TraceAllowedUse::ModelTraining,
+    )
+    .await;
+    assert_eq!(
+        item_runs(&snapshot),
+        vec![run.run_id],
+        "the completed run is export-eligible"
+    );
+
+    // A paid leg of a principal held the same way stays held.
+    let paid_tenant = format!("paid-held-{}", uuid::Uuid::new_v4());
+    let paid_service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        Arc::new(RecordingNearAdapter::new()),
+        None,
+    )
+    .await;
+    paid_service
+        .register_default_bundle(&paid_tenant)
+        .await
+        .unwrap();
+    backend
+        .upsert_trace_credit_hold(TraceCreditHoldWrite {
+            tenant_id: paid_tenant.clone(),
+            hold_id: uuid::Uuid::new_v4(),
+            credit_account_ref: principal.to_string(),
+            credit_account_hash: credit_account_hash(principal),
+            reason: TraceCreditHoldReason::PolicyMigration,
+            reason_hash: credit_account_hash("pipeline-hold"),
+            actor_principal_ref: principal.to_string(),
+            released_at: None,
+        })
+        .await
+        .expect("hold the principal's credit");
+    let paid = submit_envelope_and_complete(
+        &paid_service,
+        &paid_tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(paid.state, PipelineRunState::Retry, "{paid:?}");
+    assert_eq!(
+        paid.last_error_label.as_deref(),
+        Some(PIPELINE_CREDIT_HELD_LABEL)
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &paid_tenant, paid.run_id).await,
+        0,
+        "the paid leg stays held"
+    );
+}
+
+/// Finding 15: a compatibility run's `NoveltyUtility` ledger row names the
+/// principal that issued it -- the configured pipeline issuer
+/// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), the principal
+/// Settle checks against `main`'s central-issuer list -- as `main` records
+/// its issuing gate worker, never the contributor, under the gate worker's
+/// role (`vector_worker`).
+#[tokio::test]
+async fn a_novelty_utility_ledger_row_names_the_pipeline_issuer() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let issuer = format!("principal_sha256:{}", "d".repeat(64));
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(issuer.clone()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+    )
+    .await;
+    let tenant = format!("compat-issuer-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-issuer-contributor";
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT credit_account_ref, actor_principal_ref, actor_role, event_type
+               FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect("the run's ledger row");
+    tx.commit().await.unwrap();
+    assert_eq!(row.get::<_, String>("event_type"), "novelty_utility");
+    assert_eq!(row.get::<_, String>("credit_account_ref"), principal);
+    assert_eq!(
+        row.get::<_, String>("actor_principal_ref"),
+        issuer,
+        "the issuer, not the contributor"
+    );
+    assert_eq!(row.get::<_, String>("actor_role"), "vector_worker");
+}
+
+/// The pipeline issuer the compatibility tests configure: with none, every
+/// `NoveltyUtility` leg is withheld (Zaki review 3, Z3-2).
+const TEST_PIPELINE_ISSUER: &str =
+    "principal_sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+/// `PipelineNoveltyUtilityChecks` with `TEST_PIPELINE_ISSUER` as the issuer
+/// and every other check at its default.
+fn issuing_checks() -> PipelineNoveltyUtilityChecks {
+    PipelineNoveltyUtilityChecks {
+        issuer_principal_ref: Some(TEST_PIPELINE_ISSUER.to_string()),
+        ..PipelineNoveltyUtilityChecks::default()
+    }
+}
+
+/// Zaki review 3, Z3-2: with no configured pipeline issuer, a compatibility
+/// run's `NoveltyUtility` leg is withheld (`credit_check_error`, as `main`
+/// fails a credit check it cannot make): no ledger row, and never the
+/// contributor standing in as the issuer.
+#[tokio::test]
+async fn a_novelty_utility_award_with_no_configured_issuer_is_withheld() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("compat-no-issuer-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-no-issuer-contributor";
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "no issuer, no NoveltyUtility row"
+    );
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref()
+        ),
+        (
+            "complete",
+            Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+        )
+    );
+}
+
+/// The `main` gate configuration `config` holds.
+fn main_gate_of(
+    config: &CompatibilityBundleConfig,
+) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(config.perplexity_floor_micros),
+        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
+        novelty_floor_micros: Some(config.novelty_floor_micros),
+        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
+        top_k: config.top_k,
+        chunk_target_tokens: config.chunk_target_tokens,
+        chunk_max_tokens: config.chunk_max_tokens,
+        chunk_cap: config.chunk_cap,
+        chunk_min_tokens: config.chunk_min_tokens,
+        novelty_utility_microcredits: config.novelty_utility_microcredits,
+    }
+}
+
+/// Multi-lens review L5-2 and Zaki review 3, Z3-2: startup checks every
+/// bundle a worker may run for a routed or drained tenant -- its active
+/// bundle, and the bundle of each run in flight -- as it checks the default
+/// package: `main`'s gate configuration (here its index-insert threshold),
+/// the pipeline's credit issuer, and (without test dependencies) a
+/// qualifiable configuration.
+#[tokio::test]
+async fn startup_checks_every_bundle_a_tenant_may_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let old_config = near_duplicate_config();
+    let mut new_config = near_duplicate_config();
+    new_config.embed_insert_novelty_micros = old_config.embed_insert_novelty_micros * 2;
+    let gate = main_gate_of(&new_config);
+    let old = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        old_config,
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let new = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        new_config.clone(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let label = |result: anyhow::Result<()>| result.unwrap_err().to_string();
+    let tenant = format!("startup-tenant-bundles-{}", uuid::Uuid::new_v4());
+
+    old.register_default_bundle(&tenant).await.unwrap();
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, &gate, false).await),
+        "pipeline_runtime_main_gate_config_mismatch",
+        "the tenant keeps its first active bundle when the default package changes"
+    );
+
+    let run_id = receive_envelope(
+        &old,
+        &tenant,
+        "principal_sha256:startup-tenant-bundles",
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    new.register_default_bundle(&tenant).await.unwrap();
+    // The bundle switch, as an operator makes it (the runtime login has no
+    // UPDATE on the selection).
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_active_bundles SET bundle_id = $2 WHERE tenant_id = $1",
+        &[&tenant, &new.bundle_id()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, &gate, false).await),
+        "pipeline_runtime_main_gate_config_mismatch",
+        "a run in flight is still bound to the old bundle"
+    );
+    process_until_idle(&old, &tenant).await;
+    let run = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.state, PipelineRunState::Complete);
+    new.check_tenant_bundles(&tenant, &gate, false)
+        .await
+        .expect("only the new bundle is left to run");
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, &gate, true).await),
+        "pipeline_runtime_dependencies_not_production_qualified",
+        "the local reference configuration is not qualifiable"
+    );
+
+    let no_issuer = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        new_config,
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        index,
+    )
+    .await;
+    assert_eq!(
+        label(no_issuer.check_tenant_bundles(&tenant, &gate, false).await),
+        "pipeline_credit_issuer_principal_missing"
+    );
+}
+
+/// Finding 16, first bullet: the payout pays only a leg Score seeded for
+/// the batches Settle writes now -- a batch line under the account's
+/// settlement key, carrying the account's hold (`payout_eligible`). A
+/// `pending` leg without that marker (one the earlier V94 code seeded) is
+/// never paid, by the pass or by a direct `process_payout`.
+#[tokio::test]
+async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-unmarked-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "pending");
+    assert!(leg.payout_eligible, "a leg this code seeds is marked");
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements SET payout_eligible = FALSE
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    service
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("a direct payout of an unmarked leg changes nothing");
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty());
+}
+
+/// Finding 16, second bullet (and addendum C-16): a Trace Credit leg that
+/// Settle completed and ledgered is paid even when its run then fails for
+/// good -- here Settle crashes after the leg completes and before its own
+/// commit, and the run is then failed `attempts_exhausted` as the sweep
+/// fails a run with no attempt left. The payout pass lists the leg (it does
+/// not require the run to be `complete`), submits it, and the contributor
+/// status reads its payout state.
+#[tokio::test]
+async fn a_completed_leg_of_a_run_that_later_failed_is_still_paid() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let crashing = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        Some(PipelineCrashPoint::AfterInstrumentOperation),
+    )
+    .await;
+    let tenant = format!("payout-failed-run-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&crashing, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    for phase in ["Review", "Score"] {
+        crashing
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    crashing
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect_err("Settle crashes after the leg completes");
+    let leg = trace_credit_settlement(&crashing, &tenant, created.run_id).await;
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert!(leg.settlement_batch_id.is_some());
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET state = 'failed', last_error_label = 'attempts_exhausted',
+                lease_token = NULL, lease_expires_at = NULL
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &created.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "submitted");
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, RECEIPT_PRINCIPAL, &[created.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .expect("the owner reads the run's status");
+    assert_eq!(status.processing, PipelineProcessingStatus::Failed);
+    let trace_credit = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("the trace_credit instrument");
+    assert_eq!(trace_credit.payout_state, "submitted");
+}
+
+/// Finding 16, third bullet: `commit_score` seeds a `pending` payout only
+/// for `trace_credit`, the one instrument the payout pays. Another
+/// instrument on the `near` rail is seeded `disabled`, even with payout
+/// enabled.
+#[tokio::test]
+async fn only_trace_credit_is_seeded_a_pending_payout() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            RecordingSettlementAdapter::new(
+                InstrumentId::new("storage_rebate").unwrap(),
+                "recording_storage_rebate_near_rail_test_only",
+                "near",
+            ) as Arc<dyn SettlementAdapter>,
+            near_rail_trace_credit_adapter(),
+        ],
+        Arc::new(RecordingNearAdapter::new()),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-seed-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let legs = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|leg| (leg.instrument_id, leg.payout_rail, leg.payout_state))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        legs,
+        vec![
+            (
+                "storage_rebate".to_string(),
+                "near".to_string(),
+                "disabled".to_string()
+            ),
+            (
+                "trace_credit".to_string(),
+                "near".to_string(),
+                "pending".to_string()
+            ),
+        ]
+    );
+}
+
+/// Finding 19: `main`'s `NoveltyUtility` credit checks run before the Trace
+/// Credit leg's adapter call, so a leg they withhold never reaches its
+/// adapter: it completes withheld (no ledger row, `main`'s label) and the
+/// adapter records no request. A credited leg still settles through it.
+#[tokio::test]
+async fn a_withheld_novelty_utility_leg_never_reaches_its_adapter() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry =
+        SettlementAdapterRegistry::new(vec![trace_credit.clone() as Arc<dyn SettlementAdapter>])
+            .expect("build settlement adapter registry");
+    let service = Arc::new(
+        PipelineServiceBuilder::new(
+            backend.clone(),
+            artifact_store(&dir),
+            package,
+            index.clone(),
+            index,
+            registry,
+            PipelineCaps {
+                per_instrument_atomic_units: BTreeMap::from([(
+                    InstrumentId::trace_credit().as_str().to_string(),
+                    AtomicUnits::from_raw(u128::MAX),
+                )]),
+            },
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_authority(allow_all_authority())
+        .with_privacy(default_privacy_boundary())
+        .with_novelty_utility_checks(issuing_checks())
+        .build()
+        .expect("build the compatibility service"),
+    );
+
+    let withheld =
+        settled_compatibility_award(&service, &backend, &envelope(uuid::Uuid::new_v4()).await)
+            .await;
+    assert_withheld(&withheld, PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL);
+    assert!(
+        trace_credit.requests().is_empty(),
+        "a withheld leg never reaches its adapter"
+    );
+
+    assert_credited(
+        &settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await,
+    );
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "a credited leg settles through its adapter"
+    );
+}
+
+/// A compatibility configuration with `main`'s documented novelty floor
+/// (0.5) that awards `CHECKED_DELTA_MICROCREDITS`: the first of two
+/// identical traces is novel, the second is not.
+fn near_duplicate_config() -> CompatibilityBundleConfig {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_floor_micros = 500_000;
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    config
+}
+
+/// Receives `env` for `principal` in `tenant` and returns the new run's id.
+async fn receive_envelope(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+    env: &TraceContributionEnvelope,
+) -> uuid::Uuid {
+    let raw = serde_json::to_vec(env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = submit_registered(
+        service,
+        PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: env,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    created.run_id
+}
+
+/// Runs `process_one` for `tenant` until no run is due.
+async fn process_until_idle(service: &PipelineService, tenant: &str) {
+    for _ in 0..64 {
+        if service.process_one(tenant).await.unwrap().is_none() {
+            return;
+        }
+    }
+    panic!("the tenant's runs did not go idle");
+}
+
+/// The tenant's `novelty_utility` ledger rows.
+async fn count_novelty_utility_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND event_type = 'novelty_utility'",
+            &[&tenant_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+/// Two receipts of the same trace, in a fresh tenant: `(tenant, first,
+/// second)` envelopes that differ only in their submission id.
+async fn identical_receipts() -> (String, TraceContributionEnvelope, TraceContributionEnvelope) {
+    let tenant = format!("compat-near-duplicate-{}", uuid::Uuid::new_v4());
+    let first = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let mut second = first.clone();
+    second.submission_id = uuid::Uuid::new_v4();
+    (tenant, first, second)
+}
+
+/// Asserts the owner ruling on near-duplicates for `tenant`: exactly one
+/// `novelty_utility` ledger row, and exactly one revision in the index.
+async fn assert_one_award_and_one_indexed_revision(
+    backend: &Arc<PgBackend>,
+    index: &IsolatedPipelineIndex,
+    tenant: &str,
+) {
+    assert_eq!(
+        count_novelty_utility_rows(backend, tenant).await,
+        1,
+        "only the first of two identical traces earns NoveltyUtility"
+    );
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(tenant), MINIMAL_INDEX_ID),
+        1,
+        "only the first of two identical traces is indexed"
+    );
+}
+
+/// Zaki review 1, round 2, finding 12, and the owner ruling of 2026-09-30:
+/// near-duplicate traces are dropped after the first one. Two identical
+/// receipts, processed by a single worker until idle, give exactly one
+/// `novelty_utility` ledger row and one indexed revision, although both
+/// Scores run before the first Settle writes the index.
+#[tokio::test]
+async fn identical_receipts_earn_one_novelty_utility_award_with_one_worker() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:compat-near-duplicate";
+    receive_envelope(&service, &tenant, principal, &first).await;
+    receive_envelope(&service, &tenant, principal, &second).await;
+    process_until_idle(&service, &tenant).await;
+    assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Finding 12, the interleaved variant: the second receipt arrives after
+/// the first run's Score committed, and its Review and Score run before the
+/// first run's Settle wrote the index.
+#[tokio::test]
+async fn identical_receipts_earn_one_novelty_utility_award_when_interleaved() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:compat-near-duplicate";
+    let first_run = receive_envelope(&service, &tenant, principal, &first).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, first_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        0,
+        "the first run's Settle has not written the index yet"
+    );
+    let second_run = receive_envelope(&service, &tenant, principal, &second).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, second_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the second run's {phase} runs"));
+    }
+    process_until_idle(&service, &tenant).await;
+    assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Zaki review 3, Z3-M1: makes two Scores overlap for certain. While
+/// `armed`, the first scorer call waits (on its blocking-pool thread) until
+/// two Scores have read their approved bytes -- the read a Score makes
+/// before it takes the tenant's Score lock -- or a bound passes.
+#[derive(Default)]
+struct ScoreBarrier {
+    armed: AtomicBool,
+    entered: AtomicUsize,
+    waited: AtomicBool,
+}
+
+impl ScoreBarrier {
+    fn wait_for_the_second_score(&self) {
+        if !self.armed.load(Ordering::SeqCst) || self.waited.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.entered.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+/// The reference scorer, under a `ScoreBarrier`.
+struct BarrierScorer {
+    inner: ReferencePerplexityScorer,
+    barrier: Arc<ScoreBarrier>,
+}
+
+impl trace_commons_gate_api::PerplexityScorer for BarrierScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.barrier.wait_for_the_second_score();
+        trace_commons_gate_api::PerplexityScorer::score(&self.inner, plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<trace_commons_gate_api::ChunkPerplexity> {
+        self.barrier.wait_for_the_second_score();
+        trace_commons_gate_api::PerplexityScorer::score_chunk(&self.inner, chunk)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for BarrierScorer {
+    fn dependency_identity(&self) -> &str {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::dependency_identity(&self.inner)
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::content_descriptor(&self.inner)
+    }
+}
+
+/// A store that counts, while its `ScoreBarrier` is armed, the reads of
+/// contribution-envelope objects: in a Score round, each Score's read of its
+/// approved bytes.
+struct BarrierStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    barrier: Arc<ScoreBarrier>,
+}
+
+impl TraceArtifactStore for BarrierStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        if self.barrier.armed.load(Ordering::SeqCst)
+            && expected_artifact_kind == TraceArtifactKind::ContributionEnvelope
+        {
+            self.barrier.entered.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// Finding 12 with two workers: two services over one database and one
+/// index process the two identical receipts at the same time. Zaki review 3,
+/// Z3-M1: the two Scores overlap for certain -- the first worker's scorer
+/// call waits until the second worker has entered its Score
+/// (`ScoreBarrier`) -- so without the tenant's Score lock both would score
+/// against an empty unapplied set and both would earn.
+#[tokio::test]
+async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let barrier = Arc::new(ScoreBarrier::default());
+    let config = near_duplicate_config();
+    let worker = || {
+        let scorer = Arc::new(BarrierScorer {
+            inner: ReferencePerplexityScorer::new(),
+            barrier: barrier.clone(),
+        });
+        let embedder = Arc::new(ReferenceEmbedder::new());
+        let package =
+            MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+                .expect("build compatibility bundle package");
+        let trace_credit = RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        );
+        let registry =
+            SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+                .expect("build settlement adapter registry");
+        let caps = PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::from([(
+                InstrumentId::trace_credit().as_str().to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            )]),
+        };
+        Arc::new(
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                Arc::new(BarrierStore {
+                    inner: artifact_store(&dir),
+                    barrier: barrier.clone(),
+                }),
+                package,
+                index.clone(),
+                index.clone(),
+                registry,
+                caps,
+            )
+            .with_scorer(scorer)
+            .with_embedder(embedder)
+            .with_authority(allow_all_authority())
+            .with_privacy(default_privacy_boundary())
+            .with_novelty_utility_checks(issuing_checks())
+            .build()
+            .expect("build pipeline service"),
+        )
+    };
+    let (one, two) = (worker(), worker());
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:compat-near-duplicate";
+    one.register_default_bundle(&tenant).await.unwrap();
+    let first_run = receive_envelope(&one, &tenant, principal, &first).await;
+    let second_run = receive_envelope(&two, &tenant, principal, &second).await;
+    for phase in ["Review", "Score"] {
+        barrier.armed.store(phase == "Score", Ordering::SeqCst);
+        let (a, b) = tokio::join!(one.process_one(&tenant), two.process_one(&tenant));
+        assert!(
+            a.unwrap().is_some() && b.unwrap().is_some(),
+            "both workers ran a {phase}"
+        );
+    }
+    barrier.armed.store(false, Ordering::SeqCst);
+    assert!(
+        barrier.waited.load(Ordering::SeqCst) && barrier.entered.load(Ordering::SeqCst) >= 2,
+        "the first Score waited while the second entered its Score"
+    );
+    // The Score that found the tenant's lock held waits, uncharged, for a
+    // fixed delay (multi-lens review L3-2); make it due now.
+    let runs = PgPipelineStore::new(backend.clone());
+    for run_id in [first_run, second_run] {
+        if runs
+            .get_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_error_label
+            .as_deref()
+            == Some(PIPELINE_SCORE_LOCK_BUSY_LABEL)
+        {
+            force_due(&backend, &tenant, run_id).await;
+        }
+    }
+    process_until_idle(&one, &tenant).await;
+    assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Multi-lens review L3-2 (Zaki review 3, Z3-M2): a compatibility Score
+/// that finds its tenant's Score lock held does not wait for it. It is
+/// released at once, uncharged, as `score_lock_busy`, due again after a
+/// fixed delay (not the phase-age backoff), and runs once the lock is free.
+#[tokio::test]
+async fn a_score_that_finds_the_tenant_lock_held_is_released_uncharged() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let runs = PgPipelineStore::new(backend.clone());
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(
+        &service,
+        &tenant,
+        "principal_sha256:score-lock-busy",
+        &first,
+    )
+    .await;
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let before = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+
+    // Another replica's Score holds the tenant's lock.
+    let holder = backend.trace_pool_for_test().get().await.unwrap();
+    holder
+        .execute(
+            "SELECT pg_advisory_lock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    let released = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.process_run(&tenant, run_id),
+    )
+    .await
+    .expect("the Score does not wait for the lock")
+    .unwrap()
+    .expect("the Score is claimed");
+    assert_eq!(
+        (
+            released.state,
+            released.last_error_label.as_deref(),
+            released.attempt_count,
+            released.next_phase,
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_SCORE_LOCK_BUSY_LABEL),
+            before.attempt_count,
+            Some(Phase::Score),
+        )
+    );
+    let delay = released.next_attempt_at - released.updated_at;
+    assert!(
+        delay >= chrono::Duration::seconds(1) && delay <= chrono::Duration::seconds(5),
+        "a fixed short delay, not the phase-age backoff: {delay:?}"
+    );
+
+    holder
+        .execute(
+            "SELECT pg_advisory_unlock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    force_due(&backend, &tenant, run_id).await;
+    let scored = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the Score runs once the lock is free");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+}
+
+/// Finding 12 on a pool of one: a compatibility Score reads its approved
+/// bytes before it opens the transaction that holds the tenant's Score
+/// lock, reads the unapplied index commands and commits on that same
+/// transaction, so it never holds two pooled connections. With a pool of
+/// one, a second checkout would wait for the first forever; the bound turns
+/// that into a failure.
+#[tokio::test]
+async fn compatibility_score_never_holds_two_pooled_connections() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:compat-near-duplicate";
+    receive_envelope(&service, &tenant, principal, &first).await;
+    receive_envelope(&service, &tenant, principal, &second).await;
+    tokio::time::timeout(HELD_CALL_BOUND, process_until_idle(&service, &tenant))
+        .await
+        .expect("a compatibility Score never waits for a second connection");
+    assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Sets a run's `attempt_count`, as earlier charged attempts of its
+/// current phase would have.
+async fn set_attempt_count(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+    attempt_count: i32,
+) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET attempt_count = $3 WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id, &attempt_count],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// Multi-lens review L2-1 and the owner decision of 2026-10-01: each phase
+/// has its own attempt budget. A run whose Review, and then whose Score,
+/// commits on the last attempt its phase had left is claimed for its next
+/// phase and completes; it is not left `pending` with no attempt to claim.
+#[tokio::test]
+async fn a_phase_that_commits_on_its_last_attempt_leaves_the_next_phase_its_budget() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let store = PgPipelineStore::new(backend.clone());
+    let (tenant, first, _) = identical_receipts().await;
+    let principal = "principal_sha256:per-phase-attempt-budget";
+    let run_id = receive_envelope(&service, &tenant, principal, &first).await;
+    let max_attempts = store
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .max_attempts as i32;
+    for phase in ["Review", "Score"] {
+        set_attempt_count(&backend, &tenant, run_id, max_attempts - 1).await;
+        service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} is claimed on the phase's last attempt"));
+        let run = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+        assert_eq!(
+            run.attempt_count, 0,
+            "the {phase} commit leaves the next phase its whole budget"
+        );
+    }
+    process_until_idle(&service, &tenant).await;
+    let run = store.get_run(&tenant, run_id).await.unwrap().unwrap();
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
+}
+
+/// L2-1's backstop in C-12's neighbour read: a run waiting for Settle that
+/// no claim can select (its attempts spent, so it is never claimed again)
+/// is not a neighbour, so it does not take the award from a later identical
+/// trace.
+#[tokio::test]
+async fn a_run_no_claim_can_select_is_not_a_compatibility_neighbour() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let store = PgPipelineStore::new(backend.clone());
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:stranded-neighbour";
+    let first_run = receive_envelope(&service, &tenant, principal, &first).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, first_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let stranded = store.get_run(&tenant, first_run).await.unwrap().unwrap();
+    assert_eq!(stranded.next_phase, Some(Phase::Settle));
+    set_attempt_count(&backend, &tenant, first_run, stranded.max_attempts as i32).await;
+    let second_run = receive_envelope(&service, &tenant, principal, &second).await;
+    for phase in ["Review", "Score", "Settle"] {
+        service
+            .process_run(&tenant, second_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the second run's {phase} runs"));
+    }
+    assert_eq!(
+        count_novelty_utility_rows(&backend, &tenant).await,
+        1,
+        "the second trace earns NoveltyUtility: the run no claim can select is not its neighbour"
+    );
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        1
+    );
+}
+
+/// Multi-lens review L2-2: a store whose reads, or whose writes, fail while
+/// the matching flag is set, as an object-store outage does.
+struct OutageArtifactStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    fail_reads: AtomicBool,
+    fail_writes: AtomicBool,
+}
+
+impl OutageArtifactStore {
+    fn over(inner: Arc<dyn TraceArtifactStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            fail_reads: AtomicBool::new(false),
+            fail_writes: AtomicBool::new(false),
+        })
+    }
+
+    fn set(&self, reads: bool, writes: bool) {
+        self.fail_reads.store(reads, Ordering::SeqCst);
+        self.fail_writes.store(writes, Ordering::SeqCst);
+    }
+
+    fn check(flag: &AtomicBool) -> anyhow::Result<()> {
+        anyhow::ensure!(!flag.load(Ordering::SeqCst), "object store unavailable");
+        Ok(())
+    }
+}
+
+impl TraceArtifactStore for OutageArtifactStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        Self::check(&self.fail_writes)?;
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::check(&self.fail_writes)?;
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::check(&self.fail_writes)?;
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        Self::check(&self.fail_reads)?;
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::check(&self.fail_reads)?;
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::check(&self.fail_reads)?;
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// Multi-lens review L2-2 and ruling FR3: an object-store call that fails
+/// is a dependency outage, the uncharged suspension
+/// `artifact_store_unavailable`, at each of the run path's store calls:
+/// Review's source read and approved write, and Score's approved read and
+/// object write. The run then completes once the store is back. (Settle's
+/// read of the stored index command stays charged, ruling RB-35;
+/// `stored_command_binding_failures_fail_closed` covers it.)
+#[tokio::test]
+async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = OutageArtifactStore::over(artifact_store(&dir));
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        store.clone(),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let runs = PgPipelineStore::new(backend.clone());
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(
+        &service,
+        &tenant,
+        "principal_sha256:artifact-store-outage",
+        &first,
+    )
+    .await;
+    // (outage of reads, outage of writes, the phase it hits).
+    for (reads, writes, phase) in [
+        (true, false, "Review's source read"),
+        (false, true, "Review's approved write"),
+        (true, false, "Score's approved read"),
+        (false, true, "Score's object write"),
+    ] {
+        let before = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+        store.set(reads, writes);
+        service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} is claimed"));
+        let after = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+        assert_eq!(
+            (
+                after.state,
+                after.last_error_label.as_deref(),
+                after.attempt_count,
+                after.next_phase,
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL),
+                before.attempt_count,
+                before.next_phase,
+            ),
+            "{phase} failing is uncharged"
+        );
+        store.set(false, false);
+        force_due(&backend, &tenant, run_id).await;
+        if phase.ends_with("write") {
+            service
+                .process_run(&tenant, run_id)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("the phase after {phase} runs"));
+        }
+    }
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    let run = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
+}
+
+/// Zaki review 1, round 2, N-6: a store whose every call made on a Tokio
+/// runtime worker fails, so a pipeline object-store call that was not moved
+/// to the blocking pool shows as a failed phase.
+struct BlockingPoolOnlyArtifactStore {
+    inner: Arc<dyn TraceArtifactStore>,
+}
+
+impl BlockingPoolOnlyArtifactStore {
+    fn refuse_runtime_workers() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "object store called on a runtime worker"
+        );
+        Ok(())
+    }
+}
+
+impl TraceArtifactStore for BlockingPoolOnlyArtifactStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        Self::refuse_runtime_workers()?;
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::refuse_runtime_workers()?;
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::refuse_runtime_workers()?;
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        Self::refuse_runtime_workers()?;
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::refuse_runtime_workers()?;
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::refuse_runtime_workers()?;
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        Self::refuse_runtime_workers()?;
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// The reference scorer, failing every call made on a runtime worker (N-6).
+struct BlockingPoolOnlyScorer(ReferencePerplexityScorer);
+
+impl trace_commons_gate_api::PerplexityScorer for BlockingPoolOnlyScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "scorer called on a runtime worker"
+        );
+        trace_commons_gate_api::PerplexityScorer::score(&self.0, plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<trace_commons_gate_api::ChunkPerplexity> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "scorer called on a runtime worker"
+        );
+        trace_commons_gate_api::PerplexityScorer::score_chunk(&self.0, chunk)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for BlockingPoolOnlyScorer {
+    fn dependency_identity(&self) -> &str {
+        "blocking_pool_only_scorer_test_only"
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"blocking-pool-only-scorer-test-only.v1".to_vec()
+    }
+}
+
+/// The reference embedder, failing every call made on a runtime worker.
+struct BlockingPoolOnlyEmbedder(ReferenceEmbedder);
+
+impl Embedder for BlockingPoolOnlyEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        anyhow::ensure!(
+            !trace_commons_server::versioned_pipeline_index::called_on_a_runtime_worker(),
+            "embedder called on a runtime worker"
+        );
+        self.0.embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for BlockingPoolOnlyEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "blocking_pool_only_embedder_test_only"
+    }
+    fn model_id(&self) -> &str {
+        self.0.model_id()
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"blocking-pool-only-embedder-test-only.v1".to_vec()
+    }
+}
+
+/// Zaki review 1, round 2, N-6: the pipeline calls none of its synchronous
+/// dependencies on a Tokio runtime worker, on any phase or follow-up: the
+/// scorer, the embedder and the index reader in Score, the index writes in
+/// Settle and in the invalidation pass, and every object-store call (the
+/// receipt, Review's approved object, Score's objects and their reads,
+/// Settle's read of the index command). Each double fails a call made on a
+/// worker, so a call left on one fails its phase. A compatibility run
+/// completes with its index write applied and its credit written, and its
+/// withdrawal's invalidation removes the revision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    index.refuse_calls_on_runtime_workers();
+    let scorer = Arc::new(BlockingPoolOnlyScorer(ReferencePerplexityScorer::new()));
+    let embedder = Arc::new(BlockingPoolOnlyEmbedder(ReferenceEmbedder::new()));
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(BlockingPoolOnlyArtifactStore {
+        inner: artifact_store(&dir),
+    });
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .with_novelty_utility_checks(issuing_checks())
+    .build()
+    .expect("build pipeline service");
+    let tenant = format!("compat-blocking-pool-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-blocking-pool";
+    let envelope = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, &tenant, principal, &envelope).await;
+    process_until_idle(&service, &tenant).await;
+    let run = service
+        .store()
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert_eq!(run.index_write_state, "complete");
+    assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        1
+    );
+
+    service
+        .withdraw_submission(&tenant, envelope.submission_id, principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    service
+        .process_index_invalidations(&tenant, 8)
+        .await
+        .expect("the invalidation pass runs");
+    assert_eq!(
+        index.revision_count(&pipeline_tenant_storage_ref(&tenant), MINIMAL_INDEX_ID),
+        0,
+        "the invalidation pass removed the revision off the runtime workers"
+    );
+}
+
+/// Owner ruling on Zaki review 1, round 2, N-7: the index holds only
+/// revisions of runs that completed. A Settle that crashes after its index
+/// write on the run's last attempt leaves the write `pending` and the run
+/// `leased`; the claim's sweep then fails the run for good
+/// (`attempts_exhausted`), and with it queues the invalidation of the
+/// run's revision through the queue a withdrawal uses (reason
+/// `run_failed`). The invalidation pass removes the revision.
+#[tokio::test]
+async fn a_run_that_fails_for_good_after_its_index_write_has_its_revision_removed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterIndexApply),
+    )
+    .await;
+    let tenant = format!("failed-run-invalidation-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET attempt_count = max_attempts - 1
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let crashed = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .expect_err("Settle crashes after its index write");
+    assert_eq!(crashed.to_string(), INJECTED_PIPELINE_CRASH);
+    assert!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
+        "the crashed Settle wrote the revision's entries"
+    );
+    expire_lease(&backend, &tenant, run.run_id).await;
+    assert!(
+        service.process_one(&tenant).await.unwrap().is_none(),
+        "the run has no attempt left"
+    );
+    let failed = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let queued: i64 = {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let count = tx
+            .query_one(
+                "SELECT COUNT(*) FROM pipeline_index_invalidations
+                  WHERE tenant_id = $1 AND run_id = $2 AND reason_code = 'run_failed'",
+                &[&tenant, &run.run_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    assert_eq!(queued, 1, "the failed run's revision is queued for removal");
+    service
+        .process_index_invalidations(&tenant, 8)
+        .await
+        .expect("the invalidation pass runs");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "the failed run's revision left the index"
+    );
+}
+
+/// Zaki review 1, round 2, simplification: every pipeline operability check
+/// reads one definition of a live submission, which counts `withdrawn_at`
+/// as the credit leg's check always did. A submission whose row records a
+/// withdrawal time but has no `trace_withdrawals` row is no longer operable
+/// for Score either: its approved-bytes read refuses it, and the run never
+/// reaches Settle.
+#[tokio::test]
+async fn a_submission_with_a_withdrawal_time_is_not_operable_for_score() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdrawn-at-operability-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "UPDATE trace_submissions SET withdrawn_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &env.submission_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert_eq!(scored.next_phase, Some(Phase::Score), "{scored:?}");
+    assert_eq!(
+        scored.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
     );
 }

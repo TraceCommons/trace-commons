@@ -41,6 +41,10 @@ use trace_commons_protocol::device_invite_subject::{
     DEVICE_INVITE_SUBJECT_REQUEST_SCHEMA_VERSION, DEVICE_INVITE_SUBJECT_REVOKED,
     DEVICE_INVITE_SUBJECT_STALE, DeviceInviteSubjectRequest, DeviceInviteSubjectResponse,
 };
+use trace_commons_protocol::invite_lookup::{
+    INVITE_LOOKUP_PATH, INVITE_LOOKUP_REASON_MALFORMED, INVITE_LOOKUP_REASON_NOT_FOUND,
+    INVITE_LOOKUP_REQUEST_SCHEMA_VERSION, InviteLookupRequest, InviteLookupResponse,
+};
 use trace_commons_protocol::onboarding::{
     TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TRACE_ONBOARD_REQUEST_SCHEMA_VERSION,
     TraceInstanceEnrollRequest, TraceOnboardErrorCode, TraceOnboardRequest, TraceOnboardResponse,
@@ -526,6 +530,26 @@ impl TraceUploadClaimIssuerConfig {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(60),
+            invite_lookup_rate_per_min: std::env::var("TRACE_COMMONS_INVITE_LOOKUP_RATE_PER_MIN")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(DEFAULT_INVITE_LOOKUP_RATE_PER_MIN),
+            invite_lookup_client_ip_header: crate::invite_lookup::parse_client_ip_header(
+                std::env::var("TRACE_COMMONS_INVITE_LOOKUP_CLIENT_IP_HEADER")
+                    .ok()
+                    .as_deref(),
+            )?,
+            invite_lookup_per_client_rate_per_min: std::env::var(
+                "TRACE_COMMONS_INVITE_LOOKUP_PER_CLIENT_RATE_PER_MIN",
+            )
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DEFAULT_INVITE_LOOKUP_PER_CLIENT_RATE_PER_MIN),
+            invite_lookup_client_limiter: Arc::new(
+                crate::invite_lookup::LookupClientRateLimiter::new(
+                    crate::invite_lookup::MAX_TRACKED_LOOKUP_CLIENTS,
+                ),
+            ),
             invite_admin_backend: self.invite_admin_backend.clone(),
             invite_admin_registry: self.invite_admin_registry.clone(),
             invite_registry_authoritative: self.invite_registry_authoritative,
@@ -680,6 +704,19 @@ struct TraceUploadClaimIssuerState {
     instance_replay_cache: Arc<crate::instance_enroll_guard::ReplayCache>,
     instance_rate_limiter: Arc<crate::instance_enroll_guard::InstanceRateLimiter>,
     instance_enroll_default_rate_per_min: u32,
+    /// Lookups per minute across ALL callers of `POST /v1/invite/lookup`: one
+    /// shared bucket (the same limiter as enroll, under its own key). It caps
+    /// how fast the route can be used to guess invite codes, and it stays the
+    /// outer cap when per-client keying below is on.
+    invite_lookup_rate_per_min: u32,
+    /// Header the operator's trusted proxy writes the caller's address into
+    /// (`TRACE_COMMONS_INVITE_LOOKUP_CLIENT_IP_HEADER`). `None`, the default,
+    /// means no header is trusted and only the shared bucket applies: the
+    /// issuer does not see client addresses itself.
+    invite_lookup_client_ip_header: Option<axum::http::HeaderName>,
+    /// Lookups per minute per client when the header above is configured.
+    invite_lookup_per_client_rate_per_min: u32,
+    invite_lookup_client_limiter: Arc<crate::invite_lookup::LookupClientRateLimiter>,
     invite_admin_backend: Option<Arc<PgBackend>>,
     invite_admin_registry: Option<Arc<DbInviteRegistry>>,
     invite_registry_authoritative: bool,
@@ -1124,6 +1161,7 @@ fn router_from_state(
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
         .route("/v1/onboard", post(onboard_handler))
         .route("/v1/enroll", post(enroll_handler))
+        .route(INVITE_LOOKUP_PATH, post(invite_lookup_handler))
         .route(
             DEVICE_INVITE_SUBJECT_PATH,
             post(device_invite_subject_handler),
@@ -1578,6 +1616,134 @@ async fn onboard_handler(
 ) -> Result<Json<TraceOnboardResponse>, IssuerError> {
     let response = state.onboard(request).await?;
     Ok(Json(response))
+}
+
+/// Default cap on invite lookups per minute, all callers together.
+const DEFAULT_INVITE_LOOKUP_RATE_PER_MIN: u32 = 30;
+
+/// Default cap on invite lookups per minute from one client, applied only when
+/// the operator names a trusted client-address header.
+const DEFAULT_INVITE_LOOKUP_PER_CLIENT_RATE_PER_MIN: u32 = 10;
+
+/// Key of the shared lookup bucket in the issuer's rate limiter.
+const INVITE_LOOKUP_RATE_KEY: &str = "invite-lookup";
+
+/// `POST /v1/invite/lookup`: is this invite usable, who issued it and what does
+/// it pay? Read-only: spends no use, mints nothing, writes nothing. The code
+/// rides in the body (never the URL, so it cannot reach an access log), and
+/// the log line carries only the invite's subject hash.
+async fn invite_lookup_handler(
+    State(state): State<Arc<TraceUploadClaimIssuerState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<InviteLookupResponse>, IssuerError> {
+    let result = state.invite_lookup(&headers, &body).await;
+    match &result {
+        Ok((subject_hash, response)) => tracing::info!(
+            invite_subject_hash = subject_hash.as_deref().unwrap_or("none"),
+            valid = response.valid,
+            reason = response.reason_label.as_deref().unwrap_or("none"),
+            "invite lookup"
+        ),
+        Err(error) => tracing::info!(outcome = error.message, "invite lookup refused"),
+    }
+    result.map(|(_, response)| Json(response))
+}
+
+impl TraceUploadClaimIssuerState {
+    /// Returns the presented invite's subject hash (when the code was
+    /// well-formed) beside the answer, for the caller's hash-only log line.
+    async fn invite_lookup(
+        &self,
+        headers: &HeaderMap,
+        body: &Bytes,
+    ) -> Result<(Option<String>, InviteLookupResponse), IssuerError> {
+        // Throttle before any parsing or database work: an unthrottled
+        // lookup is a free oracle for guessing bearer codes.
+        let rate_limited = || IssuerError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "invite_lookup_rate_limited",
+        };
+        let now = std::time::Instant::now();
+        // Per client first, so a caller already over its own budget is
+        // refused without spending the shared budget everyone else needs.
+        if let Some(header) = &self.invite_lookup_client_ip_header {
+            let client = crate::invite_lookup::lookup_client_key(headers, header);
+            if !self.invite_lookup_client_limiter.try_acquire(
+                &client,
+                self.invite_lookup_per_client_rate_per_min,
+                now,
+            ) {
+                return Err(rate_limited());
+            }
+        }
+        if !self.instance_rate_limiter.try_acquire(
+            INVITE_LOOKUP_RATE_KEY,
+            self.invite_lookup_rate_per_min,
+            now,
+        ) {
+            return Err(rate_limited());
+        }
+        let request: InviteLookupRequest = serde_json::from_slice(body)
+            .map_err(|_| IssuerError::bad_request("invalid invite lookup request"))?;
+        if request.schema_version != INVITE_LOOKUP_REQUEST_SCHEMA_VERSION {
+            return Err(IssuerError::bad_request("invalid invite lookup request"));
+        }
+        let invite_code = request.invite_code.trim();
+        if !valid_onboard_invite_code(invite_code) {
+            return Ok((
+                None,
+                InviteLookupResponse::invalid(INVITE_LOOKUP_REASON_MALFORMED),
+            ));
+        }
+        // Fail closed: without the invite database there is nothing to
+        // answer from, and the file allowlist carries no issuer or range.
+        // The database must also be what `/v1/onboard` redeems against. When
+        // it is not authoritative, onboarding reads the file allowlist, so a
+        // row here says nothing about whether the invite would work: a
+        // database-only invite would read as valid and then be refused, and
+        // a revocation recorded here would not stop a redemption.
+        let backend = self
+            .invite_admin_backend
+            .as_ref()
+            .filter(|_| self.invite_registry_authoritative)
+            .ok_or(IssuerError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "invite_registry_not_configured",
+            })?;
+        let registry = self.invite_admin_registry.as_ref().ok_or(IssuerError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "invite_registry_not_configured",
+        })?;
+        let subject_hash = hash_invite_code(invite_code);
+        // Ask the in-process cache first, exactly as `/v1/onboard` does, so
+        // the two agree on whether a code is usable: a stale cache is a 503
+        // there and here, and a code the cache does not hold is refused there
+        // (an invite minted by a separate `--mint-invites` process is
+        // invisible to it until the next refresh) so it must not read valid
+        // here. Only a `valid` answer is overridden. The database is still
+        // consulted for the refusal label, since the cache drops revoked and
+        // expired rows and a holder is told which of those it was.
+        let cached = match registry.lookup(&subject_hash) {
+            Ok(cached) => cached,
+            Err(InviteRegistryError::Stale { .. }) => {
+                return Err(IssuerError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    message: "invite_registry_stale",
+                });
+            }
+            Err(InviteRegistryError::Backend(_)) => return Err(IssuerError::internal()),
+        };
+        let peek = backend
+            .peek_invite_grant(&subject_hash)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        let mut response = crate::invite_lookup::classify_invite(peek.as_ref(), Utc::now());
+        if response.valid && cached.is_none() {
+            response = InviteLookupResponse::invalid(INVITE_LOOKUP_REASON_NOT_FOUND);
+        }
+        Ok((Some(subject_hash), response))
+    }
 }
 
 async fn enroll_handler(
@@ -4424,6 +4590,10 @@ mod tests {
                 instance_replay_cache: Arc::clone(&self.instance_replay_cache),
                 instance_rate_limiter: Arc::clone(&self.instance_rate_limiter),
                 instance_enroll_default_rate_per_min: self.instance_enroll_default_rate_per_min,
+                invite_lookup_rate_per_min: self.invite_lookup_rate_per_min,
+                invite_lookup_client_ip_header: self.invite_lookup_client_ip_header.clone(),
+                invite_lookup_per_client_rate_per_min: self.invite_lookup_per_client_rate_per_min,
+                invite_lookup_client_limiter: Arc::clone(&self.invite_lookup_client_limiter),
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
                 invite_registry_authoritative: self.invite_registry_authoritative,
@@ -4796,83 +4966,86 @@ mod tests {
         );
     }
 
+    fn enrollment_keypair() -> ring::signature::Ed25519KeyPair {
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .expect("generate enrollment keypair");
+        ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .expect("parse enrollment keypair")
+    }
+
+    struct EnrollmentFixture {
+        _allowlist_dir: tempfile::TempDir,
+        state: Arc<TraceUploadClaimIssuerState>,
+        instance_key: ring::signature::Ed25519KeyPair,
+        instance_public: Vec<u8>,
+        device_public: Vec<u8>,
+    }
+
+    impl EnrollmentFixture {
+        fn new() -> Self {
+            use ring::signature::KeyPair;
+            let instance_key = enrollment_keypair();
+            let instance_public = instance_key.public_key().as_ref().to_vec();
+            let device_public = enrollment_keypair().public_key().as_ref().to_vec();
+            let instance_pk_b64 =
+                base64::engine::general_purpose::STANDARD.encode(&instance_public);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("allowlist.json");
+            std::fs::write(&path, format!(
+                r#"{{"version":1,"generated_at":"2026-01-01T00:00:00Z","policy_label":"test","entries":[{{"kind":"instance","instance_id":"ironclaw-test","instance_public_key":"{instance_pk_b64}","max_enrollments":100,"policy_template":{{"policy_version":"v1","allowed_consent_scopes":["debugging_evaluation"],"allowed_uses":["debugging"]}}}}]}}"#
+            )).expect("write allowlist");
+            let state = TraceUploadClaimIssuerConfig {
+                allowlist_source: Some(AllowlistSourceSpec::File(path)),
+                onboarding_device_key_db: None,
+                ..test_config()
+            }
+            .build_state()
+            .expect("state builds");
+            Self {
+                _allowlist_dir: dir,
+                state,
+                instance_key,
+                instance_public,
+                device_public,
+            }
+        }
+
+        fn request(
+            &self,
+            user: &str,
+        ) -> trace_commons_protocol::onboarding::TraceInstanceEnrollRequest {
+            make_enroll_request(
+                &self.instance_key,
+                &self.instance_public,
+                &self.device_public,
+                "trace-commons-upload",
+                "ironclaw-test",
+                user,
+                &Uuid::new_v4().to_string(),
+            )
+        }
+
+        fn sign(
+            &self,
+            request: &mut trace_commons_protocol::onboarding::TraceInstanceEnrollRequest,
+        ) {
+            let bytes =
+                trace_commons_protocol::onboarding::instance_enroll_attestation_signing_bytes(
+                    &request.attestation,
+                );
+            request.attestation_sig = base64::engine::general_purpose::STANDARD
+                .encode(self.instance_key.sign(&bytes).as_ref());
+        }
+    }
+
     #[tokio::test]
     async fn enroll_rejects_bad_signature_uniformly() {
-        use crate::trace_upload_claim_allowlist::hash_instance_subject;
-        use ring::signature::KeyPair;
-        use trace_commons_protocol::onboarding::{
-            TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TraceInstanceEnrollAttestation,
-            TraceInstanceEnrollRequest, TraceOnboardClientInfo,
-            device_key_id_from_public_key_bytes,
-        };
-
-        // Generate an instance keypair.
-        let rng = ring::rand::SystemRandom::new();
-        let instance_pkcs8 =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("instance keypair");
-        let instance_kp =
-            ring::signature::Ed25519KeyPair::from_pkcs8(instance_pkcs8.as_ref()).expect("parse");
-        let instance_pk = instance_kp.public_key().as_ref().to_vec();
-        let instance_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&instance_pk);
-
-        // Generate a device keypair.
-        let device_pkcs8 =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("device keypair");
-        let device_kp =
-            ring::signature::Ed25519KeyPair::from_pkcs8(device_pkcs8.as_ref()).expect("parse");
-        let device_pk = device_kp.public_key().as_ref().to_vec();
-        let device_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&device_pk);
-        let device_key_id = device_key_id_from_public_key_bytes(&device_pk);
-
-        // Build an allowlist file with the instance entry.
-        let instance_subject_hash = hash_instance_subject(&instance_pk);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("allowlist.json");
-        {
-            use std::io::Write;
-            let body = format!(
-                r#"{{"version":1,"generated_at":"2026-01-01T00:00:00Z","policy_label":"test","entries":[{{"kind":"instance","instance_id":"ironclaw-test","instance_public_key":"{instance_pk_b64}","max_enrollments":100,"policy_template":{{"policy_version":"v1","allowed_consent_scopes":["debugging_evaluation"],"allowed_uses":["debugging"]}}}}]}}"#
-            );
-            let mut f = std::fs::File::create(&path).expect("create allowlist");
-            f.write_all(body.as_bytes()).expect("write allowlist");
-        }
-        // Suppress unused warning — the hash is used in the allowlist body above.
-        let _ = &instance_subject_hash;
-
-        let config = TraceUploadClaimIssuerConfig {
-            allowlist_source: Some(AllowlistSourceSpec::File(path)),
-            onboarding_device_key_db: None,
-            ..test_config()
-        };
-
-        let state = config.build_state().expect("state builds");
-
-        let now_ts = chrono::Utc::now().timestamp();
-        let attestation = TraceInstanceEnrollAttestation {
-            device_key_id: device_key_id.clone(),
-            aud: "trace-commons-upload".to_string(),
-            instance_id: "ironclaw-test".to_string(),
-            user_subject: "user-enroll-bad-sig-test".to_string(),
-            nonce: uuid::Uuid::new_v4().to_string(),
-            exp: now_ts + 240,
-        };
-
-        // Use a 64-byte garbage signature.
-        let bad_sig = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
-
-        let request = TraceInstanceEnrollRequest {
-            schema_version: TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION.to_string(),
-            instance_public_key: instance_pk_b64.clone(),
-            device_public_key: device_pk_b64.clone(),
-            attestation,
-            attestation_sig: bad_sig,
-            client_info: TraceOnboardClientInfo {
-                agent: "ironclaw".to_string(),
-                version: "0.x.y".to_string(),
-            },
-        };
-
-        let err = state
+        let fixture = EnrollmentFixture::new();
+        let mut request = fixture.request("user-enroll-bad-sig-test");
+        request.attestation_sig = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
+        let err = fixture
+            .state
             .enroll(request)
             .await
             .expect_err("bad sig must be rejected");
@@ -5023,77 +5196,13 @@ mod tests {
 
     #[tokio::test]
     async fn enroll_rejects_future_exp_uniformly() {
-        use crate::trace_upload_claim_allowlist::hash_instance_subject;
-        use ring::signature::KeyPair;
-        use trace_commons_protocol::onboarding::{
-            TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TraceInstanceEnrollAttestation,
-            TraceInstanceEnrollRequest, TraceOnboardClientInfo,
-            device_key_id_from_public_key_bytes, instance_enroll_attestation_signing_bytes,
-        };
-
-        let rng = ring::rand::SystemRandom::new();
-        let instance_pkcs8 =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("instance keypair");
-        let instance_kp =
-            ring::signature::Ed25519KeyPair::from_pkcs8(instance_pkcs8.as_ref()).expect("parse");
-        let instance_pk = instance_kp.public_key().as_ref().to_vec();
-        let instance_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&instance_pk);
-
-        let device_pkcs8 =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("device keypair");
-        let device_kp =
-            ring::signature::Ed25519KeyPair::from_pkcs8(device_pkcs8.as_ref()).expect("parse");
-        let device_pk = device_kp.public_key().as_ref().to_vec();
-        let device_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&device_pk);
-        let device_key_id = device_key_id_from_public_key_bytes(&device_pk);
-
-        let instance_subject_hash = hash_instance_subject(&instance_pk);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("allowlist.json");
-        {
-            use std::io::Write;
-            let body = format!(
-                r#"{{"version":1,"generated_at":"2026-01-01T00:00:00Z","policy_label":"test","entries":[{{"kind":"instance","instance_id":"ironclaw-test","instance_public_key":"{instance_pk_b64}","max_enrollments":100,"policy_template":{{"policy_version":"v1","allowed_consent_scopes":["debugging_evaluation"],"allowed_uses":["debugging"]}}}}]}}"#
-            );
-            let mut f = std::fs::File::create(&path).expect("create allowlist");
-            f.write_all(body.as_bytes()).expect("write allowlist");
-        }
-        let _ = &instance_subject_hash;
-
-        let config = TraceUploadClaimIssuerConfig {
-            allowlist_source: Some(AllowlistSourceSpec::File(path)),
-            onboarding_device_key_db: None,
-            ..test_config()
-        };
-        let state = config.build_state().expect("state builds");
-
-        let now_ts = chrono::Utc::now().timestamp();
-        // exp is 1 hour in the future — well beyond the 5-minute (300s) upper bound.
-        let attestation = TraceInstanceEnrollAttestation {
-            device_key_id: device_key_id.clone(),
-            aud: "trace-commons-upload".to_string(),
-            instance_id: "ironclaw-test".to_string(),
-            user_subject: "user-future-exp-test".to_string(),
-            nonce: uuid::Uuid::new_v4().to_string(),
-            exp: now_ts + 3600,
-        };
-        let signing_bytes = instance_enroll_attestation_signing_bytes(&attestation);
-        let sig = instance_kp.sign(&signing_bytes);
-        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
-
-        let request = TraceInstanceEnrollRequest {
-            schema_version: TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION.to_string(),
-            instance_public_key: instance_pk_b64.clone(),
-            device_public_key: device_pk_b64.clone(),
-            attestation,
-            attestation_sig: sig_b64,
-            client_info: TraceOnboardClientInfo {
-                agent: "ironclaw".to_string(),
-                version: "0.x.y".to_string(),
-            },
-        };
-
-        let err = state
+        let fixture = EnrollmentFixture::new();
+        let mut request = fixture.request("user-future-exp-test");
+        // A valid signature with expiry beyond the 5-minute upper bound.
+        request.attestation.exp = Utc::now().timestamp() + 3600;
+        fixture.sign(&mut request);
+        let err = fixture
+            .state
             .enroll(request)
             .await
             .expect_err("far-future exp must be rejected");
@@ -5106,85 +5215,16 @@ mod tests {
 
     #[tokio::test]
     async fn enroll_device_key_mismatch_is_uniform_403() {
-        use crate::trace_upload_claim_allowlist::hash_instance_subject;
         use ring::signature::KeyPair;
-        use trace_commons_protocol::onboarding::{
-            TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TraceInstanceEnrollAttestation,
-            TraceInstanceEnrollRequest, TraceOnboardClientInfo,
-            device_key_id_from_public_key_bytes, instance_enroll_attestation_signing_bytes,
-        };
-
-        let rng = ring::rand::SystemRandom::new();
-        let instance_pkcs8 =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("instance keypair");
-        let instance_kp =
-            ring::signature::Ed25519KeyPair::from_pkcs8(instance_pkcs8.as_ref()).expect("parse");
-        let instance_pk = instance_kp.public_key().as_ref().to_vec();
-        let instance_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&instance_pk);
-
-        // Real device key used in the request.
-        let device_pkcs8 =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("device keypair");
-        let device_kp =
-            ring::signature::Ed25519KeyPair::from_pkcs8(device_pkcs8.as_ref()).expect("parse");
-        let device_pk = device_kp.public_key().as_ref().to_vec();
-        let device_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&device_pk);
-
-        // A *different* device key whose id we put in the attestation — mismatch.
-        let other_pkcs8 =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("other keypair");
-        let other_kp =
-            ring::signature::Ed25519KeyPair::from_pkcs8(other_pkcs8.as_ref()).expect("parse");
-        let other_pk = other_kp.public_key().as_ref().to_vec();
-        let mismatched_device_key_id = device_key_id_from_public_key_bytes(&other_pk);
-
-        let instance_subject_hash = hash_instance_subject(&instance_pk);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("allowlist.json");
-        {
-            use std::io::Write;
-            let body = format!(
-                r#"{{"version":1,"generated_at":"2026-01-01T00:00:00Z","policy_label":"test","entries":[{{"kind":"instance","instance_id":"ironclaw-test","instance_public_key":"{instance_pk_b64}","max_enrollments":100,"policy_template":{{"policy_version":"v1","allowed_consent_scopes":["debugging_evaluation"],"allowed_uses":["debugging"]}}}}]}}"#
-            );
-            let mut f = std::fs::File::create(&path).expect("create allowlist");
-            f.write_all(body.as_bytes()).expect("write allowlist");
-        }
-        let _ = &instance_subject_hash;
-
-        let config = TraceUploadClaimIssuerConfig {
-            allowlist_source: Some(AllowlistSourceSpec::File(path)),
-            onboarding_device_key_db: None,
-            ..test_config()
-        };
-        let state = config.build_state().expect("state builds");
-
-        let now_ts = chrono::Utc::now().timestamp();
-        // Attestation claims the *other* device_key_id (mismatch with device_pk_b64).
-        let attestation = TraceInstanceEnrollAttestation {
-            device_key_id: mismatched_device_key_id.clone(),
-            aud: "trace-commons-upload".to_string(),
-            instance_id: "ironclaw-test".to_string(),
-            user_subject: "user-device-mismatch-test".to_string(),
-            nonce: uuid::Uuid::new_v4().to_string(),
-            exp: now_ts + 240,
-        };
-        let signing_bytes = instance_enroll_attestation_signing_bytes(&attestation);
-        let sig = instance_kp.sign(&signing_bytes);
-        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
-
-        let request = TraceInstanceEnrollRequest {
-            schema_version: TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION.to_string(),
-            instance_public_key: instance_pk_b64.clone(),
-            device_public_key: device_pk_b64.clone(), // real device key
-            attestation,
-            attestation_sig: sig_b64,
-            client_info: TraceOnboardClientInfo {
-                agent: "ironclaw".to_string(),
-                version: "0.x.y".to_string(),
-            },
-        };
-
-        let err = state
+        use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
+        let fixture = EnrollmentFixture::new();
+        let mut request = fixture.request("user-device-mismatch-test");
+        // Sign a different key's ID while the request still carries the real device key.
+        request.attestation.device_key_id =
+            device_key_id_from_public_key_bytes(enrollment_keypair().public_key().as_ref());
+        fixture.sign(&mut request);
+        let err = fixture
+            .state
             .enroll(request)
             .await
             .expect_err("device_key_id mismatch must be rejected");
@@ -6745,6 +6785,279 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        }
+    }
+
+    /// `POST /v1/invite/lookup` without a database: routing, throttling,
+    /// fail-closed behaviour and secret-free logging. The database-backed
+    /// behaviour (labels, no use spent) is `tests/trace_invite_registry_pg.rs`.
+    mod invite_lookup {
+        use super::*;
+        use std::io::Write;
+        use std::sync::Mutex;
+        use trace_commons_protocol::invite_lookup::{
+            INVITE_LOOKUP_PATH, INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+        };
+
+        const CODE: &str = "ABCDEFGHJKLMNPQR";
+
+        std::thread_local! {
+            static CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Writes into this thread's capture buffer, if one is open.
+        struct ThreadCapture;
+
+        impl Write for ThreadCapture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                CAPTURE.with(|capture| {
+                    if let Some(sink) = capture.borrow().as_ref() {
+                        sink.lock().unwrap().extend_from_slice(buf);
+                    }
+                });
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// Capture every event emitted on this thread while `f` runs.
+        ///
+        /// A process-global subscriber, not a scoped one. With a single
+        /// scoped dispatcher, tracing-core resolves a callsite's first
+        /// registration against whichever thread registers it, so a parallel
+        /// test that first hit the handler's `info!` after a scoped
+        /// subscriber went in cached it as disabled for every thread, and
+        /// this test failed every run under `cargo test --lib invite_lookup`.
+        /// A global subscriber gives every thread the same answer; its
+        /// filter admits only threads with a capture open. The filter must
+        /// be dynamic: a plain `filter_fn` caches its first answer per
+        /// callsite, so whichever thread registered the handler's `info!`
+        /// would decide for all of them again.
+        fn capture_logs(f: impl FnOnce()) -> String {
+            use tracing_subscriber::Layer;
+            use tracing_subscriber::layer::SubscriberExt;
+            static INSTALL: std::sync::Once = std::sync::Once::new();
+            INSTALL.call_once(|| {
+                let layer = tracing_subscriber::fmt::layer()
+                    .with_writer(|| ThreadCapture)
+                    .with_ansi(false)
+                    .with_filter(tracing_subscriber::filter::dynamic_filter_fn(|_, _| {
+                        CAPTURE.with(|capture| capture.borrow().is_some())
+                    }));
+                tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                    .expect("no other global subscriber in the lib tests");
+            });
+            let sink = Arc::new(Mutex::new(Vec::new()));
+            CAPTURE.with(|capture| *capture.borrow_mut() = Some(sink.clone()));
+            f();
+            CAPTURE.with(|capture| *capture.borrow_mut() = None);
+            let bytes = sink.lock().unwrap().clone();
+            String::from_utf8(bytes).unwrap()
+        }
+
+        fn request_body(code: &str) -> String {
+            json!({
+                "schema_version": INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+                "invite_code": code,
+            })
+            .to_string()
+        }
+
+        fn state_with_rate(rate: u32) -> Arc<TraceUploadClaimIssuerState> {
+            state_with_client_header(rate, None, 0)
+        }
+
+        /// `client_header` is the trusted header name, or `None` for the
+        /// default (no header trusted).
+        fn state_with_client_header(
+            global: u32,
+            client_header: Option<&'static str>,
+            per_client: u32,
+        ) -> Arc<TraceUploadClaimIssuerState> {
+            let mut state = test_config().build_state().expect("state builds");
+            let inner = Arc::get_mut(&mut state).expect("state is unshared");
+            inner.invite_lookup_rate_per_min = global;
+            inner.invite_lookup_client_ip_header =
+                client_header.map(axum::http::HeaderName::from_static);
+            inner.invite_lookup_per_client_rate_per_min = per_client;
+            state
+        }
+
+        async fn post(
+            state: Arc<TraceUploadClaimIssuerState>,
+            body: String,
+        ) -> (StatusCode, serde_json::Value) {
+            post_from(state, body, None).await
+        }
+
+        /// POST as a caller whose proxy wrote `forwarded_for` into
+        /// `X-Forwarded-For` (or wrote nothing).
+        async fn post_from(
+            state: Arc<TraceUploadClaimIssuerState>,
+            body: String,
+            forwarded_for: Option<&str>,
+        ) -> (StatusCode, serde_json::Value) {
+            let router = router_from_state(state, StdDuration::from_secs(5), 64 * 1024);
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(INVITE_LOOKUP_PATH)
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(value) = forwarded_for {
+                request = request.header("x-forwarded-for", value);
+            }
+            let response = router
+                .oneshot(request.body(Body::from(body)).expect("request builds"))
+                .await
+                .expect("request completes");
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("body reads");
+            (status, serde_json::from_slice(&bytes).expect("json"))
+        }
+
+        #[tokio::test]
+        async fn a_malformed_code_is_answered_without_a_database() {
+            let (status, body) = post(state_with_rate(30), request_body("short")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({"valid": false, "reason_label": "malformed"}));
+        }
+
+        #[tokio::test]
+        async fn a_well_formed_code_fails_closed_without_the_invite_database() {
+            let (status, body) = post(state_with_rate(30), request_body(CODE)).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body, json!({"error": "invite_registry_not_configured"}));
+        }
+
+        #[tokio::test]
+        async fn a_wrong_schema_or_extra_field_is_a_bad_request() {
+            let state = state_with_rate(30);
+            let wrong = json!({"schema_version": "nope", "invite_code": CODE}).to_string();
+            assert_eq!(post(state.clone(), wrong).await.0, StatusCode::BAD_REQUEST);
+            let extra = json!({
+                "schema_version": INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+                "invite_code": CODE,
+                "device_public_key": "x",
+            })
+            .to_string();
+            assert_eq!(post(state, extra).await.0, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn lookups_past_the_budget_are_throttled() {
+            let state = state_with_rate(2);
+            for _ in 0..2 {
+                let (status, _) = post(state.clone(), request_body("short")).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+            let (status, body) = post(state.clone(), request_body("short")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(body, json!({"error": "invite_lookup_rate_limited"}));
+            // Throttled before the body is even parsed, so garbage is also
+            // refused rather than answered.
+            let (status, _) = post(state, "not json".to_string()).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[tokio::test]
+        async fn no_client_header_is_trusted_unless_configured() {
+            // Default: one shared bucket. A caller cannot buy a fresh budget
+            // by sending a different X-Forwarded-For.
+            let state = state_with_client_header(2, None, 100);
+            for ip in ["203.0.113.1", "203.0.113.2"] {
+                let (status, _) = post_from(state.clone(), request_body("short"), Some(ip)).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+            let (status, _) = post_from(state, request_body("short"), Some("203.0.113.3")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[tokio::test]
+        async fn a_configured_client_header_gives_each_client_its_own_budget() {
+            let state = state_with_client_header(100, Some("x-forwarded-for"), 2);
+            for _ in 0..2 {
+                let (status, _) =
+                    post_from(state.clone(), request_body("short"), Some("203.0.113.1")).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+            let (status, body) =
+                post_from(state.clone(), request_body("short"), Some("203.0.113.1")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(body, json!({"error": "invite_lookup_rate_limited"}));
+            // A client-written prefix does not escape: the proxy's own hop is
+            // the rightmost one.
+            let (status, _) = post_from(
+                state.clone(),
+                request_body("short"),
+                Some("198.51.100.9, 203.0.113.1"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            // Another client is unaffected by the first one's exhaustion.
+            let (status, _) =
+                post_from(state.clone(), request_body("short"), Some("203.0.113.2")).await;
+            assert_eq!(status, StatusCode::OK);
+            // Callers the proxy did not attribute share one bucket.
+            for _ in 0..2 {
+                let (status, _) = post_from(state.clone(), request_body("short"), None).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+            let (status, _) = post_from(state, request_body("short"), None).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[tokio::test]
+        async fn the_shared_budget_still_caps_all_clients_together() {
+            let state = state_with_client_header(3, Some("x-forwarded-for"), 1);
+            // One client over its own budget does not spend the shared one.
+            let (status, _) =
+                post_from(state.clone(), request_body("short"), Some("203.0.113.1")).await;
+            assert_eq!(status, StatusCode::OK);
+            for _ in 0..5 {
+                let (status, _) =
+                    post_from(state.clone(), request_body("short"), Some("203.0.113.1")).await;
+                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            }
+            for ip in ["203.0.113.2", "203.0.113.3"] {
+                let (status, _) = post_from(state.clone(), request_body("short"), Some(ip)).await;
+                assert_eq!(status, StatusCode::OK, "{ip}");
+            }
+            // Three fresh clients have now used the shared three.
+            let (status, _) = post_from(state, request_body("short"), Some("203.0.113.4")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[tokio::test]
+        async fn a_zero_budget_refuses_every_lookup() {
+            let (status, _) = post(state_with_rate(0), request_body("short")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[test]
+        fn the_code_never_reaches_a_log_line() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let logged = capture_logs(|| {
+                runtime.block_on(async {
+                    let state = state_with_rate(30);
+                    post(state.clone(), request_body(CODE)).await;
+                    post(state.clone(), request_body("short-but-secret")).await;
+                    post(state, "garbage-SECRETBODY".to_string()).await;
+                });
+            });
+            assert!(logged.contains("invite lookup"), "no log emitted: {logged}");
+            for secret in [CODE, "short-but-secret", "SECRETBODY"] {
+                assert!(
+                    !logged.contains(secret),
+                    "{secret} reached the log: {logged}"
+                );
+            }
         }
     }
 }

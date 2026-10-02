@@ -198,6 +198,7 @@
                                           VerticalAlignment="Center" />
 
                                 <TextBlock Text="{x:Bind ViewModel.QueueCountText, Mode=OneWay}"
+                                           ToolTipService.ToolTip="{x:Bind ViewModel.QueueCountToolTip, Mode=OneWay}"
                                            Visibility="{x:Bind ViewModel.HasQueueCount, Mode=OneWay}"
                                            Style="{StaticResource TcMonoBadgeTextStyle}"
                                            VerticalAlignment="Center" />

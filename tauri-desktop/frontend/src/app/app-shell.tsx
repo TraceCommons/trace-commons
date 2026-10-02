@@ -48,7 +48,11 @@ export function AppShell() {
   return (
     <SidebarProvider>
       <AppNavbar
-        queueCount={core.data?.daemon.queue_depth ?? 0}
+        decisionsOwed={
+          core.state === "ready"
+            ? (core.data?.daemon.decisions_owed ?? null)
+            : null
+        }
         profile={publicProfile.data}
         profileState={publicProfile.state}
       />

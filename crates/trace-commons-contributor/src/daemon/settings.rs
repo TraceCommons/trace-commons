@@ -23,8 +23,12 @@ const DEFAULT_QUIESCENCE_SECS: u64 = 1800;
 /// quiescence window, so the poll rate costs nothing in responsiveness.
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 /// Minimum gap between digest notifications, so a busy day is one interruption
-/// rather than a dozen.
+/// rather than a dozen. Only meaningful under `DigestSchedule::Interval`.
 const DEFAULT_DIGEST_INTERVAL_SECS: u64 = 14_400;
+/// The local hour `DigestSchedule::Evening` fires at when a contributor does
+/// not choose one -- the open decision #5 in #1118 is interval vs. a fixed
+/// evening time, and this is the "evening" side's default.
+const DEFAULT_DIGEST_EVENING_HOUR: u8 = 18;
 const DEFAULT_QUEUE_TTL_DAYS: i64 = 14;
 /// A resumed session must grow by this factor to be worth re-uploading.
 const DEFAULT_GROWTH_FACTOR: f64 = 2.0;
@@ -200,6 +204,72 @@ impl std::fmt::Debug for NearAiSession {
     }
 }
 
+/// See [`DaemonSettings::scrub_check`]. On the wire: `"automatic"` or
+/// `"manual"`, and nothing else. The default is `Automatic`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrubCheck {
+    /// Unsure sessions wait; the rest of an armed folder sends on its own.
+    #[default]
+    Automatic,
+    /// Everything waits for a person.
+    Manual,
+}
+
+impl ScrubCheck {
+    /// The wire value.
+    pub fn label(self) -> &'static str {
+        match self {
+            ScrubCheck::Automatic => "automatic",
+            ScrubCheck::Manual => "manual",
+        }
+    }
+
+    /// From the wire value. Anything else is `None`: a mistyped mode must
+    /// be refused, never read as either one.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "automatic" => Some(ScrubCheck::Automatic),
+            "manual" => Some(ScrubCheck::Manual),
+            _ => None,
+        }
+    }
+}
+
+/// Why the stored Cloud credential could not be loaded at startup.
+///
+/// Each one is a different thing to tell the contributor, and the old single
+/// "unlock your credential store and restart" was false for two of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CloudStorageFailure {
+    /// The store did not answer: locked, denied, or a platform error. Unlock
+    /// and restart is the advice, and it is true.
+    #[default]
+    Unavailable,
+    /// This binary is not entitled to the store at all. Permanent for this
+    /// build; restarting changes nothing.
+    Unentitled,
+    /// macOS only: the store answered, and has nothing under the reference
+    /// settings name. A build from before the data-protection move kept it
+    /// in the legacy keychain, which is the only other place it can be. Not
+    /// confirmed by reading the legacy keychain -- that read can prompt, and
+    /// startup is not a moment the contributor chose -- so the move is
+    /// offered, and the move does the one read.
+    LegacyOnly,
+}
+
+/// `scrub_check` as it is read from a settings file: absent (a file written
+/// before the key existed) and `null` (what the build before the Automatic
+/// default wrote for "never chosen") both load as the default, Automatic, so
+/// an upgraded install gets the hold as a fresh one does. A chosen value
+/// loads as itself; anything else fails the load, as a mistyped mode must.
+fn scrub_check_or_default<'de, D>(deserializer: D) -> std::result::Result<ScrubCheck, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<ScrubCheck>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSettings {
     /// Opaque OS entry and Cloud metadata. Legacy documents omit this field.
@@ -208,10 +278,21 @@ pub struct DaemonSettings {
     /// Runtime-only failure, never a credential or a platform error string.
     #[serde(skip)]
     pub cloud_storage_unavailable: bool,
+    /// Why, when `cloud_storage_unavailable` is set. Runtime-only, like it.
+    /// The boolean stays the gate every credential use checks; this only
+    /// chooses which state, and so which sentence, a contributor is shown.
+    #[serde(skip)]
+    pub cloud_storage_failure: CloudStorageFailure,
     pub schema_version: String,
     pub poll_interval_secs: u64,
     pub quiescence_secs: u64,
     pub digest_interval_secs: u64,
+    /// Open decision #5 in #1118: whether the digest fires on the interval
+    /// above or once a day at a fixed local hour. `#[serde(default)]` so a
+    /// settings file written before this field existed loads as
+    /// `Interval` -- the unchanged, shipped behaviour.
+    #[serde(default)]
+    pub digest_schedule: DigestSchedule,
     pub queue_ttl_days: i64,
     pub growth_factor: f64,
     pub growth_min_new_bytes: u64,
@@ -381,6 +462,41 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub private_inference_offer_seen: bool,
 
+    /// The Scrub check (K4 of #1118): whether a session in a folder set to
+    /// share automatically may leave without a person, and which ones.
+    ///
+    /// - [`ScrubCheck::Automatic`] -- armed folders send unattended, **except**
+    ///   a session `second_look::second_look_reasons` flags (nothing matched,
+    ///   looks unsure, or trimmed to fit). That one is held for a person under
+    ///   `second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED` and never moves on
+    ///   its own. The uploader decides the hold from the envelope it has just
+    ///   built, after redaction and before anything is sent, so a session
+    ///   nobody has scrubbed is never taken as fine. See
+    ///   `Uploader::upload_entry`.
+    /// - [`ScrubCheck::Manual`] -- every session waits for a person, armed
+    ///   folders included. The watcher approves nothing on anyone's behalf,
+    ///   and the uploader holds anything already approved that way.
+    ///
+    /// **The default is Automatic** (Zaki's decision on #1139): the
+    /// protection is on unless the contributor chooses Manual, which holds
+    /// more. There is no "never chosen" state. A settings file written before
+    /// this key existed, or by the build that wrote `null` for "never
+    /// chosen", loads as Automatic (`scrub_check_or_default`), so an
+    /// upgraded install gets the hold as a fresh one does; an explicit
+    /// `"manual"` loads as Manual. `get_settings` always reports the string.
+    ///
+    /// The field is not an `Option` resolved at each use on purpose: every
+    /// reader compares the one stored value, so no reader can mistake an
+    /// unset value for "no hold".
+    #[serde(default, deserialize_with = "scrub_check_or_default")]
+    pub scrub_check: ScrubCheck,
+
+    /// The stored choice was absent/null when Automatic became the default.
+    /// Kept across unrelated preference writes so startup can announce the
+    /// changed behavior of folders that were already armed.
+    #[serde(default)]
+    pub scrub_check_defaulted_on_upgrade: bool,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -396,6 +512,64 @@ pub struct DaemonSettings {
     /// See `legacy_claude_root`.
     #[serde(default, rename = "codex_root", skip_serializing)]
     pub legacy_codex_root: Option<PathBuf>,
+}
+
+/// When the digest fires: the interval behaviour that shipped first, or once
+/// a day at a fixed local hour.
+///
+/// K9 (#1118): the WYSIWYG design's Flow 2/3 alerts show a single evening
+/// digest ("1 session contributed from orchard-api. 6.0 credit pending."),
+/// and the issue's open decision #5 asks whether that is a fixed evening
+/// time or the interval this daemon already had. Both stay supported --
+/// `Interval` is the default and unchanged, so no existing install's
+/// behaviour moves under it -- and this is the choice, not the answer.
+///
+/// Serialized tagged, like [`SourceDeclaration`], so a shell reads `mode`
+/// without guessing at a bare string, and `Evening` has somewhere to put its
+/// hour.
+///
+/// ```json
+/// "digest_schedule": { "mode": "interval" }
+/// "digest_schedule": { "mode": "evening", "hour": 18 }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum DigestSchedule {
+    /// One digest every `digest_interval_secs`, whatever the local time.
+    Interval,
+    /// One digest a day, computed in the contributor's local timezone at
+    /// `hour` (0-23), defaulting to [`DEFAULT_DIGEST_EVENING_HOUR`] (18:00
+    /// local) when a caller sends `{"mode":"evening"}` with no hour of its
+    /// own. See `daemon::notify::evening_window_elapsed` for how DST and a
+    /// missed day are handled.
+    Evening {
+        #[serde(default = "default_digest_evening_hour")]
+        hour: u8,
+    },
+}
+
+impl DigestSchedule {
+    /// Whether an `Evening` hour is a real hour of the day. `Interval` is
+    /// always valid.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        match self {
+            DigestSchedule::Interval => true,
+            DigestSchedule::Evening { hour } => hour <= 23,
+        }
+    }
+}
+
+fn default_digest_evening_hour() -> u8 {
+    DEFAULT_DIGEST_EVENING_HOUR
+}
+
+impl Default for DigestSchedule {
+    /// `Interval` -- the behaviour every install already has. K9 adds the
+    /// alternative; it does not change anyone's default.
+    fn default() -> Self {
+        DigestSchedule::Interval
+    }
 }
 
 /// What the contributor said about one agent's session store.
@@ -728,6 +902,7 @@ impl Default for DaemonSettings {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             quiescence_secs: DEFAULT_QUIESCENCE_SECS,
             digest_interval_secs: DEFAULT_DIGEST_INTERVAL_SECS,
+            digest_schedule: DigestSchedule::Interval,
             queue_ttl_days: DEFAULT_QUEUE_TTL_DAYS,
             growth_factor: DEFAULT_GROWTH_FACTOR,
             growth_min_new_bytes: DEFAULT_GROWTH_MIN_NEW_BYTES,
@@ -745,6 +920,7 @@ impl Default for DaemonSettings {
             near_ai_session: None,
             cloud_credentials: None,
             cloud_storage_unavailable: false,
+            cloud_storage_failure: CloudStorageFailure::default(),
             claude_source: None,
             codex_source: None,
             gemini_source: None,
@@ -756,6 +932,8 @@ impl Default for DaemonSettings {
             token_capture_enabled: None,
             private_inference: false,
             private_inference_offer_seen: false,
+            scrub_check: ScrubCheck::Automatic,
+            scrub_check_defaulted_on_upgrade: false,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -784,7 +962,18 @@ impl DaemonSettings {
     /// never been configured on this machine.
     pub fn load(store: &ConfigStore) -> Result<Self> {
         let Some(body) = store.read_daemon_file(DAEMON_SETTINGS_FILE)? else {
-            return Ok(Self::default());
+            // Older installs can arm folders without ever writing settings.
+            // Preserve that evidence even if a preferences writer runs before
+            // daemon startup. New-format policies already know this default.
+            let policy = super::policy::ProjectPolicy::load(store)?;
+            return Ok(Self {
+                scrub_check_defaulted_on_upgrade: !policy.scrub_check_upgrade_recorded
+                    && policy.projects.iter().any(|(key, entry)| {
+                        key != super::policy::UNKNOWN_PROJECT_KEY
+                            && entry.mode == super::policy::ProjectMode::AutoUpload
+                    }),
+                ..Self::default()
+            });
         };
         // The serde context stays for local stderr and journals, where the
         // parser's own "missing field `schema_version` at line 1 column 65"
@@ -795,8 +984,29 @@ impl DaemonSettings {
         let mut settings: Self = serde_json::from_slice(&body)
             .context("parsing daemon settings")
             .context(crate::daemon::StartFailure::SettingsUnreadable)?;
+        let stored: serde_json::Value = serde_json::from_slice(&body)?;
+        settings.scrub_check_defaulted_on_upgrade |= stored
+            .get("scrub_check")
+            .is_none_or(serde_json::Value::is_null);
         settings.absorb_legacy_roots();
+        settings.validate_digest_schedule();
         Ok(settings)
+    }
+
+    /// Refuse an evening `hour` outside 0..=23 read from the file (a hand
+    /// edit, or a future build's value), rather than letting
+    /// `daemon::notify` clamp it silently -- a clamped 99 fires at 23:00 and
+    /// nobody learns why. The schedule falls back to `Interval`, the
+    /// shipped default, and says so in a label-only log line; the rest of
+    /// the file still loads, since a notification schedule is no reason to
+    /// refuse to start.
+    fn validate_digest_schedule(&mut self) {
+        if !self.digest_schedule.is_valid() {
+            tracing::warn!(
+                "digest_schedule hour out of range in daemon settings; using interval schedule"
+            );
+            self.digest_schedule = DigestSchedule::Interval;
+        }
     }
 
     /// Fold `claude_root` / `codex_root` from an older file into the source
@@ -1034,6 +1244,11 @@ pub fn apply_settings_object(
             "digest_interval_secs" => {
                 settings.digest_interval_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
+            // `{"mode":"interval"}` or `{"mode":"evening","hour":0..=23}`.
+            // See `DigestSchedule`; K9 (#1118), open decision #5.
+            "digest_schedule" => {
+                settings.digest_schedule = parse_digest_schedule(value)?;
+            }
             "approval_hold_secs" => {
                 settings.approval_hold_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
@@ -1126,6 +1341,18 @@ pub fn apply_settings_object(
                 settings.private_inference_offer_seen =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
+            // The Scrub check: `automatic` or `manual`. Anything else is
+            // refused rather than read as either, because a typo read as
+            // `automatic` would send what the contributor meant to hold.
+            // `null` is refused too: it is not a mode, and a caller meaning
+            // "the default" says `automatic`. Accepting it would let a shell
+            // that dropped the field clear a Manual choice by accident.
+            "scrub_check" => {
+                settings.scrub_check = value
+                    .as_str()
+                    .and_then(ScrubCheck::parse)
+                    .ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
         // SET-SETTINGS-KEYS-END
@@ -1198,6 +1425,22 @@ fn parse_source_declaration(
             .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
+}
+
+/// `{"mode":"interval"}` or `{"mode":"evening","hour":0..=23}`. An `hour`
+/// outside that range is refused rather than clamped -- a silently clamped
+/// 25 would fire at midnight and the caller would never learn why. Never
+/// formats `value` into the error, as `apply_settings_object`'s doc requires,
+/// though a schedule carries no secret either way.
+fn parse_digest_schedule(
+    value: &serde_json::Value,
+) -> std::result::Result<DigestSchedule, &'static str> {
+    let schedule: DigestSchedule =
+        serde_json::from_value(value.clone()).map_err(|_| ERR_SETTINGS_INVALID_VALUE)?;
+    if !schedule.is_valid() {
+        return Err(ERR_SETTINGS_INVALID_VALUE);
+    }
+    Ok(schedule)
 }
 
 #[cfg(test)]
@@ -1618,6 +1861,167 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert!(!s.private_inference_offer_seen);
+    }
+
+    /// The Scrub check starts Automatic and is written as the string, and
+    /// only the two wire values are accepted; `null` is not a mode. (Files
+    /// that never chose are
+    /// `a_settings_file_that_never_chose_a_scrub_check_loads_as_automatic`.)
+    #[test]
+    fn the_scrub_check_starts_automatic_and_takes_only_its_two_values() {
+        let v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["scrub_check"], "automatic");
+        assert_eq!(DaemonSettings::default().scrub_check, ScrubCheck::Automatic);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"scrub_check": "manual"})),
+            Ok(true)
+        );
+        assert_eq!(s.scrub_check, ScrubCheck::Manual);
+        for bad in [
+            serde_json::json!("Manual"),
+            serde_json::json!("auto"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({ "scrub_check": bad })),
+                Err(ERR_SETTINGS_INVALID_VALUE)
+            );
+            assert_eq!(
+                s.scrub_check,
+                ScrubCheck::Manual,
+                "a refusal changes nothing"
+            );
+        }
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"scrub_check": "automatic"})),
+            Ok(true)
+        );
+        assert_eq!(s.scrub_check, ScrubCheck::Automatic);
+    }
+
+    /// Zaki's decision on #1139: an install upgraded from before the
+    /// default changed gets the protection. A settings file without the key,
+    /// or with the `null` the previous build wrote for "never chosen", loads
+    /// as Automatic.
+    #[test]
+    fn a_settings_file_that_never_chose_a_scrub_check_loads_as_automatic() {
+        for unset in [None, Some(serde_json::Value::Null)] {
+            let (_d, store) = temp_store();
+            let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+            let object = v.as_object_mut().unwrap();
+            object.remove("scrub_check");
+            if let Some(null) = unset.clone() {
+                object.insert("scrub_check".to_string(), null);
+            }
+            store
+                .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+                .unwrap();
+            let loaded = DaemonSettings::load(&store).expect("an older file still loads");
+            assert_eq!(
+                serde_json::to_value(&loaded).unwrap()["scrub_check"],
+                "automatic",
+                "unset ({unset:?}) resolves to Automatic"
+            );
+            assert_eq!(
+                serde_json::to_value(&loaded).unwrap()["scrub_check_defaulted_on_upgrade"],
+                true
+            );
+            loaded.save(&store).unwrap();
+            let reloaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(
+                serde_json::to_value(&reloaded).unwrap()["scrub_check_defaulted_on_upgrade"],
+                true
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_stored_scrub_checks_fail_closed() {
+        for invalid in ["off", "Automatic"] {
+            let (_d, store) = temp_store();
+            let mut value = serde_json::to_value(DaemonSettings::default()).unwrap();
+            value["scrub_check"] = serde_json::json!(invalid);
+            store
+                .write_daemon_file(DAEMON_SETTINGS_FILE, value.to_string().as_bytes())
+                .unwrap();
+            assert!(DaemonSettings::load(&store).is_err());
+        }
+    }
+
+    #[test]
+    fn an_old_armed_policy_without_settings_preserves_upgrade_provenance() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        let (_d, store) = temp_store();
+        assert!(
+            !DaemonSettings::load(&store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/tmp/legacy-armed",
+                ProjectMode::AutoUpload,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        policy.scrub_check_upgrade_recorded = false;
+        policy.save(&store).unwrap();
+        let settings = DaemonSettings::load(&store).unwrap();
+        assert!(settings.scrub_check_defaulted_on_upgrade);
+        settings.save(&store).unwrap();
+        assert!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+    }
+
+    #[test]
+    fn a_new_armed_policy_without_settings_is_not_an_upgrade() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        let (_d, store) = temp_store();
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/tmp/new-armed",
+                ProjectMode::AutoUpload,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        policy.save(&store).unwrap();
+        assert!(
+            !DaemonSettings::load(&store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+    }
+
+    /// An explicit Manual choice is kept across a load and the daemon's own
+    /// save: only an unset value becomes Automatic.
+    #[test]
+    fn an_explicit_manual_scrub_check_survives_a_load() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["scrub_check"] = serde_json::json!("manual");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["scrub_check"],
+            "manual"
+        );
+        assert!(!loaded.scrub_check_defaulted_on_upgrade);
+        loaded.save(&store).unwrap();
+        let reloaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(
+            serde_json::to_value(&reloaded).unwrap()["scrub_check"],
+            "manual"
+        );
     }
 
     // --- the discovery pointer -----------------------------------------
@@ -2456,6 +2860,110 @@ mod tests {
                 &serde_json::json!({"max_uploads_per_day": 100, "nonsense": 1}),
             ),
             Err(ERR_SETTINGS_UNKNOWN_FIELD)
+        );
+    }
+
+    #[test]
+    fn digest_schedule_defaults_to_interval() {
+        assert_eq!(
+            DaemonSettings::default().digest_schedule,
+            DigestSchedule::Interval
+        );
+    }
+
+    #[test]
+    fn digest_schedule_is_settable_to_evening_and_back() {
+        let mut s = DaemonSettings::default();
+        assert!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_schedule": {"mode": "evening", "hour": 18}})
+            )
+            .unwrap()
+        );
+        assert_eq!(s.digest_schedule, DigestSchedule::Evening { hour: 18 });
+        assert!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_schedule": {"mode": "interval"}})
+            )
+            .unwrap()
+        );
+        assert_eq!(s.digest_schedule, DigestSchedule::Interval);
+    }
+
+    #[test]
+    fn digest_schedule_evening_defaults_the_hour_to_18_local() {
+        let mut s = DaemonSettings::default();
+        assert!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_schedule": {"mode": "evening"}})
+            )
+            .unwrap()
+        );
+        assert_eq!(s.digest_schedule, DigestSchedule::Evening { hour: 18 });
+    }
+
+    #[test]
+    fn digest_schedule_refuses_an_hour_outside_the_day() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_schedule": {"mode": "evening", "hour": 24}})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(s.digest_schedule, DigestSchedule::Interval);
+    }
+
+    /// A settings file written before K9 has no `digest_schedule` key and
+    /// must load as `Interval`, the behaviour it already had.
+    #[test]
+    fn a_settings_file_written_before_the_digest_schedule_loads_as_interval() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("digest_schedule");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.digest_schedule, DigestSchedule::Interval);
+    }
+
+    /// `hour: 99` in the file is refused on load, not clamped: the schedule
+    /// falls back to `Interval` and every other setting still loads.
+    #[test]
+    fn an_out_of_range_evening_hour_in_the_file_is_refused_on_load() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["digest_schedule"] = serde_json::json!({"mode": "evening", "hour": 99});
+        v["queue_ttl_days"] = serde_json::json!(3);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.digest_schedule, DigestSchedule::Interval);
+        assert_eq!(loaded.queue_ttl_days, 3);
+
+        // A valid hour survives the same path untouched.
+        v["digest_schedule"] = serde_json::json!({"mode": "evening", "hour": 23});
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().digest_schedule,
+            DigestSchedule::Evening { hour: 23 }
+        );
+    }
+
+    #[test]
+    fn digest_schedule_refuses_an_unknown_shape() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"digest_schedule": "evening"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
         );
     }
 

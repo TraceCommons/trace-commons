@@ -77,8 +77,8 @@ use sha2::{Digest, Sha256};
 use super::measurements::EXPECTED_MEASUREMENTS_CONTROL;
 use super::quote::{QuoteVerifyError, VerifiedQuote, verify_quote};
 use super::receipt::{
-    AttestedKeyError, ReceiptSignatureKind, gateway_ed25519_key, model_attestation_entries,
-    model_ed25519_keys,
+    AttestedKeyError, ReceiptSignatureKind, gateway_ed25519_key, model_ed25519_keys,
+    model_entry_quotes as shared_model_entry_quotes, quote_bound_keys,
 };
 use trace_commons_attestation::measurements::{ExpectedMeasurements, check_measurements_opt};
 
@@ -90,12 +90,6 @@ pub const SIGNER_MISS_FLOOR_SECS: u64 = 60;
 
 /// How stale an installed set may get before it reads empty.
 pub const HARD_CEILING_SECS: u64 = 24 * 60 * 60;
-
-/// Where the ed25519 signing key sits in a TDX quote's `report_data`, and
-/// where the nonce sits beside it. Read out of a [`VerifiedQuote`], so these
-/// are offsets into a structure DCAP verification has already accepted.
-const REPORT_DATA_KEY: std::ops::Range<usize> = 0..32;
-const REPORT_DATA_NONCE: std::ops::Range<usize> = 32..64;
 
 /// A digest of a public value, for evidence. Keys are public, but they are
 /// deployment state and this repository's operational surfaces are hash-only.
@@ -685,57 +679,24 @@ fn reconcile(
     verified: &[VerifiedQuote],
     nonce: &str,
 ) -> Result<Vec<String>, RefreshRefusal> {
-    let mut derived = Vec::with_capacity(verified.len());
-    for quote in verified {
-        let key = quote
-            .report_data
-            .get(REPORT_DATA_KEY)
-            .ok_or(RefreshRefusal::KeyNotInVerifiedQuote)?;
-        let bound_nonce = quote
-            .report_data
-            .get(REPORT_DATA_NONCE)
-            .ok_or(RefreshRefusal::KeyNotInVerifiedQuote)?;
-        if hex::encode(bound_nonce) != nonce {
-            return Err(RefreshRefusal::KeyNotInVerifiedQuote);
-        }
-        derived.push(hex::encode(key));
-    }
-    let claimed_lower: Vec<String> = claimed.iter().map(|k| k.to_ascii_lowercase()).collect();
-    if derived.iter().any(|key| !claimed_lower.contains(key)) {
-        return Err(RefreshRefusal::KeyNotInVerifiedQuote);
-    }
-    if claimed_lower.iter().any(|key| !derived.contains(key)) {
-        return Err(RefreshRefusal::KeyNotInVerifiedQuote);
-    }
-    Ok(derived)
+    // The comparison itself lives in the permissive attestation crate, so the
+    // contributor's quote-bound attestor applies exactly this rule.
+    let report_data: Vec<&[u8]> = verified.iter().map(|q| q.report_data.as_slice()).collect();
+    quote_bound_keys(claimed, &report_data, nonce)
+        .map_err(|_| RefreshRefusal::KeyNotInVerifiedQuote)
 }
 
 /// The `intel_quote` bytes of every model-attestation entry naming `model`.
 ///
 /// An entry for this model carrying no readable quote is a refusal, not a
 /// skip: skipping it would leave the resolver verifying some other entry's
-/// quote and installing a key it never checked.
+/// quote and installing a key it never checked. Shared with the contributor
+/// through `trace_commons_attestation::receipt::model_entry_quotes`.
 fn model_entry_quotes(report_json: &str, model: &str) -> Result<Vec<Vec<u8>>, RefreshRefusal> {
-    let document: serde_json::Value =
-        serde_json::from_str(report_json).map_err(|_| RefreshRefusal::ReportShape)?;
-    // Same container lookup the key derivation uses, so the quotes verified
-    // here are the quotes those keys came out of.
-    let entries = model_attestation_entries(&document).ok_or(RefreshRefusal::ReportShape)?;
-    let mut quotes = Vec::new();
-    for entry in entries {
-        if entry.get("model_name").and_then(serde_json::Value::as_str) != Some(model) {
-            continue;
-        }
-        let hex_quote = entry
-            .get("intel_quote")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(RefreshRefusal::ReportShape)?;
-        quotes.push(hex::decode(hex_quote).map_err(|_| RefreshRefusal::ReportShape)?);
-    }
-    if quotes.is_empty() {
-        return Err(RefreshRefusal::ModelNotAttested);
-    }
-    Ok(quotes)
+    shared_model_entry_quotes(report_json, model).map_err(|error| match error {
+        AttestedKeyError::ModelNotAttested => RefreshRefusal::ModelNotAttested,
+        _ => RefreshRefusal::ReportShape,
+    })
 }
 
 /// The gateway attestation's own quote. Exactly one, or a refusal.

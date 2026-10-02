@@ -64,7 +64,9 @@ fn refusal_status(refusal: LinkRefusal) -> StatusCode {
     match refusal {
         LinkRefusal::InvalidRequest => StatusCode::BAD_REQUEST,
         LinkRefusal::TooManyChallenges => StatusCode::TOO_MANY_REQUESTS,
-        LinkRefusal::TenantPooled | LinkRefusal::TenantClaimed => StatusCode::CONFLICT,
+        LinkRefusal::TenantPooled | LinkRefusal::TenantClaimed | LinkRefusal::InviteNotLinked => {
+            StatusCode::CONFLICT
+        }
         LinkRefusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         LinkRefusal::SignatureInvalid
         | LinkRefusal::ChallengeInvalid

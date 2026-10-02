@@ -659,12 +659,16 @@ async fn sourced_publications_wait_for_the_provenance_graph_lock() {
         .get()
         .await
         .expect("get blocked publication probe connection");
-    // The publication runs on a spawned task and reaches the row lock in its
-    // own time; probing `pg_stat_activity` once raced it (CI found 0 blocked
-    // backends on a docs-only PR). Poll with a bound instead: the assertion
-    // is still "exactly one", it is just made once the wait has begun.
+    // The publication is a pinned future, not a spawned task: it advances
+    // only while something polls it. The 100 ms wait above is not enough for
+    // it to reach the row lock on a slow runner, and a probe loop that only
+    // slept left it stalled short of the lock, so the probe found 0 blocked
+    // backends however long it waited (#1146's CI). Each probe interval now
+    // polls the publication instead of sleeping, which also checks that it
+    // cannot finish while the row lock is held. The bound only turns a hang
+    // into a failure.
     let blocked_publications = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let rows = probe_client
                 .query(
@@ -680,14 +684,19 @@ async fn sourced_publications_wait_for_the_provenance_graph_lock() {
             if !rows.is_empty() || std::time::Instant::now() >= deadline {
                 break rows;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut delayed_variation,)
+                    .await
+                    .is_err(),
+                "the sourced publication must not finish while its submission row is locked"
+            );
         }
     };
     assert_eq!(
         blocked_publications.len(),
         1,
         "the submission row lock must block exactly the publication under test \
-         (waited up to 10 s for it to reach the lock)"
+         (polled it for up to 30 s while waiting for it to reach the lock)"
     );
     let blocked_publication_pid: i32 = blocked_publications[0].get("pid");
     let lock_class = i64::from(lock_class);

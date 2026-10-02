@@ -1011,14 +1011,15 @@ const ERR_DAEMON_NOT_RUNNING: &str = "daemon-not-running";
 ///
 /// Mirrors [`preview_pointer_is_live`] exactly, for the same reason and
 /// against the same threat. `tc_daemon_stop`, `tc_call`, `tc_subscribe`,
-/// `tc_unsubscribe`, `tc_preview_open`, and `tc_preview_turns_json` each
+/// `tc_unsubscribe`, `tc_preview_open`, `tc_preview_turns_json` and
+/// `tc_preview_unsure_spans_json` each
 /// null-checked `handle` and then dereferenced it, with nothing in
 /// between confirming it was ever a live `tc_handle*` at all -- a stale
 /// pointer (already freed by `tc_handle_free`) or a cross-type one (a
 /// `tc_preview*` passed here by mistake) was a use-after-free or a type
 /// confusion, not the fixed error the free functions and the preview
 /// accessors already promise. `registry_is`, not `registry_take`: every
-/// one of these six functions borrows the handle rather than consuming
+/// one of these seven functions borrows the handle rather than consuming
 /// it, exactly like the preview accessors borrow the preview.
 ///
 /// This runs *outside* [`guard`] where the existing null check already
@@ -1026,7 +1027,8 @@ const ERR_DAEMON_NOT_RUNNING: &str = "daemon-not-running";
 /// null check but still before the first dereference where the null
 /// check already lives inside a `guard`/`guard_forwarding` closure
 /// (`tc_call`, `tc_subscribe`, `tc_preview_open`,
-/// `tc_preview_turns_json`) -- in both places, strictly before any use of
+/// `tc_preview_turns_json`, `tc_preview_unsure_spans_json`) -- in both
+/// places, strictly before any use of
 /// `handle` as a reference. The reason is the same one
 /// `preview_pointer_is_live` gives: `guard` discards the underlying error
 /// text and substitutes `"operation-failed"`, which would hide the one
@@ -1224,6 +1226,88 @@ pub unsafe extern "C" fn tc_call(
         Ok(to_owned_cstring(&body))
     });
     outcome.unwrap_or_else(|_| to_owned_cstring(&error_frame("unavailable", "panic")))
+}
+
+/// The unsure-span index over a redacted preview body, as an owned JSON
+/// string: `{entry_id, body_digest, envelope_digest, span_count, spans:
+/// [{label, byte_offset, byte_len}], spans_truncated}`. Free it with
+/// [`tc_string_free`]. Returns NULL and sets `*err` (if non-null, also
+/// owned, also freed with `tc_string_free`) on failure.
+///
+/// The C ABI twin of the socket's `preview_unsure_spans`, answered by the
+/// same `ipc::open_preview_unsure_spans`, so the two cannot describe one
+/// entry differently. Offsets into the body `tc_preview_body` returned and
+/// a fixed label (`looks-like-email`, `looks-like-phone`,
+/// `looks-like-key`); never the text at them.
+///
+/// `body_digest` is required and is the anchor, exactly as for
+/// [`tc_preview_turns_json`]: a body that is not that one is refused with
+/// `preview-body-changed`. A body the detector cannot index exactly is
+/// refused with `preview-unsure-index-failed`.
+///
+/// A non-NULL `handle` that is not a live `tc_handle*` is refused before
+/// any dereference: NULL plus `*err` set to `"invalid-handle-pointer"`.
+///
+/// # Safety
+/// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` and
+/// `body_digest` must be valid NUL-terminated C strings (or NULL, which is
+/// an error). `err`, if non-null, must point to writable `*mut c_char`
+/// storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_preview_unsure_spans_json(
+    handle: *mut tc_handle,
+    entry_id: *const c_char,
+    body_digest: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    // Every error below is a fixed, content-free label, as in
+    // `tc_preview_turns_json`.
+    let outcome = guard_forwarding(|| {
+        if handle.is_null() {
+            anyhow::bail!("null-handle");
+        }
+        if !handle_pointer_is_live(handle) {
+            anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
+        }
+        let handle = unsafe { &*handle };
+        if handle.attached.is_some() {
+            anyhow::bail!("{ERR_PREVIEW_REQUIRES_EMBEDDED}");
+        }
+        let entry_id = unsafe { borrow_str(entry_id) }?;
+        let digest = unsafe { borrow_str(body_digest) }?.to_string();
+        let id = entry_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("entry-id-invalid"))?;
+        let Some(shared) = shared_of(handle) else {
+            anyhow::bail!("daemon-stopped");
+        };
+        // Its own thread and runtime, for the reason `tc_preview_open`
+        // gives: this may be called from inside a `tc_subscribe` callback.
+        let spans = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "runtime-unavailable")?;
+            rt.block_on(ipc::open_preview_unsure_spans(&shared, id, &digest))
+                .map_err(|(_code, label)| label)
+                .and_then(|value| {
+                    serde_json::to_string(&value).map_err(|_| "unsure-spans-serialize-failed")
+                })
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("unsure-spans-thread-panicked"))?;
+        spans.map_err(|label| anyhow::anyhow!("{label}"))
+    });
+    match outcome {
+        Ok(json) => to_owned_cstring(&json),
+        Err(e) => {
+            set_last_error(&e);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(&e) };
+            }
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// The instance an invite link names, as an owned UTF-8 string, or NULL if
@@ -2054,8 +2138,16 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
 /// stops a daemon from starting.
 ///
 /// Returns an owned JSON array; free it with [`tc_string_free`]. Each
-/// element carries `source`, `path`, `exists`, `session_count`,
-/// `most_recent` (RFC 3339 or null) and `relocated_by_env`.
+/// element carries `source` (`claude-code`, `codex`, `gemini-cli` or
+/// `cline`), `path`, `exists`, `session_count`, `most_recent` (RFC 3339 or
+/// null), `relocated_by_env` and `answers_at` (the vendor this tool's own
+/// calls answer at by default, e.g. `"Anthropic"`, or null for a tool with
+/// no single default -- see [`tc_discover_opencode_export`]'s doc for why
+/// OpenCode is one of those and is absent from this list entirely).
+///
+/// `answers_at` is a fixed label this build ships with, never something
+/// checked against the tool actually installed: it names what the released
+/// tool defaults to, not what a contributor may have reconfigured it to do.
 ///
 /// This is the one place in this ABI that deliberately returns a filesystem
 /// path. Everywhere else a path is withheld, because elsewhere the caller is
@@ -2072,6 +2164,50 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
         let found = trace_commons_contributor::source::discovery::probe_this_machine();
         let json = serde_json::to_string(&found).unwrap_or_else(|_| "[]".to_string());
         Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Describe a folder the contributor has already named as their OpenCode
+/// export directory, so a Customize screen can say "N sessions found" for
+/// the folder they just picked rather than trusting the folder name alone.
+///
+/// Needs no handle, like [`tc_discover_sources`], and for a stronger reason:
+/// OpenCode has no conventional per-user store to guess at before anyone has
+/// said anything -- its export folder is picked by the contributor, one at a
+/// time -- so it is not one of [`tc_discover_sources`]'s rows at all, blind
+/// or otherwise. This call exists so OpenCode can still be described once a
+/// folder is actually named, whether that is moments after a folder chooser
+/// closes or on a later run, reading back whatever this contributor already
+/// declared (`opencode_source` in the daemon's settings).
+///
+/// Returns an owned JSON object with the same shape as one row of
+/// [`tc_discover_sources`] -- `source` (always `"opencode"`), `path`,
+/// `exists`, `session_count`, `most_recent`, `relocated_by_env` (always
+/// `false`: nothing relocates this folder but the contributor) and
+/// `answers_at` (always `null`: OpenCode ships with no single default
+/// vendor to name). Free it with [`tc_string_free`].
+///
+/// Reads directory entries and metadata only, and never opens a session
+/// file, per the same rule [`tc_discover_sources`] follows.
+///
+/// Returns NULL for a NULL or non-UTF-8 `path`, recording `null-pointer` or
+/// `invalid-utf8`, and NULL on a caught panic.
+///
+/// # Safety
+/// `path` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_discover_opencode_export(path: *const c_char) -> *mut c_char {
+    guard_forwarding(|| {
+        let path = unsafe { borrow_str(path) }?;
+        let candidate = trace_commons_contributor::source::discovery::describe_opencode(
+            std::path::Path::new(path),
+        );
+        let json = serde_json::to_string(&candidate).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
     })
 }
 
@@ -3200,7 +3336,7 @@ pub unsafe extern "C" fn tc_route_disclosure_copy(facts_json: *const c_char) -> 
 }
 
 /// What a disclosure surface says when [`tc_route_disclosure_copy`] answers
-/// NULL: `panel` and `session`. Owned JSON; free it with [`tc_string_free`].
+/// NULL: `title`, `panel` and `session`. Owned JSON; free it with [`tc_string_free`].
 /// NULL only on a caught panic.
 #[unsafe(no_mangle)]
 pub extern "C" fn tc_route_disclosure_unreadable_copy() -> *mut c_char {
@@ -3219,6 +3355,23 @@ pub extern "C" fn tc_route_disclosure_unreadable_copy() -> *mut c_char {
 pub extern "C" fn tc_certificate_detail_copy() -> *mut c_char {
     guarded_string_no_err(|| {
         let copy = trace_commons_contributor::consent_copy::certificate_detail_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// K9 (#1118): the per-session notification's words -- the design's
+/// "Notification. Body is the consent sentence; one action, 'Look, then
+/// decide'."
+///
+/// Needs no handle, like [`tc_consent_copy`]: it describes the build, not a
+/// running daemon. Returns an owned JSON object with `body` (the same
+/// sentence [`tc_consent_copy`]'s `gate_statement` carries) and `action`;
+/// free it with [`tc_string_free`]. NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_session_notification_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::session_notification_copy();
         let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
         Ok(to_owned_cstring(&json))
     })
@@ -3380,6 +3533,10 @@ pub const TC_CREDENTIAL_ACTION_NONE: i32 = 30;
 pub const TC_CREDENTIAL_ACTION_OBTAIN: i32 = 31;
 pub const TC_CREDENTIAL_ACTION_CANCEL: i32 = 32;
 pub const TC_CREDENTIAL_ACTION_FORGET: i32 = 33;
+/// Copy a sign-in an earlier build kept in the macOS login keychain into the
+/// store this build uses: the `near_ai_credential_migrate` method. Offered
+/// only for `migration_available`, which only macOS produces.
+pub const TC_CREDENTIAL_ACTION_MIGRATE: i32 = 34;
 
 /// Why a connect control is not on offer, or the empty string.
 ///
@@ -3503,6 +3660,7 @@ pub unsafe extern "C" fn tc_near_ai_credential_action(state: *const c_char) -> i
                 CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
                 CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
                 CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+                CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
             },
         )
     })
@@ -4007,6 +4165,33 @@ pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
     })
 }
 
+/// K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
+/// limit X of Y", the WYSIWYG design's Flow 2/3 example.
+///
+/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
+/// fields of the same names; `decisions_owed` is `status.decisions_owed`
+/// (K6, a separate branch). All three are clamped to 0 on a negative value,
+/// which no honest caller sends.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_toast_sent_text(
+    uploads_today: i64,
+    max_uploads_per_day: i64,
+    decisions_owed: i64,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::consent_copy::toast_sent_text(
+                u64::try_from(uploads_today).unwrap_or(0),
+                u64::try_from(max_uploads_per_day).unwrap_or(0),
+                u64::try_from(decisions_owed).unwrap_or(0),
+            ),
+        ))
+    })
+}
+
 /// The sentence for one `near_ai_balance` `state`.
 ///
 /// `state` is the `state` field of a `near_ai_balance` answer. A NULL or
@@ -4104,6 +4289,7 @@ pub unsafe extern "C" fn tc_near_ai_balance_action(state: *const c_char) -> i32 
                 CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
                 CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
                 CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+                CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
             },
         )
     })
@@ -5004,6 +5190,17 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
         let copy = trace_commons_contributor::onboarding_copy::onboarding_copy();
         Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
+}
+
+/// Can this process reach the Cloud credential store?
+///
+/// Exists so a release pipeline can ask a *signed bundle* the question, which
+/// no unit test can answer: entitlements are a property of the code signature
+/// and `cargo test` never has one. Returns 0 reachable, 1 unentitled, 2
+/// otherwise. Reads nothing and writes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_credential_store_self_check() -> i32 {
+    trace_commons_contributor::daemon::credential_store_self_check()
 }
 
 #[cfg(test)]

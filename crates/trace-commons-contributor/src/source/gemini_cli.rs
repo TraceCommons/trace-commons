@@ -139,7 +139,7 @@ impl TraceSource for GeminiCliSource {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        let Ok(projects) = std::fs::read_dir(&self.root) else {
+        let Some(projects) = super::read_dir_for_discovery(&self.root)? else {
             return Ok(sessions);
         };
         for project in projects {
@@ -160,7 +160,9 @@ impl TraceSource for GeminiCliSource {
             }
             let project_dir = project.path();
             let cwd = project_root_cwd(&project_dir);
-            let Ok(entries) = std::fs::read_dir(project_dir.join(CHATS_DIR)) else {
+            // No chats directory is a project with no sessions; one that
+            // cannot be read fails the discovery, as for the root.
+            let Some(entries) = super::read_dir_for_discovery(&project_dir.join(CHATS_DIR))? else {
                 continue;
             };
             for entry in entries {

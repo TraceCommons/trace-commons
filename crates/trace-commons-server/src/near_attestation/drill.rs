@@ -56,8 +56,9 @@ use super::measurements::{
 use super::quote::{VerifiedQuote, verify_quote};
 use super::receipt::{ReceiptError, verify_receipt};
 
-/// The TCB verdict the drill accepts. Anything else fails.
-pub const REQUIRED_TCB_STATUS: &str = "UpToDate";
+/// The TCB verdict the drill accepts. Anything else fails. The same constant
+/// the contributor's receipt-proof attestor applies, so the two cannot drift.
+pub const REQUIRED_TCB_STATUS: &str = trace_commons_attestation::quote::REQUIRED_TCB_STATUS;
 
 /// The prompt the paid completion sends. Kept to one word deliberately.
 const DRILL_PROMPT: &str = "ping";

@@ -10,6 +10,9 @@ export const coreStatusSchema = z.object({
     consent_scopes: z.array(z.string()),
     paused: z.boolean(),
     queue_depth: z.number(),
+    // Older daemons do not report this aggregate. Keep an unavailable
+    // count distinct from a confirmed zero and preserve the other status.
+    decisions_owed: z.number().int().nonnegative().nullable().catch(null),
     daily_budget: z
       .object({
         bytes_today: z.number(),

@@ -146,7 +146,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     private string _disclosureTitle = string.Empty;
 
-    /// <summary>The section title, from the Rust. Empty when unreadable.</summary>
+    /// <summary>The section title, from the Rust, whether or not the route could be read.</summary>
     public string DisclosureTitle => _disclosureTitle;
 
     /// <summary>
@@ -162,14 +162,14 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         RouteDisclosure? disclosure = response.IsError || response.Result is null
             ? null
             : RouteDisclosureSurface.ForFacts(response.Result.Value.GetRawText());
+        RouteDisclosureUnreadable? unreadable = disclosure is null ? RouteDisclosureSurface.Unreadable() : null;
         DisclosureRows.Clear();
-        foreach (DisclosureRow row in RouteDisclosureSurface.PanelRows(
-            disclosure, disclosure is null ? RouteDisclosureSurface.Unreadable() : null))
+        foreach (DisclosureRow row in RouteDisclosureSurface.PanelRows(disclosure, unreadable))
         {
             DisclosureRows.Add(row);
         }
 
-        _disclosureTitle = disclosure?.Copy.Title ?? string.Empty;
+        _disclosureTitle = RouteDisclosureSurface.PanelTitle(disclosure, unreadable);
         Raise(nameof(DisclosureTitle));
     }
 
@@ -1761,6 +1761,16 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private async void OnDaemonStatusChanged()
     {
         await RefreshRoutingAsync().ConfigureAwait(true);
+
+        // The route disclosure too, as GTK does on every status event: a
+        // witness pinned, refused or cleared elsewhere changes where
+        // sessions go, and this section must not keep saying the old route.
+        // Nothing here is a knob the contributor is holding, so it is not
+        // skipped while a write is in flight.
+        if (IsLoaded)
+        {
+            await RefreshDisclosureAsync().ConfigureAwait(true);
+        }
     }
 
     /// <summary>

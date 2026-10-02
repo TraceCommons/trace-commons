@@ -114,7 +114,7 @@ public sealed class TrayIcon : IDisposable
     private IntPtr _hIcon;
     private ushort _classAtom;
     private bool _added;
-    private TrayModel _model = TrayModel.Compute(0, isPaused: false, isHealthy: true);
+    private TrayModel _model = TrayModel.Compute(null, isPaused: false, isHealthy: true);
     private TrayMenuModel _menu = TrayMenuModel.Compute(
         new DaemonStatus(),
         Array.Empty<QueueEntry>(),
@@ -434,7 +434,7 @@ public sealed class TrayIcon : IDisposable
                     "   " + waiting.Text);
             }
 
-            if (_menu.DecisionsOwed > 0)
+            if (_menu.DecisionsOwed > 0 || _menu.Waiting.Count > 0)
             {
                 AppendMenu(menu, MF_STRING, MenuIdReview, "Review waiting sessions…");
             }

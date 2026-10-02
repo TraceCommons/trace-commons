@@ -222,15 +222,18 @@ impl SelfHostedPrivacyFilterAdapter {
 
         let status = response.status();
         if !status.is_success() {
-            // Same split the hosted adapter makes: a 5xx is the shim's
-            // problem and must not be charged to the trace; a 4xx is our
-            // misconfiguration and retrying it forever would hide the bug.
+            // Same split the hosted adapter makes: a 5xx, 429 or 408 is the
+            // shim's problem and must not be charged to the trace; any other
+            // 4xx is our misconfiguration and retrying it forever would hide
+            // the bug.
             let reason = format!("{BACKEND} privacy classifier returned {status}");
-            return Err(if status.is_server_error() {
-                TraceContributionError::TransientRedactionFailed { reason }
-            } else {
-                TraceContributionError::RedactionFailed { reason }
-            });
+            return Err(
+                if crate::privacy_filter_spans::is_transient_classifier_status(status) {
+                    TraceContributionError::TransientRedactionFailed { reason }
+                } else {
+                    TraceContributionError::RedactionFailed { reason }
+                },
+            );
         }
 
         let parsed: ClassifyResponse =

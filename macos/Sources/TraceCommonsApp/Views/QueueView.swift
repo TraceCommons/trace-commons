@@ -193,7 +193,13 @@ struct QueueContent: View {
             // Left as a sentence, not compressed into a label-and-count
             // header. It is the one line on this screen written in the
             // product's voice and it says what the screen is FOR.
-            Text("^[\(model.decisionsOwed) session](inflect: true) waiting for your decision")
+            Group {
+                if let count = model.decisionsOwed {
+                    Text("^[\(count) session](inflect: true) waiting for your decision")
+                } else {
+                    Text("Decision count unavailable")
+                }
+            }
                 .font(TC.Font_.sectionTitle)
                 .foregroundStyle(TC.inkPrimary)
 

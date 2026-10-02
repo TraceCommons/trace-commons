@@ -157,6 +157,15 @@ fn route_disclosure_value(facts: serde_json::Value) -> Result<serde_json::Value,
     Ok(serde_json::json!({ "facts": parsed, "copy": copy }))
 }
 
+/// What a disclosure surface says when [`route_disclosure`] fails: the
+/// section's title and the unreadable lines, from the contributor core, so
+/// the shell writes none of them.
+#[tauri::command]
+pub(crate) fn route_disclosure_unreadable_copy() -> serde_json::Value {
+    serde_json::to_value(trace_commons_contributor::consent_copy::disclosure_unreadable_copy())
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// The held certificate's claims for one pending entry, as the daemon's
 /// `certificate_detail` returns them, with the core's labels. The daemon
 /// refuses entries without a held certificate; that refusal is passed on.
@@ -190,7 +199,8 @@ mod tests {
     use trace_commons_contributor::config::{ConfigStore, WitnessOrigin, WitnessOriginView};
 
     use super::{
-        certificate_detail_value, clear_witness_in, configure_witness_in, route_disclosure_value,
+        certificate_detail_value, clear_witness_in, configure_witness_in,
+        route_disclosure_unreadable_copy, route_disclosure_value,
     };
 
     fn temp_store() -> (std::path::PathBuf, ConfigStore) {
@@ -291,6 +301,17 @@ mod tests {
                 Err("route-disclosure-unreadable".to_owned())
             );
         }
+    }
+
+    #[test]
+    fn the_unreadable_copy_is_the_cores() {
+        assert_eq!(
+            route_disclosure_unreadable_copy(),
+            serde_json::to_value(
+                trace_commons_contributor::consent_copy::disclosure_unreadable_copy()
+            )
+            .unwrap()
+        );
     }
 
     #[test]

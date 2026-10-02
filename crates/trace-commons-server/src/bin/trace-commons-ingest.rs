@@ -58,15 +58,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use trace_commons_gate_api::pipeline::{ReasonCode, ReviewRecommendation};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
     ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
-    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
-    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
-    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
-    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
-    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
+    TraceAllowedUse, TraceContributionEnvelope, TraceInstrumentStatusUpdate,
+    TracePipelineStatusUpdate, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
+    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
+    canonical_summary_for_embedding, privacy_filter_backend_from_env,
+    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
+    retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -100,8 +102,8 @@ use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
-    CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
-    TraceCorpusRlsDiagnostics,
+    ACCOUNT_SETTLEMENT_KEY_PREFIX, CreditSettlementAdvisoryLock, Database, PayoutHoldReason,
+    PayoutResolution, TraceCorpusRlsDiagnostics, settlement_group_key,
 };
 use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
@@ -127,7 +129,10 @@ use trace_commons_server::near_attestation::key_drift::{
 use trace_commons_server::near_attestation::measurements::{
     EXPECTED_MEASUREMENTS_ENV, expected_measurements_from_env,
 };
-use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
+use trace_commons_server::near_credit::{
+    NearCreditReceipt, NearCreditReceiptCall, trace_credit_settlement_attestation_hash,
+    trace_credit_settlement_issuer_signature_hash,
+};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_kek::{
     KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper, WrappedDek,
@@ -252,11 +257,25 @@ use trace_commons_server::trace_gate_service::{
 use trace_commons_server::trace_score_attestation::{
     AttestationConfig, AttestationSigningState, ScoreAttestationCoverage, ScoreAttestationScope,
     ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
+    sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
-    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
-    PipelineService,
+    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore,
+    PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNearPayoutControls,
+    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
+    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
+    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
+    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
+    is_pipeline_score_object_ref,
+};
+use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+use trace_commons_server::versioned_pipeline_product::{
+    PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
+    PIPELINE_EXPORT_SNAPSHOT_INVALIDATED, PIPELINE_EXPORT_SOURCE_INVALIDATED,
+    PipelineContributorStatus, PipelineCreditStatus, PipelineExportConsentScopes,
+    PipelineExportSnapshot, PipelineForensicTrace, PipelineOperationalSummary,
+    PipelineProcessingStatus, PipelineProductStore, PipelineReconciliationRows,
+    is_pipeline_export_manifest_purpose_code, pipeline_export_manifest_purpose_code,
 };
 use uuid::Uuid;
 
@@ -659,6 +678,12 @@ const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS";
 const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
     "TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS";
+/// Tenants whose pipeline follow-up work the worker still processes -- their
+/// runs in flight, index invalidations, payouts and confirmations, staged
+/// receipt sweeps -- while no receipt of theirs is routed to the pipeline: a
+/// tenant being rolled back off `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`
+/// (Zaki review 1, item 7). The worker drains the union of the two lists.
+const TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS: &str = "TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS";
 /// Fails ingest startup closed when no pipeline runtime was injected (or an
 /// injected one is not production-qualified) rather than booting without one.
 /// See `assemble_ingest_pipeline_runtime`.
@@ -672,6 +697,13 @@ const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RU
 /// `docs/operator/pipeline-activation.md`.
 const TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES: &str =
     "TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES";
+/// The principal the pipeline issues a compatibility `NoveltyUtility` credit
+/// as (Ruling T15-10): checked against
+/// `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` where
+/// `main` checks its calling gate worker. A canonical hashed principal ref;
+/// unset means none. Documented in `docs/operator/pipeline-activation.md`.
+const TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF: &str =
+    "TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF";
 /// Whole-seconds overrides for the per-phase claim lease; see
 /// `parse_pipeline_lease_config_from_env`. Unset keeps
 /// `PipelineLeaseConfig::default()`'s value for that phase.
@@ -803,11 +835,6 @@ const TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN: &str =
 const TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE: &str =
     "TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE";
 const TRACE_COMMONS_NEAR_SETTLEMENT_MODE: &str = "TRACE_COMMONS_NEAR_SETTLEMENT_MODE";
-/// Settlement-group key prefix for credit groups re-keyed onto a durable account
-/// (`account:{uuid}`). Shared by the account-group build site, the payout parse
-/// site, and the hold-recovery repair path; drift between literals would misroute
-/// on-chain payout, so they all reference this one const.
-const ACCOUNT_SETTLEMENT_KEY_PREFIX: &str = "account:";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN: &str =
@@ -937,6 +964,27 @@ const TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS: &str =
 /// 210 others were never touched, because the driver takes them oldest-first
 /// and nothing bounded the first one.
 const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
+/// The unbound-account reaper (Z2 S5). Off unless `_ENABLED`; when on it needs
+/// its own least-privilege login, never the runtime URL.
+const TRACE_COMMONS_UNBOUND_REAPER_ENABLED: &str = "TRACE_COMMONS_UNBOUND_REAPER_ENABLED";
+const TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL: &str = "TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL";
+const TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS";
+const TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS";
+/// Names an earlier, never-released draft of the reaper read. Neither is an
+/// alias: the idle window they configured no longer exists, so boot refuses
+/// either one rather than silently ignoring it.
+const TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS: &[&str] = &[
+    "TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS",
+    "TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS",
+];
+const TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS";
+const TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE: &str = "TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE";
+const TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS: u64 = 3600;
+/// Batches one tick may run back to back while each one comes back full.
+const TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK: usize = 10;
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -1434,6 +1482,7 @@ pub async fn run_ingest(
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
     spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
+    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1607,6 +1656,16 @@ struct AppState {
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
     pipeline_service: Option<Arc<PipelineService>>,
+    /// Product reads over the pipeline's records: the status block, the
+    /// score attestation, exports, and the administrator summaries. Present
+    /// exactly when `pipeline_service` is, on the same PostgreSQL backend.
+    pipeline_product: Option<Arc<PipelineProductStore>>,
+    /// The pipeline's own records on the DB mirror's PostgreSQL backend,
+    /// present whenever the DB mirror is, whether a pipeline runtime is
+    /// injected or not: `main`'s side paths that reach submissions with a
+    /// pipeline run (retention maintenance, ruling RB-30) queue the
+    /// pipeline's follow-up through it, for a runtime to process.
+    pipeline_store: Option<Arc<PgPipelineStore>>,
     /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
     /// / `pipeline_runtime_required_but_not_injected`) instead of silently
     /// running ingest without a pipeline runtime. See
@@ -1619,6 +1678,11 @@ struct AppState {
     /// unconditionally when no worker is running at all (no runtime
     /// injected).
     pipeline_worker_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`: tenants the pipeline worker
+    /// drains although no receipt of theirs is routed. Empty by default;
+    /// refused at startup without a pipeline runtime
+    /// (`validate_pipeline_drain_tenants`).
+    pipeline_drain_tenant_ids: Arc<BTreeSet<String>>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -1763,6 +1827,10 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
+    /// Unbound passkey-account reaper. `None` (the default) means it is off;
+    /// `TRACE_COMMONS_UNBOUND_REAPER_ENABLED` turns it on. Its own pool, built
+    /// at boot from its own login, so the runtime pool never runs the sweep.
+    unbound_account_reaper: Option<UnboundAccountReaperConfig>,
     /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
     /// posture every deployment ships in -- means an arriving certificate is
     /// ignored entirely and every content-bearing trace holds exactly as it
@@ -2088,6 +2156,19 @@ struct PiiBackstopDriverConfig {
     max_attempts: i32,
     backoff_base_seconds: i64,
     per_submission_timeout: StdDuration,
+}
+
+/// In-process unbound-account reaper config (Z2 S5). Like the PII-backstop
+/// driver it has no bearer-token worker route; unlike it, the cross-tenant
+/// pool is the reaper's own, held here rather than in `PgBackend`, and the
+/// only thing it can run is the V101 definer function.
+#[derive(Clone)]
+struct UnboundAccountReaperConfig {
+    interval: StdDuration,
+    unbound_ttl_days: i64,
+    closed_ttl_days: i64,
+    batch_size: i32,
+    reaper: trace_commons_server::account_reaper::UnboundAccountReaper,
 }
 
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
@@ -3819,18 +3900,81 @@ impl AppState {
         let pipeline_allow_test_dependencies =
             env_truthy(TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES);
         let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
-        let pipeline_receipts_tenants_routed =
-            tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0;
+        let pipeline_drain_tenant_ids =
+            parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS)?;
+        let pipeline_tenants_processed = pipeline_runtime::pipeline_tenants_processed(
+            &tenant_rollout_gates,
+            &pipeline_drain_tenant_ids,
+        );
+        let novelty_utility_require_production_gate =
+            env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
+        // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
+        // checks, for a compatibility run's Trace Credit leg, and (Zaki
+        // review 1, item 2) `main`'s settlement controls, for the paid leg.
+        let pipeline_novelty_utility_checks = PipelineNoveltyUtilityChecks {
+            central_issuer_principal_refs: credit_settlement_central_issuer_principal_refs.clone(),
+            issuer_principal_ref: parse_pipeline_credit_issuer_principal_ref_from_env()?,
+            require_production_gate: novelty_utility_require_production_gate,
+            settlement_allowed_policy_versions: credit_settlement_allowed_policy_versions.clone(),
+            settlement_require_issuer_approval: credit_settlement_require_issuer_approval,
+            settlement_require_rollout_smoke_ready: credit_settlement_require_rollout_smoke_ready,
+            settlement_max_micros_per_account: credit_settlement_max_micros_per_account,
+        };
+        // Zaki review 1, round 2, finding 2: `main`'s NEAR settlement mode and
+        // adapter-auth requirement, resolved before the pipeline runtime is
+        // assembled, so an enabled payout follows both.
+        let near_settlement_mode = NearSettlementMode::from_env();
+        let near_credit_require_adapter_auth =
+            env_truthy(TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH);
+        // Multi-lens review L5-4 and Zaki review 3, Z3-3: `main`'s gate
+        // configuration and `NoveltyUtility` delta, which a compatibility
+        // bundle must hold.
+        let novelty_utility_credit_points_delta =
+            parse_novelty_utility_credit_points_delta_from_env()?;
+        let pipeline_main_gate = pipeline_main_gate_config_from_env(
+            pipeline_runtime_assembler.is_some(),
+            novelty_utility_credit_points_delta,
+        )?;
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
             artifact_store.as_ref(),
             pipeline_runtime_required,
             pipeline_lease_config,
-            pipeline_receipts_tenants_routed,
+            pipeline_tenants_processed,
             pipeline_allow_test_dependencies,
+            credit_settlement_near_contract_id.as_deref(),
+            pipeline_near_confirmation_interval_from_env(pipeline_runtime_assembler.is_some())?,
+            PipelineNearPayoutControls {
+                settlement_mode: near_settlement_mode.for_pipeline(),
+                require_adapter_auth: near_credit_require_adapter_auth,
+            },
+            &pipeline_novelty_utility_checks,
+            pipeline_main_gate,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
+        if let Some(service) = pipeline_service.as_ref() {
+            pipeline_runtime::validate_pipeline_privacy_filter_requirement(
+                require_privacy_filter,
+                service,
+            )?;
+            pipeline_runtime::validate_pipeline_tenant_bundles(
+                service,
+                &tenant_rollout_gates,
+                &pipeline_drain_tenant_ids,
+                &pipeline_main_gate,
+                pipeline_allow_test_dependencies,
+            )
+            .await?;
+        }
+        validate_pipeline_drain_tenants(&pipeline_drain_tenant_ids, pipeline_service.is_some())?;
+        let pipeline_product = pipeline_service
+            .as_ref()
+            .and(db_connections.as_ref())
+            .map(|connections| Arc::new(PipelineProductStore::new(connections.postgres.clone())));
+        let pipeline_store = db_connections
+            .as_ref()
+            .map(|connections| Arc::new(PgPipelineStore::new(connections.postgres.clone())));
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
@@ -3848,8 +3992,6 @@ impl AppState {
         let near_credit_confirmer_auth_configured = near_credit_confirmer_config
             .as_ref()
             .is_some_and(|config| config.auth_configured);
-        let near_credit_require_adapter_auth =
-            env_truthy(TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH);
         if near_credit_require_adapter_auth
             && near_credit_submitter_timeout_ms.is_some()
             && !near_credit_submitter_auth_configured
@@ -3901,7 +4043,8 @@ impl AppState {
         // its auth requirements, while `DryRun` substitutes in-process impls and
         // `Disabled` withholds any submitter (worker no-ops, rows stay pending).
         // Default is `Disabled` (fail-safe): an unset mode never advances credit.
-        let near_settlement_mode = NearSettlementMode::from_env();
+        // The mode itself was resolved before the pipeline runtime was
+        // assembled.
         let (near_credit_submitter, near_credit_confirmer) = match near_settlement_mode {
             NearSettlementMode::Disabled => (None, None),
             NearSettlementMode::DryRun => {
@@ -4023,6 +4166,29 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
+        let unbound_account_reaper = parse_unbound_account_reaper_config_from_env()?;
+        if let Some(reaper) = &unbound_account_reaper {
+            // The pool connects lazily; take one connection now and check the
+            // login may execute the reaper function, so a login that cannot
+            // connect, or lacks trace_unbound_account_reaper, fails boot, not
+            // the first tick. The error names the variable, never the URL.
+            reaper.reaper.verify_login().await.map_err(|error| {
+                let denied = matches!(
+                    &error,
+                    trace_commons_server::error::DatabaseError::Pool(label)
+                        if label == "unbound_reaper_execute_denied"
+                );
+                if denied {
+                    anyhow::anyhow!(
+                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} connects but cannot execute trace_reap_unbound_accounts (unbound_reaper_execute_denied)"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} did not accept a connection"
+                    )
+                }
+            })?;
+        }
         // Fail closed on configuration. An enabled bypass missing its signing
         // address, its measurement set, or its policy allowlist refuses to
         // boot naming the control, rather than running with a control an
@@ -4305,8 +4471,11 @@ impl AppState {
             require_tenant_submission_policy,
             db_mirror,
             pipeline_service,
+            pipeline_product,
+            pipeline_store,
             pipeline_runtime_required,
             pipeline_worker_ready,
+            pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -4392,6 +4561,7 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
+            unbound_account_reaper,
             witness_bypass,
             witness_capture_pin,
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
@@ -4420,11 +4590,8 @@ impl AppState {
             gate_service: build_trace_gate_service_from_env().await?,
             revocation_propagation_max_attempts:
                 parse_revocation_propagation_max_attempts_from_env()?,
-            novelty_utility_credit_points_delta:
-                parse_novelty_utility_credit_points_delta_from_env()?,
-            novelty_utility_require_production_gate: env_truthy(
-                TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE,
-            ),
+            novelty_utility_credit_points_delta,
+            novelty_utility_require_production_gate,
             account_webauthn,
             account_ceremony_store,
             account_unbound_ceiling,
@@ -4627,6 +4794,20 @@ fn validate_pipeline_receipt_rollout(
     anyhow::ensure!(
         runtime_present || gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) == 0,
         "pipeline_receipts_configured_without_runtime"
+    );
+    Ok(())
+}
+
+/// Refuses startup when `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` names
+/// tenants but no pipeline runtime is injected: nothing would drain them
+/// (Zaki review 1, item 7).
+fn validate_pipeline_drain_tenants(
+    drain_tenant_ids: &BTreeSet<String>,
+    runtime_present: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        runtime_present || drain_tenant_ids.is_empty(),
+        "pipeline_drain_tenants_configured_without_runtime"
     );
     Ok(())
 }
@@ -6475,6 +6656,104 @@ fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
     }
 }
 
+/// The NEAR credit outbox scheduler's tick interval: how often `main`
+/// submits and confirms its NEAR outbox, 60 seconds unless configured. The
+/// versioned pipeline's NEAR payout polls a submitted payout for its
+/// confirmation at this same cadence (Ruling T10-10).
+fn parse_near_credit_outbox_scheduler_interval_from_env() -> anyhow::Result<StdDuration> {
+    Ok(StdDuration::from_secs(parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?))
+}
+
+/// The confirmation interval an assembled pipeline runtime's payout polls at:
+/// `main`'s NEAR outbox scheduler cadence (Ruling T10-10). `main` reads that
+/// variable only for an enabled scheduler, so it is read here only when a
+/// pipeline runtime is assembled (Ruling F-I2): with no pipeline, a value
+/// `main` would refuse does not stop startup. Without a pipeline nothing uses
+/// the interval, and the default stands in for it.
+fn pipeline_near_confirmation_interval_from_env(
+    pipeline_runtime_assembled: bool,
+) -> anyhow::Result<StdDuration> {
+    if !pipeline_runtime_assembled {
+        return Ok(StdDuration::from_secs(
+            TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        ));
+    }
+    parse_near_credit_outbox_scheduler_interval_from_env()
+}
+
+/// `main`'s gate configuration for an assembled pipeline runtime's
+/// compatibility bundle (multi-lens review L5-4, Zaki review 3, Z3-3): the
+/// three floors, top-k, the chunk knobs and index-insert threshold
+/// (`parse_gate_chunking_config_from_env`, Zaki review 1, round 2, finding
+/// 14), and `novelty_utility_credit_points_delta`, `main`'s parsed
+/// `NoveltyUtility` delta, in microcredits. `main` reads the gate variables
+/// only in its feature-gated enclave gate builders, so they are read here
+/// only when a pipeline runtime is assembled (Ruling F-I2, multi-lens review
+/// L5-1): with no pipeline, a value `main` would refuse does not stop
+/// startup, and `main`'s defaults stand in (no floors). A floor that is unset
+/// is `None`, which no compatibility bundle matches.
+fn pipeline_main_gate_config_from_env(
+    pipeline_runtime_assembled: bool,
+    novelty_utility_credit_points_delta: f32,
+) -> anyhow::Result<MainGateConfig> {
+    let novelty_utility_microcredits =
+        u64::try_from(credit_delta_micros(novelty_utility_credit_points_delta))
+            .context("the NoveltyUtility delta must be non-negative")?;
+    if !pipeline_runtime_assembled {
+        return Ok(MainGateConfig {
+            perplexity_floor_micros: None,
+            tail_fraction_floor_micros: None,
+            novelty_floor_micros: None,
+            embed_insert_novelty_micros: TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS
+                as u64,
+            top_k: TRACE_COMMONS_GATE_DEFAULT_TOP_K as u32,
+            chunk_target_tokens: TRACE_COMMONS_GATE_DEFAULT_CHUNK_TARGET_TOKENS as u32,
+            chunk_max_tokens: TRACE_COMMONS_GATE_DEFAULT_CHUNK_MAX_TOKENS as u32,
+            chunk_cap: TRACE_COMMONS_GATE_DEFAULT_CHUNK_CAP as u32,
+            chunk_min_tokens: TRACE_COMMONS_GATE_DEFAULT_CHUNK_MIN_TOKENS as u64,
+            novelty_utility_microcredits,
+        });
+    }
+    let optional_floor = |var: &'static str| -> anyhow::Result<Option<u64>> {
+        optional_trimmed_env(var)?
+            .map(|raw| {
+                raw.parse::<u64>()
+                    .with_context(|| format!("{var} must parse as a non-negative integer"))
+            })
+            .transpose()
+    };
+    let as_u32 = |var: &'static str, value: usize| -> anyhow::Result<u32> {
+        u32::try_from(value).with_context(|| format!("{var} is too large"))
+    };
+    let chunking = parse_gate_chunking_config_from_env()?;
+    Ok(MainGateConfig {
+        perplexity_floor_micros: optional_floor(TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS)?,
+        tail_fraction_floor_micros: optional_floor(TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS)?,
+        novelty_floor_micros: optional_floor(TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS)?,
+        embed_insert_novelty_micros: chunking.embed_insert_novelty_micros,
+        top_k: as_u32(
+            TRACE_COMMONS_GATE_TOP_K,
+            parse_usize_env(TRACE_COMMONS_GATE_TOP_K, TRACE_COMMONS_GATE_DEFAULT_TOP_K)?,
+        )?,
+        chunk_target_tokens: as_u32(
+            TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS,
+            chunking.chunk_target_tokens,
+        )?,
+        chunk_max_tokens: as_u32(
+            TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS,
+            chunking.chunk_max_tokens,
+        )?,
+        chunk_cap: as_u32(TRACE_COMMONS_GATE_CHUNK_CAP, chunking.chunk_cap)?,
+        chunk_min_tokens: chunking.chunk_min_tokens,
+        novelty_utility_microcredits,
+    })
+}
+
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceNearCreditOutboxSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED);
@@ -6487,12 +6766,7 @@ fn parse_trace_near_credit_outbox_scheduler_config_from_env()
             "{TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN}"
         );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
-        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
-        TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
-    )?;
+    let interval = parse_near_credit_outbox_scheduler_interval_from_env()?;
     let submit_limit = parse_optional_scheduler_u32_env(
         TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_SUBMIT_LIMIT,
         TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT,
@@ -6511,7 +6785,7 @@ fn parse_trace_near_credit_outbox_scheduler_config_from_env()
         .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
     Ok(Some(TraceNearCreditOutboxSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         submit_limit,
         confirm_limit,
         dry_run: env_truthy(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN),
@@ -6927,6 +7201,72 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
         max_attempts: max_attempts as i32,
         backoff_base_seconds,
         per_submission_timeout: StdDuration::from_secs(per_submission_timeout_seconds as u64),
+    }))
+}
+
+/// The unbound passkey-account reaper. Off by default (`Ok(None)`), so
+/// existing deployments and CI are unaffected until an operator opts in.
+///
+/// Fail-closed at boot: `_ENABLED` without a reaper login URL refuses with a
+/// missing-control label rather than silently leaving the reaper off, and a
+/// login that cannot connect refuses in `AppState::from_env`. The error text
+/// never includes the URL. The unbound TTL defaults to 7 days from binding
+/// creation and the closed TTL to 30 days from `closed_at`; neither can be set
+/// under one day, and the V101 function refuses that too. A variable from the
+/// earlier draft's idle window refuses boot.
+fn parse_unbound_account_reaper_config_from_env()
+-> anyhow::Result<Option<UnboundAccountReaperConfig>> {
+    use trace_commons_server::account_reaper::{
+        DEFAULT_BATCH, DEFAULT_CLOSED_TTL_DAYS, DEFAULT_UNBOUND_TTL_DAYS, MAX_BATCH, MAX_TTL_DAYS,
+        MIN_TTL_DAYS, UnboundAccountReaper,
+    };
+    for removed in TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS {
+        if optional_trimmed_env(removed)?.is_some() {
+            anyhow::bail!(
+                "{removed} is no longer read; use {TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS} and {TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS}"
+            );
+        }
+    }
+    if !env_truthy(TRACE_COMMONS_UNBOUND_REAPER_ENABLED) {
+        return Ok(None);
+    }
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL)? else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_UNBOUND_REAPER_ENABLED}=true but {TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is not set"
+        );
+    };
+    let unbound_ttl_days = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS,
+        DEFAULT_UNBOUND_TTL_DAYS,
+        MIN_TTL_DAYS,
+        MAX_TTL_DAYS,
+    )?;
+    let closed_ttl_days = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS,
+        DEFAULT_CLOSED_TTL_DAYS,
+        MIN_TTL_DAYS,
+        MAX_TTL_DAYS,
+    )?;
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS,
+        TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS,
+        60,
+        86_400,
+    )?;
+    let batch_size = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE,
+        i64::from(DEFAULT_BATCH),
+        1,
+        i64::from(MAX_BATCH),
+    )?;
+    let reaper = UnboundAccountReaper::connect(&url)
+        .map_err(|_| anyhow::anyhow!("{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is invalid"))?;
+    Ok(Some(UnboundAccountReaperConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+        unbound_ttl_days,
+        closed_ttl_days,
+        batch_size: batch_size as i32,
+        reaper,
     }))
 }
 
@@ -7758,6 +8098,13 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
             "/v1/account/traces/{submission_id}/withdraw",
             account_trace_withdraw_handler,
         )
+        // Declared here, not beside the other `/v1/contributors/me/*` routes,
+        // so the account-session middleware covers it: a withdrawal needs an
+        // account session, never a device key, as the route above does.
+        .post(
+            "/v1/contributors/me/pipeline-submissions/{submission_id}/withdraw",
+            pipeline_submission_withdraw_handler,
+        )
         .get(
             "/v1/account/traces/{submission_id}/publication",
             account_public_run_handler,
@@ -7945,6 +8292,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(settlement_posture_handler),
         )
         .route(
+            trace_commons_protocol::near_ai_measurements::NEAR_AI_MEASUREMENTS_PATH,
+            get(near_ai_measurements_handler),
+        )
+        .route(
             "/v1/contributors/me/credit-events",
             get(credit_events_handler),
         )
@@ -7955,6 +8306,27 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/contributors/me/score-attestation",
             get(score_attestation_handler).post(scoped_score_attestation_handler),
+        )
+        .route(
+            "/v1/contributors/me/pipeline-score-attestation",
+            get(pipeline_score_attestation_handler),
+        )
+        .route("/v1/pipeline/exports", post(create_pipeline_export_handler))
+        .route(
+            "/v1/pipeline/exports/{snapshot_id}/complete",
+            post(complete_pipeline_export_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/operational-summary",
+            get(pipeline_operational_summary_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/runs/{run_id}/forensic",
+            get(pipeline_forensic_trace_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/index-invalidations/requeue-failed",
+            post(pipeline_requeue_failed_index_invalidations_handler),
         )
         .route(
             "/.well-known/trace-commons-attestation-keyset.json",
@@ -8064,6 +8436,14 @@ fn app(state: Arc<AppState>) -> Router {
             "/account/passkey/login/finish",
             post(account_passkey_login_finish_handler),
         )
+        // The browser passkey step-up page (Z2 S7). Un-versioned and un-authed
+        // beside the login it drives: a plain page whose one script calls the
+        // routes above and the authenticated passkey and payout routes, so a
+        // weak native session's owner can get a strong cookie session.
+        .route(
+            step_up_page::STEP_UP_PATH,
+            get(step_up_page::step_up_page_handler),
+        )
         // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
         // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
         // IS the credential. No RPC at login — the signature is verified offline.
@@ -8121,6 +8501,18 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/review/{submission_id}/credit-events",
             post(append_credit_event_handler),
+        )
+        .route(
+            "/v1/review/pipeline/quarantine",
+            get(pipeline_review_quarantine_handler),
+        )
+        .route(
+            "/v1/review/pipeline/runs/{run_id}/claim",
+            post(pipeline_review_claim_handler),
+        )
+        .route(
+            "/v1/review/pipeline/runs/{run_id}/assessment",
+            post(pipeline_review_assessment_handler),
         )
         .route("/v1/datasets/replay", get(dataset_replay_handler))
         .route(
@@ -8253,6 +8645,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/audit-chain-repair",
             post(audit_chain_repair_handler),
         )
+        .route("/v1/admin/tombstone-repair", post(tombstone_repair_handler))
         .route(
             "/v1/admin/db-reconciliation-drill",
             post(db_reconciliation_drill_handler),
@@ -10092,6 +10485,7 @@ const CREDIT_CYCLE_SCHEDULER_DRIVER_NAME: &str = "credit_cycle_scheduler";
 const CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME: &str = "credit_settlement_scheduler";
 const PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME: &str = "process_evaluation_scheduler";
 const REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME: &str = "revocation_propagation_scheduler";
+const UNBOUND_ACCOUNT_REAPER_DRIVER_NAME: &str = "unbound_account_reaper";
 
 /// Every driver the liveness registry knows about. The distinctness test
 /// reads this; keep it in sync when adding a driver.
@@ -10108,6 +10502,7 @@ const ALL_DRIVER_NAMES: &[&str] = &[
     CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
     PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
     REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
+    UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
 ];
 
 /// Run `tick` forever on `interval`, recording liveness and emitting the
@@ -10271,6 +10666,67 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
                     "Trace Commons PII backstop driver tick completed"
                 );
                 pii_backstop_tick_outcome(&summary)
+            }
+        },
+    );
+}
+
+/// Spawn the in-process unbound-account reaper (Z2 S5). Copies
+/// `spawn_pii_backstop_driver_task`: `spawn_driver_loop`, a cross-tenant pool
+/// that is not the runtime pool, no bearer-token worker route, hash-free
+/// count-only logging. A tick runs bounded batches back to back while each
+/// comes back full of deletions, up to `TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK`.
+fn spawn_unbound_account_reaper_task(
+    state: &Arc<AppState>,
+    config: Option<UnboundAccountReaperConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        unbound_ttl_days = config.unbound_ttl_days,
+        closed_ttl_days = config.closed_ttl_days,
+        batch_size = config.batch_size,
+        "Trace Commons unbound account reaper enabled"
+    );
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
+        config.interval,
+        move |_state| {
+            let config = tick_config.clone();
+            async move {
+                let mut reaped_unbound = 0u64;
+                let mut reaped_closed = 0u64;
+                let mut skipped = 0u64;
+                for _ in 0..TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK {
+                    let summary = config
+                        .reaper
+                        .reap(
+                            config.unbound_ttl_days,
+                            config.closed_ttl_days,
+                            config.batch_size,
+                        )
+                        .await
+                        .context("unbound account reaper batch failed")?;
+                    reaped_unbound += summary.reaped_unbound;
+                    reaped_closed += summary.reaped_closed;
+                    skipped += summary.skipped;
+                    if summary.reaped() < u64::try_from(config.batch_size).unwrap_or(0) {
+                        break;
+                    }
+                }
+                tracing::info!(
+                    reaped_unbound,
+                    reaped_closed,
+                    skipped,
+                    unbound_ttl_days = config.unbound_ttl_days,
+                    closed_ttl_days = config.closed_ttl_days,
+                    "Trace Commons unbound account reaper tick completed"
+                );
+                Ok(())
             }
         },
     );
@@ -11313,6 +11769,22 @@ fn parse_credit_settlement_allowed_policy_versions(
         );
     }
     Ok(policy_versions)
+}
+
+/// `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`, held to the same
+/// canonical hashed form `parse_credit_settlement_central_issuer_principal_refs`
+/// requires of the allowlist it is checked against.
+fn parse_pipeline_credit_issuer_principal_ref_from_env() -> anyhow::Result<Option<String>> {
+    let Some(configured) =
+        optional_trimmed_env(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF)?
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        is_canonical_principal_storage_ref(&configured),
+        "{TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF} must be a canonical hashed principal ref"
+    );
+    Ok(Some(configured))
 }
 
 fn parse_central_issuer_principal_refs_from_env() -> anyhow::Result<BTreeSet<String>> {
@@ -13711,6 +14183,25 @@ fn pipeline_runtime_for_tenant<'a>(
     state.pipeline_service.as_ref()
 }
 
+/// The pipeline runtime whose receipts a retried upload of `tenant` may
+/// replay: `Some` when a runtime is injected and the tenant is routed to
+/// `PipelineReceipts` or on `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`. A
+/// tenant rolled back from the first list to the second still made its
+/// earlier uploads through the pipeline, so their retries replay the
+/// pipeline receipt instead of reading the legacy record the pipeline never
+/// wrote (Zaki review 1, fix round, item 5). Only this read-only replay
+/// lookup takes the drain list: a new receipt is routed only for a tenant
+/// on the receipts list (`pipeline_runtime_for_tenant`).
+fn pipeline_runtime_for_replay<'a>(
+    state: &'a AppState,
+    tenant: &TenantCtx,
+) -> Option<&'a Arc<PipelineService>> {
+    if state.pipeline_drain_tenant_ids.contains(tenant.tenant_id()) {
+        return state.pipeline_service.as_ref();
+    }
+    pipeline_runtime_for_tenant(state, tenant)
+}
+
 /// The fixed receipt a pipeline-routed submission returns for `Created` and
 /// `Replayed` alike -- shared between `route_pipeline_receipt` (a fresh
 /// submission or its ordinary retry) and the completed-admission branch of
@@ -13735,6 +14226,77 @@ fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
         StatusCode::CONFLICT,
         "receipt id reused with different content",
     )
+}
+
+/// The label a retried upload gets for a submission id that a pipeline run
+/// owns when no pipeline runtime may replay it: the tenant is on neither
+/// pipeline list, or no runtime is injected (Zaki review 1, round 2, N-3).
+const SUBMISSION_OWNED_BY_PIPELINE_RUN: &str = "submission_owned_by_pipeline_run";
+
+/// Zaki review 1, round 2, N-3: an upload of a submission id that a
+/// pipeline run owns never reaches `main`'s legacy upsert, whatever path it
+/// took (with or without account admission, static-token tenants
+/// included). With a runtime that may replay the tenant's receipts (a
+/// routed or drained tenant, `pipeline_runtime_for_replay`), the caller
+/// must be the principal the pipeline recorded, under the same ownership
+/// predicate the legacy path applies (`can_access_submission`, by principal
+/// ref); another principal is refused with `ownership_conflict`, as the
+/// legacy path refuses one. The same body then replays the pipeline
+/// receipt, and a different body is refused as the pipeline refuses it
+/// (`pipeline_content_conflict`). With no such runtime, a run found
+/// through the database (`PgPipelineStore`) refuses the upload with
+/// `SUBMISSION_OWNED_BY_PIPELINE_RUN`. `Ok(None)` when no pipeline run owns
+/// the id: the upload takes `main`'s path.
+async fn pipeline_owned_submission_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    if let Some(pipeline_service) = pipeline_runtime_for_replay(state, tenant) {
+        let idempotency_key = submission_id.to_string();
+        let Some(PipelineReplayReceipt {
+            result,
+            auth_principal_ref,
+        }) = pipeline_service
+            .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
+            .await
+            .map_err(internal_error)?
+        else {
+            return Ok(None);
+        };
+        if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
+            return Err(api_error(StatusCode::CONFLICT, ownership_conflict));
+        }
+        return match result {
+            PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
+            PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
+            // `replay_receipt` only ever builds a `Replayed` or a
+            // `ContentConflict` result (`replay_result`, over a run it
+            // found); any other variant fails closed rather than letting
+            // the upload reach the legacy upsert.
+            PipelineReceiptResult::Created(_)
+            | PipelineReceiptResult::Tombstoned
+            | PipelineReceiptResult::QuotaExceeded(_)
+            | PipelineReceiptResult::SourceSessionWithdrawn => {
+                Err(internal_error("pipeline_replay_result_unexpected"))
+            }
+        };
+    }
+    if let Some(store) = state.pipeline_store.as_ref() {
+        if store
+            .submission_has_pipeline_run(tenant.tenant_id(), submission_id)
+            .await
+            .map_err(internal_error)?
+        {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                SUBMISSION_OWNED_BY_PIPELINE_RUN,
+            ));
+        }
+    }
+    Ok(None)
 }
 
 /// Routes a receipt to the versioned pipeline instead of the legacy corpus
@@ -13768,6 +14330,7 @@ async fn route_pipeline_receipt(
     envelope: &TraceContributionEnvelope,
     raw_body: &[u8],
     residual_risk_basis: &[ResidualRiskCondition],
+    source_claim: Option<(Uuid, [u8; 32])>,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
     let Some(pipeline_service) = pipeline_runtime_for_tenant(state, tenant) else {
         return Ok(None);
@@ -13775,6 +14338,7 @@ async fn route_pipeline_receipt(
     let idempotency_key = envelope.submission_id.to_string();
     let result = pipeline_service
         .submit(PipelineReceiptRequest {
+            source_session: source_claim,
             tenant_id: tenant.tenant_id(),
             actor_principal_ref: tenant.principal_ref(),
             counts_toward_quota: tenant.role() == TokenRole::Contributor,
@@ -13843,6 +14407,12 @@ async fn route_pipeline_receipt(
             StatusCode::TOO_MANY_REQUESTS,
             "trace contribution principal submission quota exceeded",
         )),
+        // The label `main`'s receipt answers when the upload's source
+        // session was withdrawn before the upload recorded (Zaki review 1,
+        // item 5).
+        PipelineReceiptResult::SourceSessionWithdrawn => {
+            Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"))
+        }
     }
 }
 
@@ -13948,55 +14518,23 @@ async fn submit_trace_handler(
         // and the same ownership predicate the legacy fallback below applies
         // (`can_access_submission`, here via its principal-ref form) is
         // applied to it before either pipeline outcome is returned.
-        if let Some(pipeline_service) = pipeline_runtime_for_tenant(state.as_ref(), &tenant) {
-            let idempotency_key = envelope.submission_id.to_string();
-            if let Some(PipelineReplayReceipt {
-                result,
-                auth_principal_ref,
-            }) = pipeline_service
-                .replay_receipt(tenant.tenant_id(), &idempotency_key, &raw_body)
-                .await
-                .map_err(internal_error)?
-            {
-                if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
-                    return Err(api_error(
-                        StatusCode::CONFLICT,
-                        "admission_identity_conflict",
-                    ));
-                }
-                match result {
-                    PipelineReceiptResult::Replayed(_) => {
-                        return Ok(Json(pipeline_processing_receipt()));
-                    }
-                    // Defensive, not reachable over HTTP today:
-                    // `admission::reserve`'s own completed-lookup is keyed on
-                    // the request body's hash, so a retry with different
-                    // content for a submission id that is already
-                    // `completed` never reaches this branch as a completed
-                    // retry in the first place -- `reserve` answers it
-                    // first, either refusing a new submission outright (no
-                    // evidence) or with its own identity-conflict decision
-                    // (with evidence). See the third POST in
-                    // `real_http_pipeline_receipt_replays_on_retry`.
-                    PipelineReceiptResult::ContentConflict => {
-                        return Err(pipeline_content_conflict());
-                    }
-                    // `replay_receipt` only ever builds a `Replayed` or a
-                    // `ContentConflict` result (`replay_result`, over a run
-                    // `existing_receipt_run` already found); a read-only
-                    // replay lookup neither creates a run, stages an
-                    // attempt, checks a tombstone, nor counts a quota, so
-                    // none of these three variants can come from it. Kept
-                    // only so this match stays exhaustive against the
-                    // shared `PipelineReceiptResult` enum.
-                    PipelineReceiptResult::Created(_)
-                    | PipelineReceiptResult::Tombstoned
-                    | PipelineReceiptResult::QuotaExceeded(_) => {}
-                }
-            }
-            // No run under this key: a submission that completed admission
-            // on the legacy path before this tenant was routed to the
-            // pipeline. Fall back to the legacy read below, unchanged.
+        // `pipeline_owned_submission_receipt` replays it for a routed or
+        // drained tenant; with no runtime that may replay it, a run found
+        // through the database refuses it with a label rather than reading
+        // the legacy record the pipeline never wrote. With no run under this
+        // key (a submission that completed admission on the legacy path
+        // before this tenant was routed to the pipeline), the legacy read
+        // below runs, unchanged.
+        if let Some(receipt) = pipeline_owned_submission_receipt(
+            state.as_ref(),
+            &tenant,
+            envelope.submission_id,
+            &raw_body,
+            "admission_identity_conflict",
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
         }
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)
@@ -14020,6 +14558,24 @@ async fn submit_trace_handler(
     let result = async {
         if state.account_admission.is_none() {
             validate_envelope(&envelope)?;
+        }
+
+        // Zaki review 1, round 2, N-3: a submission id a pipeline run owns
+        // never reaches the legacy record read or upsert below, on this
+        // path too (no completed admission: a static-token tenant, or an
+        // admission still in progress). It is answered as `main` answers a
+        // retry of an existing record, before the tenant policy and quota
+        // checks.
+        if let Some(receipt) = pipeline_owned_submission_receipt(
+            state.as_ref(),
+            &tenant,
+            envelope.submission_id,
+            &raw_body,
+            "submission id already belongs to another principal",
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
         }
 
         // Idempotency: same submission_id always addresses the same record.
@@ -14162,6 +14718,7 @@ async fn submit_trace_handler(
             &envelope,
             &raw_body,
             &residual_risk_basis,
+            source_claim,
         )
         .await?
         {
@@ -14651,6 +15208,25 @@ async fn revoke_submission(
         }
         let mirror_result = mirror_result.map(|counts| invalidation_counts = counts);
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
+            .map_err(internal_error)?;
+    }
+    // Zaki review 1, round 2, finding 5: a submission with a pipeline run
+    // gets the pipeline's follow-up too -- its revision queued for removal
+    // from the pipeline index, a payload deletion per live object, and its
+    // runs' work ended -- as the pipeline withdrawal does. The submission is
+    // marked revoked above, so Settle, which reads the submission guard,
+    // forfeits whatever it has not completed.
+    // With no runtime injected, the follow-up is queued through the
+    // database for a later runtime (Zaki review 1, round 2, N-9).
+    if let Some(pipeline) = state.pipeline_service.as_ref() {
+        pipeline
+            .follow_up_revocation(tenant.tenant_id(), submission_id, tenant.principal_ref())
+            .await
+            .map_err(internal_error)?;
+    } else if let Some(store) = state.pipeline_store.as_ref() {
+        store
+            .follow_up_revocation(tenant.tenant_id(), submission_id, tenant.principal_ref())
+            .await
             .map_err(internal_error)?;
     }
     if !invalidation_counts.is_empty() {
@@ -15792,6 +16368,30 @@ async fn settlement_posture_handler(
     )))
 }
 
+/// `GET /v1/contributors/me/near-ai-measurements`
+///
+/// The NEAR AI image measurements this deployment pins, for a caller holding
+/// a device credential. A contributor's IronWire ties a NEAR AI receipt's
+/// signer to a DCAP-verified quote and pins that quote's image against these
+/// sets, so the device and ingest agree on which image counts.
+///
+/// Read through `expected_measurements_from_env`, the loader the attestation
+/// drills enforce with, and published by `measurements::published_pins`: pins
+/// only, no URL or secret. Nothing configured is `unconfigured` with no sets,
+/// so a client verifies nothing rather than everything. Deployment-wide, so
+/// any authenticated caller may read it, as with the settlement posture.
+async fn near_ai_measurements_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins>> {
+    let _tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    Ok(Json(
+        trace_commons_server::near_attestation::measurements::published_pins(
+            expected_measurements_from_env(),
+        ),
+    ))
+}
+
 async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -15865,15 +16465,87 @@ async fn submission_status_handler(
     let gate_decisions = gate_credit_decisions_for_records(state.as_ref(), asked_records)
         .await
         .map_err(internal_error)?;
+    // The pipeline's view of the same ids, for the same principals as the
+    // credit view above: the account's principal set when the caller is
+    // linked to an account, else the caller's own principal. Read only for a
+    // tenant on the receipts or the drain list, the tenants whose retried
+    // uploads replay pipeline receipts (`pipeline_runtime_for_replay`); any
+    // other tenant's answer is `main`'s alone, with no pipeline query (Zaki
+    // review 1, round 2, item 6).
+    let pipeline_product = state
+        .pipeline_product
+        .as_ref()
+        .filter(|_| pipeline_runtime_for_replay(state.as_ref(), &tenant).is_some());
+    let pipeline_by_submission = match pipeline_product {
+        Some(product) => {
+            let principal_refs = account_principals.map_or_else(
+                || vec![tenant.principal_ref().to_string()],
+                AccountPrincipalSet::to_vec,
+            );
+            product
+                .contributor_statuses_for_principals(
+                    tenant.tenant_id(),
+                    &principal_refs,
+                    &body.submission_ids,
+                )
+                .await
+                .map_err(internal_error)?
+                .into_iter()
+                .map(|status| (status.submission_id, status))
+                .collect::<BTreeMap<_, _>>()
+        }
+        None => BTreeMap::new(),
+    };
+    // Zaki review 1, round 2, item 1: every compatibility run `main`'s view
+    // did not describe gets `main`'s document from the database, all of them
+    // from one submission read and one credit-event read.
+    let compatibility_pipelines = body
+        .submission_ids
+        .iter()
+        .filter(|submission_id| !visible_by_submission.contains_key(submission_id))
+        .filter_map(|submission_id| pipeline_by_submission.get(submission_id))
+        .filter(|pipeline| pipeline.compatibility.is_some())
+        .collect::<Vec<_>>();
+    let compatibility_documents = compatibility_statuses_from_database(
+        state.as_ref(),
+        tenant.auth(),
+        account_principals,
+        &compatibility_pipelines,
+    )
+    .await
+    .map_err(internal_error)?;
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
-        if let Some(record) = visible_by_submission.get(&submission_id) {
-            statuses.push(submission_status_from_record(
+        let pipeline = pipeline_by_submission.get(&submission_id);
+        // Ruling T15-7: a compatibility run's credit figure is the shadow
+        // credit quality its Score recorded, where `main` shows its gate's.
+        let compatibility_decision = pipeline.and_then(compatibility_credit_decision);
+        // Zaki review 1, round 2, N-8: a minimal-family run's document is the
+        // pipeline's in both read modes. Under database reads `main`'s view
+        // also holds the run's submission row, but `main` keeps no ledger
+        // event of the `accepted` type its Trace Credit leg writes, so a
+        // document built from that row would report its award as 0, where
+        // file reads, which never hold the row, report its points.
+        let main_record = visible_by_submission
+            .get(&submission_id)
+            .filter(|_| pipeline.is_none_or(|pipeline| pipeline.compatibility.is_some()));
+        if let Some(record) = main_record {
+            let mut status = submission_status_from_record(
                 record,
                 &status_credit_events,
                 state.near_settlement_mode,
-                gate_decisions.get(&submission_id),
-            ));
+                gate_decisions
+                    .get(&submission_id)
+                    .or(compatibility_decision.as_ref()),
+            );
+            status.pipeline = pipeline.map(pipeline_status_for_protocol);
+            statuses.push(status);
+        } else if let Some(pipeline) = pipeline {
+            // The same id asked twice gets the same document twice.
+            let compatibility_status = compatibility_documents.get(&submission_id).cloned();
+            statuses.push(
+                compatibility_status.unwrap_or_else(|| submission_status_from_pipeline(pipeline)),
+            );
         }
     }
 
@@ -15886,6 +16558,222 @@ async fn submission_status_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(statuses))
+}
+
+/// The snake_case label an enum (a pipeline status, an allowed use)
+/// serializes as.
+fn snake_case_label<T: Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The protocol's pipeline block for a submission's run. Each field is a
+/// label, an id, or a decimal-string amount; the credit event, settlement
+/// batch, and outcome ids stay on the server.
+fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipelineStatusUpdate {
+    TracePipelineStatusUpdate {
+        run_id: status.run_id,
+        bundle_id: status.bundle_id.clone(),
+        processing_state: snake_case_label(status.processing),
+        current_phase: status.current_phase.map(snake_case_label),
+        responsible_phase: status.responsible_phase.map(snake_case_label),
+        reason_label: status.reason_label.clone(),
+        instruments: status
+            .instruments
+            .iter()
+            .map(|instrument| TraceInstrumentStatusUpdate {
+                instrument_id: instrument.instrument_id.clone(),
+                atomic_units: instrument.atomic_units.to_string(),
+                operation_state: instrument.operation_state.clone(),
+                internal_settlement_state: instrument.internal_settlement_state.clone(),
+                payout_rail: instrument.payout_rail.clone(),
+                payout_state: instrument.payout_state.clone(),
+                reason_label: instrument.reason_label.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Ruling T15-7: the gate decision `main`'s status reads its credit figure
+/// and explanation from, for a compatibility run whose Score has committed:
+/// the shadow credit quality and coverage the Score evidence recorded, and,
+/// when one of `main`'s credit checks withheld the Trace Credit leg, its
+/// label as the decision's `credit_withheld_reason`, as on `main` (Ruling
+/// T15-12).
+fn compatibility_credit_decision(
+    status: &PipelineContributorStatus,
+) -> Option<StorageTraceGateCreditDecisionRow> {
+    let quality = status.compatibility.as_ref()?.credit_quality.as_ref()?;
+    let count = |value: Option<u32>| value.and_then(|value| i32::try_from(value).ok());
+    let credit_withheld_reason = status
+        .instruments
+        .iter()
+        .find(|instrument| {
+            instrument.instrument_id == "trace_credit"
+                && instrument.internal_settlement_state == "withheld"
+        })
+        .and_then(|instrument| instrument.reason_label.clone());
+    Some(StorageTraceGateCreditDecisionRow {
+        submission_id: status.submission_id,
+        credit_quality_micros: i64::try_from(quality.credit_quality_micros).ok(),
+        credit_quality_calibration_version: Some(quality.credit_quality_version),
+        credit_withheld_reason,
+        chunk_count: count(quality.chunk_count),
+        total_chunk_count: count(quality.total_chunk_count),
+        chunks_capped: quality.chunks_capped,
+    })
+}
+
+/// Ruling T15-7: `main`'s status documents of the compatibility runs in
+/// `pipelines`, the ones `main`'s own view did not describe (contributor
+/// reads come from files, and the pipeline writes no file record), keyed by
+/// submission id: each
+/// built as `main` builds it, from the submission row the pipeline wrote,
+/// the credit events of those submissions, and the run's gate-equivalent
+/// decision (`compatibility_credit_decision`), with the pipeline block.
+/// One submission read and one credit-event read serve every run. A
+/// submission missing from the result -- no database, a submission `main`'s
+/// document does not describe (a `received` one), or one the caller may not
+/// see -- falls back to the pipeline's own document at the caller.
+async fn compatibility_statuses_from_database(
+    state: &AppState,
+    auth: &TenantAuth,
+    account_principals: Option<&AccountPrincipalSet>,
+    pipelines: &[&PipelineContributorStatus],
+) -> anyhow::Result<BTreeMap<Uuid, TraceSubmissionStatusUpdate>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+    if pipelines.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let submission_ids = pipelines
+        .iter()
+        .map(|pipeline| pipeline.submission_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut records = Vec::with_capacity(submission_ids.len());
+    for stored in db
+        .get_trace_submissions(&auth.tenant_id, &submission_ids)
+        .await?
+    {
+        if let Some(record) = trace_commons_record_from_storage_submission(stored).transpose()? {
+            records.push(record);
+        }
+    }
+    let records = visible_submission_records_scoped(auth, account_principals, records);
+    if records.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let credit_events = credit_events_for_records(
+        &records,
+        read_contributor_credit_events_for_records_from_db(
+            state,
+            auth,
+            account_principals,
+            &records,
+        )
+        .await?,
+    );
+    let pipeline_by_submission = pipelines
+        .iter()
+        .map(|pipeline| (pipeline.submission_id, *pipeline))
+        .collect::<BTreeMap<_, _>>();
+    let mut documents = BTreeMap::new();
+    for record in &records {
+        let Some(pipeline) = pipeline_by_submission.get(&record.submission_id) else {
+            continue;
+        };
+        let decision = compatibility_credit_decision(pipeline);
+        let mut status = submission_status_from_record(
+            record,
+            &credit_events,
+            state.near_settlement_mode,
+            decision.as_ref(),
+        );
+        status.pipeline = Some(pipeline_status_for_protocol(pipeline));
+        documents.insert(record.submission_id, status);
+    }
+    Ok(documents)
+}
+
+/// The status document of a submission only the pipeline knows. Trace Credit
+/// becomes points as the legacy status computes them, microcredits over one
+/// million: pending from the award, and final only once the leg is
+/// finalized. A leg that was forfeited or failed reports no pending points,
+/// because they will never arrive (Ruling F-M8); its pipeline block still
+/// carries the award and the leg's state. The ledger and total points keep their legacy meaning, the
+/// delayed ledger deltas and final plus those deltas: a minimal-family run
+/// has no delayed ledger event, so they are 0 and absent (Ruling T14-9). A
+/// compatibility run's document is `main`'s instead
+/// (`compatibility_status_from_database`); this one covers it only before
+/// `main`'s document can describe it.
+fn submission_status_from_pipeline(
+    status: &PipelineContributorStatus,
+) -> TraceSubmissionStatusUpdate {
+    let trace_credit_points = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .map(|instrument| instrument.atomic_units.get() as f32 / 1_000_000.0)
+        .unwrap_or_default();
+    // Zaki review 1, minor item M-b: points that will never be paid are not
+    // pending -- a withheld leg and a leg `main` never settles, as well as a
+    // forfeited or failed one.
+    let credit_points_pending = match status.credit {
+        PipelineCreditStatus::Forfeited
+        | PipelineCreditStatus::Failed
+        | PipelineCreditStatus::Withheld
+        | PipelineCreditStatus::NotSettlementEligible => 0.0,
+        _ => trace_credit_points,
+    };
+    TraceSubmissionStatusUpdate {
+        submission_id: status.submission_id,
+        trace_id: status.trace_id,
+        status: main_status_for_pipeline(status).to_string(),
+        credit_points_pending,
+        credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
+            .then_some(trace_credit_points),
+        credit_points_ledger: 0.0,
+        credit_points_total: None,
+        explanation: Vec::new(),
+        delayed_credit_explanations: Vec::new(),
+        consent_scopes: Vec::new(),
+        pipeline: Some(pipeline_status_for_protocol(status)),
+    }
+}
+
+/// A pipeline-only submission's `status`, in `main`'s vocabulary (Zaki
+/// review 1, minor item M-c), so the contributor daemon's history counts and
+/// its held-for-review check (`quarantined`) recognize it; the pipeline's own
+/// state stays in the pipeline block (`processing_state`).
+///
+/// A decided submission reports `main`'s stored status as is (`accepted`,
+/// `rejected`, `revoked`, `expired`, `purged`, `quarantined`). One not yet
+/// decided (`received`: Review has not approved or rejected it) reports what
+/// `main`'s receipt reports for the same privacy decision: `quarantined`
+/// when it waits for a human review or its Admission quarantined it,
+/// `rejected` when Admission rejected it, and `accepted` otherwise. A run
+/// that failed keeps the value of the state it failed in.
+fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str {
+    match status.submission_status.as_str() {
+        "accepted" => "accepted",
+        "quarantined" => "quarantined",
+        "rejected" => "rejected",
+        "revoked" => "revoked",
+        "expired" => "expired",
+        "purged" => "purged",
+        _ if status.processing == PipelineProcessingStatus::AwaitingReview
+            || status.admission_decision == "quarantine" =>
+        {
+            "quarantined"
+        }
+        _ if status.admission_decision == "reject" => "rejected",
+        _ => "accepted",
+    }
 }
 
 /// Cap on submissions bundled into a single score attestation, mirroring the
@@ -16151,6 +17039,378 @@ async fn scoped_score_attestation_handler(
         pending,
         unknown,
     }))
+}
+
+// Versioned pipeline product routes: the score attestation, exports, and the
+// administrator reads over the pipeline's records. Each authenticates as the
+// closest `main` route does, and without a pipeline runtime (no product
+// store) each answers 404, as the pipeline review routes do.
+
+/// 404 when no pipeline runtime was assembled: there is then no product
+/// store, and nothing for a product route to read.
+fn require_pipeline_product(state: &AppState) -> ApiResult<&Arc<PipelineProductStore>> {
+    state
+        .pipeline_product
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline runtime not configured"))
+}
+
+/// `GET /v1/contributors/me/pipeline-score-attestation` -- signs a statement
+/// of the caller's own versioned-pipeline Score outcomes. It authenticates
+/// and resolves the principal exactly as `score_attestation_handler` does:
+/// the tenant and principal come from the authenticated credential alone,
+/// and the route takes no body and no query parameters.
+async fn pipeline_score_attestation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ScoreAttestationResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let Some(attestation) = state.attestation_signing.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+        ));
+    };
+    let submissions = product
+        .own_score_attestation_entries(tenant.tenant_id(), tenant.principal_ref())
+        .await
+        .map_err(internal_error)?;
+    let item_count = submissions.len();
+    let token = sign_versioned_score_attestation(
+        attestation,
+        tenant.tenant_id(),
+        tenant.principal_ref(),
+        submissions,
+        Utc::now(),
+    )
+    .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        tenant.auth(),
+        "pipeline_score_attestation",
+        item_count,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(ScoreAttestationResponse { attestation: token }))
+}
+
+/// Body of `POST /v1/pipeline/exports`. The tenant, the requester, and the
+/// consent-scope allowlists come from the credential and the tenant policy,
+/// never from the body: any other field is refused. `consent_scope` and
+/// `limit` are `main`'s replay export request fields, read as `main` reads
+/// them (`parse_consent_scope_filter`, `resolve_export_limit`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PipelineExportRequest {
+    allowed_use: TraceAllowedUse,
+    purpose: String,
+    #[serde(default)]
+    consent_scope: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// The hash an export snapshot stores as its purpose: of the purpose, the
+/// item limit, and the requested consent scope, so that the request key's
+/// idempotency check, which compares the requester, the use, and this hash,
+/// also refuses the same key with another limit or scope. The limit is
+/// digits and a scope label has no `:`, so the first two `:` end them.
+fn pipeline_export_purpose_hash(
+    purpose: &str,
+    limit: usize,
+    consent_scope: Option<ConsentScope>,
+) -> String {
+    let consent_scope = consent_scope.map(snake_case_label).unwrap_or_default();
+    sha256_prefixed(&format!("{limit}:{consent_scope}:{purpose}"))
+}
+
+/// Records a pipeline export snapshot's `stage` (`created` or `delivered`)
+/// as `main`'s replay export records a delivered dataset: one `Export`
+/// audit event with `Export` metadata (export artifact, `purpose_code`, the
+/// item count), appended through `main`'s mirrored helper. A delivery's
+/// purpose code is its manifest's, as `main` writes one purpose to both; a
+/// creation, which has no manifest, carries the use label.
+async fn append_pipeline_export_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    stage: &str,
+    purpose_code: String,
+    snapshot: &PipelineExportSnapshot,
+) -> anyhow::Result<()> {
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::pipeline_export(tenant, stage, snapshot),
+        StorageTraceAuditAction::Export,
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some(purpose_code),
+            item_count: snapshot.items.len().min(u32::MAX as usize) as u32,
+        },
+    )
+    .await
+}
+
+/// `POST /v1/pipeline/exports`: snapshots the tenant's approved pipeline
+/// revisions for `allowed_use`, at most `limit` of them, resolved as
+/// `main`'s replay export resolves it (`resolve_export_limit`: by default
+/// 100, clamped to `max_export_items_per_request`) and at most
+/// `PIPELINE_EXPORT_ITEM_MAX`. It authenticates as
+/// `/v1/workers/replay-export` does -- an admin or export-worker credential
+/// -- and applies `main`'s export rules for the caller: the export
+/// guardrails (`enforce_dataset_export_guardrails`: with
+/// `require_export_guardrails` on, an explicit purpose and consent scope);
+/// the scoped credential and the tenant policy must allow the use and the
+/// requested consent scope; and a submission must meet their consent-scope
+/// allowlists and hold the requested scope. The selection holds accepted
+/// submissions only, and under the guardrails low-risk ones only, as a
+/// guardrailed replay export does. The `idempotency-key` header names the
+/// request: the same key with the same use, purpose, and limit returns the
+/// first snapshot, and with any of them different is refused. Each snapshot
+/// returned is recorded as one `created` export audit event.
+async fn create_pipeline_export_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PipelineExportRequest>,
+) -> ApiResult<Json<PipelineExportSnapshot>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_export_worker_operator(&tenant)?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "idempotency_key_required"))?;
+    let consent_scope = parse_consent_scope_filter(body.consent_scope.as_deref())?;
+    // The status and privacy risk `main`'s guardrails require hold for every
+    // pipeline export they reach: the selection takes accepted submissions
+    // only, and under the guardrails low-risk ones only.
+    let privacy_risk = state
+        .require_export_guardrails
+        .then_some(ResidualPiiRisk::Low);
+    enforce_dataset_export_guardrails(
+        state.as_ref(),
+        "pipeline",
+        Some(&body.purpose),
+        Some(TraceCorpusStatus::Accepted),
+        privacy_risk,
+        consent_scope,
+    )?;
+    let policy = tenant_export_policy_for_request(
+        state.as_ref(),
+        &tenant,
+        "pipeline export",
+        consent_scope,
+        body.allowed_use,
+    )
+    .await?;
+    let limit = resolve_export_limit(state.as_ref(), body.limit).min(PIPELINE_EXPORT_ITEM_MAX);
+    let consent_scopes = PipelineExportConsentScopes {
+        token: tenant.allowed_consent_scopes.clone(),
+        policy: policy
+            .map(|policy| policy.allowed_consent_scopes)
+            .unwrap_or_default(),
+        requested: consent_scope,
+    };
+    let snapshot = product
+        .create_export_snapshot(
+            &tenant.tenant_id,
+            &tenant.principal_ref,
+            &sha256_prefixed(idempotency_key),
+            body.allowed_use,
+            &consent_scopes,
+            privacy_risk,
+            &pipeline_export_purpose_hash(&body.purpose, limit, consent_scope),
+            limit,
+        )
+        .await
+        .map_err(|error| match error {
+            DatabaseError::Constraint(label) if label == PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT => {
+                api_error(StatusCode::CONFLICT, "export_idempotency_conflict")
+            }
+            other => internal_error(other),
+        })?;
+    append_pipeline_export_audit(
+        state.as_ref(),
+        &tenant,
+        "created",
+        snake_case_label(snapshot.allowed_use),
+        &snapshot,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(snapshot))
+}
+
+/// `POST /v1/pipeline/exports/{snapshot_id}/complete`: delivers the snapshot
+/// the same credential created, recording `main`'s export manifest for it; a
+/// delivered snapshot is returned unchanged. Authenticated as the create
+/// route. A snapshot that can no longer be delivered is refused with a label
+/// that tells the caller to create a new snapshot: a withdrawal invalidated
+/// it, or one of its submissions is no longer exportable (it expired, or was
+/// revoked outside the pipeline), which leaves the snapshot `ready`. Each
+/// snapshot returned is recorded as one `delivered` export audit event; a
+/// refusal records none.
+async fn complete_pipeline_export_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<Uuid>,
+) -> ApiResult<Json<PipelineExportSnapshot>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_export_worker_operator(&tenant)?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let snapshot = product
+        .complete_export_snapshot(&tenant.tenant_id, &tenant.principal_ref, snapshot_id)
+        .await
+        .map_err(|error| match error {
+            DatabaseError::NotFound { .. } => {
+                api_error(StatusCode::NOT_FOUND, "export_snapshot_not_found")
+            }
+            DatabaseError::Constraint(label)
+                if label == PIPELINE_EXPORT_SNAPSHOT_INVALIDATED
+                    || label == PIPELINE_EXPORT_SOURCE_INVALIDATED =>
+            {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "export_snapshot_invalidated_create_new_snapshot",
+                )
+            }
+            DatabaseError::Constraint(label) if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL => {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "export_snapshot_stale_create_new_snapshot",
+                )
+            }
+            other => internal_error(other),
+        })?;
+    let purpose_code =
+        pipeline_export_manifest_purpose_code(snapshot.allowed_use).map_err(internal_error)?;
+    append_pipeline_export_audit(
+        state.as_ref(),
+        &tenant,
+        "delivered",
+        purpose_code,
+        &snapshot,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(snapshot))
+}
+
+/// `GET /v1/admin/pipeline/operational-summary`: the tenant's pipeline work
+/// by phase, state, and reason label, with its error, index, credit, payout,
+/// invalidation, and export counts -- labels and counts only. It
+/// authenticates as `/v1/admin/operational-summary` does (an admin
+/// credential), and records the read.
+async fn pipeline_operational_summary_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PipelineOperationalSummary>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let summary = product
+        .operational_summary(tenant.tenant_id())
+        .await
+        .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        tenant.auth(),
+        "pipeline_operational_summary",
+        summary.work.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summary))
+}
+
+/// `GET /v1/admin/pipeline/runs/{run_id}/forensic`: one run's phase outcomes
+/// as hashes, with its index, settlement, and payout states -- hashes and
+/// labels only. Authenticated as the operational summary, and the read is
+/// recorded. A run the tenant does not have is 404.
+async fn pipeline_forensic_trace_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+) -> ApiResult<Json<PipelineForensicTrace>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let trace = product
+        .forensic_trace(tenant.tenant_id(), run_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline_run_not_found"))?;
+    append_control_plane_read_audit(state.as_ref(), tenant.auth(), "pipeline_forensic_trace", 1)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(trace))
+}
+
+/// Response body of
+/// `POST /v1/admin/pipeline/index-invalidations/requeue-failed`: how many
+/// invalidations went back to `pending`. A count only.
+#[derive(Debug, Serialize)]
+struct PipelineInvalidationRequeueResponse {
+    requeued: u64,
+}
+
+/// `POST /v1/admin/pipeline/index-invalidations/requeue-failed`: re-enqueues
+/// every `failed` index invalidation of the caller's tenant
+/// (`PipelineService::requeue_failed_index_invalidations`), for an operator
+/// who has fixed the fault that failed them, and answers how many. It needs
+/// `main`'s admin credential, as the other pipeline admin routes do; the
+/// tenant is the credential's. Without a pipeline runtime it is `404`. The
+/// worker's next pass takes the re-enqueued invalidations up (Zaki review 1,
+/// item 6).
+async fn pipeline_requeue_failed_index_invalidations_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PipelineInvalidationRequeueResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let pipeline = require_pipeline_service(state.as_ref())?;
+    let requeued = pipeline
+        .requeue_failed_index_invalidations(tenant.tenant_id())
+        .await
+        .map_err(internal_error)?;
+    // Zaki review 1, fix round, item 4: an index maintenance row, as the
+    // vector index routes append, hash-only and label-only: a fixed purpose
+    // (hashed), and a count under its own label. The row's surface is its
+    // kind, `vector_index`, as `main`'s maintenance rows record it.
+    let purpose = "pipeline_index_invalidation_requeue";
+    let action_counts = BTreeMap::from([(
+        "pipeline_index_invalidations_requeued".to_string(),
+        u32::try_from(requeued).unwrap_or(u32::MAX),
+    )]);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        tenant.auth(),
+        TraceCommonsAuditEvent::vector_index(
+            tenant.auth(),
+            false,
+            Some(purpose),
+            action_counts.clone(),
+        ),
+        StorageTraceAuditAction::VectorIndex,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("vector_index".to_string()),
+            purpose_hash: Some(sha256_prefixed(purpose)),
+            dry_run: false,
+            action_counts,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(tenant.tenant_id()),
+        requeued,
+        "pipeline failed index invalidations re-enqueued"
+    );
+    Ok(Json(PipelineInvalidationRequeueResponse { requeued }))
 }
 
 /// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the
@@ -16442,7 +17702,7 @@ async fn account_auth_middleware(
             request.extensions_mut().insert(binding);
             next.run(request).await
         };
-        if let Some(token) = rotated_secret_value {
+        if let Some((token, _)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
                     .headers_mut()
@@ -16464,7 +17724,7 @@ async fn account_auth_middleware(
         next.run(request).await
     };
 
-    if let Some(cookie_value) = rotated_secret_value {
+    if let Some((cookie_value, expires_at)) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
         // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
         // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
@@ -16475,7 +17735,7 @@ async fn account_auth_middleware(
             .http_only(true)
             .same_site(cookie::SameSite::Strict)
             .path("/")
-            .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+            .max_age(rotated_cookie_max_age(expires_at, Utc::now()))
             .build();
         if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
             // APPEND, not insert: a handler may have already set its OWN Set-Cookie
@@ -16497,6 +17757,19 @@ async fn account_auth_middleware(
     }
 
     response
+}
+
+/// Max-Age for a rotated session cookie: the usual lifetime, capped at what
+/// is left of the session's absolute `expires_at`, so rotation can never make
+/// the cookie outlive its row. That matters for a step-up session
+/// (`STEP_UP_SESSION_TTL_MINUTES`), whose row expires long before a fresh
+/// seven-day cookie would.
+fn rotated_cookie_max_age(
+    expires_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> cookie::time::Duration {
+    let remaining = (expires_at - now).num_seconds().max(0);
+    cookie::time::Duration::seconds(remaining.min(ACCOUNT_SESSION_TTL_DAYS * 24 * 60 * 60))
 }
 
 #[cfg(test)]
@@ -16564,6 +17837,10 @@ async fn account_binding_handler(
     response
 }
 
+/// A session that rotated on this request: the new credential value (cookie
+/// value or native token) and the session's unchanged absolute expiry.
+type RotatedSession = (String, chrono::DateTime<Utc>);
+
 /// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
 /// rotated session secret (cookie path only) so the auth middleware can attach a
 /// fresh `Set-Cookie` on EVERY authenticated response. The bearer / both-creds /
@@ -16573,7 +17850,7 @@ async fn resolve_account_ctx_with_rotation(
     headers: &HeaderMap,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let bearer = headers
@@ -16637,7 +17914,7 @@ async fn resolve_account_ctx_native(
     bearer: &str,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let invalid = || {
@@ -16673,9 +17950,10 @@ async fn resolve_account_ctx_native(
     // middleware hands the new secret back in a response header (the bearer
     // analogue of `Set-Cookie`) so the client can swap before the short
     // prev-token grace lapses.
+    let expires_at = session.expires_at;
     let rotated = session
         .rotated_secret
-        .map(|new_secret| native_token_value(&tenant_id, &new_secret));
+        .map(|new_secret| (native_token_value(&tenant_id, &new_secret), expires_at));
 
     Ok((
         AccountCtx {
@@ -16706,7 +17984,7 @@ async fn resolve_account_ctx_cookie(
     cookie: &str,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let invalid = || {
@@ -16735,11 +18013,15 @@ async fn resolve_account_ctx_cookie(
     // (`{b64url(tenant)}.{new_secret}`) so the middleware can attach a fresh
     // `Set-Cookie`. The browser still holds the old secret until that header lands;
     // `validate_session` already parked the old hash as the within-grace prev token.
+    let expires_at = session.expires_at;
     let rotated_cookie_value = session.rotated_secret.map(|new_secret| {
-        format!(
-            "{}.{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
-            new_secret,
+        (
+            format!(
+                "{}.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
+                new_secret,
+            ),
+            expires_at,
         )
     });
 
@@ -17508,6 +18790,10 @@ fn trace_artifact_kind_from_storage(kind: StorageTraceObjectArtifactKind) -> Tra
 ///    corpus status and a transition may have left bytes at an earlier path.
 ///
 /// Errors propagate: withdrawal must not report success while content survives.
+///
+/// Marking the object refs deleted is the LAST durable step of a withdrawal:
+/// the source-session withdrawal reconciler keys on a ref not marked deleted,
+/// so everything a failure could leave behind has to come before it.
 async fn delete_withdrawn_trace_objects(
     state: &AppState,
     db: &Arc<dyn Database>,
@@ -17517,6 +18803,18 @@ async fn delete_withdrawn_trace_objects(
     token_bundles::cleanup(state, tenant_id, Some(submission_id)).await?;
     if let Some(record) = read_submission_record(&state.root, tenant_id, submission_id)? {
         delete_trace_objects_for_record(state, &record)?;
+    }
+    for status in [
+        TraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        TraceCorpusStatus::Rejected,
+        TraceCorpusStatus::Revoked,
+        TraceCorpusStatus::Expired,
+        TraceCorpusStatus::Purged,
+    ] {
+        let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+        remove_file_if_exists(&state.root.join(&object_key))?;
     }
 
     let tenant_ref = tenant_storage_ref(tenant_id);
@@ -17550,19 +18848,6 @@ async fn delete_withdrawn_trace_objects(
         )
         .await?;
     }
-
-    for status in [
-        TraceCorpusStatus::Accepted,
-        TraceCorpusStatus::Quarantined,
-        TraceCorpusStatus::AwaitingPiiBackstop,
-        TraceCorpusStatus::Rejected,
-        TraceCorpusStatus::Revoked,
-        TraceCorpusStatus::Expired,
-        TraceCorpusStatus::Purged,
-    ] {
-        let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
-        remove_file_if_exists(&state.root.join(&object_key))?;
-    }
     Ok(())
 }
 
@@ -17581,21 +18866,26 @@ async fn delete_withdrawn_trace_objects(
 /// Must run before the content is deleted: the tombstone's redaction hash
 /// comes from the stored envelope. On a retry the tombstone already exists
 /// and is left as first written.
+///
+/// The file tombstone is also written to the DB's `trace_tombstones`, as an
+/// operator revocation's mirror writes it, so the two tombstone records stay
+/// consistent: the rollback drill compares them by submission id.
 async fn revoke_withdrawn_trace_file_records(
     state: &AppState,
     db: &Arc<dyn Database>,
     tenant_id: &str,
     submission_id: Uuid,
+    created_by_principal_ref: &str,
 ) -> anyhow::Result<()> {
     let record = read_submission_record(&state.root, tenant_id, submission_id)?;
     let derived = read_derived_record(&state.root, tenant_id, submission_id)?;
     if record.is_none() && derived.is_none() {
         return Ok(());
     }
-    if read_revocation(&state.root, tenant_id, submission_id)?.is_none() {
-        write_revocation(
-            &state.root,
-            &TraceCommonsRevocation {
+    let file_tombstone = match read_revocation(&state.root, tenant_id, submission_id)? {
+        Some(existing) => existing,
+        None => {
+            let tombstone = TraceCommonsRevocation {
                 tenant_id: tenant_id.to_string(),
                 tenant_storage_ref: tenant_storage_ref(tenant_id),
                 submission_id,
@@ -17607,9 +18897,25 @@ async fn revoke_withdrawn_trace_file_records(
                 canonical_summary_hash: derived
                     .as_ref()
                     .map(|derived| derived.canonical_summary_hash.clone()),
-            },
-        )?;
-    }
+            };
+            write_revocation(&state.root, &tombstone)?;
+            tombstone
+        }
+    };
+    let trace_id = match record.as_ref() {
+        Some(record) => Some(record.trace_id),
+        None => db
+            .get_trace_submission(tenant_id, submission_id)
+            .await?
+            .map(|db_record| db_record.trace_id),
+    };
+    write_file_tombstone_to_db(
+        db.as_ref(),
+        &file_tombstone,
+        trace_id,
+        created_by_principal_ref,
+    )
+    .await?;
     if let Some(mut record) = record {
         let purged_at = db
             .get_trace_submission(tenant_id, submission_id)
@@ -17631,10 +18937,46 @@ async fn revoke_withdrawn_trace_file_records(
     Ok(())
 }
 
+/// Write a file revocation tombstone's DB row in `trace_tombstones`, with the
+/// file tombstone's own reason, hashes and time, under the same deterministic
+/// tombstone id the revocation mirror uses. First writer wins
+/// (`ON CONFLICT DO NOTHING`), so a retry, or a repair run over a withdrawal
+/// that already has its row, changes nothing.
+async fn write_file_tombstone_to_db(
+    db: &dyn Database,
+    file_tombstone: &TraceCommonsRevocation,
+    trace_id: Option<Uuid>,
+    created_by_principal_ref: &str,
+) -> anyhow::Result<()> {
+    db.write_trace_tombstone(StorageTraceTombstoneWrite {
+        tombstone_id: deterministic_trace_uuid_for(
+            "revocation-tombstone",
+            &file_tombstone.tenant_id,
+            file_tombstone.submission_id,
+        ),
+        tenant_id: file_tombstone.tenant_id.clone(),
+        submission_id: file_tombstone.submission_id,
+        trace_id,
+        redaction_hash: file_tombstone.redaction_hash.clone(),
+        canonical_summary_hash: file_tombstone.canonical_summary_hash.clone(),
+        reason: file_tombstone.reason.clone(),
+        effective_at: file_tombstone.revoked_at,
+        retain_until: None,
+        created_by_principal_ref: created_by_principal_ref.to_string(),
+    })
+    .await
+    .context("failed to write the DB row for a file revocation tombstone")
+}
+
 /// Evict a withdrawn trace from every derived surface that would otherwise
 /// keep its content alive in derived form: the vector index (both the DB rows
 /// and the gate service's in-memory ANN index), the dedup clusters, and future
 /// export / benchmark membership.
+///
+/// The gate's in-memory index is evicted BEFORE the DB rows are invalidated:
+/// a gate failure then leaves the vector entry live in the DB, where the
+/// source-session withdrawal reconciler finds it and runs this again. The gate
+/// delete is idempotent (a miss is still "gone").
 async fn evict_withdrawn_trace_from_derived_surfaces(
     state: &AppState,
     db: &Arc<dyn Database>,
@@ -17643,8 +18985,6 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
 ) -> anyhow::Result<()> {
     let vector_entry_ids = db
         .list_trace_vector_entry_ids_for_submission(tenant_id, submission_id)
-        .await?;
-    db.invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
         .await?;
     // Canonical tenant_storage_ref: it must match the form the gate worker
     // used at insertion time, or a sharded index routes the delete to the
@@ -17656,6 +18996,8 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
             .invalidate_vector_entry(&gate_tenant, vector_entry_id)
             .context("VectorInvalidationFailed")?;
     }
+    db.invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
+        .await?;
 
     db.clear_trace_dedup_cluster_for_submission(tenant_id, submission_id)
         .await?;
@@ -17674,6 +19016,78 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
         StorageTraceExportManifestItemInvalidationReason::Revoked,
     )
     .await?;
+    Ok(())
+}
+
+/// Everything a withdrawal does after its DB tombstone and `revoked` status
+/// have landed, for every withdrawn version in `affected_ids`: the file-side
+/// tombstone and records, eviction from derived surfaces, deletion of every
+/// stored object (token bundles included), and one hash-only revoke audit
+/// event per version. Credit needs no step here: unsettled credit on a
+/// revoked record is never batched.
+///
+/// Shared by the withdrawal route, account merge, and the source-session
+/// withdrawal reconciler, so a version whose withdrawal a merge or the
+/// reconciler completes is treated exactly as a withdrawn one. Idempotent: a
+/// retry converges rather than leaving content behind. `audit_tenant` is the
+/// actor recorded on the tombstone and the audit events: the synthetic
+/// account-actor ref on the account routes, the worker principal on the
+/// reconciler. Never contributor identity.
+async fn complete_trace_withdrawal(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    audit_tenant: &TenantAuth,
+    affected_ids: &[Uuid],
+) -> anyhow::Result<()> {
+    // The file side records the withdrawal too, before any content is deleted:
+    // the file tombstone's redaction hash is read from the stored envelope.
+    // Its DB row is written from the same tombstone.
+    for affected_id in affected_ids.iter().copied() {
+        revoke_withdrawn_trace_file_records(
+            state,
+            db,
+            tenant_id,
+            affected_id,
+            &audit_tenant.principal_ref,
+        )
+        .await?;
+    }
+
+    // Retained mappings make this list stable across retries. Complete the
+    // external deletion for every content version before reporting success.
+    // Object refs are marked deleted last, so a failure anywhere here leaves
+    // a version the reconciler still finds.
+    for affected_id in affected_ids.iter().copied() {
+        evict_withdrawn_trace_from_derived_surfaces(state, db, tenant_id, affected_id).await?;
+        delete_withdrawn_trace_objects(state, db, tenant_id, affected_id).await?;
+    }
+
+    // Hash-only audit, one event per withdrawn version. The reason is a fixed
+    // label. It is appended only once the content is gone, so a failed run
+    // followed by a reconciled one still records one event per version.
+    for affected_id in affected_ids.iter().copied() {
+        let audit_event =
+            TraceCommonsAuditEvent::revoked(audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
+        if let Err(error) = append_audit_event_with_db_mirror(
+            state,
+            audit_tenant,
+            audit_event,
+            StorageTraceAuditAction::Revoke,
+            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+        )
+        .await
+        {
+            // The content is already gone and the tombstone is durable; a
+            // failed audit append must not resurrect either. Log hash-only
+            // and continue.
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                submission_id = %affected_id,
+                "Trace Commons withdrawal audit append failed"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -17743,29 +19157,32 @@ async fn account_trace_withdraw_handler(
     Extension(ctx): Extension<AccountCtx>,
     AxumPath(submission_id): AxumPath<Uuid>,
 ) -> ApiResult<Json<AccountTraceWithdrawalResponse>> {
-    let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
-
     let db = account_db(state.as_ref())?;
-    let record = db
-        .get_trace_submission(&ctx.tenant_id, submission_id)
-        .await
-        .map_err(internal_error)?;
-    // Ownership BEFORE any state change. The storage record is used directly
-    // rather than the local corpus-status projection, which drops `received`
-    // and would leave those traces permanently un-withdrawable.
-    let record = match record {
-        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
-        _ => return Err(not_found()),
-    };
+    let record = owned_account_trace_submission(&db, &ctx, submission_id).await?;
 
-    let withdrawal_failed = |error: &anyhow::Error| {
-        tracing::warn!(
-            error_hash = %safe_display_error_hash(error),
-            %submission_id,
-            "Trace Commons trace withdrawal failed; failing closed"
-        );
-        api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
-    };
+    let withdrawal_failed =
+        |error: &anyhow::Error| account_trace_withdrawal_failed(submission_id, error);
+
+    // A withdrawal that reaches a pipeline run -- the submission's own, or
+    // one of another submission of its source session -- goes through the
+    // pipeline withdrawal, which also queues the index invalidation and ends
+    // the run's work. Every other withdrawal takes the path below, unchanged.
+    if let Some(pipeline) = state.pipeline_service.as_ref() {
+        let reaches = pipeline
+            .store()
+            .withdrawal_reaches_a_pipeline_run(
+                &ctx.tenant_id,
+                ctx.account_id.as_uuid(),
+                submission_id,
+            )
+            .await
+            .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+        if reaches {
+            let (response, _) =
+                pipeline_account_trace_withdrawal(&state, &ctx, &db, &record, pipeline).await?;
+            return Ok(Json(response));
+        }
+    }
 
     // Tier. An existing tombstone is authoritative: the reach recorded at the
     // first withdrawal is the honest answer, and recomputing it against
@@ -17803,15 +19220,10 @@ async fn account_trace_withdraw_handler(
     // Read before any state change, so a failed read leaves nothing withdrawn.
     // Recomputing on a retry gives the same answer: once the record is
     // revoked, no batch can pick its events up.
-    let credit_tenant = account_audit_tenant(&ctx);
-    let credit_events = read_credit_events_for_admin(state.as_ref(), &credit_tenant)
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
-    let settlement_batches =
-        read_credit_settlement_batches_for_admin(state.as_ref(), &credit_tenant)
+    let (credit_events, finalized_credit_event_ids) =
+        read_account_withdrawal_credit(state.as_ref(), &ctx)
             .await
             .map_err(|error| withdrawal_failed(&error))?;
-    let finalized_credit_event_ids = finalized_settlement_credit_event_ids(&settlement_batches);
 
     // Tombstone + status FIRST, bytes second: a crash between the two leaves a
     // tombstone whose retry deletes the content, never content with no record
@@ -17841,61 +19253,125 @@ async fn account_trace_withdraw_handler(
         (tombstone, vec![submission_id])
     };
 
+    // Zaki review 1, round 2, N-9: a build with no runtime injected takes
+    // this path for a submission with a pipeline run too, so each withdrawn
+    // version with one gets the pipeline's follow-up through the database
+    // (its revision queued for removal from the pipeline index, a payload
+    // deletion per live object, its runs' work ended), for a later runtime
+    // to process. After the tombstones and before the bytes, as the
+    // completion reconciler runs it; idempotent, and nothing for a version
+    // with no run.
+    if state.pipeline_service.is_none() {
+        if let Some(store) = state.pipeline_store.as_ref() {
+            let actor = account_audit_tenant(&ctx);
+            for affected_id in &affected_ids {
+                store
+                    .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
+                    .await
+                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+            }
+        }
+    }
+
     // Credit is retained only if it is retained for every withdrawn version.
     let credit_retained = affected_ids.iter().all(|affected_id| {
         withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
     });
 
-    // The file side records the withdrawal too, before any content is deleted:
-    // the file tombstone's redaction hash is read from the stored envelope.
-    for affected_id in affected_ids.iter().copied() {
-        revoke_withdrawn_trace_file_records(state.as_ref(), &db, &ctx.tenant_id, affected_id)
-            .await
-            .map_err(|error| withdrawal_failed(&error))?;
-    }
+    let response = finish_account_trace_withdrawal(
+        state.as_ref(),
+        &ctx,
+        &db,
+        &record,
+        tombstone,
+        &affected_ids,
+        credit_retained,
+    )
+    .await?;
+    Ok(Json(response))
+}
 
-    // Retained mappings make this list stable across retries. Complete the
-    // external deletion for every content version before reporting success.
-    for affected_id in affected_ids.iter().copied() {
-        evict_withdrawn_trace_from_derived_surfaces(
-            state.as_ref(),
-            &db,
-            &ctx.tenant_id,
-            affected_id,
-        )
+/// The requested submission, when the account owns it. Ownership is checked
+/// BEFORE any state change, against the account's active principal set. The
+/// storage record is used directly rather than the local corpus-status
+/// projection, which drops `received` and would leave those traces
+/// permanently un-withdrawable. Not found and not owned are the same `404`.
+async fn owned_account_trace_submission(
+    db: &Arc<dyn Database>,
+    ctx: &AccountCtx,
+    submission_id: Uuid,
+) -> ApiResult<StorageTraceSubmissionRecord> {
+    let record = db
+        .get_trace_submission(&ctx.tenant_id, submission_id)
         .await
-        .map_err(|error| withdrawal_failed(&error))?;
-        delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, affected_id)
-            .await
-            .map_err(|error| withdrawal_failed(&error))?;
+        .map_err(internal_error)?;
+    match record {
+        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => Ok(record),
+        _ => Err(api_error(StatusCode::NOT_FOUND, "trace not found")),
     }
+}
 
-    // Hash-only audit, one event per withdrawn version. The reason is a fixed
-    // label; the actor is the synthetic account-actor ref, never contributor
-    // identity.
-    let audit_tenant = account_audit_tenant(&ctx);
-    for affected_id in affected_ids.iter().copied() {
-        let audit_event =
-            TraceCommonsAuditEvent::revoked(&audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
-        if let Err(error) = append_audit_event_with_db_mirror(
-            state.as_ref(),
-            &audit_tenant,
-            audit_event,
-            StorageTraceAuditAction::Revoke,
-            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
-        )
-        .await
-        {
-            // The content is already gone and the tombstone is durable; a
-            // failed audit append must not resurrect either. Log hash-only
-            // and continue.
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(&error),
-                submission_id = %affected_id,
-                "Trace Commons withdrawal audit append failed"
-            );
-        }
-    }
+/// The label-only `500` every account withdrawal failure returns, logged
+/// hash-only.
+fn account_trace_withdrawal_failed(
+    submission_id: Uuid,
+    error: &anyhow::Error,
+) -> (StatusCode, Json<ApiError>) {
+    tracing::warn!(
+        error_hash = %safe_display_error_hash(error),
+        %submission_id,
+        "Trace Commons trace withdrawal failed; failing closed"
+    );
+    api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
+}
+
+/// The account's credit events and the ids of the events a finalized batch
+/// carries: what `withdrawal_retains_all_credit` reads.
+async fn read_account_withdrawal_credit(
+    state: &AppState,
+    ctx: &AccountCtx,
+) -> anyhow::Result<(Vec<TraceCommonsCreditLedgerRecord>, BTreeSet<Uuid>)> {
+    let credit_tenant = account_audit_tenant(ctx);
+    let credit_events = read_credit_events_for_admin(state, &credit_tenant).await?;
+    let settlement_batches =
+        read_credit_settlement_batches_for_admin(state, &credit_tenant).await?;
+    Ok((
+        credit_events,
+        finalized_settlement_credit_event_ids(&settlement_batches),
+    ))
+}
+
+/// The part of an account withdrawal after its tombstones are durable, the
+/// same for the legacy and the pipeline withdrawal: `main`'s
+/// `complete_trace_withdrawal` (the file tombstone, eviction, deletion and
+/// per-version audit), then the response, built as `main`'s handler builds
+/// it.
+async fn finish_account_trace_withdrawal(
+    state: &AppState,
+    ctx: &AccountCtx,
+    db: &Arc<dyn Database>,
+    record: &StorageTraceSubmissionRecord,
+    tombstone: StorageTraceWithdrawalRecord,
+    affected_ids: &[Uuid],
+    credit_retained: bool,
+) -> ApiResult<AccountTraceWithdrawalResponse> {
+    let submission_id = record.submission_id;
+    let withdrawal_failed =
+        |error: &anyhow::Error| account_trace_withdrawal_failed(submission_id, error);
+
+    // `main`'s tail of every account withdrawal (#1155): the file tombstone,
+    // eviction before the database invalidation, deletion, the object refs
+    // marked deleted last, and one hash-only revoke audit event per withdrawn
+    // version, in `main`'s order.
+    complete_trace_withdrawal(
+        state,
+        db,
+        &ctx.tenant_id,
+        &account_audit_tenant(ctx),
+        affected_ids,
+    )
+    .await
+    .map_err(|error| withdrawal_failed(&error))?;
 
     let mut response = AccountTraceWithdrawalResponse::from_record(tombstone, credit_retained);
     if db.supports_token_bundles() {
@@ -17928,7 +19404,109 @@ async fn account_trace_withdraw_handler(
         }
         response.token_deletion_state = Some(state_label);
     }
-    Ok(Json(response))
+    Ok(response)
+}
+
+/// The pipeline withdrawal behind both account withdrawal routes, for a
+/// submission whose withdrawal reaches a pipeline run.
+///
+/// `PipelineService::withdraw_submission` writes every tombstone, withdraws
+/// the submission's source session and every submission mapped to it, and
+/// queues the pipeline follow-up (index invalidation, payload deletion), all
+/// in one transaction. This then does what `main`'s account withdrawal does
+/// after its tombstones (`finish_account_trace_withdrawal`), for every
+/// affected submission.
+///
+/// Credit is retained when no withdrawn version has credit that has not
+/// settled: `main`'s rule over the account's credit events
+/// (`withdrawal_retains_all_credit`), and no Trace Credit settlement leg the
+/// withdrawal forfeits (a leg Settle has not completed yet pays nothing
+/// once the submission is withdrawn).
+async fn pipeline_account_trace_withdrawal(
+    state: &AppState,
+    ctx: &AccountCtx,
+    db: &Arc<dyn Database>,
+    record: &StorageTraceSubmissionRecord,
+    pipeline: &PipelineService,
+) -> ApiResult<(AccountTraceWithdrawalResponse, PipelineWithdrawalOutcome)> {
+    let submission_id = record.submission_id;
+    let withdrawal_failed =
+        |error: &anyhow::Error| account_trace_withdrawal_failed(submission_id, error);
+    // Read before any state change, so a failed read leaves nothing withdrawn.
+    let (credit_events, finalized_credit_event_ids) = read_account_withdrawal_credit(state, ctx)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+    let outcome = match pipeline
+        .withdraw_submission(
+            &ctx.tenant_id,
+            submission_id,
+            &record.auth_principal_ref,
+            Some(ctx.account_id.as_uuid()),
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error)
+            if matches!(
+                error.downcast_ref::<DatabaseError>(),
+                Some(DatabaseError::NotFound { .. })
+            ) =>
+        {
+            return Err(api_error(StatusCode::NOT_FOUND, "trace not found"));
+        }
+        Err(error) => return Err(withdrawal_failed(&error)),
+    };
+    let credit_retained = !outcome.trace_credit_forfeited
+        && outcome.affected_submission_ids.iter().all(|affected_id| {
+            withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+        });
+    let response = finish_account_trace_withdrawal(
+        state,
+        ctx,
+        db,
+        record,
+        outcome.withdrawal.clone(),
+        &outcome.affected_submission_ids,
+        credit_retained,
+    )
+    .await?;
+    Ok((response, outcome))
+}
+
+/// Response body for
+/// `POST /v1/contributors/me/pipeline-submissions/{submission_id}/withdraw`:
+/// the account withdrawal response, plus where the pipeline follow-up
+/// stands.
+#[derive(Debug, Serialize)]
+struct PipelineSubmissionWithdrawalResponse {
+    #[serde(flatten)]
+    withdrawal: AccountTraceWithdrawalResponse,
+    index_invalidation: PipelineWithdrawalFollowUpState,
+    revocation_propagation: PipelineWithdrawalFollowUpState,
+}
+
+/// `POST /v1/contributors/me/pipeline-submissions/{submission_id}/withdraw`:
+/// withdraws a pipeline submission. It authenticates and checks ownership
+/// exactly as `POST /v1/account/traces/{submission_id}/withdraw` does -- an
+/// account session only, never a device key, and the same `404` for a
+/// submission that is not found and one the account does not own -- and
+/// returns that route's response with the pipeline follow-up states.
+/// Without a pipeline runtime there is nothing to withdraw here: `404`.
+async fn pipeline_submission_withdraw_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<Json<PipelineSubmissionWithdrawalResponse>> {
+    let pipeline = require_pipeline_service(state.as_ref())?;
+    let db = account_db(state.as_ref())?;
+    let record = owned_account_trace_submission(&db, &ctx, submission_id).await?;
+    let (withdrawal, outcome) =
+        pipeline_account_trace_withdrawal(state.as_ref(), &ctx, &db, &record, pipeline).await?;
+    Ok(Json(PipelineSubmissionWithdrawalResponse {
+        withdrawal,
+        index_invalidation: outcome.index_invalidation,
+        revocation_propagation: outcome.revocation_propagation,
+    }))
 }
 
 /// Mint a single-use login link for the authenticated device's principal.
@@ -18180,6 +19758,9 @@ use native_passkey::{
     native_passkey_login_finish_handler, native_passkey_login_start_handler,
 };
 
+#[path = "trace_commons_ingest_internal/step_up_page.rs"]
+mod step_up_page;
+
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
@@ -18382,6 +19963,12 @@ where
 
 /// Issued session lifetime. Matches the spec's ~7d browser session.
 const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
+
+/// Lifetime of a browser passkey session minted for the step-up page (Z2 S7):
+/// a sign-in whose `login/start` asked for `purpose=step_up`. Absolute, like
+/// every session's `expires_at`: activity and rotation-on-use never move it.
+/// A constant, as the other session lifetimes are.
+const STEP_UP_SESSION_TTL_MINUTES: i64 = 15;
 
 /// The session cookie name. Value is `{b64url(tenant_id)}.{secret}`; only the
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
@@ -20400,6 +21987,134 @@ async fn account_merge_start_handler(
     })))
 }
 
+/// How many incomplete withdrawn versions one merge confirm completes inline.
+/// More than that is left to the revocation-propagation reconciler, and the
+/// response says completion is pending. A work bound, not a policy.
+const MERGE_WITHDRAWAL_COMPLETION_LIMIT: i64 = 500;
+
+/// Counts from one source-session withdrawal reconciliation pass. Counts only:
+/// hash-only by construction.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SourceSessionWithdrawalReconcileSummary {
+    /// Incomplete withdrawn versions found.
+    checked: usize,
+    /// Versions whose withdrawal this pass completed.
+    completed: usize,
+    /// Versions whose completion failed; the next pass finds them again.
+    failed: usize,
+}
+
+/// Complete every source-session withdrawal that actual state says is not
+/// finished, for `tenant_id` (and one account, if `account_id` is set).
+///
+/// Keyed on state, not on a record of intent: see
+/// `list_incomplete_source_session_withdrawals`. Two sources feed it:
+///
+/// - an account merge, which can join one account's live version to a
+///   session the other account had withdrawn (V78: a withdrawal on either
+///   side wins). That version has no `trace_withdrawals` row, so it is first
+///   withdrawn through `withdraw_trace_source_session`, which is idempotent
+///   and keeps the session's first `withdrawn_at`;
+/// - a source-session-mapped withdrawal whose tail failed after the DB
+///   tombstone and `revoked` status landed: its object refs, vector entry,
+///   dedup cluster, derived records, or token attachments are still there.
+///
+/// Each version then runs the idempotent `complete_trace_withdrawal` tail on
+/// its own, so one failure does not hold up the rest, and a failed version is
+/// found again on the next pass. Runs at merge confirm (scoped to the
+/// survivor) and from the revocation-propagation worker (its authenticated
+/// tenant only). The in-process scheduler covers only its token's tenant;
+/// other tenants require their own worker invocation or external schedule.
+/// Failures are logged hash-only and persisted incomplete state feeds the
+/// tenant's operational withdrawal-completion alert.
+async fn reconcile_source_session_withdrawals(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    account_id: Option<Uuid>,
+    audit_tenant: &TenantAuth,
+    limit: i64,
+    dry_run: bool,
+) -> anyhow::Result<SourceSessionWithdrawalReconcileSummary> {
+    let held_retention_policy_ids = state
+        .legal_hold_retention_policy_ids
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let incomplete = db
+        .list_incomplete_source_session_withdrawals(
+            tenant_id,
+            account_id,
+            &held_retention_policy_ids,
+            limit,
+        )
+        .await
+        .context("failed to list incomplete source-session withdrawals")?;
+    let mut summary = SourceSessionWithdrawalReconcileSummary {
+        checked: incomplete.len(),
+        ..SourceSessionWithdrawalReconcileSummary::default()
+    };
+    if dry_run {
+        return Ok(summary);
+    }
+    for version in incomplete {
+        let outcome: anyhow::Result<()> = async {
+            if !version.withdrawal_recorded {
+                // Tombstone and revoke first, bytes second, as the route does.
+                db.withdraw_trace_source_session(
+                    tenant_id,
+                    version.account_id,
+                    version.submission_id,
+                    Utc::now(),
+                )
+                .await?
+                .context("TraceSourceSessionMappingMissing")?;
+            }
+            // A version with a pipeline run gets the pipeline's follow-up
+            // too, as the pipeline withdrawal makes it: its revision queued
+            // for removal from the pipeline index, a payload deletion per
+            // live object, and its runs' work ended. It runs after the
+            // tombstone and before the bytes, and is idempotent, so a retried
+            // completion repeats nothing (Zaki review 1, round 2: #1155's
+            // consumer sweep).
+            if let Some(pipeline) = state.pipeline_service.as_ref() {
+                pipeline
+                    .follow_up_withdrawal(
+                        tenant_id,
+                        version.submission_id,
+                        &audit_tenant.principal_ref,
+                    )
+                    .await?;
+            } else if let Some(store) = state.pipeline_store.as_ref() {
+                // With no runtime injected, through the database (N-9).
+                store
+                    .follow_up_withdrawal(
+                        tenant_id,
+                        version.submission_id,
+                        &audit_tenant.principal_ref,
+                    )
+                    .await?;
+            }
+            complete_trace_withdrawal(state, db, tenant_id, audit_tenant, &[version.submission_id])
+                .await
+        }
+        .await;
+        match outcome {
+            Ok(()) => summary.completed += 1,
+            Err(error) => {
+                summary.failed += 1;
+                tracing::warn!(
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    submission_id = %version.submission_id,
+                    "Trace Commons source-session withdrawal completion failed; the next reconcile retries it"
+                );
+            }
+        }
+    }
+    Ok(summary)
+}
+
 /// `POST /v1/account/merge/confirm` — execute a staged device-principal merge
 /// (Slice 3b Task 8). This is the IRREVERSIBLE step: it atomically re-keys
 /// account B's principals + strong authenticators onto the caller's account and
@@ -20413,6 +22128,18 @@ async fn account_merge_start_handler(
 /// or a closed survivor/absorbed account all affect zero rows and yield a UNIFORM
 /// 400 — no existence oracle. `execute_merge` writes the `account_merged` audit on
 /// success; this handler adds none. Hash-only: returns counts only.
+///
+/// After the merge commits, a withdrawal either account made wins across the
+/// merged session: [`reconcile_source_session_withdrawals`] completes it for
+/// the survivor. The merge is committed and irreversible by then, and the
+/// proposal is consumed, so a failure there cannot be retried through this
+/// route and is not reported as one: the response is still `200`, with
+/// `withdrawal_completion_pending: true`. Each completion writes the DB revoke
+/// and tombstone before deleting content. Remaining work is re-derived from
+/// actual state and finished by a revocation-propagation worker run for this
+/// tenant. The scheduler covers only its token's tenant, so other tenants need
+/// an explicit worker run; see the account-merge operator runbook. Persisted
+/// incomplete state also feeds the tenant's operational pending alert.
 async fn account_merge_confirm_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -20438,10 +22165,42 @@ async fn account_merge_confirm_handler(
         ));
     };
 
+    let withdrawal_completion_pending = match reconcile_source_session_withdrawals(
+        state.as_ref(),
+        &db,
+        &ctx.tenant_id,
+        Some(ctx.account_id.as_uuid()),
+        &account_audit_tenant(&ctx),
+        MERGE_WITHDRAWAL_COMPLETION_LIMIT,
+        false,
+    )
+    .await
+    {
+        Ok(summary) => {
+            summary.failed > 0
+                || i64::try_from(summary.checked).unwrap_or(i64::MAX)
+                    >= MERGE_WITHDRAWAL_COMPLETION_LIMIT
+        }
+        Err(error) => {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                "Trace Commons merge withdrawal lookup failed"
+            );
+            true
+        }
+    };
+    if withdrawal_completion_pending {
+        tracing::warn!(
+            tenant_storage_ref = %tenant_storage_ref(&ctx.tenant_id),
+            "Trace Commons merge committed with withdrawal completion pending; run the revocation-propagation worker for this tenant"
+        );
+    }
+
     Ok(Json(serde_json::json!({
         "merged": true,
         "principals_moved": merge.principals_moved,
         "authenticators_moved": merge.authenticators_moved,
+        "withdrawal_completion_pending": withdrawal_completion_pending,
     })))
 }
 
@@ -20515,6 +22274,34 @@ where
     }
 }
 
+/// What a browser passkey sign-in is for, fixed at `login/start` and carried
+/// in the ceremony to `finish`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasskeyLoginPurpose {
+    /// An ordinary sign-in: a session of `ACCOUNT_SESSION_TTL_DAYS`.
+    Session,
+    /// The step-up page's sign-in (Z2 S7): a session of
+    /// `STEP_UP_SESSION_TTL_MINUTES`.
+    StepUp,
+}
+
+/// The `purpose` of a `login/start`, from its raw query. No `purpose` is an
+/// ordinary sign-in and other parameters are ignored, as before. A `purpose`
+/// must be exactly `step_up`, once; any other value (or a repeat) is `None`,
+/// which the handler answers with the uniform deny. The value is compared, not
+/// decoded, and never logged.
+fn passkey_login_purpose(query: Option<&str>) -> Option<PasskeyLoginPurpose> {
+    let mut purposes = query.unwrap_or_default().split('&').filter_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "purpose").then_some(value)
+    });
+    match (purposes.next(), purposes.next()) {
+        (None, _) => Some(PasskeyLoginPurpose::Session),
+        (Some("step_up"), None) => Some(PasskeyLoginPurpose::StepUp),
+        _ => None,
+    }
+}
+
 /// `POST /account/passkey/login/start` — begin a discoverable passkey login
 /// (Slice 2 Task 6). UNAUTHENTICATED. Fails closed (uniform deny) when the
 /// relying party is unconfigured. Rate-limited per-IP + global. Issues a
@@ -20526,7 +22313,13 @@ where
 async fn account_passkey_login_start_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> axum::response::Response {
+    // The one optional input: `purpose=step_up` from the step-up page. Checked
+    // before anything else so a refused purpose costs nothing.
+    let Some(purpose) = passkey_login_purpose(query.as_deref()) else {
+        return passkey_login_generic_deny();
+    };
     // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
     // in the `REDEEM_MIN_LATENCY` timing floor. It performs NO credential or tenant
     // lookup — it only mints a fresh discoverable-auth challenge — so there is no
@@ -20559,7 +22352,10 @@ async fn account_passkey_login_start_handler(
     let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
-        CeremonyState::DiscoverableAuthentication(auth_state),
+        match purpose {
+            PasskeyLoginPurpose::Session => CeremonyState::DiscoverableAuthentication(auth_state),
+            PasskeyLoginPurpose::StepUp => CeremonyState::StepUpDiscoverable(auth_state),
+        },
     );
 
     // Same short-lived ceremony cookie shape as enrollment (Task 5): opaque id
@@ -20735,14 +22531,21 @@ async fn account_passkey_login_finish_inner(
 
     // 3. Recover and CONSUME (single-use `take`) the pending discoverable-auth
     //    state via the ceremony cookie. Missing / expired / already-consumed /
-    //    wrong-variant all collapse to the uniform deny.
-    let auth_state = match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
-        Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-            Some(CeremonyState::DiscoverableAuthentication(auth_state)) => auth_state,
-            Some(_) | None => return passkey_login_generic_deny(),
-        },
-        None => return passkey_login_generic_deny(),
-    };
+    //    wrong-variant all collapse to the uniform deny. The purpose was bound
+    //    into the ceremony at `start`; nothing here can change it.
+    let (auth_state, purpose) =
+        match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
+            Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+                Some(CeremonyState::DiscoverableAuthentication(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::Session)
+                }
+                Some(CeremonyState::StepUpDiscoverable(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::StepUp)
+                }
+                Some(_) | None => return passkey_login_generic_deny(),
+            },
+            None => return passkey_login_generic_deny(),
+        };
 
     // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
     //    the advanced sign counter: the verification core shared with native
@@ -20762,9 +22565,22 @@ async fn account_passkey_login_finish_inner(
     //    hash-only audit in one RLS-scoped tx under the resolved tenant. NO
     //    ensure_trace_tenant: the credential is verified, so the tenant provably
     //    exists via its FK.
+    //    A step-up sign-in's session lasts `STEP_UP_SESSION_TTL_MINUTES`, in
+    //    the row's absolute `expires_at` and in the cookie's Max-Age alike.
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
-    let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
+    let (lifetime, metadata) = match purpose {
+        PasskeyLoginPurpose::Session => (
+            Duration::days(ACCOUNT_SESSION_TTL_DAYS),
+            // Hash-only / label-only: never the credential id or key material.
+            serde_json::json!({ "client_kind": "passkey" }),
+        ),
+        PasskeyLoginPurpose::StepUp => (
+            Duration::minutes(STEP_UP_SESSION_TTL_MINUTES),
+            serde_json::json!({ "client_kind": "passkey", "purpose": "step_up" }),
+        ),
+    };
+    let expires_at = Utc::now() + lifetime;
     if db
         .issue_passkey_session(
             &tenant,
@@ -20778,8 +22594,7 @@ async fn account_passkey_login_finish_inner(
             trace_commons_server::db::RedeemAudit {
                 action: "account_passkey_login".to_string(),
                 outcome: "success".to_string(),
-                // Hash-only / label-only: never the credential id or key material.
-                metadata: serde_json::json!({ "client_kind": "passkey" }),
+                metadata,
             },
         )
         .await
@@ -20801,7 +22616,7 @@ async fn account_passkey_login_finish_inner(
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
         .path("/")
-        .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+        .max_age(cookie::time::Duration::seconds(lifetime.num_seconds()))
         .build();
     // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
     let clear_ceremony = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ""))
@@ -22043,8 +23858,15 @@ const RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND: &str =
     "retention_purged_artifact_invalidation";
 
 /// The file audit event recording an operator audit-chain repair: how many
-/// file lines it restored from the DB. Hash-only.
-const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str = "audit_chain_repair";
+/// file lines it restored from the DB, or the legacy segment it resumed the
+/// DB chain across. Hash-only. The store accepts a resume only from a row of
+/// this kind.
+const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str =
+    trace_commons_server::trace_corpus_storage::TRACE_AUDIT_CHAIN_REPAIR_KIND;
+
+/// The file audit event recording an operator tombstone repair: how many DB
+/// tombstone rows it wrote from file tombstones. Hash-only.
+const TOMBSTONE_REPAIR_AUDIT_KIND: &str = "tombstone_repair";
 
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
@@ -22053,6 +23875,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+            | TOMBSTONE_REPAIR_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -23461,6 +25284,16 @@ impl NearSettlementMode {
             NearSettlementMode::Disabled => "disabled",
             NearSettlementMode::DryRun => "dry_run",
             NearSettlementMode::Http => "http",
+        }
+    }
+
+    /// The same mode, as the pipeline payout follows it (Zaki review 1,
+    /// round 2, finding 2).
+    fn for_pipeline(self) -> PipelineNearSettlementMode {
+        match self {
+            NearSettlementMode::Disabled => PipelineNearSettlementMode::Disabled,
+            NearSettlementMode::DryRun => PipelineNearSettlementMode::DryRun,
+            NearSettlementMode::Http => PipelineNearSettlementMode::Http,
         }
     }
 }
@@ -26993,13 +28826,7 @@ async fn run_credit_settlement_unlocked(
                 PayoutResolution::Designated(near) | PayoutResolution::SoleActive(near) => {
                     (Some(near), None)
                 }
-                PayoutResolution::Hold(reason) => {
-                    let label = match reason {
-                        PayoutHoldReason::NoneEnrolled => "none_enrolled",
-                        PayoutHoldReason::AmbiguousNoDesignation => "ambiguous_no_designation",
-                    };
-                    (None, Some(label.to_string()))
-                }
+                PayoutResolution::Hold(reason) => (None, Some(reason.label().to_string())),
             }
         } else {
             (None, None)
@@ -27185,16 +29012,6 @@ fn validate_credit_risk_summary_account_limit(limit: Option<usize>) -> ApiResult
 /// while the payout groups by account, a contributor holding several
 /// principals under one account is capped once per principal and paid once
 /// per account.
-fn settlement_group_key(
-    auth_principal_ref: &str,
-    principal_to_account: &HashMap<String, Uuid>,
-) -> String {
-    principal_to_account
-        .get(auth_principal_ref)
-        .map(|account_id| format!("{ACCOUNT_SETTLEMENT_KEY_PREFIX}{account_id}"))
-        .unwrap_or_else(|| auth_principal_ref.to_string())
-}
-
 fn apply_credit_settlement_account_cap(
     events: Vec<TraceCommonsCreditLedgerRecord>,
     max_micros_per_account: Option<i64>,
@@ -27403,35 +29220,6 @@ fn near_credit_outbox_item_from_settlement_line_item(
         last_error_hash: None,
         confirmed_at: None,
     })
-}
-
-fn trace_credit_settlement_attestation_hash(
-    source_list_hash: &str,
-    issuer_approval_evidence_hash: Option<&str>,
-) -> String {
-    if let Some(approval_hash) = issuer_approval_evidence_hash {
-        sha256_prefixed(&format!(
-            "trace-credit-attestation:v2:{source_list_hash}:{approval_hash}"
-        ))
-    } else {
-        sha256_prefixed(&format!("trace-credit-attestation:v1:{source_list_hash}"))
-    }
-}
-
-fn trace_credit_settlement_issuer_signature_hash(
-    settlement_batch_id: Uuid,
-    source_list_hash: &str,
-    issuer_approval_evidence_hash: Option<&str>,
-) -> String {
-    if let Some(approval_hash) = issuer_approval_evidence_hash {
-        sha256_prefixed(&format!(
-            "trace-credit-settlement:v2:{settlement_batch_id}:{source_list_hash}:{approval_hash}"
-        ))
-    } else {
-        sha256_prefixed(&format!(
-            "trace-credit-settlement:v1:{settlement_batch_id}:{source_list_hash}"
-        ))
-    }
 }
 
 fn validate_credit_settlement_issuer_approval_evidence_hash(
@@ -28558,7 +30346,7 @@ async fn near_credit_outbox_handler(
 ) -> ApiResult<Json<Vec<TraceNearCreditOutboxItem>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let items = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
+    let items = read_mains_near_credit_outbox_items(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
     append_control_plane_read_audit(state.as_ref(), &tenant, "near_credit_outbox", items.len())
@@ -28792,7 +30580,7 @@ async fn mark_near_credit_outbox_status_handler(
     };
     require_near_credit_outbox_status_principal_if_configured(state.as_ref(), &tenant)?;
     require_near_credit_manual_status_adapter_auth(state.as_ref(), status)?;
-    let existing = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
+    let existing = read_mains_near_credit_outbox_items(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?
         .into_iter()
@@ -29638,7 +31426,7 @@ async fn run_near_credit_outbox_submit_worker(
     // Preview snapshot, used ONLY for the dry_run report. The live submit path
     // re-reads candidates UNDER the advisory lock below so a run that waited on the
     // lock observes the prior run's committed writes (never a stale pre-lock read).
-    let preview_items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let preview_items = read_mains_near_credit_outbox_items(state, tenant).await?;
     let preview_pending_total = preview_items
         .iter()
         .filter(|item| near_credit_outbox_item_is_submit_candidate(item))
@@ -29842,7 +31630,7 @@ async fn run_near_credit_outbox_confirm_worker(
     let limit = request
         .limit
         .clamp(1, TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT) as usize;
-    let items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let items = read_mains_near_credit_outbox_items(state, tenant).await?;
     let pending_total = items
         .iter()
         .filter(|item| near_credit_outbox_item_is_confirm_candidate(item))
@@ -31411,6 +33199,25 @@ async fn read_near_credit_outbox_items_for_admin(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
+    read_near_credit_outbox_items(state, tenant, true).await
+}
+
+/// `read_near_credit_outbox_items_for_admin` without the versioned
+/// pipeline's payout rows (`near_credit_outbox_record_is_pipeline_payout`):
+/// the NEAR outbox workers' read, and the read of `main`'s admin outbox
+/// listing and manual status route (Zaki review 1, item 3).
+async fn read_mains_near_credit_outbox_items(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
+    read_near_credit_outbox_items(state, tenant, false).await
+}
+
+async fn read_near_credit_outbox_items(
+    state: &AppState,
+    tenant: &TenantAuth,
+    include_pipeline_payout_rows: bool,
+) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
     if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         let db = state
             .db_mirror
@@ -31421,10 +33228,29 @@ async fn read_near_credit_outbox_items_for_admin(
             .await
             .context("failed to read NEAR credit outbox items from DB mirror")?
             .into_iter()
+            .filter(|record| {
+                include_pipeline_payout_rows
+                    || !near_credit_outbox_record_is_pipeline_payout(record)
+            })
             .map(near_credit_outbox_item_from_storage)
             .collect();
     }
     read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)
+}
+
+/// A versioned-pipeline payout row (a non-NULL `instrument_id`, V94). The
+/// pipeline submits and confirms those through its own NEAR payout adapter,
+/// so `main`'s NEAR outbox workers never select one (Ruling T10-3): one
+/// payout is never submitted twice, through two adapters. `main`'s admin
+/// outbox listing leaves it out, and its manual status route answers it
+/// `404`, as a row it does not have: an operator could otherwise mark a
+/// pipeline line confirmed with no adapter evidence, or submit one the
+/// pipeline also submits (Zaki review 1, item 3). The pipeline's
+/// operational summary still counts it. The file store never holds one.
+fn near_credit_outbox_record_is_pipeline_payout(
+    record: &StorageTraceNearCreditOutboxItemRecord,
+) -> bool {
+    record.instrument_id.is_some()
 }
 
 /// Read submit candidates (`pending`/`failed` rows) for the under-lock submit pass.
@@ -31447,6 +33273,7 @@ async fn read_near_credit_outbox_submit_candidates_authoritative(
             .await
             .context("failed to read DB-authoritative NEAR credit outbox candidates")?
             .into_iter()
+            .filter(|record| !near_credit_outbox_record_is_pipeline_payout(record))
             .map(near_credit_outbox_item_from_storage)
             .collect::<anyhow::Result<Vec<_>>>()?
     } else {
@@ -40642,6 +42469,364 @@ async fn release_review_lease_handler(
     Ok(Json(TraceReviewLeaseResponse::from_record(&record)))
 }
 
+// Versioned pipeline human review (Task 3): claims, assessments, and the
+// quarantine queue for a run parked at Review. These three routes sit
+// behind the same reviewer credential as `claim_review_lease_handler`
+// above -- a tenant-scoped bearer token whose role can review -- and copy
+// its authentication and error-mapping shape. Without an injected pipeline
+// runtime (`state.pipeline_service`), all three return 404: there is
+// nothing for a reviewer to claim or assess.
+
+/// `reviewer_sha256:` plus the lowercase hex SHA-256 of the authenticated
+/// reviewer principal -- the `pipeline_review_claims.reviewer_principal_ref`
+/// shape `PgPipelineStore::claim_review` requires.
+fn pipeline_reviewer_principal_ref(principal_ref: &str) -> String {
+    format!(
+        "reviewer_sha256:{}",
+        hex::encode(Sha256::digest(principal_ref.as_bytes()))
+    )
+}
+
+/// 404 when no pipeline runtime was injected -- the shared refusal for all
+/// three pipeline review routes.
+fn require_pipeline_service(state: &AppState) -> ApiResult<&Arc<PipelineService>> {
+    state
+        .pipeline_service
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline runtime not configured"))
+}
+
+/// `claim_review`'s and `record_review_assessment`'s refusal of a run whose
+/// submission is no longer operable (or, for an assessment, of a claim that
+/// is no longer live).
+const PIPELINE_REVIEW_CLAIM_STALE_OR_INOPERABLE: &str = "review claim is stale or inoperable";
+
+/// Maps `record_review_assessment`'s labeled `Constraint` refusals to their
+/// HTTP shape: a stale or inoperable claim is a conflict with the run's
+/// current state, an unresolved quarantine reason is a semantically invalid
+/// request. The claim route maps its own inoperable refusal first
+/// (`pipeline_review_claim_db_error`). Every other `DatabaseError` --
+/// including `claim_review`'s own `invalid review claim`, which the claim
+/// handler's fixed 30-minute duration and derived reviewer ref should never
+/// trigger -- falls back to the generic hash-only internal error.
+fn pipeline_review_db_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
+    if let DatabaseError::Constraint(label) = &error {
+        if label == PIPELINE_REVIEW_CLAIM_STALE_OR_INOPERABLE {
+            return api_error(StatusCode::CONFLICT, label.clone());
+        }
+        if label == "quarantine reason is unresolved" {
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, label.clone());
+        }
+    }
+    internal_error(error)
+}
+
+#[derive(Debug, Deserialize)]
+struct PipelineReviewQuarantineQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+const DEFAULT_PIPELINE_REVIEW_QUEUE_LIMIT: usize = 50;
+
+#[derive(Debug, Serialize)]
+struct PipelineReviewQueueItem {
+    run_id: Uuid,
+    submission_id: Uuid,
+    admission_reason: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+/// `GET /v1/review/pipeline/quarantine?limit=N`: quarantined pipeline runs
+/// waiting for a human assessment, oldest first. `PgPipelineStore::
+/// list_review_queue` already excludes a run whose submission is no longer
+/// operable (Ruling T3-6).
+async fn pipeline_review_quarantine_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<PipelineReviewQuarantineQuery>,
+) -> ApiResult<Json<Vec<PipelineReviewQueueItem>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(&tenant)?;
+    let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let limit = query.limit.unwrap_or(DEFAULT_PIPELINE_REVIEW_QUEUE_LIMIT);
+    let queue = pipeline_service
+        .store()
+        .list_review_queue(&tenant.tenant_id, limit)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|run| PipelineReviewQueueItem {
+            run_id: run.run_id,
+            submission_id: run.submission_id,
+            admission_reason: run.admission_reason,
+            created_at: run.created_at,
+        })
+        .collect();
+    Ok(Json(queue))
+}
+
+/// 30 minutes: the fixed lease duration `PgPipelineStore::claim_review`
+/// accepts (also its own upper bound).
+const PIPELINE_REVIEW_CLAIM_LEASE_MINUTES: i64 = 30;
+
+#[derive(Debug, Serialize)]
+struct PipelineReviewClaimResponse {
+    lease_token: Uuid,
+    lease_expires_at: DateTime<Utc>,
+}
+
+/// The claim route's mapping of `claim_review`'s errors. A claim on a run
+/// whose submission is no longer operable answers 404, "not waiting for
+/// review", like any other run a reviewer cannot claim (Ruling T3-9(b));
+/// 409 means only that another reviewer holds a live claim
+/// (`pipeline_review_claim_conflict`). Everything else maps as
+/// `pipeline_review_db_error` does.
+fn pipeline_review_claim_db_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
+    if matches!(
+        &error,
+        DatabaseError::Constraint(label) if label == PIPELINE_REVIEW_CLAIM_STALE_OR_INOPERABLE
+    ) {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "pipeline run is not waiting for review",
+        );
+    }
+    pipeline_review_db_error(error)
+}
+
+/// `POST /v1/review/pipeline/runs/{run_id}/claim`: claims the run for the
+/// authenticated reviewer, for 30 minutes.
+async fn pipeline_review_claim_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+) -> ApiResult<Json<PipelineReviewClaimResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(&tenant)?;
+    let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let reviewer_principal_ref = pipeline_reviewer_principal_ref(&tenant.principal_ref);
+    let claimed = pipeline_service
+        .store()
+        .claim_review(
+            &tenant.tenant_id,
+            run_id,
+            &reviewer_principal_ref,
+            Duration::minutes(PIPELINE_REVIEW_CLAIM_LEASE_MINUTES),
+        )
+        .await
+        .map_err(pipeline_review_claim_db_error)?;
+    let claim = match claimed {
+        PipelineReviewClaimOutcome::Claimed(claim) => claim,
+        // Ruling T3-9(b): `404` for a run that is not waiting for review,
+        // `409` only for one another reviewer holds.
+        PipelineReviewClaimOutcome::Ineligible => {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                "pipeline run is not waiting for review",
+            ));
+        }
+        PipelineReviewClaimOutcome::HeldByAnotherReviewer => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "pipeline review claim is held by another reviewer",
+            ));
+        }
+    };
+    // Zaki review 1, minor item M-a: the audit row `main`'s review lease
+    // claim appends, hash-only and label-only.
+    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
+        .await
+        .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::review_lease(
+            &tenant,
+            submission_id,
+            StorageTraceReviewLeaseAuditAction::Claim,
+            Some(claim.lease_expires_at),
+            None,
+        ),
+        StorageTraceAuditAction::Review,
+        StorageTraceAuditSafeMetadata::ReviewLease {
+            action: StorageTraceReviewLeaseAuditAction::Claim,
+            lease_expires_at: Some(claim.lease_expires_at),
+            review_due_at: None,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(PipelineReviewClaimResponse {
+        lease_token: claim.lease_token,
+        lease_expires_at: claim.lease_expires_at,
+    }))
+}
+
+/// The submission record of pipeline run `run_id`, read from the database
+/// and built as `main`'s database reads build one, for the checks `main`
+/// applies to a record. `None` when there is no such run; a run whose
+/// submission row is missing, or has no status `main` reads, answers `404`,
+/// as `main` answers a record it cannot read.
+async fn pipeline_run_submission_record(
+    state: &AppState,
+    pipeline_service: &PipelineService,
+    tenant_id: &str,
+    run_id: Uuid,
+) -> ApiResult<Option<TraceCommonsSubmissionRecord>> {
+    let Some(run) = pipeline_service
+        .store()
+        .get_run(tenant_id, run_id)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Ok(None);
+    };
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| internal_error("pipeline review requires the DB mirror"))?;
+    let not_found = || api_error(StatusCode::NOT_FOUND, "trace submission not found");
+    let stored = db
+        .get_trace_submission(tenant_id, run.submission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let record = trace_commons_record_from_storage_submission(stored)
+        .ok_or_else(not_found)?
+        .map_err(internal_error)?;
+    Ok(Some(record))
+}
+
+/// The submission a pipeline run belongs to, for the review routes' audit
+/// rows.
+async fn pipeline_run_submission_id(
+    pipeline_service: &PipelineService,
+    tenant_id: &str,
+    run_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    Ok(pipeline_service
+        .store()
+        .get_run(tenant_id, run_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("pipeline_run_missing"))?
+        .submission_id)
+}
+
+#[derive(Debug, Deserialize)]
+struct PipelineReviewAssessmentRequest {
+    lease_token: Uuid,
+    recommendation: String,
+    reason: String,
+    #[serde(default)]
+    resolved_quarantine_reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PipelineReviewAssessmentResponse {
+    assessment_id: Uuid,
+}
+
+/// `POST /v1/review/pipeline/runs/{run_id}/assessment`: records the
+/// authenticated reviewer's Approve/Reject recommendation against the run
+/// they hold `lease_token` for.
+async fn pipeline_review_assessment_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+    Json(body): Json<PipelineReviewAssessmentRequest>,
+) -> ApiResult<Json<PipelineReviewAssessmentResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(&tenant)?;
+    let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let recommendation = match body.recommendation.as_str() {
+        "approve" => ReviewRecommendation::Approve,
+        "reject" => ReviewRecommendation::Reject,
+        _ => {
+            return Err(api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid review recommendation",
+            ));
+        }
+    };
+    let reason = ReasonCode::new(body.reason)
+        .map_err(|_| api_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid reason code"))?;
+    let reason_label = reason.as_str().to_string();
+    let resolved_quarantine_reasons = body
+        .resolved_quarantine_reasons
+        .into_iter()
+        .map(ReasonCode::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| api_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid reason code"))?;
+    let claim = PipelineReviewClaim {
+        tenant_id: tenant.tenant_id.clone(),
+        run_id,
+        reviewer_principal_ref: pipeline_reviewer_principal_ref(&tenant.principal_ref),
+        lease_token: body.lease_token,
+        // Not read by `record_review_assessment`: it re-checks the live
+        // claim's own `lease_expires_at`, under the row lock, against the
+        // stored claim -- not against this field.
+        lease_expires_at: Utc::now(),
+    };
+    let resulting_status = match recommendation {
+        ReviewRecommendation::Approve => TraceCorpusStatus::Accepted,
+        ReviewRecommendation::Reject => TraceCorpusStatus::Rejected,
+    };
+    // Zaki review 1, round 2, N-2: the privileged-action consent check
+    // `main`'s review decision applies (`apply_review_decision`): the
+    // reviewer's claims and the tenant's current policy must allow a
+    // consent scope and a use of the submission, so a policy narrowed after
+    // the receipt applies too. A run that does not exist is left to
+    // `record_review_assessment`'s own answer.
+    if let Some(record) =
+        pipeline_run_submission_record(state.as_ref(), pipeline_service, &tenant.tenant_id, run_id)
+            .await?
+    {
+        let privileged_policy =
+            tenant_privileged_action_policy_for_request(state.as_ref(), &tenant, "review decision")
+                .await?;
+        ensure_record_matches_privileged_action_policy_abac(
+            &record,
+            &tenant,
+            privileged_policy.as_ref(),
+            "review decision",
+        )?;
+    }
+    let assessment = pipeline_service
+        .store()
+        .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
+        .await
+        .map_err(pipeline_review_db_error)?;
+    // Zaki review 1, minor item M-a: the audit row `main`'s review decision
+    // appends: the reason as a hash, and labels only in the metadata. The
+    // status is the one the recommendation leads to once Review runs.
+    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
+        .await
+        .map_err(internal_error)?;
+    let review_status = storage_corpus_status(resulting_status);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::review_decision(
+            &tenant,
+            submission_id,
+            resulting_status,
+            Some(&trace_free_text_audit_reason(&reason_label)),
+        ),
+        StorageTraceAuditAction::Review,
+        StorageTraceAuditSafeMetadata::ReviewDecision {
+            decision: serde_storage_string(&review_status).map_err(internal_error)?,
+            resulting_status: review_status,
+            reason_code: Some(reason_label),
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(PipelineReviewAssessmentResponse {
+        assessment_id: assessment.assessment_id,
+    }))
+}
+
 fn validate_review_lease_ttl_seconds(ttl_seconds: Option<i64>) -> ApiResult<i64> {
     let ttl_seconds = ttl_seconds.unwrap_or(DEFAULT_REVIEW_LEASE_TTL_SECONDS);
     if !(1..=MAX_REVIEW_LEASE_TTL_SECONDS).contains(&ttl_seconds) {
@@ -40936,6 +43121,15 @@ async fn prepare_replay_export_execution(
     .await?;
     let purpose =
         normalized_export_purpose(query.purpose.as_deref(), "trace_commons_replay_dataset");
+    // `pipeline_export:` purpose codes mark pipeline export manifests, which
+    // the replay-dataset list and count leave out; a replay export in that
+    // family would leave itself out of both.
+    if is_pipeline_export_manifest_purpose_code(&purpose) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "export_purpose_reserved",
+        ));
+    }
     Ok((consent_scope, tenant_policy, purpose))
 }
 
@@ -43813,7 +46007,12 @@ async fn read_trace_operational_summary(
         list_benchmark_conversion_artifacts_for_worker(state, tenant.auth()).await?;
     let benchmark_registry_outbox =
         read_benchmark_registry_outbox_items_for_admin(state, tenant.auth()).await?;
-    let near_credit_outbox = read_near_credit_outbox_items_for_admin(state, tenant.auth()).await?;
+    // Zaki review 1, round 2, finding 18: the pipeline's payout lines are
+    // the pipeline's to submit, confirm and report (its own operational
+    // summary), so `main`'s summary, and the rollout-smoke readiness built
+    // from it, read `main`'s lines only, as `main`'s outbox listing does: a
+    // failed pipeline line never holds `main`'s gates.
+    let near_credit_outbox = read_mains_near_credit_outbox_items(state, tenant.auth()).await?;
     let rollout_smoke_evidence =
         read_rollout_smoke_evidence_for_admin(state, tenant.auth()).await?;
     let revocation_propagation =
@@ -44031,7 +46230,8 @@ async fn retention_dry_run_drill_handler(
         tenant.auth(),
         request.purge_expired_before,
         privileged_tenant_policy.as_ref(),
-    )?;
+    )
+    .await?;
     let response = run_retention_dry_run_drill(state.as_ref(), tenant.auth(), request)
         .await
         .map_err(maintenance_error)?;
@@ -44203,6 +46403,14 @@ struct TraceRollbackDrillResponse {
     /// Submit audit rows in the pre-file-event shape, left out of the audit
     /// gap counts. Not blocking.
     legacy_submit_audit_row_count: usize,
+    /// Database submissions with a pipeline run, which the pipeline writes to
+    /// the database only, left out of `db_submissions_not_in_file_fallback`
+    /// as the DB reconciliation leaves them out (Zaki review 1, round 2,
+    /// finding 18). Not blocking.
+    pipeline_db_only_submission_count: usize,
+    /// Database tombstones of those submissions, left out of
+    /// `db_tombstones_not_in_file_fallback` the same way. Not blocking.
+    pipeline_db_only_tombstone_count: usize,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -44423,6 +46631,13 @@ struct TraceAuditChainDrillResponse {
     db_mismatch_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     db_last_event_hash: Option<String>,
+    /// Where the DB chain resumes across a legacy segment an operator
+    /// accepted after a binary rollback (`audit-chain-repair`), and how many
+    /// file events those resumes skip. Evidence, not a gap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_legacy_segment_resume_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_legacy_segment_file_event_count: Option<usize>,
     blocking_gaps: Vec<String>,
     failure_hashes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46303,6 +48518,9 @@ struct TraceDbReconciliationDrillResponse {
     /// DB audit rows before the first hashed row, mirrored by a build from
     /// before the DB carried the chain. Not blocking.
     db_audit_legacy_prefix_row_count: usize,
+    /// File events a rolled-back build left with no DB row, inside a legacy
+    /// segment the DB chain resumes across. Not blocking.
+    db_audit_legacy_segment_file_only_event_count: usize,
     file_replay_export_manifest_count: usize,
     db_export_manifest_count: usize,
     db_export_manifest_item_count: usize,
@@ -46382,6 +48600,8 @@ async fn run_db_reconciliation_drill(
         file_audit_event_count: report.file_audit_event_count,
         db_audit_event_count: report.db_audit_event_count,
         db_audit_legacy_prefix_row_count: report.db_audit_legacy_prefix_row_count,
+        db_audit_legacy_segment_file_only_event_count: report
+            .db_audit_legacy_segment_file_only_event_count,
         file_replay_export_manifest_count: report.file_replay_export_manifest_count,
         db_export_manifest_count: report.db_export_manifest_count,
         db_export_manifest_item_count: report.db_export_manifest_item_count,
@@ -46466,6 +48686,20 @@ async fn run_audit_chain_drill(
             "db_audit_chain_mismatch_count",
             usize::from(!db_report.verified) * db_report.mismatch_count.max(1),
         );
+        // Both chains can verify on their own while the tenant is locked
+        // out: every audited append chains from the file's head, and the
+        // store refuses it as stale unless that is also the DB's latest
+        // hashed row. A binary rollback or a failed file append leaves them
+        // apart; `POST /v1/admin/audit-chain-repair` says which and repairs
+        // it. (With no hashed DB row yet, the DB accepts any first one.)
+        push_rollback_gap_count(
+            &mut blocking_gaps,
+            "audit_chain_file_head_not_db_head",
+            usize::from(
+                db_report.last_event_hash.is_some()
+                    && db_report.last_event_hash != report.last_event_hash,
+            ),
+        );
     }
     let failure_hashes = report
         .failures
@@ -46486,6 +48720,9 @@ async fn run_audit_chain_drill(
         db_report.map(|report| report.payload_unverified_event_count);
     let db_mismatch_count = db_report.map(|report| report.mismatch_count);
     let db_last_event_hash = db_report.and_then(|report| report.last_event_hash.clone());
+    let db_legacy_segment_resume_count = db_report.map(|report| report.legacy_segment_resume_count);
+    let db_legacy_segment_file_event_count =
+        db_report.map(|report| report.legacy_segment_file_event_count);
     let evidence_hash = audit_chain_drill_evidence_hash(
         tenant,
         report.verified,
@@ -46500,6 +48737,8 @@ async fn run_audit_chain_drill(
         db_payload_unverified_event_count,
         db_mismatch_count,
         db_last_event_hash.as_deref(),
+        db_legacy_segment_resume_count,
+        db_legacy_segment_file_event_count,
         &blocking_gaps,
         &failure_hashes,
     );
@@ -46523,6 +48762,8 @@ async fn run_audit_chain_drill(
         db_payload_unverified_event_count,
         db_mismatch_count,
         db_last_event_hash,
+        db_legacy_segment_resume_count,
+        db_legacy_segment_file_event_count,
         blocking_gaps,
         failure_hashes,
         recorded_evidence: None,
@@ -46796,15 +49037,25 @@ async fn run_rollback_drill(
     // Legacy submit rows and the file events they stand for are counted
     // apart, not as rollback gaps; see `legacy_submit_audit_rows`.
     let legacy_submit_audit = legacy_submit_audit_rows(&file_audit_events, &db_audit_events);
+    // So are a rolled-back build's file-only events and store rows inside a
+    // legacy segment the DB chain resumes across; see
+    // `db_audit_legacy_segments`.
+    let legacy_segments = db_audit_legacy_segments(&db_audit_events, &file_audit_events);
     let file_audit_event_ids = file_audit_events
         .iter()
         .map(|event| event.event_id)
-        .filter(|event_id| !legacy_submit_audit.file_event_ids.contains(event_id))
+        .filter(|event_id| {
+            !legacy_submit_audit.file_event_ids.contains(event_id)
+                && !legacy_segments.file_only_event_ids.contains(event_id)
+        })
         .collect::<BTreeSet<_>>();
     let db_audit_event_ids = db_audit_events
         .iter()
         .map(|event| event.audit_event_id)
-        .filter(|event_id| !legacy_submit_audit.db_row_ids.contains(event_id))
+        .filter(|event_id| {
+            !legacy_submit_audit.db_row_ids.contains(event_id)
+                && !legacy_segments.store_row_ids.contains(event_id)
+        })
         .collect::<BTreeSet<_>>();
     let file_tombstone_submission_ids = file_tombstones
         .iter()
@@ -46814,6 +49065,30 @@ async fn run_rollback_drill(
         .iter()
         .map(|record| record.submission_id)
         .collect::<BTreeSet<_>>();
+    // Zaki review 1, round 2, finding 18: the submissions with a pipeline
+    // run, and their tombstones, are in the database only, by design (Ruling
+    // F-M10). As in the DB reconciliation, they are found through their runs,
+    // left out of the two database-versus-file gaps they would fail, and
+    // counted on their own; with no pipeline runtime injected none is found,
+    // so they stay gaps (fail closed).
+    let pipeline_submission_ids = match state.pipeline_product.as_ref() {
+        Some(product) => {
+            product
+                .reconciliation_rows(&tenant.tenant_id)
+                .await
+                .context("failed to list pipeline rows for rollback drill")?
+                .submission_ids
+        }
+        None => BTreeSet::new(),
+    };
+    let pipeline_db_only_submission_count = db_submission_ids
+        .difference(&file_submission_ids)
+        .filter(|submission_id| pipeline_submission_ids.contains(submission_id))
+        .count();
+    let pipeline_db_only_tombstone_count = db_tombstone_submission_ids
+        .difference(&file_tombstone_submission_ids)
+        .filter(|submission_id| pipeline_submission_ids.contains(submission_id))
+        .count();
 
     let mut blocking_gaps = Vec::new();
     push_rollback_gap_count(
@@ -46824,7 +49099,8 @@ async fn run_rollback_drill(
     push_rollback_gap_count(
         &mut blocking_gaps,
         "db_submissions_not_in_file_fallback",
-        db_submission_ids.difference(&file_submission_ids).count(),
+        db_submission_ids.difference(&file_submission_ids).count()
+            - pipeline_db_only_submission_count,
     );
     push_rollback_gap_count(
         &mut blocking_gaps,
@@ -46848,7 +49124,8 @@ async fn run_rollback_drill(
         "db_tombstones_not_in_file_fallback",
         db_tombstone_submission_ids
             .difference(&file_tombstone_submission_ids)
-            .count(),
+            .count()
+            - pipeline_db_only_tombstone_count,
     );
 
     let active_rollout_flags = active_rollout_flags_for_rollback_drill(state, &tenant.tenant_id);
@@ -46878,6 +49155,8 @@ async fn run_rollback_drill(
         file_tombstone_count: file_tombstones.len(),
         db_tombstone_count: db_tombstones.len(),
         legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
+        pipeline_db_only_submission_count,
+        pipeline_db_only_tombstone_count,
         blocking_gaps,
         recorded_evidence: None,
     };
@@ -47454,11 +49733,15 @@ fn audit_chain_drill_evidence_hash(
     db_payload_unverified_event_count: Option<usize>,
     db_mismatch_count: Option<usize>,
     db_last_event_hash: Option<&str>,
+    db_legacy_segment_resume_count: Option<usize>,
+    db_legacy_segment_file_event_count: Option<usize>,
     blocking_gaps: &[String],
     failure_hashes: &[String],
 ) -> String {
     json_evidence_hash(&serde_json::json!({
         "schema": "trace_commons_audit_chain_drill.v1",
+        "db_legacy_segment_resume_count": db_legacy_segment_resume_count,
+        "db_legacy_segment_file_event_count": db_legacy_segment_file_event_count,
         "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
         "actor_principal_ref": tenant.principal_ref,
         "file_verified": file_verified,
@@ -48423,6 +50706,19 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         response
             .promotion_gates
             .ranking_worker_run_actionable_skip_count,
+    );
+    body.push_str("# HELP trace_commons_operational_withdrawal_completion_pending Whether persisted source-session withdrawals need completion for this tenant.\n");
+    body.push_str("# TYPE trace_commons_operational_withdrawal_completion_pending gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_withdrawal_completion_pending",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        usize::from(
+            response
+                .revocation_propagation
+                .withdrawal_completion_pending,
+        ),
     );
     body.push_str("# HELP trace_commons_operational_revocation_propagation_latest_run Latest audited revocation-propagation worker counts by state.\n");
     body.push_str("# TYPE trace_commons_operational_revocation_propagation_latest_run gauge\n");
@@ -52190,7 +54486,8 @@ async fn maintenance_handler(
         &tenant,
         body.purge_expired_before,
         privileged_tenant_policy.as_ref(),
-    )?;
+    )
+    .await?;
     let vector_tenant_policy = if body.index_vectors {
         tenant_vector_policy_for_request(state.as_ref(), &tenant).await?
     } else {
@@ -52239,7 +54536,8 @@ async fn retention_maintenance_handler(
         &tenant,
         body.purge_expired_before,
         privileged_tenant_policy.as_ref(),
-    )?;
+    )
+    .await?;
     let response = run_maintenance(
         state.as_ref(),
         &tenant,
@@ -52315,6 +54613,13 @@ struct TraceRevocationPropagationWorkerResponse {
     skipped: usize,
     pending: usize,
     next_attempt_scheduled: usize,
+    /// Source-session withdrawals this run found incomplete from actual
+    /// state (see `reconcile_source_session_withdrawals`). Separate from the
+    /// propagation-item counts above, which the scheduler's outage check
+    /// reads.
+    withdrawal_completions_checked: usize,
+    withdrawal_completions_completed: usize,
+    withdrawal_completions_failed: usize,
 }
 
 async fn revocation_propagation_worker_handler(
@@ -55557,6 +57862,22 @@ async fn gate_evaluate_worker_handler(
 ) -> ApiResult<Json<TraceGateEvaluateWorkerResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
+    // Zaki review 1, minor item M-f: a submission the versioned pipeline
+    // scores and credits is not evaluated here, so this path cannot award it
+    // a second `NoveltyUtility` credit under another idempotency key. Without
+    // a pipeline runtime there are no pipeline runs to find.
+    if let Some(pipeline) = state.pipeline_service.as_ref()
+        && pipeline
+            .store()
+            .submission_has_pipeline_run(&tenant.tenant_id, body.submission_id)
+            .await
+            .map_err(internal_error)?
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "pipeline_run_owns_submission",
+        ));
+    }
 
     let outcome = evaluate_and_record_gate(state.as_ref(), &tenant.tenant_id, body.submission_id)
         .await
@@ -55773,6 +58094,15 @@ async fn gate_evaluate_worker_handler(
 ///   minted, but the prior emission is the audit trail
 /// - `(false, Some(label))` — credit withheld; the decision row records the
 ///   stable label-only reason
+///
+/// The versioned pipeline applies the same checks, in the same order and
+/// under the same labels, to a compatibility run's Trace Credit leg at
+/// Settle: `PipelineService::novelty_utility_withheld_reason` in
+/// `versioned_pipeline.rs` (Ruling T15-6). It cannot call this function (the
+/// library has no `AppState` or `TenantAuth`), so it holds its own copy. A
+/// change to the production-gate, central-issuer, tenant-policy or
+/// allowed-use rule here must be made there too, or the two paths credit
+/// differently.
 async fn attempt_emit_novelty_utility_credit(
     state: &AppState,
     tenant: &TenantAuth,
@@ -57853,7 +60183,10 @@ fn source_matches_allowed_use_allowlist(
             .any(|allowed_use| allowlist.contains(allowed_use))
 }
 
-fn ensure_maintenance_purge_matches_privileged_action_policy(
+/// Every purge candidate, a submission with a pipeline run among them
+/// (ruling RB-30, which `run_maintenance` purges too), must pass the
+/// privileged-action consent check before the purge runs.
+async fn ensure_maintenance_purge_matches_privileged_action_policy(
     state: &AppState,
     tenant: &TenantAuth,
     purge_expired_before: Option<DateTime<Utc>>,
@@ -57863,8 +60196,12 @@ fn ensure_maintenance_purge_matches_privileged_action_policy(
         return Ok(());
     };
     let now = Utc::now();
-    let records =
+    let mut records =
         read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let pipeline_records = read_pipeline_retention_records(state, tenant, &records)
+        .await
+        .map_err(internal_error)?;
+    records.extend(pipeline_records);
     for record in records {
         ensure_retention_metadata_within_server_policy(&record).map_err(internal_error)?;
         if retention_policy_is_on_legal_hold(state, &record).map_err(internal_error)? {
@@ -58568,7 +60905,22 @@ async fn read_replay_export_metadata_view(
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceCommonsMetadataView> {
     if state.db_replay_export_reads_for_tenant(&tenant.tenant_id) {
-        return read_reviewer_metadata_view_from_db(state, tenant).await;
+        // Zaki review 1, round 2, finding 18: a submission with a pipeline
+        // run is exported through pipeline snapshots, and its stored body is
+        // a pipeline artifact `main`'s replay export does not read, so it is
+        // not a replay export source.
+        let mut view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+        if let Some(store) = state.pipeline_store.as_ref() {
+            let pipeline_submission_ids = store
+                .pipeline_submission_ids(&tenant.tenant_id)
+                .await
+                .context("failed to list pipeline submissions for replay export")?;
+            view.records
+                .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+            view.derived
+                .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+        }
+        return Ok(view);
     }
 
     Ok(TraceCommonsMetadataView {
@@ -58839,6 +61191,42 @@ async fn read_contributor_credit_events_from_db(
     let mut credit_events = Vec::new();
     for event in db
         .list_trace_credit_events(&tenant.tenant_id)
+        .await
+        .context("failed to read Trace Commons credit events from DB mirror")?
+    {
+        let Some(owner_principal_ref) = owner_by_submission.get(&event.submission_id) else {
+            continue;
+        };
+        if let Some(event) =
+            trace_commons_credit_event_from_storage(event, owner_principal_ref.as_str())?
+        {
+            credit_events.push(event);
+        }
+    }
+    Ok(visible_credit_events(tenant, account_scope, credit_events))
+}
+
+/// `read_contributor_credit_events_from_db` for `records` only: the credit
+/// events of those submissions, read with one statement filtered to their
+/// ids rather than the whole ledger.
+async fn read_contributor_credit_events_for_records_from_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
+    records: &[TraceCommonsSubmissionRecord],
+) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("TRACE_COMMONS_DB_CONTRIBUTOR_READS is enabled without a DB mirror")?;
+    let owner_by_submission = records
+        .iter()
+        .map(|record| (record.submission_id, record.auth_principal_ref.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let submission_ids = owner_by_submission.keys().copied().collect::<Vec<_>>();
+    let mut credit_events = Vec::new();
+    for event in db
+        .list_trace_credit_events_for_submissions(&tenant.tenant_id, &submission_ids)
         .await
         .context("failed to read Trace Commons credit events from DB mirror")?
     {
@@ -59416,7 +61804,7 @@ fn db_audit_legacy_prefix_row_count(events: &[StorageTraceAuditEventRecord]) -> 
 /// hashed row must chain from the hashed row before it.
 struct DbAuditChainFileAnchors<'a> {
     by_id: BTreeMap<Uuid, &'a TraceCommonsAuditEvent>,
-    event_hashes: BTreeSet<&'a str>,
+    by_hash: BTreeMap<&'a str, &'a TraceCommonsAuditEvent>,
 }
 
 impl<'a> DbAuditChainFileAnchors<'a> {
@@ -59426,11 +61814,34 @@ impl<'a> DbAuditChainFileAnchors<'a> {
                 .iter()
                 .map(|event| (event.event_id, event))
                 .collect(),
-            event_hashes: file_events
+            by_hash: file_events
                 .iter()
-                .filter_map(|event| event.event_hash.as_deref())
+                .filter_map(|event| Some((event.event_hash.as_deref()?, event)))
                 .collect(),
         }
+    }
+
+    /// The file events a resume skips: those after the event hashed
+    /// `from_hash`, up to and including the one hashed `to_hash`, walking the
+    /// file chain back from `to_hash`. `None` unless `from_hash` is an
+    /// ancestor of `to_hash` in the file chain.
+    fn file_events_between(
+        &self,
+        from_hash: &str,
+        to_hash: &str,
+    ) -> Option<Vec<&'a TraceCommonsAuditEvent>> {
+        let mut between = Vec::new();
+        let mut cursor = to_hash;
+        while cursor != from_hash {
+            let event = *self.by_hash.get(cursor)?;
+            between.push(event);
+            if between.len() > self.by_hash.len() {
+                return None;
+            }
+            cursor = event.previous_event_hash.as_deref()?;
+        }
+        between.reverse();
+        Some(between)
     }
 
     fn accepts_chain_start(
@@ -59456,7 +61867,7 @@ impl<'a> DbAuditChainFileAnchors<'a> {
         };
         file_event.previous_event_hash.as_deref() == Some(previous_event_hash)
             && file_event.event_hash.as_deref() == Some(event_hash)
-            && self.event_hashes.contains(previous_event_hash)
+            && self.by_hash.contains_key(previous_event_hash)
     }
 
     /// The row an operator audit-chain repair writes to resume the chain
@@ -59467,7 +61878,9 @@ impl<'a> DbAuditChainFileAnchors<'a> {
     /// payload, whose hash the chain check recomputes, carries that
     /// declaration. So the DB chain continues through it only from the exact
     /// hashed row it was written against: a hashed row lost before it still
-    /// breaks the chain.
+    /// breaks the chain. That row must also be an ancestor of the resume in
+    /// the file chain -- the segment is file events after it -- or the DB
+    /// chain would resume across a fork.
     fn accepts_legacy_segment_resume(
         &self,
         expected_previous_hash: &str,
@@ -59475,17 +61888,42 @@ impl<'a> DbAuditChainFileAnchors<'a> {
         previous_event_hash: &str,
         event_hash: &str,
     ) -> bool {
-        row.decision_inputs_hash.as_deref() == Some(expected_previous_hash)
+        self.legacy_segment_resume_skips(
+            expected_previous_hash,
+            row,
+            previous_event_hash,
+            event_hash,
+        )
+        .is_some()
+    }
+
+    /// The file events a resume accepted by
+    /// [`Self::accepts_legacy_segment_resume`] skips; `None` if the row is
+    /// not one.
+    fn legacy_segment_resume_skips(
+        &self,
+        expected_previous_hash: &str,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> Option<Vec<&'a TraceCommonsAuditEvent>> {
+        let is_repair_row = row.decision_inputs_hash.as_deref() == Some(expected_previous_hash)
             && row.canonical_event_json.is_some()
             && row.action == StorageTraceAuditAction::Retain
             && matches!(
                 &row.metadata,
                 StorageTraceAuditSafeMetadata::Maintenance {
                     surface: Some(surface),
+                    dry_run: false,
                     ..
                 } if surface == AUDIT_CHAIN_REPAIR_AUDIT_KIND
             )
-            && self.anchored_in_file(row, previous_event_hash, event_hash)
+            && self.anchored_in_file(row, previous_event_hash, event_hash);
+        if !is_repair_row {
+            return None;
+        }
+        self.file_events_between(expected_previous_hash, previous_event_hash)
+            .filter(|skipped| !skipped.is_empty())
     }
 
     /// Whether a hashed row chains: from the hashed row before it, or across
@@ -59580,6 +62018,76 @@ fn collect_db_audit_hash_chain_failures(
         expected_previous_hash = Some(event_hash.to_string());
     }
     failures
+}
+
+/// The legacy segments the DB audit chain resumes across, as the resume
+/// rows the chain accepts show them. The drills report them, and count the
+/// old build's file-only events and store rows inside them as history, not
+/// drift: an operator accepted that segment, and a verified resume row
+/// records which one.
+#[derive(Debug, Default)]
+struct DbAuditLegacySegments {
+    /// Resume rows the chain accepts.
+    resume_count: usize,
+    /// File events the resumes skip.
+    file_event_count: usize,
+    /// Of those, the ones with no DB row of their id, of a kind the old
+    /// build left file-only ([`LEGACY_FILE_ONLY_AUDIT_KINDS`]).
+    file_only_event_ids: BTreeSet<Uuid>,
+    /// Unhashed DB rows between a resume's declared head and the resume row
+    /// that are of no file event's id: the old build's store rows.
+    store_row_ids: BTreeSet<Uuid>,
+}
+
+fn db_audit_legacy_segments(
+    rows: &[StorageTraceAuditEventRecord],
+    file_events: &[TraceCommonsAuditEvent],
+) -> DbAuditLegacySegments {
+    let anchors = DbAuditChainFileAnchors::new(file_events);
+    let db_ids = rows
+        .iter()
+        .map(|row| row.audit_event_id)
+        .collect::<BTreeSet<_>>();
+    let mut segments = DbAuditLegacySegments::default();
+    let mut previous_hashed: Option<(&str, i64)> = None;
+    for row in rows {
+        let Some(event_hash) = row.event_hash.as_deref() else {
+            continue;
+        };
+        let previous_event_hash = row
+            .previous_event_hash
+            .as_deref()
+            .unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
+        if let Some((expected, head_sequence)) = previous_hashed
+            && previous_event_hash != expected
+            && let Some(skipped) =
+                anchors.legacy_segment_resume_skips(expected, row, previous_event_hash, event_hash)
+        {
+            segments.resume_count += 1;
+            segments.file_event_count += skipped.len();
+            segments.file_only_event_ids.extend(
+                skipped
+                    .iter()
+                    .filter(|event| {
+                        !db_ids.contains(&event.event_id)
+                            && LEGACY_FILE_ONLY_AUDIT_KINDS.contains(&event.kind.as_str())
+                    })
+                    .map(|event| event.event_id),
+            );
+            segments.store_row_ids.extend(
+                rows.iter()
+                    .filter(|other| {
+                        other.audit_sequence > head_sequence
+                            && other.audit_sequence < row.audit_sequence
+                            && other.event_hash.is_none()
+                            && !anchors.by_id.contains_key(&other.audit_event_id)
+                    })
+                    .map(|other| other.audit_event_id),
+            );
+        }
+        previous_hashed = Some((event_hash, row.audit_sequence));
+    }
+    segments
 }
 
 fn storage_audit_event_kind(
@@ -60362,6 +62870,7 @@ fn submission_status_from_record(
         explanation: receipt.explanation,
         delayed_credit_explanations,
         consent_scopes: record.consent_scopes.clone(),
+        pipeline: None,
     }
 }
 
@@ -61512,9 +64021,23 @@ async fn run_revocation_propagation_worker(
         skipped: 0,
         pending: if request.dry_run { due_items.len() } else { 0 },
         next_attempt_scheduled: 0,
+        withdrawal_completions_checked: 0,
+        withdrawal_completions_completed: 0,
+        withdrawal_completions_failed: 0,
     };
 
     if request.dry_run {
+        let reconciled = reconcile_source_session_withdrawals(
+            state,
+            db,
+            &tenant.tenant_id,
+            None,
+            tenant,
+            i64::from(limit),
+            true,
+        )
+        .await?;
+        response.withdrawal_completions_checked = reconciled.checked;
         append_revocation_propagation_audit(state, tenant, &response).await?;
         log_revocation_propagation_worker_summary(tenant, &response);
         return Ok(response);
@@ -61648,6 +64171,22 @@ async fn run_revocation_propagation_worker(
         }
     }
 
+    // Withdrawals complete from actual state, on the same credential scope:
+    // this worker already pushes revocations to derived surfaces.
+    let reconciled = reconcile_source_session_withdrawals(
+        state,
+        db,
+        &tenant.tenant_id,
+        None,
+        tenant,
+        i64::from(limit),
+        false,
+    )
+    .await?;
+    response.withdrawal_completions_checked = reconciled.checked;
+    response.withdrawal_completions_completed = reconciled.completed;
+    response.withdrawal_completions_failed = reconciled.failed;
+
     append_revocation_propagation_audit(state, tenant, &response).await?;
     log_revocation_propagation_worker_summary(tenant, &response);
     Ok(response)
@@ -61698,6 +64237,9 @@ fn log_revocation_propagation_worker_summary(
         skipped_count = fields.skipped,
         pending_count = fields.pending,
         next_attempt_scheduled_count = fields.next_attempt_scheduled,
+        withdrawal_completions_checked_count = response.withdrawal_completions_checked,
+        withdrawal_completions_completed_count = response.withdrawal_completions_completed,
+        withdrawal_completions_failed_count = response.withdrawal_completions_failed,
         "Trace Commons revocation propagation worker completed"
     );
 }
@@ -62211,6 +64753,34 @@ async fn delete_object_payload_for_revocation_propagation(
                     )
                 })?;
         }
+        // An object a pipeline Score attempt stored (the index command or
+        // the neighbour set) is a `worker_intermediate` ref too, but it holds
+        // the pipeline's byte wrapper, not a vector payload of this service.
+        // Reading it under the tenant's key checks the tenant; the wrapper
+        // check checks what it is.
+        TraceArtifactKind::VectorPayload
+            if is_pipeline_score_object_ref(
+                object_ref.object_ref_id,
+                object_ref.created_by_job_id,
+            ) =>
+        {
+            let wrapper = store
+                .get_json_by_object_key::<serde_json::Value>(
+                    &tenant_ref,
+                    TraceArtifactKind::VectorPayload,
+                    &object_ref.object_key,
+                    &object_ref.content_sha256,
+                )
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "service-owned encrypted object verification failed before deletion"
+                    )
+                })?;
+            anyhow::ensure!(
+                is_pipeline_artifact_wrapper(&wrapper),
+                "service-owned pipeline object verification failed before deletion"
+            );
+        }
         TraceArtifactKind::VectorPayload => {
             let payload = store
                 .get_json_by_object_key::<TraceVectorPayloadArtifact>(
@@ -62585,6 +65155,22 @@ async fn append_revocation_propagation_audit(
         "next_attempt_scheduled".to_string(),
         response.next_attempt_scheduled.min(u32::MAX as usize) as u32,
     );
+    for (label, count) in [
+        (
+            "withdrawal_completions_checked",
+            response.withdrawal_completions_checked,
+        ),
+        (
+            "withdrawal_completions_completed",
+            response.withdrawal_completions_completed,
+        ),
+        (
+            "withdrawal_completions_failed",
+            response.withdrawal_completions_failed,
+        ),
+    ] {
+        action_counts.insert(label.to_string(), count.min(u32::MAX as usize) as u32);
+    }
     let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
@@ -66911,7 +69497,7 @@ fn fail_next_audit_file_append(root: &Path, tenant_id: &str) {
 fn plan_audit_chain_repair(
     file_events: &[TraceCommonsAuditEvent],
     db_rows: &[StorageTraceAuditEventRecord],
-) -> Result<Vec<TraceCommonsAuditEvent>, &'static str> {
+) -> Result<Vec<TraceCommonsAuditEvent>, AuditChainRepairPlanRefusal> {
     let file_head = file_events
         .last()
         .and_then(|event| event.event_hash.clone())
@@ -66926,16 +69512,47 @@ fn plan_audit_chain_repair(
         hashed
             .iter()
             .position(|row| row.event_hash.as_deref() == Some(file_head.as_str()))
-            .ok_or("file_head_not_in_db")?
+            .ok_or(AuditChainRepairPlanRefusal::FileAheadOfDb)?
             + 1
     };
+    plan_db_ahead_tail(file_events, &hashed[start..], file_head)
+        .map_err(AuditChainRepairPlanRefusal::Unrestorable)
+}
+
+/// Why [`plan_audit_chain_repair`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditChainRepairPlanRefusal {
+    /// The file's head is no hashed DB row: the file is ahead of the DB. A
+    /// fork, unless a rolled-back build wrote it; the caller asks
+    /// [`plan_legacy_segment_resume`] which.
+    FileAheadOfDb,
+    /// The DB is ahead of the file, but its tail cannot be verified.
+    Unrestorable(&'static str),
+}
+
+impl AuditChainRepairPlanRefusal {
+    fn label(self) -> &'static str {
+        match self {
+            Self::FileAheadOfDb => "file_head_not_in_db",
+            Self::Unrestorable(label) => label,
+        }
+    }
+}
+
+/// The file lines that the hashed DB rows after the file's head stand for,
+/// each verified against its row.
+fn plan_db_ahead_tail(
+    file_events: &[TraceCommonsAuditEvent],
+    tail: &[&StorageTraceAuditEventRecord],
+    file_head: String,
+) -> Result<Vec<TraceCommonsAuditEvent>, &'static str> {
     let file_event_ids = file_events
         .iter()
         .map(|event| event.event_id)
         .collect::<BTreeSet<_>>();
     let mut expected_previous = file_head;
     let mut plan = Vec::new();
-    for row in &hashed[start..] {
+    for row in tail {
         let event_hash = row.event_hash.as_deref().ok_or("db_row_unhashed")?;
         let payload = row
             .canonical_event_json
@@ -66974,18 +69591,70 @@ fn plan_audit_chain_repair(
     Ok(plan)
 }
 
-/// A legacy segment the DB audit chain can resume across. Hash and counts
-/// only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The file audit kinds that the build a binary rollback returns to (one from
+/// before #1043; `5f239be4` for the pilot) wrote to the file log with no DB
+/// row of the event's id, under required mirror writes. It mirrored every
+/// other kind with the event's id.
+///
+/// - `submitted`, `quarantine_remediated`, `quarantine_operator_rescrub`: its
+///   submission mirror wrote the store's derived-id `submit-audit` row
+///   instead ([`legacy_submit_audit_row_status`]).
+/// - `review_decision`: its review mirror wrote the store's own status row
+///   instead ([`legacy_store_status_row_status`]).
+/// - `idempotent_submit`: a re-POST of a known submission. No DB row at all.
+const LEGACY_FILE_ONLY_AUDIT_KINDS: [&str; 5] = [
+    "submitted",
+    "quarantine_remediated",
+    "quarantine_operator_rescrub",
+    "review_decision",
+    "idempotent_submit",
+];
+
+/// The principals of the old build's PII-backstop passes. Their status
+/// changes were DB-only: the store's status row, and no file event.
+const LEGACY_DB_ONLY_STATUS_PRINCIPALS: [&str; 2] = [
+    PII_BACKSTOP_DRIVER_ACTOR_REF,
+    PII_BACKSTOP_REQUEUE_ACTOR_REF,
+];
+
+/// The derived-id rows the old build wrote for a lifecycle's artifact
+/// invalidation: each id label, with the row's action.
+const LEGACY_LIFECYCLE_INVALIDATION_AUDIT_LABELS: [(&str, StorageTraceAuditAction); 3] = [
+    (
+        "revocation-artifact-invalidation",
+        StorageTraceAuditAction::Revoke,
+    ),
+    (
+        "retention-expiration-artifact-invalidation",
+        StorageTraceAuditAction::Retain,
+    ),
+    (
+        "retention-purge-artifact-invalidation",
+        StorageTraceAuditAction::Purge,
+    ),
+];
+
+/// A legacy segment the DB audit chain can resume across. Hash, counts and
+/// times only.
+#[derive(Debug, Clone)]
 struct LegacySegmentResume {
     /// The DB's latest hashed row's `event_hash`: where the DB chain stopped.
     db_head_event_hash: String,
-    /// File events after the DB head.
+    /// File events after the DB head (an interrupted resume event aside).
     file_events: usize,
     /// DB rows after the DB head, all without chain fields.
     unhashed_db_rows: usize,
     /// File events after the DB head that have no DB row of their id.
     file_only_events: usize,
+    /// The earliest and latest time in the segment: its file events'
+    /// `created_at` and its DB rows' `occurred_at`. The operator checks them
+    /// against the rollback window; a segment reaching outside it is not the
+    /// rollback's doing.
+    earliest_at: Option<DateTime<Utc>>,
+    latest_at: Option<DateTime<Utc>>,
+    /// A resume event that an earlier run appended to the file, whose DB row
+    /// did not commit. The repair completes it instead of writing another.
+    interrupted_resume: Option<Box<TraceCommonsAuditEvent>>,
 }
 
 /// Plans the repair for a file log that ran ahead of the DB through legacy
@@ -66993,23 +69662,42 @@ struct LegacySegmentResume {
 ///
 /// That build chained every event into the file, but under required mirror
 /// writes it wrote the DB row before the event was chained, so the row has
-/// no chain fields; and some of its events (a submission's `submitted`, an
-/// idempotent re-POST) were written to the file only. After the roll-forward
-/// the new build chains from the file head, which is no hashed DB row, and
-/// every append is refused as stale.
+/// no chain fields; and some of its events it wrote to the file only
+/// ([`LEGACY_FILE_ONLY_AUDIT_KINDS`]). After the roll-forward the new build
+/// chains from the file head, which is no hashed DB row, and every append is
+/// refused as stale.
 ///
-/// `file_events` must be in file-line order. `Ok(None)` means nothing is
-/// locked: there is no hashed DB row (the DB accepts any first one), or the
-/// file ends at the DB's latest hashed row. The plan is only ever this shape:
+/// Nothing in-band proves that a rolled-back build wrote the segment, so the
+/// plan accepts only what that build could have written, and every row and
+/// event must account for each other:
 /// - the DB's latest hashed row is a file event, with the same chain fields
 ///   (else `db_head_not_in_file`: a fork or a tampered row);
 /// - the file events after it chain from it, each reproducing its own hash
 ///   (else `file_chain_break_after_db_head`);
-/// - none of them has a hashed DB row, and every DB row of one's id is an
-///   unhashed row agreeing with it (else `legacy_row_mismatch`);
-/// - at least one DB row after the latest hashed row is unhashed -- the mark
-///   of the old build. Without it, a file ahead of the DB is unexplained and
-///   is refused as before (`file_head_not_in_db`).
+/// - a DB row of a segment event's id sits after the DB head (else
+///   `legacy_row_before_db_head`) and is the row the old build mirrored that
+///   event as: unhashed, with the event's principal, and every column the
+///   event determines -- action and metadata through the kind projection,
+///   status, role, reason, export, decision inputs -- agreeing with it (else
+///   `legacy_row_mismatch`);
+/// - a segment event with no DB row is of a kind the old build left
+///   file-only (else `legacy_file_only_event_unexpected`), and has the store
+///   row that build wrote beside it (else `legacy_submit_row_missing` or
+///   `legacy_status_row_missing`);
+/// - every DB row after the DB head is one of those, or another store row the
+///   old build wrote beside a segment event or on its own (else
+///   `legacy_row_unexplained`);
+/// - there is at least one such row -- the old build's mark. Without it, a
+///   file ahead of the DB is unexplained, and it is refused as before
+///   (`file_head_not_in_db`).
+///
+/// A last file event that is this repair's own resume event, declaring the
+/// DB head, with no DB row, is a resume whose DB write did not commit; the
+/// plan carries it as [`LegacySegmentResume::interrupted_resume`].
+///
+/// `file_events` must be in file-line order. `Ok(None)` means nothing is
+/// locked: there is no hashed DB row (the DB accepts any first one), or the
+/// file ends at the DB's latest hashed row.
 fn plan_legacy_segment_resume(
     file_events: &[TraceCommonsAuditEvent],
     db_rows: &[StorageTraceAuditEventRecord],
@@ -67032,7 +69720,7 @@ fn plan_legacy_segment_resume(
     {
         return Err("db_head_not_in_file");
     }
-    let segment = &file_events[head_index + 1..];
+    let mut segment = &file_events[head_index + 1..];
     if segment.is_empty() {
         return Ok(None);
     }
@@ -67054,50 +69742,309 @@ fn plan_legacy_segment_resume(
         .iter()
         .map(|row| (row.audit_event_id, row))
         .collect::<BTreeMap<_, _>>();
-    let mut file_only_events = 0usize;
-    for event in segment {
-        let Some(row) = rows_by_id.get(&event.event_id) else {
-            file_only_events += 1;
-            continue;
-        };
-        if !legacy_audit_row_matches_file_event(row, event) {
-            return Err("legacy_row_mismatch");
-        }
+    let interrupted_resume = segment
+        .last()
+        .filter(|event| {
+            !rows_by_id.contains_key(&event.event_id)
+                && is_legacy_segment_resume_event(event, &db_head_hash)
+        })
+        .cloned()
+        .map(Box::new);
+    if interrupted_resume.is_some() {
+        segment = &segment[..segment.len() - 1];
     }
-    let unhashed_db_rows = db_rows
+    let after_head = db_rows
         .iter()
         .filter(|row| row.audit_sequence > db_head.audit_sequence)
-        .count();
-    if unhashed_db_rows == 0 {
+        .collect::<Vec<_>>();
+    if segment.is_empty() || after_head.is_empty() {
         return Err("file_head_not_in_db");
     }
+
+    let mut explained = BTreeSet::new();
+    let mut file_only_events = 0usize;
+    for event in segment {
+        if let Some(row) = rows_by_id.get(&event.event_id) {
+            if row.audit_sequence <= db_head.audit_sequence {
+                return Err("legacy_row_before_db_head");
+            }
+            if !legacy_audit_row_matches_file_event(row, event) {
+                return Err("legacy_row_mismatch");
+            }
+            explained.insert(row.audit_event_id);
+            continue;
+        }
+        file_only_events += 1;
+        if !LEGACY_FILE_ONLY_AUDIT_KINDS.contains(&event.kind.as_str()) {
+            return Err("legacy_file_only_event_unexpected");
+        }
+        let (Some(principal), Some(_)) = (event.actor_principal_ref.as_deref(), event.actor_role)
+        else {
+            return Err("legacy_event_unattributed");
+        };
+        let status = event.status.map(storage_corpus_status);
+        match event.kind.as_str() {
+            "idempotent_submit" => {}
+            "review_decision" => {
+                let row = after_head
+                    .iter()
+                    .find(|row| {
+                        !explained.contains(&row.audit_event_id)
+                            && legacy_store_status_row_status(row).is_some()
+                            && legacy_store_status_row_status(row) == status
+                            && row.submission_id == Some(event.submission_id)
+                            && row.actor_principal_ref == principal
+                            && row.reason.as_deref() == Some("review_decision")
+                    })
+                    .ok_or("legacy_status_row_missing")?;
+                explained.insert(row.audit_event_id);
+            }
+            _ => {
+                // The submit family: one derived-id row per submission, so a
+                // row pairs with one event at most.
+                let row_id = deterministic_trace_uuid_for(
+                    "submit-audit",
+                    &event.tenant_id,
+                    event.submission_id,
+                );
+                let paired = rows_by_id.get(&row_id).is_some_and(|row| {
+                    row.audit_sequence > db_head.audit_sequence
+                        && legacy_submit_audit_row_status(row).is_some()
+                        && legacy_submit_audit_row_status(row) == status
+                });
+                if !paired || !explained.insert(row_id) {
+                    return Err("legacy_submit_row_missing");
+                }
+            }
+        }
+    }
+    for row in &after_head {
+        if !explained.contains(&row.audit_event_id)
+            && !legacy_store_row_explained_by_segment(row, segment)
+        {
+            return Err("legacy_row_unexplained");
+        }
+    }
+    let times = segment
+        .iter()
+        .map(|event| event.created_at)
+        .chain(after_head.iter().map(|row| row.occurred_at));
     Ok(Some(LegacySegmentResume {
         db_head_event_hash: db_head_hash,
         file_events: segment.len(),
-        unhashed_db_rows,
+        unhashed_db_rows: after_head.len(),
         file_only_events,
+        earliest_at: times.clone().min(),
+        latest_at: times.max(),
+        interrupted_resume,
     }))
 }
 
 /// Whether an unhashed DB row is the mirror a build from before #1043 wrote
-/// for this file event: that build copied these fields from the unchained
-/// event, so any difference is not its doing.
+/// for this file event. That build wrote the row from the unchained event,
+/// with the same action and metadata as the current build, so the row must
+/// be exactly the current build's projection of the event without chain
+/// fields ([`verify_db_audit_projection`]), and carry the event's principal:
+/// that build wrote every event with one. Only `object_ref_id` and
+/// `occurred_at` are not compared -- the file event holds no object ref, and
+/// `occurred_at` is the database's clock, not the event's.
 fn legacy_audit_row_matches_file_event(
     row: &StorageTraceAuditEventRecord,
     event: &TraceCommonsAuditEvent,
 ) -> bool {
+    if row.event_hash.is_some()
+        || row.previous_event_hash.is_some()
+        || row.canonical_event_json.is_some()
+        || row.request_id.is_some()
+        || event.actor_role.is_none()
+        || event.actor_principal_ref.as_deref() != Some(row.actor_principal_ref.as_str())
+    {
+        return false;
+    }
+    let mut unchained = event.clone();
+    unchained.previous_event_hash = None;
+    unchained.event_hash = None;
+    let mut report = TraceDbAuditChainReport::default();
+    verify_db_audit_projection(0, row, &unchained, &mut report);
+    report.failures.is_empty()
+}
+
+/// The `submit-audit` row the old build's submission mirror wrote under an
+/// id derived from the submission, in place of a mirror of the `submitted`
+/// event: its status, if the row is one.
+fn legacy_submit_audit_row_status(
+    row: &StorageTraceAuditEventRecord,
+) -> Option<StorageTraceCorpusStatus> {
+    let submission_id = row.submission_id?;
+    let StorageTraceAuditSafeMetadata::Submission { status, .. } = &row.metadata else {
+        return None;
+    };
+    (row.action == StorageTraceAuditAction::Submit
+        && row.event_hash.is_none()
+        && row.previous_event_hash.is_none()
+        && row.canonical_event_json.is_none()
+        && row.audit_event_id
+            == deterministic_trace_uuid_for("submit-audit", &row.tenant_id, submission_id))
+    .then_some(*status)
+}
+
+/// The status row the old build's store wrote for itself on a status change
+/// (`update_trace_submission_status`, `release_pii_backstop_hold`): its
+/// resulting status, if the row is one.
+fn legacy_store_status_row_status(
+    row: &StorageTraceAuditEventRecord,
+) -> Option<StorageTraceCorpusStatus> {
+    let StorageTraceAuditSafeMetadata::ReviewDecision {
+        decision,
+        resulting_status,
+        reason_code,
+    } = &row.metadata
+    else {
+        return None;
+    };
+    (legacy_store_row_has_no_event_columns(row)
+        && row.actor_role == "system"
+        && *reason_code == row.reason
+        && serde_storage_string(resulting_status).ok().as_deref() == Some(decision.as_str())
+        && row.action == legacy_store_status_action(*resulting_status))
+    .then_some(*resulting_status)
+}
+
+/// The action the store's own status row takes for a status.
+fn legacy_store_status_action(status: StorageTraceCorpusStatus) -> StorageTraceAuditAction {
+    match status {
+        StorageTraceCorpusStatus::Accepted
+        | StorageTraceCorpusStatus::Quarantined
+        | StorageTraceCorpusStatus::AwaitingPiiBackstop
+        | StorageTraceCorpusStatus::Rejected => StorageTraceAuditAction::Review,
+        StorageTraceCorpusStatus::Revoked => StorageTraceAuditAction::Revoke,
+        StorageTraceCorpusStatus::Purged => StorageTraceAuditAction::Purge,
+        StorageTraceCorpusStatus::Expired => StorageTraceAuditAction::Retain,
+        StorageTraceCorpusStatus::Received => StorageTraceAuditAction::Submit,
+    }
+}
+
+/// The derived-id row the old build wrote for a lifecycle's artifact
+/// invalidation: its id label, if the row is one.
+fn legacy_lifecycle_invalidation_row_label(
+    row: &StorageTraceAuditEventRecord,
+) -> Option<&'static str> {
+    let submission_id = row.submission_id?;
+    if !legacy_store_row_has_no_event_columns(row)
+        || !matches!(
+            &row.metadata,
+            StorageTraceAuditSafeMetadata::Maintenance { surface: None, .. }
+        )
+    {
+        return None;
+    }
+    LEGACY_LIFECYCLE_INVALIDATION_AUDIT_LABELS
+        .iter()
+        .find(|(label, action)| {
+            row.action == *action
+                && row.audit_event_id
+                    == deterministic_trace_uuid_for(label, &row.tenant_id, submission_id)
+        })
+        .map(|(label, _)| *label)
+}
+
+/// A store row stands for no file event: no chain fields, no payload, and
+/// none of the columns only an event's mirror fills.
+fn legacy_store_row_has_no_event_columns(row: &StorageTraceAuditEventRecord) -> bool {
     row.event_hash.is_none()
         && row.previous_event_hash.is_none()
         && row.canonical_event_json.is_none()
-        && row.tenant_id == event.tenant_id
-        && row.submission_id == (event.submission_id != Uuid::nil()).then_some(event.submission_id)
-        && row.reason == event.reason
-        && row.export_manifest_id == event.export_id
-        && row.decision_inputs_hash == event.decision_inputs_hash
-        && event
-            .actor_principal_ref
-            .as_deref()
-            .is_none_or(|principal| principal == row.actor_principal_ref)
+        && row.request_id.is_none()
+        && row.object_ref_id.is_none()
+        && row.export_manifest_id.is_none()
+        && row.decision_inputs_hash.is_none()
+        && row.submission_id.is_some()
+}
+
+/// Whether a DB row after the DB head, of no segment event's id, is a store
+/// row the old build wrote on its own or beside a segment event:
+/// - a status row or an artifact-invalidation row of a revocation, beside
+///   that submission's `revoked` event, by the same principal;
+/// - a status row or an artifact-invalidation row of a revocation,
+///   expiration or purge, beside a `maintenance` event by the same
+///   principal (the retention pass);
+/// - a status row of a PII-backstop pass, which had no file event.
+fn legacy_store_row_explained_by_segment(
+    row: &StorageTraceAuditEventRecord,
+    segment: &[TraceCommonsAuditEvent],
+) -> bool {
+    let principal = Some(row.actor_principal_ref.as_str());
+    let revoked_event = || {
+        segment.iter().any(|event| {
+            event.kind == "revoked"
+                && row.submission_id == Some(event.submission_id)
+                && event.actor_principal_ref.as_deref() == principal
+        })
+    };
+    let maintenance_event = || {
+        segment.iter().any(|event| {
+            event.kind == "maintenance" && event.actor_principal_ref.as_deref() == principal
+        })
+    };
+    if let Some(status) = legacy_store_status_row_status(row) {
+        return match status {
+            StorageTraceCorpusStatus::Revoked => revoked_event() || maintenance_event(),
+            StorageTraceCorpusStatus::Expired | StorageTraceCorpusStatus::Purged => {
+                maintenance_event()
+            }
+            _ => LEGACY_DB_ONLY_STATUS_PRINCIPALS.contains(&row.actor_principal_ref.as_str()),
+        };
+    }
+    match legacy_lifecycle_invalidation_row_label(row) {
+        Some("revocation-artifact-invalidation") => revoked_event() || maintenance_event(),
+        Some(_) => maintenance_event(),
+        None => false,
+    }
+}
+
+/// Whether a file event is this repair's own resume event declaring
+/// `db_head_event_hash`, in the canonical shape the repair writes.
+fn is_legacy_segment_resume_event(
+    event: &TraceCommonsAuditEvent,
+    db_head_event_hash: &str,
+) -> bool {
+    event.kind == AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        && event.submission_id == Uuid::nil()
+        && event.status.is_none()
+        && event.actor_role.is_some()
+        && event.actor_principal_ref.is_some()
+        && event.decision_inputs_hash.as_deref() == Some(db_head_event_hash)
+        && legacy_segment_resume_row_mirror(event).is_some()
+}
+
+/// The DB row a resume event is mirrored as, rebuilt from the event: its
+/// reason carries the purpose's hash and the counts, and must be exactly the
+/// reason the repair writes for them.
+fn legacy_segment_resume_row_mirror(event: &TraceCommonsAuditEvent) -> Option<AuditRowMirror> {
+    let reason = event.reason.as_deref();
+    let action_counts = trace_maintenance_audit_action_counts_from_reason(reason);
+    if !action_counts.contains_key("legacy_segment_file_events") {
+        return None;
+    }
+    let purpose_hash = trace_audit_reason_value(reason, "purpose_hash").map(str::to_string);
+    if reason
+        != Some(
+            trace_maintenance_audit_reason(purpose_hash.as_deref(), false, &action_counts).as_str(),
+        )
+    {
+        return None;
+    }
+    Some(AuditRowMirror {
+        action: StorageTraceAuditAction::Retain,
+        metadata: StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
+            purpose_hash,
+            dry_run: false,
+            action_counts,
+        },
+        object_ref_id: None,
+        actor_role_label: None,
+    })
 }
 
 enum AuditChainRepairOutcome {
@@ -67115,11 +70062,20 @@ enum AuditChainRepairOutcome {
 /// Writes the event that resumes the DB audit chain across a legacy segment:
 /// a hash-only `audit_chain_repair` event, chained from the file head like
 /// any other, whose `decision_inputs_hash` names the DB's latest hashed row.
-/// The caller holds the tenant's audit append lock.
+/// The caller holds the tenant's audit append lock, which serializes repairs
+/// in this process only.
 ///
-/// The file line goes first. If the DB insert then fails, the event is one
-/// more file-only event past the DB head and a rerun resumes across it; the
-/// DB insert refuses a DB head that has moved since the plan.
+/// Across processes -- an old and a new build overlapping on one file root --
+/// the DB serializes them: the store takes the tenant's advisory lock,
+/// re-checks that the DB head is still the one planned against, inserts the
+/// row, and only then, before committing, has the file line appended. A
+/// repair that planned against a head another has since moved fails before
+/// it touches the file. The file append re-checks the file head too.
+///
+/// If the commit fails after the file append, the line is file-only; the
+/// next plan finds it as [`LegacySegmentResume::interrupted_resume`], and
+/// this completes it: the row is written for the line already in the file,
+/// and no second resume event is.
 async fn write_legacy_segment_resume_event(
     state: &AppState,
     tenant: &TenantAuth,
@@ -67127,6 +70083,25 @@ async fn write_legacy_segment_resume_event(
     resume: &LegacySegmentResume,
     purpose_hash: &str,
 ) -> anyhow::Result<Uuid> {
+    let path = audit_events_path(&state.root, &tenant.tenant_id);
+    if let Some(event) = resume.interrupted_resume.as_ref() {
+        let row = legacy_segment_resume_row_mirror(event)
+            .context("the interrupted resume event is not in the repair's shape")?;
+        let write = audit_event_storage_write(tenant, event, row)?;
+        let file_still_ends_at_it = || match latest_audit_event_hash(&path, &tenant.tenant_id) {
+            Ok(head) if head == event.event_hash => Ok(()),
+            Ok(_) => Err("the file log moved past the interrupted resume event".to_string()),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        db.append_trace_audit_chain_resume_event(
+            write,
+            &resume.db_head_event_hash,
+            &file_still_ends_at_it,
+        )
+        .await
+        .context("failed to complete the interrupted audit chain resume")?;
+        return Ok(event.event_id);
+    }
     let mut action_counts = BTreeMap::new();
     for (key, value) in [
         ("legacy_segment_file_events", resume.file_events),
@@ -67143,28 +70118,16 @@ async fn write_legacy_segment_resume_event(
         &action_counts,
     );
     event.decision_inputs_hash = Some(resume.db_head_event_hash.clone());
-    event.created_at = Utc::now().max(latest_audit_event_created_at(
-        &audit_events_path(&state.root, &tenant.tenant_id),
-        &tenant.tenant_id,
-    )?);
+    event.created_at = Utc::now().max(latest_audit_event_created_at(&path, &tenant.tenant_id)?);
     let event = chain_audit_event(&state.root, &tenant.tenant_id, event)?;
-    let write = audit_event_storage_write(
-        tenant,
-        &event,
-        AuditRowMirror {
-            action: StorageTraceAuditAction::Retain,
-            metadata: StorageTraceAuditSafeMetadata::Maintenance {
-                surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
-                purpose_hash: Some(purpose_hash.to_string()),
-                dry_run: false,
-                action_counts,
-            },
-            object_ref_id: None,
-            actor_role_label: None,
-        },
-    )?;
-    write_chained_audit_event(&state.root, &tenant.tenant_id, &event)?;
-    db.append_trace_audit_chain_resume_event(write, &resume.db_head_event_hash)
+    let row = legacy_segment_resume_row_mirror(&event)
+        .context("the resume event is not in the repair's shape")?;
+    let write = audit_event_storage_write(tenant, &event, row)?;
+    let append_file_line = || {
+        write_chained_audit_event(&state.root, &tenant.tenant_id, &event)
+            .map_err(|error| format!("{error:#}"))
+    };
+    db.append_trace_audit_chain_resume_event(write, &resume.db_head_event_hash, &append_file_line)
         .await
         .context("failed to write the audit chain resume row")?;
     Ok(event.event_id)
@@ -67213,6 +70176,17 @@ struct TraceAuditChainRepairResponse {
     legacy_segment_file_events: usize,
     legacy_segment_unhashed_db_rows: usize,
     legacy_segment_file_only_events: usize,
+    /// For `file_ahead_through_legacy_rows`: the earliest and latest time in
+    /// the segment, over its file events and its DB rows. Check them against
+    /// the rollback window before accepting the segment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_segment_earliest_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_segment_latest_at: Option<DateTime<Utc>>,
+    /// For `file_ahead_through_legacy_rows`: an earlier run appended its
+    /// resume event to the file but its DB row did not commit. This run
+    /// completes that event rather than writing another.
+    legacy_segment_resume_interrupted: bool,
     /// Whether this run wrote the row that resumes the DB chain.
     chain_resumed: bool,
     /// The repair's own audit event; absent for a dry run.
@@ -67315,7 +70289,7 @@ async fn run_audit_chain_repair(
             }
             // The file is ahead of the DB. That is a fork -- unless a
             // rolled-back build wrote it, with unhashed DB rows.
-            Err("file_head_not_in_db") => {
+            Err(AuditChainRepairPlanRefusal::FileAheadOfDb) => {
                 let file_events_in_order =
                     read_audit_events_in_file_order(&state.root, &tenant.tenant_id)?;
                 match plan_legacy_segment_resume(&file_events_in_order, &db_rows).map_err(refuse)? {
@@ -67348,7 +70322,7 @@ async fn run_audit_chain_repair(
                     }
                 }
             }
-            Err(label) => return Err(refuse(label)),
+            Err(refusal) => return Err(refuse(refusal.label())),
         }
     };
 
@@ -67426,7 +70400,236 @@ async fn run_audit_chain_repair(
         legacy_segment_file_only_events: resume
             .as_ref()
             .map_or(0, |resume| resume.file_only_events),
+        legacy_segment_earliest_at: resume.as_ref().and_then(|resume| resume.earliest_at),
+        legacy_segment_latest_at: resume.as_ref().and_then(|resume| resume.latest_at),
+        legacy_segment_resume_interrupted: resume
+            .as_ref()
+            .is_some_and(|resume| resume.interrupted_resume.is_some()),
         chain_resumed: resume_event_id.is_some(),
+        repair_audit_event_id,
+    })
+}
+
+fn default_tombstone_repair_dry_run() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceTombstoneRepairRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    /// Defaults to true: a repair writes only when asked to.
+    #[serde(default = "default_tombstone_repair_dry_run")]
+    dry_run: bool,
+}
+
+/// Hash-only: counts and the purpose's hash. No submission ids and no
+/// revocation reasons, which an operator revocation may carry as free text.
+#[derive(Debug, Serialize)]
+struct TraceTombstoneRepairResponse {
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose_hash: String,
+    dry_run: bool,
+    /// Both counts as read before the repair wrote anything.
+    file_tombstone_count: usize,
+    db_tombstone_count: usize,
+    /// File tombstones with no `trace_tombstones` row.
+    file_tombstones_missing_in_db: usize,
+    /// Of those, the ones an account withdrawal wrote.
+    withdrawal_tombstones_missing_in_db: usize,
+    /// Of those, the ones whose DB submission is `revoked`: the rows this
+    /// repair writes, or would write on a dry run.
+    repairable: usize,
+    /// Skipped: the DB has no submission row for the tombstone to reference.
+    skipped_db_submission_missing: usize,
+    /// Skipped: the DB submission is not `revoked`, so a tombstone row alone
+    /// would disagree with it. Read these with the db-reconciliation drill's
+    /// `status_mismatches`; this repair does not change a submission's status.
+    skipped_db_submission_not_revoked: usize,
+    db_tombstones_written: usize,
+    /// The repair's own audit event; absent for a dry run.
+    repair_audit_event_id: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct TraceTombstoneRepairRequiresDbMirror;
+
+impl std::fmt::Display for TraceTombstoneRepairRequiresDbMirror {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons tombstone repair requires TRACE_COMMONS_DB_DUAL_WRITE"
+        )
+    }
+}
+
+impl std::error::Error for TraceTombstoneRepairRequiresDbMirror {}
+
+async fn tombstone_repair_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceTombstoneRepairRequest>,
+) -> ApiResult<Json<TraceTombstoneRepairResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_tombstone_repair(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
+/// Writes the missing `trace_tombstones` row for each of the caller's
+/// tenant's file revocation tombstones that has none, from the file
+/// tombstone itself (its reason, hashes and time), so the file and DB
+/// tombstone records are consistent again. An account withdrawal made by a
+/// build that wrote only the file tombstone is the case this exists for.
+///
+/// Writes only where the DB submission exists and is already `revoked`. A
+/// dry run (the default) counts and writes nothing. Idempotent: the rows are
+/// first-writer-wins, and a second run finds nothing missing. A non-dry run
+/// is itself audited, as a hash-only `tombstone_repair` counts event.
+async fn run_tombstone_repair(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceTombstoneRepairRequest,
+) -> anyhow::Result<TraceTombstoneRepairResponse> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or(TraceTombstoneRepairRequiresDbMirror)?;
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_tombstone_repair");
+    let purpose_hash = sha256_prefixed(purpose);
+
+    let file_tombstones = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let db_tombstones = db
+        .list_trace_tombstones(&tenant.tenant_id)
+        .await
+        .context("failed to list DB tombstones for tombstone repair")?;
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|tombstone| tombstone.submission_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut file_tombstones_missing_in_db = 0usize;
+    let mut withdrawal_tombstones_missing_in_db = 0usize;
+    let mut repairable = 0usize;
+    let mut skipped_db_submission_missing = 0usize;
+    let mut skipped_db_submission_not_revoked = 0usize;
+    let mut db_tombstones_written = 0usize;
+    for file_tombstone in &file_tombstones {
+        if db_tombstone_submission_ids.contains(&file_tombstone.submission_id) {
+            continue;
+        }
+        file_tombstones_missing_in_db += 1;
+        if file_tombstone.reason == TRACE_WITHDRAWAL_REASON {
+            withdrawal_tombstones_missing_in_db += 1;
+        }
+        let Some(db_submission) = db
+            .get_trace_submission(&tenant.tenant_id, file_tombstone.submission_id)
+            .await
+            .context("failed to read the DB submission for tombstone repair")?
+        else {
+            skipped_db_submission_missing += 1;
+            continue;
+        };
+        if db_submission.status != StorageTraceCorpusStatus::Revoked {
+            skipped_db_submission_not_revoked += 1;
+            continue;
+        }
+        repairable += 1;
+        if request.dry_run {
+            continue;
+        }
+        write_file_tombstone_to_db(
+            db.as_ref(),
+            file_tombstone,
+            Some(db_submission.trace_id),
+            &tenant.principal_ref,
+        )
+        .await?;
+        db_tombstones_written += 1;
+    }
+
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        dry_run = request.dry_run,
+        file_tombstones_missing_in_db,
+        withdrawal_tombstones_missing_in_db,
+        repairable,
+        skipped_db_submission_missing,
+        skipped_db_submission_not_revoked,
+        db_tombstones_written,
+        "Trace Commons tombstone repair"
+    );
+
+    let repair_audit_event_id = if request.dry_run {
+        None
+    } else {
+        let saturate = |count: usize| count.min(u32::MAX as usize) as u32;
+        let mut action_counts = BTreeMap::new();
+        action_counts.insert(
+            "file_tombstones_missing_in_db".to_string(),
+            saturate(file_tombstones_missing_in_db),
+        );
+        action_counts.insert(
+            "db_tombstones_written".to_string(),
+            saturate(db_tombstones_written),
+        );
+        action_counts.insert(
+            "skipped_db_submission_missing".to_string(),
+            saturate(skipped_db_submission_missing),
+        );
+        action_counts.insert(
+            "skipped_db_submission_not_revoked".to_string(),
+            saturate(skipped_db_submission_not_revoked),
+        );
+        let event = append_audit_event_mirrored(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::lifecycle_counts(
+                tenant,
+                Uuid::nil(),
+                TOMBSTONE_REPAIR_AUDIT_KIND,
+                Some(&purpose_hash),
+                &action_counts,
+            ),
+            AuditRowMirror {
+                action: StorageTraceAuditAction::Retain,
+                metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(TOMBSTONE_REPAIR_AUDIT_KIND.to_string()),
+                    purpose_hash: Some(purpose_hash.clone()),
+                    dry_run: false,
+                    action_counts,
+                },
+                object_ref_id: None,
+                actor_role_label: None,
+            },
+            "tombstone repair audit event",
+        )
+        .await?;
+        Some(event.event_id)
+    };
+
+    Ok(TraceTombstoneRepairResponse {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at: Utc::now(),
+        purpose_hash,
+        dry_run: request.dry_run,
+        file_tombstone_count: file_tombstones.len(),
+        db_tombstone_count: db_tombstones.len(),
+        file_tombstones_missing_in_db,
+        withdrawal_tombstones_missing_in_db,
+        repairable,
+        skipped_db_submission_missing,
+        skipped_db_submission_not_revoked,
+        db_tombstones_written,
         repair_audit_event_id,
     })
 }
@@ -68755,6 +71958,59 @@ fn ensure_export_provenance_tenant(
     Ok(())
 }
 
+/// The submissions of `tenant` with a pipeline run, from the database, as
+/// `main`'s retention maintenance reads its file records (ruling RB-30): the
+/// ones not among `file_records`, converted the way `main`'s DB reads
+/// convert a row. Empty with no DB mirror or no pipeline store.
+async fn read_pipeline_retention_records(
+    state: &AppState,
+    tenant: &TenantAuth,
+    file_records: &[TraceCommonsSubmissionRecord],
+) -> anyhow::Result<Vec<TraceCommonsSubmissionRecord>> {
+    let (Some(db), Some(store)) = (state.db_mirror.as_ref(), state.pipeline_store.as_ref()) else {
+        return Ok(Vec::new());
+    };
+    let pipeline_submission_ids = store
+        .pipeline_submission_ids(&tenant.tenant_id)
+        .await
+        .context("failed to list pipeline submissions for retention maintenance")?;
+    if pipeline_submission_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let file_submission_ids = file_records
+        .iter()
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    db.list_trace_submissions(&tenant.tenant_id)
+        .await
+        .context("failed to read pipeline submissions for retention maintenance")?
+        .into_iter()
+        .filter(|record| {
+            pipeline_submission_ids.contains(&record.submission_id)
+                && !file_submission_ids.contains(&record.submission_id)
+        })
+        .filter_map(trace_commons_record_from_storage_submission)
+        .collect()
+}
+
+/// The pipeline's half of a retention change to a submission with a
+/// pipeline run (`PgPipelineStore::follow_up_retention`). With no pipeline
+/// store there is no pipeline row to follow up.
+async fn follow_up_pipeline_retention(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    action: PipelineRetentionAction,
+) -> anyhow::Result<()> {
+    if let Some(store) = state.pipeline_store.as_ref() {
+        store
+            .follow_up_retention(&tenant.tenant_id, submission_id, action)
+            .await
+            .context("failed to queue the pipeline follow-up of retention maintenance")?;
+    }
+    Ok(())
+}
+
 fn export_artifact_dir(root: &Path, tenant_id: &str, export_id: Uuid) -> PathBuf {
     let tenant_key = tenant_storage_key(tenant_id);
     root.join("tenants")
@@ -68873,6 +72129,54 @@ async fn run_maintenance(
         }
     }
 
+    // Ruling RB-30 (Zaki review 1, round 2, finding 18): the submissions
+    // with a pipeline run are in the database only, so the file records
+    // above never hold them. They are expired and purged here by the same
+    // rules and the same request (dry run, purge cutoff, legal holds), and
+    // marked through the same mirror functions, so every trigger of this
+    // maintenance covers them. The pipeline's own half of each change runs
+    // first (`PgPipelineStore::follow_up_retention`): it is idempotent, and a
+    // pass that fails after it has marked nothing, so the next pass repeats
+    // it. A backfill-only request is about the file records and skips them.
+    let mut pipeline_records = if backfill_only_request {
+        Vec::new()
+    } else {
+        read_pipeline_retention_records(state, tenant, &records).await?
+    };
+    for record in &mut pipeline_records {
+        ensure_retention_metadata_within_server_policy(record)?;
+        if record.is_revoked() {
+            // A revocation or a withdrawal runs the pipeline's follow-up on
+            // its own path.
+            continue;
+        }
+        if record.status == TraceCorpusStatus::Expired {
+            expired_submission_ids.insert(record.submission_id);
+            continue;
+        }
+        if record.is_expired_at(now) && !retention_policy_is_on_legal_hold(state, record)? {
+            records_marked_expired += 1;
+            expired_submission_ids.insert(record.submission_id);
+            if !request.dry_run {
+                follow_up_pipeline_retention(
+                    state,
+                    tenant,
+                    record.submission_id,
+                    PipelineRetentionAction::Expired,
+                )
+                .await?;
+                record.status = TraceCorpusStatus::Expired;
+                mirror_expiration_to_db(
+                    state,
+                    tenant,
+                    record.submission_id,
+                    Some(&mut retention_ledger),
+                )
+                .await?;
+            }
+        }
+    }
+
     let mut derived = if backfill_only_request {
         let read = read_all_derived_records_for_backfill(&state.root, &tenant.tenant_id)?;
         db_mirror_backfill_input_failures.extend(read.failures);
@@ -68935,6 +72239,43 @@ async fn run_maintenance(
                 tenant,
                 record.submission_id,
                 &deletion_counts.deleted_targets,
+                Some(&mut retention_ledger),
+            )
+            .await?;
+        }
+        // Ruling RB-30: a pipeline submission's payloads are deleted through
+        // the pipeline's follow-up (queued `delete_object_payload` items,
+        // which mark each object ref deleted when done), so `main`'s purge
+        // marks no object ref deleted here and counts no deleted file.
+        for record in &mut pipeline_records {
+            if retention_policy_is_on_legal_hold(state, record)? {
+                continue;
+            }
+            if record.status != TraceCorpusStatus::Expired
+                || record
+                    .expires_at
+                    .is_none_or(|expires_at| expires_at > purge_cutoff)
+            {
+                continue;
+            }
+            records_marked_purged += 1;
+            if request.dry_run {
+                continue;
+            }
+            follow_up_pipeline_retention(
+                state,
+                tenant,
+                record.submission_id,
+                PipelineRetentionAction::Purged,
+            )
+            .await?;
+            record.status = TraceCorpusStatus::Purged;
+            record.purged_at = Some(now);
+            mirror_purge_to_db(
+                state,
+                tenant,
+                record.submission_id,
+                &[],
                 Some(&mut retention_ledger),
             )
             .await?;
@@ -69366,6 +72707,9 @@ fn verify_db_audit_chain_records(
         expected_previous_hash = Some(event_hash.to_string());
         report.last_event_hash = Some(event_hash.to_string());
     }
+    let segments = db_audit_legacy_segments(events, file_events);
+    report.legacy_segment_resume_count = segments.resume_count;
+    report.legacy_segment_file_event_count = segments.file_event_count;
     report.mismatch_count = report.failures.len();
     report.verified = report.mismatch_count == 0;
     Ok(report)
@@ -70327,9 +73671,9 @@ fn audit_backfill_storage_projection(
             .status
             .map(lifecycle_status_audit_action)
             .unwrap_or(StorageTraceAuditAction::Review),
-        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND | AUDIT_CHAIN_REPAIR_AUDIT_KIND => {
-            StorageTraceAuditAction::Retain
-        }
+        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
+        | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        | TOMBSTONE_REPAIR_AUDIT_KIND => StorageTraceAuditAction::Retain,
         RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND => StorageTraceAuditAction::Purge,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
@@ -70454,6 +73798,7 @@ fn audit_backfill_storage_projection(
         | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+        | TOMBSTONE_REPAIR_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -71154,6 +74499,20 @@ async fn reconcile_db_mirror(
         .list_trace_retention_jobs(&tenant.tenant_id)
         .await
         .context("failed to list trace retention jobs for DB reconciliation")?;
+    // Ruling F-M10: the rows the tenant's pipeline runs wrote into `main`'s
+    // tables, found through their runs. The pipeline writes them to the
+    // database only, so each file-versus-database comparison below that
+    // they would fail leaves them out; `main`'s own rows keep every check,
+    // and the database counts still include them. With no pipeline runtime
+    // injected none is found, so a tenant's earlier pipeline rows are
+    // reported as gaps (fail closed).
+    let pipeline_rows = match state.pipeline_product.as_ref() {
+        Some(product) => product
+            .reconciliation_rows(&tenant.tenant_id)
+            .await
+            .context("failed to list pipeline rows for DB reconciliation")?,
+        None => PipelineReconciliationRows::default(),
+    };
     let mut db_retention_job_item_count = 0usize;
     let mut db_retention_job_item_counts = BTreeMap::new();
     for job in &db_retention_jobs {
@@ -71333,6 +74692,25 @@ async fn reconcile_db_mirror(
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
     let file_revocations = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let file_tombstone_submission_ids = file_revocations
+        .iter()
+        .map(|revocation| revocation.submission_id)
+        .collect::<BTreeSet<_>>();
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|tombstone| tombstone.submission_id)
+        .collect::<BTreeSet<_>>();
+    let missing_tombstone_submission_ids_in_db = file_tombstone_submission_ids
+        .difference(&db_tombstone_submission_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    // A pipeline withdrawal writes its tombstone to the database only, so a
+    // pipeline submission's database tombstone has no file tombstone.
+    let missing_tombstone_submission_ids_in_files = db_tombstone_submission_ids
+        .difference(&file_tombstone_submission_ids)
+        .copied()
+        .filter(|submission_id| !pipeline_rows.submission_ids.contains(submission_id))
+        .collect::<Vec<_>>();
     let file_credit_event_ids = file_credit_events
         .iter()
         .map(|event| event.event_id)
@@ -71352,6 +74730,7 @@ async fn reconcile_db_mirror(
         .collect::<Vec<_>>();
     let missing_credit_event_ids_in_files = db_file_projected_credit_event_ids
         .difference(&file_credit_event_ids)
+        .filter(|event_id| !pipeline_rows.credit_event_ids.contains(event_id))
         .copied()
         .collect::<Vec<_>>();
     let file_utility_attestation_ids = file_utility_attestations
@@ -71384,6 +74763,7 @@ async fn reconcile_db_mirror(
         .collect::<Vec<_>>();
     let missing_credit_settlement_batch_ids_in_files = db_credit_settlement_batch_ids
         .difference(&file_credit_settlement_batch_ids)
+        .filter(|batch_id| !pipeline_rows.settlement_batch_ids.contains(batch_id))
         .copied()
         .collect::<Vec<_>>();
     let db_credit_settlement_batches_by_id = db_credit_settlement_batches
@@ -71442,6 +74822,7 @@ async fn reconcile_db_mirror(
         .collect::<Vec<_>>();
     let missing_near_credit_outbox_ids_in_files = db_near_credit_outbox_ids
         .difference(&file_near_credit_outbox_ids)
+        .filter(|outbox_id| !pipeline_rows.near_outbox_ids.contains(outbox_id))
         .copied()
         .collect::<Vec<_>>();
     let db_near_credit_outbox_items_by_id = db_near_credit_outbox_items
@@ -71694,9 +75075,15 @@ async fn reconcile_db_mirror(
     // table is insert-only). Each is counted as legacy, with its submission's
     // file `submitted` event, and neither is reported as drift.
     let legacy_submit_audit = legacy_submit_audit_rows(&file_audit_events, &db_audit_events);
+    // Likewise the file-only events and store rows of a rolled-back build,
+    // inside a legacy segment the DB chain resumes across.
+    let legacy_segments = db_audit_legacy_segments(&db_audit_events, &file_audit_events);
     let missing_audit_event_ids_in_db = file_audit_event_ids
         .difference(&db_audit_event_ids)
-        .filter(|event_id| !legacy_submit_audit.file_event_ids.contains(event_id))
+        .filter(|event_id| {
+            !legacy_submit_audit.file_event_ids.contains(event_id)
+                && !legacy_segments.file_only_event_ids.contains(event_id)
+        })
         .copied()
         .collect::<Vec<_>>();
     let missing_audit_event_ids_in_files = db_file_projected_audit_event_ids
@@ -71725,9 +75112,13 @@ async fn reconcile_db_mirror(
                 )
             })?;
         db_object_ref_count += object_refs.len();
+        // A pipeline submission's objects are the pipeline's own wrapped
+        // source and approved revision, which the pipeline reads and checks
+        // itself; `main`'s envelope reader cannot read them (Ruling F-M10).
         if record.status == StorageTraceCorpusStatus::Accepted
             && record.revoked_at.is_none()
             && record.purged_at.is_none()
+            && !pipeline_rows.submission_ids.contains(&record.submission_id)
         {
             // Rescrubbed first, then submitted: an accepted trace the PII
             // backstop released has only an active `rescrubbed_envelope` ref,
@@ -71809,6 +75200,7 @@ async fn reconcile_db_mirror(
     let missing_submission_ids_in_files = db_by_submission
         .keys()
         .filter(|submission_id| !file_by_submission.contains_key(submission_id))
+        .filter(|submission_id| !pipeline_rows.submission_ids.contains(submission_id))
         .copied()
         .collect::<Vec<_>>();
     let missing_derived_submission_ids_in_db = file_derived_by_submission
@@ -71819,6 +75211,7 @@ async fn reconcile_db_mirror(
     let missing_derived_submission_ids_in_files = db_derived_by_submission
         .keys()
         .filter(|submission_id| !file_derived_by_submission.contains_key(submission_id))
+        .filter(|submission_id| !pipeline_rows.submission_ids.contains(submission_id))
         .copied()
         .collect::<Vec<_>>();
     let mut derived_status_mismatches = Vec::new();
@@ -71911,9 +75304,24 @@ async fn reconcile_db_mirror(
 
     let file_credit_view =
         contributor_credit_view_from_file_records(tenant, file_records, &file_credit_events);
-    let db_credit_view = read_contributor_credit_view_from_db(state, tenant, None).await?;
+    // The reader parity checks compare `main`'s database readers with its
+    // file readers, so the database side leaves out the pipeline's rows,
+    // which have no file side (Ruling F-M10).
+    let mut db_credit_view = read_contributor_credit_view_from_db(state, tenant, None).await?;
+    db_credit_view
+        .records
+        .retain(|record| !pipeline_rows.submission_ids.contains(&record.submission_id));
+    db_credit_view
+        .credit_events
+        .retain(|event| !pipeline_rows.credit_event_ids.contains(&event.event_id));
     let file_metadata_view = metadata_view_from_file_records(file_records, file_derived);
-    let db_metadata_view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+    let mut db_metadata_view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+    db_metadata_view
+        .records
+        .retain(|record| !pipeline_rows.submission_ids.contains(&record.submission_id));
+    db_metadata_view
+        .derived
+        .retain(|record| !pipeline_rows.submission_ids.contains(&record.submission_id));
     let file_analytics = TraceCommonsAnalyticsResponse::from_records(
         tenant.tenant_id.clone(),
         file_metadata_view.records.clone(),
@@ -71925,21 +75333,37 @@ async fn reconcile_db_mirror(
         db_metadata_view.derived.clone(),
     );
     let db_audit_events_for_reader = read_audit_events_from_db(state, tenant).await;
+    // The samples leave out a legacy segment's file-only events and store
+    // rows, which stand for each other or for nothing, and are topped up past
+    // them, so both hold the same most recent events.
     let file_audit_sample = read_recent_audit_events_from_file(
         &state.root,
         &tenant.tenant_id,
-        TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT,
-    )?;
+        TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT + legacy_segments.file_only_event_ids.len(),
+    )?
+    .into_iter()
+    .filter(|event| {
+        !legacy_segments
+            .file_only_event_ids
+            .contains(&event.event_id)
+    })
+    .take(TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT)
+    .collect::<Vec<_>>();
     let mut file_audit_sample_projection = audit_event_reader_projection(&file_audit_sample);
     let mut audit_reader_sample_failures = Vec::new();
     let audit_reader_sample_parity_ok = match db
         .list_recent_trace_audit_events(
             &tenant.tenant_id,
-            TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT,
+            TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT + legacy_segments.store_row_ids.len(),
         )
         .await
     {
         Ok(db_sample) => {
+            let db_sample = db_sample
+                .into_iter()
+                .filter(|row| !legacy_segments.store_row_ids.contains(&row.audit_event_id))
+                .take(TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT)
+                .collect::<Vec<_>>();
             let db_sample_row_count = db_sample.len();
             let legacy_event_ids = db_sample
                 .iter()
@@ -72052,13 +75476,22 @@ async fn reconcile_db_mirror(
         )
     };
     let audit_reader_parity_ok = {
+        // A legacy segment's file-only events and store rows stand for each
+        // other, or for nothing (an idempotent re-POST): count neither.
         let (reader_ok, reader_detail) = match db_audit_events_for_reader.as_ref() {
             Ok(db_events) => (
-                file_audit_events.len() == db_events.len(),
+                file_audit_events
+                    .len()
+                    .saturating_sub(legacy_segments.file_only_event_ids.len())
+                    == db_events
+                        .len()
+                        .saturating_sub(legacy_segments.store_row_ids.len()),
                 format!(
-                    "file_events={} db_events={}",
+                    "file_events={} db_events={} legacy_segment_file_only_events={} legacy_segment_store_rows={}",
                     file_audit_events.len(),
-                    db_events.len()
+                    db_events.len(),
+                    legacy_segments.file_only_event_ids.len(),
+                    legacy_segments.store_row_ids.len()
                 ),
             ),
             Err(error) => (
@@ -72172,6 +75605,7 @@ async fn reconcile_db_mirror(
         missing_audit_event_ids_in_files,
         legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
         db_audit_legacy_prefix_row_count,
+        db_audit_legacy_segment_file_only_event_count: legacy_segments.file_only_event_ids.len(),
         db_audit_hash_chain_failures,
         db_audit_canonical_projection_failures,
         db_audit_submission_metadata_mismatches,
@@ -72203,6 +75637,8 @@ async fn reconcile_db_mirror(
                 .collect(),
         file_revocation_tombstone_count: file_revocations.len(),
         db_tombstone_count: db_tombstones.len(),
+        missing_tombstone_submission_ids_in_db,
+        missing_tombstone_submission_ids_in_files,
         db_object_ref_count,
         accepted_without_active_envelope_object_ref,
         unreadable_active_envelope_object_refs,
@@ -72271,6 +75707,10 @@ fn is_ranker_training_storage_manifest(record: &StorageTraceExportManifestRecord
 fn is_replay_dataset_storage_manifest(record: &StorageTraceExportManifestRecord) -> bool {
     record.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
         && !is_ranker_training_storage_manifest(record)
+        && !record
+            .purpose_code
+            .as_deref()
+            .is_some_and(is_pipeline_export_manifest_purpose_code)
 }
 
 fn deterministic_vector_entry_uuid(
@@ -72855,6 +76295,9 @@ fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     }
     if let Some(error) = error.downcast_ref::<TraceAuditChainRepairRefused>() {
         return api_error(StatusCode::CONFLICT, error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<TraceTombstoneRepairRequiresDbMirror>() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
     internal_error(error)
 }
@@ -73529,10 +76972,10 @@ impl TraceExportManifestSummary {
 
     fn is_replay_dataset_manifest(&self) -> bool {
         self.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
-            && !self
-                .purpose_code
-                .as_deref()
-                .is_some_and(is_ranker_training_purpose_code)
+            && !self.purpose_code.as_deref().is_some_and(|purpose_code| {
+                is_ranker_training_purpose_code(purpose_code)
+                    || is_pipeline_export_manifest_purpose_code(purpose_code)
+            })
     }
 }
 
@@ -74922,6 +78365,11 @@ struct TraceDbAuditChainReport {
     /// `legacy_event_count`: the history of a deployment upgraded from a
     /// build that mirrored no chain fields. Not a failure.
     legacy_prefix_event_count: usize,
+    /// Rows where the chain resumes across a legacy segment an operator
+    /// accepted after a binary rollback, and the file events those resumes
+    /// skip. Not failures; evidence that a resume happened.
+    legacy_segment_resume_count: usize,
+    legacy_segment_file_event_count: usize,
     payload_verified_event_count: usize,
     payload_unverified_event_count: usize,
     mismatch_count: usize,
@@ -75019,6 +78467,9 @@ struct TraceDbReconciliationReport {
     /// before the DB carried the file log's chain fields. Reported, not
     /// blocking.
     db_audit_legacy_prefix_row_count: usize,
+    /// File events a rolled-back build left with no DB row, inside a legacy
+    /// segment the DB chain resumes across. Reported, not blocking.
+    db_audit_legacy_segment_file_only_event_count: usize,
     db_audit_hash_chain_failures: Vec<TraceDbAuditHashChainFailure>,
     db_audit_canonical_projection_failures: Vec<TraceDbAuditProjectionFailure>,
     db_audit_submission_metadata_mismatches: Vec<TraceDbAuditSubmissionMetadataMismatch>,
@@ -75041,6 +78492,10 @@ struct TraceDbReconciliationReport {
     active_export_manifest_ids_with_ineligible_items: Vec<Uuid>,
     file_revocation_tombstone_count: usize,
     db_tombstone_count: usize,
+    /// File revocation tombstones with no `trace_tombstones` row, and the
+    /// reverse, compared by submission id as the rollback drill compares them.
+    missing_tombstone_submission_ids_in_db: Vec<Uuid>,
+    missing_tombstone_submission_ids_in_files: Vec<Uuid>,
     db_object_ref_count: usize,
     accepted_without_active_envelope_object_ref: Vec<Uuid>,
     unreadable_active_envelope_object_refs: Vec<Uuid>,
@@ -75315,6 +78770,16 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "current_retention_job_item_count_mismatches",
             self.current_retention_job_item_count_mismatches.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_tombstone_submission_ids_in_db",
+            self.missing_tombstone_submission_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_tombstone_submission_ids_in_files",
+            self.missing_tombstone_submission_ids_in_files.len(),
         );
         push_gap_count(
             &mut gaps,
@@ -76362,6 +79827,35 @@ impl TraceCommonsAuditEvent {
             export_count: Some(export_count),
             export_id: Some(export_id),
             decision_inputs_hash: Some(source_submission_ids_hash),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// A versioned-pipeline export snapshot at `stage` (`created` or
+    /// `delivered`), in the `dataset_export` shape: the snapshot is the
+    /// export id, the item count the export count, and the source-list hash
+    /// the decision inputs. The reason holds only labels and hashes: the
+    /// stage, the use, the purpose hash, and the source-list hash.
+    fn pipeline_export(auth: &TenantAuth, stage: &str, snapshot: &PipelineExportSnapshot) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "dataset_export".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!(
+                "pipeline_export={stage};allowed_use={};purpose_hash={};source_list_hash={}",
+                snake_case_label(snapshot.allowed_use),
+                snapshot.purpose_hash,
+                snapshot.source_list_hash
+            )),
+            export_count: Some(snapshot.items.len()),
+            export_id: Some(snapshot.snapshot_id),
+            decision_inputs_hash: Some(snapshot.source_list_hash.clone()),
             previous_event_hash: None,
             event_hash: None,
         }
@@ -77507,6 +81001,8 @@ impl TraceOperationalObjectStoreSummary {
 
 #[derive(Debug, Clone, Serialize)]
 struct TraceOperationalRevocationPropagationSummary {
+    /// Re-derived from durable DB state, independent of the latest worker run.
+    withdrawal_completion_pending: bool,
     latest_run_recorded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     latest_run_at: Option<DateTime<Utc>>,
@@ -77546,6 +81042,7 @@ struct TraceOperationalRevocationPropagationSummary {
 impl Default for TraceOperationalRevocationPropagationSummary {
     fn default() -> Self {
         Self {
+            withdrawal_completion_pending: false,
             latest_run_recorded: false,
             latest_run_at: None,
             latest_run_dry_run: false,
@@ -77658,6 +81155,23 @@ async fn read_revocation_propagation_summary_for_admin(
         read_all_audit_events(&state.root, &tenant.tenant_id)?
     };
     let mut summary = TraceOperationalRevocationPropagationSummary::from_audit_events(&events)?;
+    if let Some(db) = state.db_mirror.as_ref() {
+        let held_retention_policy_ids = state
+            .legal_hold_retention_policy_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        summary.withdrawal_completion_pending = !db
+            .list_incomplete_source_session_withdrawals(
+                &tenant.tenant_id,
+                None,
+                &held_retention_policy_ids,
+                1,
+            )
+            .await
+            .context("failed to read pending source-session withdrawal completion state")?
+            .is_empty();
+    }
     summary.worker_cache_invalidator_required = state.require_external_worker_cache_invalidator;
     summary.worker_cache_invalidator_configured = state.worker_cache_invalidator.is_some();
     summary.worker_cache_invalidator_ready =

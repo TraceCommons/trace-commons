@@ -201,10 +201,14 @@ struct MenuBarContent: View {
             Text("Not watching anything yet")
             Text("Open the window to choose which folders to watch")
         case .running:
-            if model.decisionsOwed == 0 {
+            if let count = model.decisionsOwed, count == 0 {
                 Text("Nothing waiting")
             } else {
-                Text("\(model.decisionsOwed) waiting for your decision")
+                if let count = model.decisionsOwed {
+                    Text("\(count) waiting for your decision")
+                } else {
+                    Text("Decision count unavailable")
+                }
                 // Not approve buttons. Deliberately inert lines: the only
                 // forward action in this menu is Review.
                 ForEach(model.waitingByProject, id: \.id) { row in

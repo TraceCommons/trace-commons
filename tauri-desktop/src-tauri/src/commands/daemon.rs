@@ -78,6 +78,11 @@ pub(crate) fn arming_offer_copy(project_label: String, count: u32) -> serde_json
         "confirm": project_copy::ARMING_OFFER_CONFIRM,
         "decline": project_copy::ARMING_OFFER_DECLINE,
         "body": project_copy::ARMING_BODY,
+        // K5: the body for arming with the backlog (`include_backlog`), and
+        // Customize's copy for the picker and "Keep on this Mac". DRAFT,
+        // NEEDS APPROVAL; see `project_copy::customize_copy`.
+        "body_with_backlog": project_copy::ARMING_BODY_WITH_BACKLOG,
+        "customize": project_copy::customize_copy(),
     })
 }
 

@@ -1349,6 +1349,13 @@ pub(super) const ACCOUNT_ALREADY_BOUND: &str = "account_already_bound";
 /// device key the ceremony enrols lives in the daemon, which holds a `tcn1_`
 /// token; a browser cookie session has no device to prove.
 pub(super) const NATIVE_SESSION_REQUIRED: &str = "native_session_required";
+/// The label (and audit stage) a bind finish answers with when the daemon's
+/// device key is already registered to another account (#1135 review). It is
+/// the one finish refusal that is not the uniform deny: by then the caller has
+/// proven it holds the device key and the NEAR AI token, the fact is about its
+/// own device, and the label names no tenant or account. A client shows it
+/// rather than retrying; nothing was written, and no fresh key is minted.
+pub(super) const BIND_DEVICE_KEY_REGISTERED_ELSEWHERE: &str = "device_key_registered_elsewhere";
 
 /// The two preconditions both bind verbs share. They answer with a label rather
 /// than the uniform deny: the caller is authenticated, and both facts are its
@@ -1365,12 +1372,17 @@ fn bind_precondition(
     } else {
         return None;
     };
+    Some(no_store(refusal))
+}
+
+/// A labelled bind refusal, marked `no-store` like the uniform deny.
+fn no_store(refusal: impl IntoResponse) -> axum::response::Response {
     let mut response = refusal.into_response();
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
     );
-    Some(response)
+    response
 }
 
 /// A label-only `account_binding_failed` row in the caller's own tenant.
@@ -1483,7 +1495,12 @@ pub(super) async fn near_ai_bind_finish_handler(
         Ok(response) => Some(response),
         Err(Some(stage)) => {
             bind_failed(&state, &ctx, stage).await;
-            None
+            (stage == BIND_DEVICE_KEY_REGISTERED_ELSEWHERE).then(|| {
+                no_store(api_error(
+                    StatusCode::CONFLICT,
+                    BIND_DEVICE_KEY_REGISTERED_ELSEWHERE,
+                ))
+            })
         }
         Err(None) => None,
     };
@@ -1566,7 +1583,17 @@ async fn near_ai_bind_finish(
             identity,
         )
         .await
-        .map_err(|_| Some("bind"))?;
+        .map_err(|error| {
+            // The one database refusal shown to the caller: its own device,
+            // proven by the signature above, is held by another account.
+            // Nothing was committed, so the account stays unbound.
+            if trace_commons_server::account_onboarding::is_device_key_registered_elsewhere(&error)
+            {
+                Some(BIND_DEVICE_KEY_REGISTERED_ELSEWHERE)
+            } else {
+                Some("bind")
+            }
+        })?;
     use trace_commons_server::account_onboarding::NearAiBindOutcome;
     let (provisioned, outcome, binding_state) = match outcome {
         NearAiBindOutcome::Bound(provisioned) => (
