@@ -37,6 +37,8 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
     /// The selected session's entry id; empty for none.
     @SceneStorage("monitor.selectedSession") private var selectedSession = ""
+    /// Home's page: the overview or History, restored per window.
+    @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
 
     /// The screens' data (C1). Sample data in this debug window until K1
     /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
@@ -44,6 +46,8 @@ struct MonitorWindowView: View {
     @State private var traces = TracesStore(client: MonitorWindowView.dataClient())
     /// The map's Private AI view and the Inference tab (R8).
     @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
+    /// Home and History (R9).
+    @State private var home = HomeStore(client: MonitorWindowView.dataClient())
 
     static func dataClient() -> any DaemonDataClient {
         let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] ?? ""
@@ -64,7 +68,11 @@ struct MonitorWindowView: View {
                 switch tab {
                 case .traces: TracesTreeView(store: traces, selection: $selectedSession)
                 case .inference: InferenceTabView(store: inference)
-                case .home: Spacer(minLength: 0)
+                case .home:
+                    HomeTabView(
+                        store: home, traces: traces,
+                        statusLabel: { status in model.publicRunCopy?.contributionStatusLabel(for: status) },
+                        page: $homePage)
                 }
             }
         } map: {
@@ -84,13 +92,14 @@ struct MonitorWindowView: View {
                         store: inference, destinationLabel: model.privateInferenceCopy?.destination,
                         sentence: { HarnessSurface.stateSentence($0, calls: model.harnessCalls) })
                 case .home:
-                    Color.clear
+                    HomeSummaryInspector(store: home)
                 }
             }
         }
         .glassWindow()
         .task { await traces.run() }
         .task { await inference.run() }
+        .task { await home.run() }
     }
 
     /// The Traces badge (R7): decisions owed, a dash when the core did not
