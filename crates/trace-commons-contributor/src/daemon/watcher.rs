@@ -1368,6 +1368,9 @@ fn visit_session(
         subagent_count: transcript.subagent_count,
         subagents_dropped: transcript.subagents_dropped,
         shape: Some(super::queue::SessionShape::of(&transcript)),
+        // K9: built from the same raw transcript, at the same moment, for
+        // the same reason -- see `queue::title_of`.
+        title: super::queue::title_of(&transcript),
         // The observation this entry is made of, so the next poll
         // can recognize it without reading the group again. See
         // `QueueEntry::observed_modified_at`.
