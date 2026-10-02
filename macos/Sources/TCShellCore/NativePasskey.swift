@@ -59,12 +59,15 @@ public struct NativePasskeyCredential: Encodable, Sendable, Equatable {
 
     public static func assertion(credentialID: Data, clientDataJSON: Data, authenticatorData: Data,
                                  signature: Data, userHandle: Data?) throws -> Self {
+        // The native server uses discoverable authentication to identify the
+        // account. A missing handle cannot complete that ceremony.
+        guard let userHandle else { throw NativePasskeyFailure.incompleteCredential }
         try validate([credentialID, clientDataJSON, authenticatorData, signature])
-        if let userHandle { try validate([userHandle]) }
+        try validate([userHandle])
         return Self(kind: .assertion, credentialID: NativePasskeyEncoding.encode(credentialID),
                     rawClientDataJSON: NativePasskeyEncoding.encode(clientDataJSON), rawAttestationObject: nil,
                     rawAuthenticatorData: NativePasskeyEncoding.encode(authenticatorData),
-                    signature: NativePasskeyEncoding.encode(signature), userHandle: userHandle.map(NativePasskeyEncoding.encode))
+                    signature: NativePasskeyEncoding.encode(signature), userHandle: NativePasskeyEncoding.encode(userHandle))
     }
 
     private static func validate(_ fields: [Data]) throws {
@@ -107,7 +110,7 @@ public struct NativePasskeyBegin: Decodable, Sendable {
         else { throw NativePasskeyFailure.invalidOptions }
         let challengeBytes = try NativePasskeyEncoding.decode(challenge, maximumBytes: 1_024)
         func credentials(_ values: [String]?) throws -> [Data] {
-            guard (values?.count ?? 0) <= 100 else { throw NativePasskeyFailure.invalidOptions }
+            guard (values?.count ?? 0) <= 128 else { throw NativePasskeyFailure.invalidOptions }
             return try (values ?? []).map { try NativePasskeyEncoding.decode($0, maximumBytes: 1_024) }
         }
         var userBytes: Data?

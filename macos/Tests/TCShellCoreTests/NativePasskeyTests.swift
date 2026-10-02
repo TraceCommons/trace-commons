@@ -23,13 +23,18 @@ final class NativePasskeyTests: XCTestCase {
             signature: Data([4]), userHandle: Data([5])))
     }
 
-    func testAssertionPreservesOptionalUserHandle() throws {
+    func testDiscoverableAssertionRequiresAndPreservesUserHandle() throws {
+        for handle in [nil, Data()] as [Data?] {
+            XCTAssertThrowsError(try NativePasskeyCredential.assertion(
+                credentialID: Data([1]), clientDataJSON: Data([2]), authenticatorData: Data([3]),
+                signature: Data([0xff]), userHandle: handle))
+        }
         let credential = try NativePasskeyCredential.assertion(
             credentialID: Data([1]), clientDataJSON: Data([2]), authenticatorData: Data([3]),
-            signature: Data([0xff]), userHandle: nil)
+            signature: Data([0xff]), userHandle: Data([4]))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(credential)) as? [String: Any])
         XCTAssertEqual(object["signature"] as? String, "_w")
-        XCTAssertTrue(object["user_handle"] == nil || object["user_handle"] is NSNull)
+        XCTAssertEqual(object["user_handle"] as? String, "BA")
         XCTAssertEqual(object["raw_authenticator_data"] as? String, "Aw")
     }
 
@@ -38,6 +43,19 @@ final class NativePasskeyTests: XCTestCase {
         for value in ["", "YQ==", "a+", "a/", "AB", "A"] {
             XCTAssertThrowsError(try NativePasskeyEncoding.decode(value), value)
         }
+    }
+
+    func testCredentialListAcceptsRustLimitAndRefusesOverflow() throws {
+        var object: [String: Any] = ["ceremony": "local", "rp_id": "tracecommons.ai",
+            "challenge": "AQID", "expires_in_secs": 180, "user_verification": "required",
+            "allowed_credentials": Array(repeating: "BAUG", count: 128)]
+        let accepted = try JSONDecoder().decode(NativePasskeyBegin.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(try accepted.validated(for: .login).allowedCredentials.count, 128)
+        object["allowed_credentials"] = Array(repeating: "BAUG", count: 129)
+        let overflow = try JSONDecoder().decode(NativePasskeyBegin.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertThrowsError(try overflow.validated(for: .login))
     }
 }
 

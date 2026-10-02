@@ -9,13 +9,13 @@ final class NativePasskeyClientTests: XCTestCase {
         let daemon = NativeIdentityWireFixture()
         let client = DaemonClient(daemon: daemon)
         let credential = try NativePasskeyCredential.assertion(credentialID: Data([1]),
-            clientDataJSON: Data([2]), authenticatorData: Data([3]), signature: Data([4]), userHandle: nil)
+            clientDataJSON: Data([2]), authenticatorData: Data([3]), signature: Data([4]), userHandle: Data([5]))
         _ = try client.passkeyComplete(.login, ceremony: "local-handle", credential: credential)
         let call = try XCTUnwrap(daemon.calls.last)
         XCTAssertEqual(call.0, "passkey_login_complete")
         let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.1.utf8)) as? [String: Any])
         XCTAssertEqual(Set(params.keys), ["ceremony", "credential_id", "raw_client_data_json", "raw_authenticator_data", "signature", "user_handle"])
-        XCTAssertTrue(params["user_handle"] is NSNull)
+        XCTAssertEqual(params["user_handle"] as? String, "BQ")
         XCTAssertEqual(params["ceremony"] as? String, "local-handle")
         XCTAssertEqual(params["signature"] as? String, "BA")
     }

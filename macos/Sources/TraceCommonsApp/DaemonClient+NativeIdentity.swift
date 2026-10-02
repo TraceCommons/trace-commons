@@ -24,7 +24,6 @@ extension DaemonClient {
         guard var params = try JSONSerialization.jsonObject(with: JSONEncoder().encode(credential)) as? [String: Any]
         else { throw NativePasskeyFailure.incompleteCredential }
         params["ceremony"] = ceremony
-        if action == .login, credential.userHandle == nil { params["user_handle"] = NSNull() }
         return try call(method, params: params, as: NativeAccountBinding.self)
     }
 
