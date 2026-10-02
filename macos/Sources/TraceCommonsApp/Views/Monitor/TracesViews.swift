@@ -424,12 +424,26 @@ struct SessionInspectorView: View {
         }
     }
 
-    /// What scrubbing removed, and what it found but left in, in the
-    /// core's redaction labels (`RedactionSummary`).
+    /// What scrubbing removed, and what it found but left in, as the core
+    /// groups, splits and words it (`tc_redaction_summary_json`), the way
+    /// the review sheet renders it. No counts, or an answer that will not
+    /// parse, lists nothing rather than claiming nothing matched. Distinct
+    /// counts are sent only with a full summary; absent, the core reads them
+    /// as none.
     @ViewBuilder
     private func redactions(_ summary: DaemonData.PreviewSummary) -> some View {
-        // A label counted zero times removed nothing: it is not a row.
-        let rows = RedactionSummary.rows(occurrences: (summary.redactions ?? [:]).filter { $0.value > 0 }, distinct: [:])
+        if let occurrences = summary.redactions,
+            let rows = RedactionSummary.rows(fromJSON: TCCoreCopy.redactionSummaryJSON(
+                occurrences: occurrences, distinct: summary.redactionsDistinct ?? [:]))
+        {
+            redactionRows(rows)
+        }
+    }
+
+    @ViewBuilder
+    private func redactionRows(
+        _ rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow])
+    ) -> some View {
         if !rows.removed.isEmpty {
             GlassCard(quiet: true) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
