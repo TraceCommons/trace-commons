@@ -164,11 +164,8 @@ public struct GlassGallery: View {
                 Toggle("settings", isOn: $settingsToggle).labelsHidden().toggleStyle(GlassToggleStyle(.settings))
                 Toggle("watch", isOn: $watched).labelsHidden().toggleStyle(GlassToggleStyle(.watch))
                 Toggle("Single", isOn: $checked).toggleStyle(GlassCheckboxStyle())
-                Toggle("Group", isOn: Binding(
-                    get: { children.allSatisfy { $0 } },
-                    set: { value in children = children.map { _ in value } }
-                ))
-                .toggleStyle(GlassCheckboxStyle(mixed: children.contains(true) && children.contains(false)))
+                Toggle("Group", sources: $children, isOn: \.self)
+                    .toggleStyle(GlassCheckboxStyle())
                 GlassCheckMark(checked: true)
                 GlassCheckMark(checked: false)
                 GlassExpander("Decisions", isOpen: $expanded).frame(width: 140)

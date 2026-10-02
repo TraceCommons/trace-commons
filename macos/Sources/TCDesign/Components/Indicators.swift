@@ -368,7 +368,7 @@ public struct GlassMapNodeStyle: Sendable, Equatable {
             ring = true
             radius = 11
         case .hub:
-            fill = GlassRGBA(0x8E8E96)
+            fill = GlassTokens.Color.mapHub
             ring = true
             radius = 16
         }

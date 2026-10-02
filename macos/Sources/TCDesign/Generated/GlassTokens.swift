@@ -59,6 +59,8 @@ public enum GlassTokens {
         public static let selection: GlassRGBA = GlassRGBA(0x2F6AC0, alpha: 1)
         public static let mapIdle: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.35)
         public static let mapNodeOff: GlassRGBA = GlassRGBA(0x5D5D63, alpha: 1)
+        /// The map's centre node.
+        public static let mapHub: GlassRGBA = GlassRGBA(0x8E8E96, alpha: 1)
         public static let mapFieldInner: GlassRGBA = GlassRGBA(0x1E2A3A, alpha: 1)
         public static let mapFieldOuter: GlassRGBA = GlassRGBA(0x131A24, alpha: 1)
         public static let consentFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.25)
@@ -115,6 +117,7 @@ public enum GlassTokens {
             "selection": selection,
             "mapIdle": mapIdle,
             "mapNodeOff": mapNodeOff,
+            "mapHub": mapHub,
             "mapFieldInner": mapFieldInner,
             "mapFieldOuter": mapFieldOuter,
             "consentFill": consentFill,
