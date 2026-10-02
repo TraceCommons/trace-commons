@@ -204,18 +204,34 @@ pub struct ReceiptOwnership {
 /// submission, principal, or trace text.
 ///
 /// `pending` holds every one of the ten labels that `legacy_drain_report`
-/// lists, a zero too, so a missing key never reads as "nothing owed". `evidence_hash` is the canonical hash
-/// (`evidence_hash`) of `{"schema": "trace_commons.pipeline_legacy_drain.v1",
-/// "pending": pending}`: the same counts give the same hash, and it names no
-/// time.
+/// lists, a zero too, so a missing key never reads as "nothing owed". It holds
+/// them in both modes of the gate driver. `not_blocking` holds the one label
+/// `gate_decision_absent`, a zero too: the legacy submissions that have no gate
+/// decision, counted only when the caller says that the gate driver is off
+/// (`gate_driver_enabled` false), because then no code makes the decision and
+/// it is not work that the legacy path owes. `evidence_hash` is the canonical
+/// hash (`evidence_hash`) of `{"schema": "trace_commons.pipeline_legacy_drain.v1",
+/// "gate_driver_enabled": gate_driver_enabled, "pending": pending,
+/// "not_blocking": not_blocking}`: the same counts in the same mode give the
+/// same hash, and it names no time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LegacyDrainReport {
     pub generated_at: DateTime<Utc>,
     /// The tenant's routing row at the same snapshot; `None` for a tenant
     /// that has none.
     pub routing_state: Option<RoutingState>,
+    /// The mode of this report: true when the caller said that the
+    /// deployment runs the gate driver (`Some(ceiling)`), false when it said
+    /// that the driver is off (`None`). The two modes of the same rows give
+    /// different `pending`, `not_blocking`, and `evidence_hash`.
+    pub gate_driver_enabled: bool,
+    /// What the legacy path owes. Every count in it blocks `drained`.
     pub pending: BTreeMap<String, u64>,
-    /// True only when every count is zero.
+    /// What the report shows and does not count as owed. It never changes
+    /// `drained`.
+    pub not_blocking: BTreeMap<String, u64>,
+    /// True only when every count in `pending` is zero. `not_blocking` is not
+    /// read.
     pub drained: bool,
     pub evidence_hash: String,
 }
@@ -232,22 +248,43 @@ enum DrainParams {
     TenantAndHeldRetentionPolicies,
 }
 
-/// One count of the drain report: its label, its statement, and its
-/// parameters.
+/// Where a count's number goes in the report, and in which mode of the gate
+/// driver the statement runs. A statement that does not run for the caller's
+/// mode leaves its label at 0 in the map it belongs to.
+#[derive(Clone, Copy)]
+enum DrainCounted {
+    /// Into `pending`, in both modes.
+    Blocking,
+    /// Into `pending`, only when the caller says that the deployment runs the
+    /// gate driver (`Some(ceiling)`): the statement takes that ceiling.
+    BlockingWhenGateDriverRuns,
+    /// Into `not_blocking`, only when the caller says that the gate driver is
+    /// off (`None`).
+    NotBlockingWhenGateDriverIsOff,
+}
+
+/// One count of the drain report: its label, its statement, its parameters,
+/// and where its number goes.
 struct LegacyDrainCount {
     label: &'static str,
     sql: &'static str,
     params: DrainParams,
+    counted: DrainCounted,
 }
 
-/// The ten counts, each the predicate of the legacy worker that does the
-/// work, with the tenant filter and "no pipeline run owns the submission"
+/// The ten counts that block `drained` and the one that does not, each the
+/// predicate of the legacy worker that does the work, with the tenant filter
+/// and "no pipeline run owns the submission"
 /// (`NOT EXISTS ... pipeline_runs`, the exclusion
 /// `list_submissions_needing_gate_decision` applies too: a pipeline receipt
 /// also writes a `trace_submissions` row, in the status `received`,
 /// `quarantined`, `rejected`, or, after a review approval, `accepted`). Every
 /// statement is one `SELECT COUNT(*)` over a tenant predicate: no row is
-/// locked and nothing is written.
+/// locked and nothing is written. The mode of the gate driver decides which
+/// statements about a missing gate decision run (`DrainCounted`): with the
+/// driver on, `gate_decision_pending` and `gate_decision_exhausted`; with it
+/// off, `gate_decision_absent` alone. A statement that does not run leaves its
+/// label at 0.
 ///
 /// Where a count cannot select exactly what its worker selects for the
 /// legacy-owned submissions, it selects more, never less: a count that reads
@@ -255,7 +292,7 @@ struct LegacyDrainCount {
 /// to prevent. The comments say where. (The legacy workers do not themselves
 /// leave out a submission with a pipeline run, except the gate driver; the
 /// report does, because that work belongs to the pipeline.)
-const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
+const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 11] = [
     // `list_submissions_awaiting_pii_backstop` (db/postgres.rs) selects a
     // submission in this status that also has an active envelope ref, fewer
     // attempts than its ceiling, and an elapsed backoff. This count is the
@@ -271,13 +308,15 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
         params: DrainParams::Tenant,
+        counted: DrainCounted::Blocking,
     },
     // `list_submissions_needing_gate_decision` (db/postgres.rs), without its
     // backoff clause: a submission that waits out a backoff is still owed its
     // decision. Attempts below the ceiling the gate driver runs with
     // (`run_perplexity_score_driver_tick`'s `max_attempts`). The envelope ref
     // is an `EXISTS`, not the worker's join: the join fans out to one row for
-    // each active ref and the worker deduplicates it with `DISTINCT`.
+    // each active ref and the worker deduplicates it with `DISTINCT`. Taken
+    // only when the caller says that the deployment runs the gate driver.
     LegacyDrainCount {
         label: "gate_decision_pending",
         sql: "SELECT COUNT(*) FROM trace_submissions s
@@ -303,10 +342,12 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
         params: DrainParams::TenantAndGateCeiling,
+        counted: DrainCounted::BlockingWhenGateDriverRuns,
     },
     // The same query with the attempts at or above the ceiling: the driver
     // no longer selects the submission, and no decision exists. Without an
-    // operator resetting its attempt row it never gets one.
+    // operator resetting its attempt row it never gets one. Taken only when the
+    // caller says that the deployment runs the gate driver.
     LegacyDrainCount {
         label: "gate_decision_exhausted",
         sql: "SELECT COUNT(*) FROM trace_submissions s
@@ -332,6 +373,38 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
         params: DrainParams::TenantAndGateCeiling,
+        counted: DrainCounted::BlockingWhenGateDriverRuns,
+    },
+    // The same query with no attempts predicate: the submissions with an
+    // active submitted envelope and no gate decision, whatever their attempts,
+    // which is the sum of the two statements above under any ceiling. It runs
+    // instead of them when the deployment does not run the gate driver: no
+    // code then makes the decision, so it is not work that the legacy path
+    // owes, and the number goes into `not_blocking`. It is its own statement,
+    // not one of the two above with a ceiling that stands for "none": no
+    // sentinel ceiling is right for every attempt count.
+    LegacyDrainCount {
+        label: "gate_decision_absent",
+        sql: "SELECT COUNT(*) FROM trace_submissions s
+               WHERE s.tenant_id = $1
+                 AND EXISTS (
+                     SELECT 1 FROM trace_object_refs o
+                      WHERE o.tenant_id = s.tenant_id
+                        AND o.submission_id = s.submission_id
+                        AND o.artifact_kind = 'submitted_envelope'
+                        AND o.invalidated_at IS NULL
+                        AND o.deleted_at IS NULL
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM trace_gate_decisions d
+                      WHERE d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pipeline_runs r
+                      WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                 )",
+        params: DrainParams::Tenant,
+        counted: DrainCounted::NotBlockingWhenGateDriverIsOff,
     },
     // `claim_trace_review_lease` (db/trace_corpus_pg.rs) claims a submission
     // in this status. A submission whose lease another reviewer holds is
@@ -346,6 +419,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
         params: DrainParams::Tenant,
+        counted: DrainCounted::Blocking,
     },
     // `index_vector_metadata_from_db` (trace-commons-ingest.rs) builds this
     // set in memory: an accepted submission that is not revoked or purged,
@@ -390,6 +464,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
         params: DrainParams::Tenant,
+        counted: DrainCounted::Blocking,
     },
     // `run_credit_settlement_unlocked` (trace-commons-ingest.rs) settles the
     // events of the four types `trace_credit_event_type_is_settlement_eligible`
@@ -425,6 +500,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
         params: DrainParams::Tenant,
+        counted: DrainCounted::Blocking,
     },
     // `list_due_trace_revocation_propagation_items` (db/trace_corpus_pg.rs)
     // lists the `pending` and `failed` items whose `next_attempt_at` is due.
@@ -445,6 +521,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                         AND r.submission_id = i.source_submission_id
                  )",
         params: DrainParams::Tenant,
+        counted: DrainCounted::Blocking,
     },
     // `read_mains_near_credit_outbox_items` (trace-commons-ingest.rs): the
     // outbox rows `main`'s NEAR workers read, which leave out the pipeline's
@@ -458,6 +535,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                  AND o.instrument_id IS NULL
                  AND o.status IN ('pending', 'failed', 'submitted')",
         params: DrainParams::Tenant,
+        counted: DrainCounted::Blocking,
     },
     // `repair_missing_near_credit_outbox_items_for_finalized_batches`
     // (trace-commons-ingest.rs), which every live settlement run calls first.
@@ -499,6 +577,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                       ))
                  )",
         params: DrainParams::Tenant,
+        counted: DrainCounted::Blocking,
     },
     // `list_incomplete_source_session_withdrawals` (db/trace_corpus_pg.rs),
     // which the revocation propagation worker runs for the whole tenant
@@ -553,6 +632,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
                                 AND NOT (submission.retention_policy_id = ANY($2)))
                  )",
         params: DrainParams::TenantAndHeldRetentionPolicies,
+        counted: DrainCounted::Blocking,
     },
 ];
 
@@ -933,24 +1013,29 @@ impl PipelineActivationStore {
         .await
     }
 
-    /// What the legacy path still owes `tenant_id`, as ten counts and one
-    /// verdict: `drained` is true only when every count is zero. Before a
-    /// tenant's legacy writer can be retired the legacy code must have
-    /// finished this work. Each count is the selection of the legacy worker
-    /// that does the work, left to what the pipeline does not own: by
-    /// submission (no pipeline run) for the first seven counts, by payout
-    /// instrument (none) for the two NEAR counts, and tenant-wide for the
-    /// withdrawals. `LEGACY_DRAIN_COUNTS` names each worker function and every
-    /// place a count is wider than the worker's own selection:
+    /// What the legacy path still owes `tenant_id`, as ten counts in `pending`
+    /// and one verdict: `drained` is true only when every count in `pending`
+    /// is zero. Before a tenant's legacy writer can be retired the legacy code
+    /// must have finished this work. A second map, `not_blocking`, holds a
+    /// number that the report shows and does not count as owed
+    /// (`gate_decision_absent`, below); it never changes `drained`. Each count
+    /// is the selection of the legacy worker that does the work, left to what
+    /// the pipeline does not own: by submission (no pipeline run) for the first
+    /// seven counts, by payout instrument (none) for the two NEAR counts, and
+    /// tenant-wide for the withdrawals. `LEGACY_DRAIN_COUNTS` names each worker
+    /// function and every place a count is wider than the worker's own
+    /// selection:
     ///
     /// - `awaiting_pii_backstop`: submissions held for the PII backstop's
     ///   verdict.
-    /// - `gate_decision_pending`: submissions with an active submitted
-    ///   envelope and no gate decision whose attempts are below
-    ///   `gate_max_attempts` (`list_submissions_needing_gate_decision`, with
-    ///   no backoff and no status filter).
-    /// - `gate_decision_exhausted`: the same with attempts at or above the
-    ///   ceiling, which the gate driver no longer selects.
+    /// - `gate_decision_pending`, only with the gate driver on: submissions
+    ///   with an active submitted envelope and no gate decision whose attempts
+    ///   are below `gate_driver_max_attempts`
+    ///   (`list_submissions_needing_gate_decision`, with no backoff and no
+    ///   status filter).
+    /// - `gate_decision_exhausted`, only with the gate driver on: the same with
+    ///   attempts at or above the ceiling, which the gate driver no longer
+    ///   selects.
     /// - `quarantine_review_pending`: quarantined submissions waiting for a
     ///   reviewer's decision (`claim_trace_review_lease`).
     /// - `vector_index_pending`: the current precheck records of accepted
@@ -980,17 +1065,51 @@ impl PipelineActivationStore {
     ///   version that has a pipeline run too, so this count does not leave
     ///   out a submission with a run.
     ///
+    /// The gate driver (owner decision, 2026-10-02). A missing gate decision
+    /// is owed work only in a deployment that runs the gate driver. With the
+    /// driver off, which is the default
+    /// (`TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`), no code ever makes the
+    /// decision, so counting it as owed would keep `drained` false for good,
+    /// and turning the driver on only to drain would have a side effect: a
+    /// gate run also awards `NoveltyUtility` credit. The caller says which
+    /// mode applies with `gate_driver_max_attempts`:
+    ///
+    /// - `Some(ceiling)`: the deployment runs the gate driver with that
+    ///   attempt ceiling. `gate_decision_pending` and `gate_decision_exhausted`
+    ///   are counted as above, `not_blocking["gate_decision_absent"]` is 0, and
+    ///   `gate_driver_enabled` is true.
+    /// - `None`: the gate driver is off. `gate_decision_pending` and
+    ///   `gate_decision_exhausted` are 0. `not_blocking["gate_decision_absent"]`
+    ///   is the number of legacy submissions with an active submitted envelope
+    ///   and no gate decision, whatever their attempts (the sum of what the two
+    ///   labels count under any ceiling), and it does not block `drained`.
+    ///   `gate_driver_enabled` is false. The count leaves out a submission that
+    ///   a pipeline run owns, as every count does.
+    ///
+    /// Both maps hold their labels in both modes, a zero too. The other eight
+    /// counts in `pending` do not depend on the mode.
+    ///
+    /// What the driver-off report does not claim: it does not say that the
+    /// submissions have a gate decision, because they have none. It says only
+    /// that no legacy code owes one. Nothing in the driver-off report makes the
+    /// decision, and `/v1/workers/gate/evaluate` can still score a submission
+    /// that its caller names, in either mode. An operator who wants the
+    /// decisions turns the gate driver on and reads the report with `Some`.
+    ///
     /// Counts that can stay above zero without legacy code ever clearing
     /// them, so that an operator reads them as work for a person:
     ///
-    /// - `gate_decision_pending` is every legacy submission with an envelope
-    ///   and no decision, accepted or not, and nothing scores one by itself
-    ///   unless the in-process gate driver runs, which it does not unless an
-    ///   operator turns it on (`TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`);
-    ///   `/v1/workers/gate/evaluate` scores a submission its caller names.
-    /// - `gate_decision_exhausted` and `awaiting_pii_backstop` after the
-    ///   attempts ran out: the driver stops, and an operator resets the
-    ///   attempt row or accepts the loss.
+    /// - `gate_decision_pending` is counted only when the caller says that the
+    ///   gate driver runs (`Some`); it is every legacy submission below the
+    ///   ceiling with an envelope and no decision, accepted or not, and it
+    ///   clears only when the in-process gate driver scores the submission.
+    ///   With the driver off, nothing scores one by itself and the same
+    ///   submissions are `not_blocking["gate_decision_absent"]`;
+    ///   `/v1/workers/gate/evaluate` can still score a submission that its
+    ///   caller names, in either mode.
+    /// - `gate_decision_exhausted` (only with the gate driver on) and
+    ///   `awaiting_pii_backstop` after the attempts ran out: the driver stops,
+    ///   and an operator resets the attempt row or accepts the loss.
     /// - `quarantine_review_pending` waits for a reviewer, not for code.
     /// - `revocation_propagation_pending` for an item left `in_progress` by a
     ///   run that crashed: the worker never lists it again.
@@ -1045,44 +1164,75 @@ impl PipelineActivationStore {
     /// database (`db_reviewer_reads_for_tenant`), so the legacy workers act
     /// on the rows this report counts. Otherwise a quarantined submission, a
     /// credit event, or an outbox row that exists only in the file store is
-    /// owed work and the report reads zero with `drained` true.
+    /// owed work and the report reads zero with `drained` true. The caller
+    /// passes `Some` only when the deployment's gate driver is on, and `None`
+    /// otherwise: the store cannot see the deployment's configuration, and a
+    /// `None` for a deployment whose driver runs would leave work that the
+    /// driver is about to do out of `pending`.
     ///
     /// Parameters. `tenant_id` is the tenant of the credential, never a
-    /// second tenant. `gate_max_attempts` is the attempt ceiling the gate
-    /// driver runs with (`PerplexityDriverKnobs::max_attempts`); it splits
-    /// the gate work into pending (below the ceiling) and exhausted (at it).
-    /// `held_retention_policy_ids` is the retention policies a legal hold
-    /// keeps (`legal_hold_retention_policy_ids`), as the withdrawal worker
-    /// receives them: a withdrawn submission's token attachment under one of
-    /// them is not owed deletion, so it is not counted. An empty list holds
-    /// nothing.
+    /// second tenant. `gate_driver_max_attempts` is `Some(ceiling)` when the
+    /// deployment runs the gate driver, with the attempt ceiling it runs with
+    /// (`PerplexityDriverKnobs::max_attempts`); it splits the gate work into
+    /// pending (below the ceiling) and exhausted (at it). It is `None` when the
+    /// gate driver is off. `held_retention_policy_ids` is the retention
+    /// policies a legal hold keeps (`legal_hold_retention_policy_ids`), as the
+    /// withdrawal worker receives them: a withdrawn submission's token
+    /// attachment under one of them is not owed deletion, so it is not
+    /// counted. An empty list holds nothing.
     ///
     /// The report runs as the ingest runtime role in one tenant transaction:
     /// a read-only, single-snapshot transaction (`REPEATABLE READ`), so all
-    /// ten counts and the routing state describe one instant, with one
-    /// statement for each count and no row lock.
+    /// the counts and the routing state describe one instant, with one
+    /// statement for each count that the mode takes (ten with the gate driver
+    /// on: the two gate statements; nine with it off: the absent statement
+    /// instead of them) and no row lock.
     pub async fn legacy_drain_report(
         &self,
         tenant_id: &str,
-        gate_max_attempts: i32,
+        gate_driver_max_attempts: Option<i32>,
         held_retention_policy_ids: &[String],
     ) -> Result<LegacyDrainReport, DatabaseError> {
+        let gate_driver_enabled = gate_driver_max_attempts.is_some();
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::read_only_tenant_transaction(&mut client, tenant_id).await?;
         let mut pending = BTreeMap::new();
+        let mut not_blocking = BTreeMap::new();
         for count in &LEGACY_DRAIN_COUNTS {
-            let params: &[&(dyn ToSql + Sync)] = match count.params {
-                DrainParams::Tenant => &[&tenant_id],
-                DrainParams::TenantAndGateCeiling => &[&tenant_id, &gate_max_attempts],
-                DrainParams::TenantAndHeldRetentionPolicies => {
-                    &[&tenant_id, &held_retention_policy_ids]
-                }
+            let (runs, blocks) = match count.counted {
+                DrainCounted::Blocking => (true, true),
+                DrainCounted::BlockingWhenGateDriverRuns => (gate_driver_enabled, true),
+                DrainCounted::NotBlockingWhenGateDriverIsOff => (!gate_driver_enabled, false),
             };
-            let counted: i64 = tx.query_one(count.sql, params).await?.get(0);
-            let counted = u64::try_from(counted).map_err(|_| {
-                DatabaseError::Serialization("legacy_drain_count_invalid".to_string())
-            })?;
-            pending.insert(count.label.to_string(), counted);
+            let counted = if runs {
+                let params: &[&(dyn ToSql + Sync)] = match (count.params, &gate_driver_max_attempts)
+                {
+                    (DrainParams::Tenant, _) => &[&tenant_id],
+                    (DrainParams::TenantAndGateCeiling, Some(ceiling)) => &[&tenant_id, ceiling],
+                    // The table runs a statement that takes the ceiling
+                    // only for a caller that gave one.
+                    (DrainParams::TenantAndGateCeiling, None) => {
+                        return Err(DatabaseError::Serialization(
+                            "legacy_drain_gate_ceiling_missing".to_string(),
+                        ));
+                    }
+                    (DrainParams::TenantAndHeldRetentionPolicies, _) => {
+                        &[&tenant_id, &held_retention_policy_ids]
+                    }
+                };
+                let counted: i64 = tx.query_one(count.sql, params).await?.get(0);
+                u64::try_from(counted).map_err(|_| {
+                    DatabaseError::Serialization("legacy_drain_count_invalid".to_string())
+                })?
+            } else {
+                0
+            };
+            let shown = if blocks {
+                &mut pending
+            } else {
+                &mut not_blocking
+            };
+            shown.insert(count.label.to_string(), counted);
         }
         let routing_state = tx
             .query_opt(
@@ -1097,13 +1247,17 @@ impl PipelineActivationStore {
         let evidence_hash =
             crate::versioned_pipeline_qualification::evidence_hash(&serde_json::json!({
                 "schema": LEGACY_DRAIN_EVIDENCE_SCHEMA,
+                "gate_driver_enabled": gate_driver_enabled,
                 "pending": pending,
+                "not_blocking": not_blocking,
             }))
             .map_err(DatabaseError::Serialization)?;
         Ok(LegacyDrainReport {
             generated_at: Utc::now(),
             routing_state,
+            gate_driver_enabled,
             pending,
+            not_blocking,
             drained,
             evidence_hash,
         })

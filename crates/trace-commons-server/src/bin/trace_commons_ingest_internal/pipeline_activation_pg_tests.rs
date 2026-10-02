@@ -10,6 +10,11 @@
 //! before and after, so a count that reads zero while the legacy path still
 //! owes work fails here.
 //!
+//! A report is read in one of two modes of the gate driver: `report` for a
+//! deployment that runs it (`Some(ceiling)`, today's behaviour) and
+//! `report_driver_off` for one that does not (`None`: a missing gate decision
+//! is shown as `not_blocking["gate_decision_absent"]` and blocks nothing).
+//!
 //! The app is served as a plain router, not through `run_pipeline_app`, so no
 //! pipeline worker runs: the pipeline's receipts stay pending, which is the
 //! point of the rehearsal (the report counts only what no pipeline run owns).
@@ -39,8 +44,13 @@ use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::versioned_pipeline_qualification::{PipelineCheckEmitter, evidence_hash};
 
 /// The gate driver's attempt ceiling in these tests: the value `main`'s own
-/// gate tests pass to `list_submissions_needing_gate_decision`.
+/// gate tests pass to `list_submissions_needing_gate_decision`. A report is
+/// read with `Some(GATE_MAX_ATTEMPTS)` for a deployment that runs the gate
+/// driver, and with `None` for one that does not.
 const GATE_MAX_ATTEMPTS: i32 = 5;
+
+/// The one label that a report holds in `not_blocking`, in both modes.
+const ABSENT_LABEL: &str = "gate_decision_absent";
 
 /// The ten labels of the report, in the order of the plan's table and the two
 /// counts that the task review added.
@@ -289,20 +299,40 @@ impl DrainFixture {
         body
     }
 
-    /// The report of `tenant`, with the gate ceiling of these tests and no
-    /// retention policy held by a legal hold.
+    /// The report of `tenant` for a deployment that runs the gate driver, with
+    /// the gate ceiling of these tests and no retention policy held by a legal
+    /// hold.
     async fn report(&self, tenant: &str) -> LegacyDrainReport {
         self.report_with_held(tenant, &[]).await
     }
 
-    /// The report of `tenant` with `held_retention_policy_ids` held.
+    /// The report of `tenant` for a deployment whose gate driver is off, with
+    /// no retention policy held by a legal hold.
+    async fn report_driver_off(&self, tenant: &str) -> LegacyDrainReport {
+        self.report_for(tenant, None, &[]).await
+    }
+
+    /// The report of `tenant` with the gate driver on and
+    /// `held_retention_policy_ids` held.
     async fn report_with_held(
         &self,
         tenant: &str,
         held_retention_policy_ids: &[String],
     ) -> LegacyDrainReport {
+        self.report_for(tenant, Some(GATE_MAX_ATTEMPTS), held_retention_policy_ids)
+            .await
+    }
+
+    /// The report of `tenant` for the gate driver state `gate_driver_max_attempts`
+    /// (`Some(ceiling)`: the driver runs; `None`: it is off).
+    async fn report_for(
+        &self,
+        tenant: &str,
+        gate_driver_max_attempts: Option<i32>,
+        held_retention_policy_ids: &[String],
+    ) -> LegacyDrainReport {
         self.store
-            .legacy_drain_report(tenant, GATE_MAX_ATTEMPTS, held_retention_policy_ids)
+            .legacy_drain_report(tenant, gate_driver_max_attempts, held_retention_policy_ids)
             .await
             .expect("the drain report reads")
     }
@@ -740,15 +770,77 @@ impl DrainFixture {
     async fn runs_of(&self, tenant: &str, submission_id: Uuid) -> usize {
         self.run_states(tenant, &[submission_id]).await.len()
     }
+
+    /// How many of `submission_ids` have an active submitted envelope and no
+    /// gate decision, whatever their status, attempts, or pipeline runs: the
+    /// raw rows that the absent gate count selects from, so that a test can
+    /// tell a submission that never met the predicate from one that the count
+    /// left out.
+    async fn rows_without_a_gate_decision(&self, tenant: &str, submission_ids: &[Uuid]) -> u64 {
+        self.owner_count(
+            tenant,
+            "SELECT COUNT(*) FROM trace_submissions s
+              WHERE s.tenant_id = $1 AND s.submission_id = ANY($2)
+                AND EXISTS (SELECT 1 FROM trace_object_refs o
+                             WHERE o.tenant_id = s.tenant_id
+                               AND o.submission_id = s.submission_id
+                               AND o.artifact_kind = 'submitted_envelope'
+                               AND o.invalidated_at IS NULL AND o.deleted_at IS NULL)
+                AND NOT EXISTS (SELECT 1 FROM trace_gate_decisions d
+                                 WHERE d.tenant_id = s.tenant_id
+                                   AND d.submission_id = s.submission_id)",
+            &[&tenant, &submission_ids],
+        )
+        .await
+    }
 }
 
 fn total(report: &LegacyDrainReport) -> u64 {
     report.pending.values().sum()
 }
 
-/// `report` counts exactly `expected` and zero for every other label, and
-/// `drained` says whether that is all zero.
+/// `report`, read with the gate driver on, counts exactly `expected` and zero
+/// for every other label, `drained` says whether that is all zero, and the
+/// absent gate count is zero: with the driver on a missing gate decision is
+/// counted in `pending`, never in `not_blocking`.
 fn assert_counts(report: &LegacyDrainReport, expected: &[(&str, u64)], context: &str) {
+    assert!(
+        report.gate_driver_enabled,
+        "{context}: a report read with the gate driver on says so"
+    );
+    assert_pending_and_not_blocking(report, expected, 0, context);
+}
+
+/// `report`, read with the gate driver off, counts exactly `expected` and zero
+/// for every other label (the two gate labels are zero whatever is waiting for
+/// a decision), `drained` says whether that is all zero, and
+/// `not_blocking["gate_decision_absent"]` is `absent`.
+fn assert_counts_driver_off(
+    report: &LegacyDrainReport,
+    expected: &[(&str, u64)],
+    absent: u64,
+    context: &str,
+) {
+    assert!(
+        !report.gate_driver_enabled,
+        "{context}: a report read with the gate driver off says so"
+    );
+    assert!(
+        expected.iter().all(|(label, _)| !matches!(
+            *label,
+            "gate_decision_pending" | "gate_decision_exhausted"
+        )),
+        "{context}: with the driver off the two gate labels are zero, not expected counts"
+    );
+    assert_pending_and_not_blocking(report, expected, absent, context);
+}
+
+fn assert_pending_and_not_blocking(
+    report: &LegacyDrainReport,
+    expected: &[(&str, u64)],
+    absent: u64,
+    context: &str,
+) {
     for label in DRAIN_LABELS {
         let want = expected
             .iter()
@@ -761,8 +853,77 @@ fn assert_counts(report: &LegacyDrainReport, expected: &[(&str, u64)], context: 
         );
     }
     assert_eq!(
+        report.pending.len(),
+        DRAIN_LABELS.len(),
+        "{context}: pending holds the ten labels and no other: {:?}",
+        report.pending
+    );
+    assert_eq!(
+        report.not_blocking,
+        BTreeMap::from([(ABSENT_LABEL.to_string(), absent)]),
+        "{context}: not_blocking holds the one label, a zero too"
+    );
+    assert_eq!(
         report.drained,
-        expected.iter().all(|(_, count)| *count == 0)
+        expected.iter().all(|(_, count)| *count == 0),
+        "{context}: drained reads pending alone"
+    );
+    assert_eq!(
+        report.evidence_hash,
+        expected_evidence_hash(report),
+        "{context}: the evidence hash is the canonical hash of the mode, pending, and not_blocking"
+    );
+}
+
+/// The canonical hash that `report.evidence_hash` must be.
+fn expected_evidence_hash(report: &LegacyDrainReport) -> String {
+    evidence_hash(&serde_json::json!({
+        "schema": "trace_commons.pipeline_legacy_drain.v1",
+        "gate_driver_enabled": report.gate_driver_enabled,
+        "pending": report.pending,
+        "not_blocking": report.not_blocking,
+    }))
+    .expect("the evidence hash")
+}
+
+/// `off` and `on` are reports of the same rows in the two modes: the eight
+/// labels that are not about the gate agree, the gate driver's two labels are
+/// zero with the driver off, the number the driver-off report shows as absent
+/// is exactly what the driver-on report counts in its two gate labels, and the
+/// two hashes differ.
+fn assert_modes_agree(off: &LegacyDrainReport, on: &LegacyDrainReport, context: &str) {
+    assert!(
+        on.gate_driver_enabled && !off.gate_driver_enabled,
+        "{context}"
+    );
+    assert_eq!(off.routing_state, on.routing_state, "{context}");
+    for label in DRAIN_LABELS {
+        if matches!(label, "gate_decision_pending" | "gate_decision_exhausted") {
+            assert_eq!(
+                off.pending[label], 0,
+                "{context}: {label} with the driver off"
+            );
+        } else {
+            assert_eq!(
+                off.pending[label], on.pending[label],
+                "{context}: {label} does not depend on the gate driver"
+            );
+        }
+    }
+    assert_eq!(
+        off.not_blocking[ABSENT_LABEL],
+        on.pending["gate_decision_pending"] + on.pending["gate_decision_exhausted"],
+        "{context}: absent is what the two gate labels count under any ceiling"
+    );
+    assert_eq!(on.not_blocking[ABSENT_LABEL], 0, "{context}");
+    assert_eq!(
+        off.drained,
+        off.pending.values().all(|count| *count == 0),
+        "{context}"
+    );
+    assert_ne!(
+        off.evidence_hash, on.evidence_hash,
+        "{context}: the two modes of the same rows hash apart"
     );
 }
 
@@ -861,6 +1022,26 @@ async fn the_legacy_drain_report_counts_real_pending_work_and_reaches_zero() {
     assert_eq!(before.pending["near_payout_unqueued"], 0);
     assert_eq!(before.pending["withdrawal_completion_pending"], 0);
     assert!(!before.drained);
+    assert!(before.gate_driver_enabled);
+    assert_eq!(
+        before.not_blocking,
+        BTreeMap::from([(ABSENT_LABEL.to_string(), 0)]),
+        "with the gate driver on, nothing is shown as absent"
+    );
+    // The same rows for a deployment whose gate driver is off: what the
+    // driver-on report counts as waiting for a gate decision is shown as
+    // absent and blocks nothing; the rest of the report is the same.
+    let before_off = fixture.report_driver_off(tenant).await;
+    assert_modes_agree(&before_off, &before, "before the switch");
+    assert_eq!(
+        before_off.not_blocking[ABSENT_LABEL],
+        gate_selected.len() as u64,
+        "absent is the gate driver's own selection (the ceiling is never reached here)"
+    );
+    assert!(
+        !before_off.drained,
+        "the quarantine, vector, and credit work still block"
+    );
     let pending_before = total(&before);
 
     // (3) Two pipeline receipts under the row `pipeline`.
@@ -894,6 +1075,19 @@ async fn the_legacy_drain_report_counts_real_pending_work_and_reaches_zero() {
     assert_eq!(
         with_pipeline_rows.pending, before.pending,
         "the pipeline's receipts, P2's quarantine included, change no count"
+    );
+    assert_eq!(
+        with_pipeline_rows.not_blocking, before.not_blocking,
+        "and show nothing as absent"
+    );
+    let with_pipeline_rows_off = fixture.report_driver_off(tenant).await;
+    assert_eq!(
+        with_pipeline_rows_off.pending, before_off.pending,
+        "driver off: the pipeline's receipts change no count"
+    );
+    assert_eq!(
+        with_pipeline_rows_off.not_blocking, before_off.not_blocking,
+        "driver off: P1 and P2 have an envelope and no gate decision, and are not absent here"
     );
     assert_eq!(
         fixture.gate_selected(tenant).await,
@@ -980,19 +1174,32 @@ async fn the_legacy_drain_report_counts_real_pending_work_and_reaches_zero() {
         after.pending
     );
     assert!(after.drained);
+    assert!(after.gate_driver_enabled);
+    assert_eq!(
+        after.not_blocking,
+        BTreeMap::from([(ABSENT_LABEL.to_string(), 0)])
+    );
     assert_eq!(
         after.evidence_hash,
         evidence_hash(&serde_json::json!({
             "schema": "trace_commons.pipeline_legacy_drain.v1",
+            "gate_driver_enabled": true,
             "pending": after.pending,
+            "not_blocking": after.not_blocking,
         }))
         .expect("the evidence hash"),
-        "the evidence hash is the canonical hash of the pending map"
+        "the evidence hash is the canonical hash of the mode, the pending map, and the not_blocking map"
     );
     assert_ne!(
         after.evidence_hash, before.evidence_hash,
         "other counts, another hash"
     );
+    // With the gate driver off the same rows are drained too, and the real
+    // gate runs left nothing to show as absent.
+    let after_off = fixture.report_driver_off(tenant).await;
+    assert_counts_driver_off(&after_off, &[], 0, "after the legacy work, driver off");
+    assert!(after_off.drained);
+    assert_modes_agree(&after_off, &after, "after the legacy work");
     let pipeline_ids = [p1.submission_id, p2.submission_id];
     let states = fixture.run_states(tenant, &pipeline_ids).await;
     assert_eq!(states.len(), 2);
@@ -1022,8 +1229,16 @@ async fn the_legacy_drain_report_counts_real_pending_work_and_reaches_zero() {
         fixture.gate_selected(tenant).await.len() as u64
     );
     assert!(!again_pending.drained);
+    // With the gate driver off, L3's missing gate decision is shown as absent
+    // and blocks nothing; its vector index work still blocks.
+    let again_off = fixture.report_driver_off(tenant).await;
+    assert_modes_agree(&again_off, &again_pending, "L3 under the row legacy");
+    assert!(again_off.not_blocking[ABSENT_LABEL] > 0);
+    assert_eq!(again_off.pending["vector_index_pending"], 1);
+    assert!(!again_off.drained);
 
-    // (8) The check of the plan's Task 12.
+    // (8) The check of the plan's Task 12. It names no package: a mechanics
+    // check. Its facts are counts and booleans.
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_legacy_drain",
         None,
@@ -1033,6 +1248,9 @@ async fn the_legacy_drain_report_counts_real_pending_work_and_reaches_zero() {
             "pending_before": pending_before,
             "pending_after_drain": total(&after),
             "pipeline_rows_counted": total(&with_pipeline_rows) - total(&before),
+            "gate_decisions_absent_before": before_off.not_blocking[ABSENT_LABEL],
+            "gate_decisions_absent_after_drain": after_off.not_blocking[ABSENT_LABEL],
+            "drained_with_gate_driver_off": after_off.drained,
         }),
     );
 }
@@ -1056,6 +1274,8 @@ async fn a_drain_report_is_tenant_scoped() {
     );
     let a_before = fixture.report(&fixture.tenant).await;
     assert_eq!(a_before.pending["quarantine_review_pending"], 1);
+    let a_off_before = fixture.report_driver_off(&fixture.tenant).await;
+    assert_modes_agree(&a_off_before, &a_before, "tenant A");
     let b_before = fixture.report(&fixture.other_tenant).await;
     assert_eq!(
         b_before.routing_state, None,
@@ -1063,6 +1283,10 @@ async fn a_drain_report_is_tenant_scoped() {
     );
     assert_eq!(total(&b_before), 0);
     assert!(b_before.drained);
+    assert_counts(&b_before, &[], "tenant B before its upload");
+    let b_off_before = fixture.report_driver_off(&fixture.other_tenant).await;
+    assert_counts_driver_off(&b_off_before, &[], 0, "tenant B before its upload");
+    assert!(b_off_before.drained);
 
     let b_quarantined =
         legacy_quarantine_envelope(&format!("drain tenant b quarantine {suffix}")).await;
@@ -1075,25 +1299,47 @@ async fn a_drain_report_is_tenant_scoped() {
     let b_after = fixture.report(&fixture.other_tenant).await;
     assert_eq!(b_after.pending["quarantine_review_pending"], 1);
     assert!(!b_after.drained);
+    let b_off_after = fixture.report_driver_off(&fixture.other_tenant).await;
+    assert_modes_agree(&b_off_after, &b_after, "tenant B");
+    assert!(
+        !b_off_after.drained,
+        "the quarantine blocks with the driver off too"
+    );
     let a_after = fixture.report(&fixture.tenant).await;
     assert_eq!(
         a_after.pending, a_before.pending,
         "tenant B's quarantine is not tenant A's"
     );
+    assert_eq!(
+        a_after.not_blocking, a_before.not_blocking,
+        "nor is it in tenant A's not_blocking"
+    );
     assert_eq!(a_after.evidence_hash, a_before.evidence_hash);
-    // A tenant the database has never seen reads zero, not an error.
-    let unknown = fixture
-        .store
-        .legacy_drain_report(
-            &format!("tenant-drain-unknown-{suffix}"),
-            GATE_MAX_ATTEMPTS,
-            &[],
-        )
-        .await
-        .expect("a tenant with no rows");
-    assert_eq!(total(&unknown), 0);
-    assert_eq!(unknown.routing_state, None);
-    assert!(unknown.drained);
+    let a_off_after = fixture.report_driver_off(&fixture.tenant).await;
+    assert_eq!(a_off_after.pending, a_off_before.pending);
+    assert_eq!(
+        a_off_after.not_blocking, a_off_before.not_blocking,
+        "tenant B's missing gate decision is not tenant A's absent count"
+    );
+    assert_eq!(a_off_after.evidence_hash, a_off_before.evidence_hash);
+    // A tenant the database has never seen reads zero, not an error, in both
+    // modes.
+    let unknown_tenant = format!("tenant-drain-unknown-{suffix}");
+    for gate_driver_max_attempts in [Some(GATE_MAX_ATTEMPTS), None] {
+        let unknown = fixture
+            .store
+            .legacy_drain_report(&unknown_tenant, gate_driver_max_attempts, &[])
+            .await
+            .expect("a tenant with no rows");
+        assert_eq!(total(&unknown), 0);
+        assert_eq!(unknown.not_blocking[ABSENT_LABEL], 0);
+        assert_eq!(unknown.routing_state, None);
+        assert!(unknown.drained);
+        assert_eq!(
+            unknown.gate_driver_enabled,
+            gate_driver_max_attempts.is_some()
+        );
+    }
 }
 
 /// An envelope the legacy path quarantines that also allows model training:
@@ -1669,6 +1915,263 @@ async fn a_submission_with_a_pipeline_run_is_never_counted_whatever_its_rows_say
         ],
         "the NEAR outbox",
     );
+}
+
+/// A missing gate decision is owed work only in a deployment that runs the gate
+/// driver (owner decision, 2026-10-02). With the driver on (`Some(ceiling)`) the
+/// report counts it as `gate_decision_pending` below the ceiling and
+/// `gate_decision_exhausted` at it, and both block `drained`. With the driver
+/// off (`None`) no code makes the decision, so both labels are zero, the same
+/// number is shown as `not_blocking["gate_decision_absent"]` whatever the
+/// attempts, and it does not change `drained`. Real legacy receipts: W waits
+/// for a decision, X has its attempts at the ceiling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_gate_decision_blocks_the_drain_only_when_the_gate_driver_runs() {
+    let Some(fixture) = DrainFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let tenant = tenant.as_str();
+    let suffix = Uuid::new_v4().simple().to_string();
+    write_routing_as_operator(tenant, "legacy").await;
+
+    // (1) Two accepted legacy receipts, neither with a gate decision. The
+    // legacy vector index worker then indexes both, so that no other work is
+    // owed.
+    let waiting = clean_envelope(&format!("drain_absent_waiting_{suffix}")).await;
+    let at_ceiling = clean_envelope(&format!("drain_absent_ceiling_{suffix}")).await;
+    for envelope in [&waiting, &at_ceiling] {
+        let receipt = fixture.upload_ok(&fixture.contributor, envelope).await;
+        assert_eq!(receipt["status"], "accepted", "{receipt}");
+        assert_eq!(
+            fixture.runs_of(tenant, envelope.submission_id).await,
+            0,
+            "a legacy receipt"
+        );
+    }
+    fixture
+        .seed_gate_attempts(tenant, at_ceiling.submission_id, GATE_MAX_ATTEMPTS)
+        .await;
+    let indexed = fixture
+        .call_ok(
+            "POST",
+            "/v1/workers/vector-index",
+            &fixture.worker,
+            serde_json::json!({
+                "purpose": "drain report gate driver mode",
+                "dry_run": false,
+                "limit": 500,
+            }),
+        )
+        .await;
+    assert_eq!(indexed["pending_after_count"], 0, "{indexed}");
+    assert_eq!(
+        fixture.gate_selected(tenant).await,
+        vec![waiting.submission_id],
+        "the gate driver selects W; X is at its ceiling"
+    );
+    let both = vec![waiting.submission_id, at_ceiling.submission_id];
+    assert_eq!(fixture.rows_without_a_gate_decision(tenant, &both).await, 2);
+
+    // (2) The gate driver runs: W is pending, X is exhausted, both block.
+    let on = fixture.report(tenant).await;
+    assert_eq!(on.routing_state, Some(RoutingState::Legacy));
+    assert_counts(
+        &on,
+        &[("gate_decision_pending", 1), ("gate_decision_exhausted", 1)],
+        "the gate driver runs",
+    );
+    assert!(!on.drained);
+    assert!(on.gate_driver_enabled);
+    assert_eq!(on.not_blocking[ABSENT_LABEL], 0);
+
+    // (3) The gate driver is off, the same rows: both are absent, neither
+    // blocks, and the report is drained.
+    let off = fixture.report_driver_off(tenant).await;
+    assert_eq!(off.routing_state, Some(RoutingState::Legacy));
+    assert_counts_driver_off(&off, &[], 2, "the gate driver is off");
+    assert_eq!(off.pending["gate_decision_pending"], 0);
+    assert_eq!(off.pending["gate_decision_exhausted"], 0);
+    assert_eq!(off.not_blocking[ABSENT_LABEL], 2);
+    assert!(off.drained, "{:?} {:?}", off.pending, off.not_blocking);
+    assert!(!off.gate_driver_enabled);
+    assert_modes_agree(&off, &on, "W and X");
+    assert_ne!(
+        on.evidence_hash, off.evidence_hash,
+        "the two modes hash apart"
+    );
+    assert_eq!(
+        off.evidence_hash,
+        evidence_hash(&serde_json::json!({
+            "schema": "trace_commons.pipeline_legacy_drain.v1",
+            "gate_driver_enabled": false,
+            "pending": off.pending,
+            "not_blocking": { "gate_decision_absent": 2 },
+        }))
+        .expect("the evidence hash"),
+        "the hash names the mode and the not_blocking map"
+    );
+    let off_again = fixture.report_driver_off(tenant).await;
+    assert_eq!(
+        off_again.evidence_hash, off.evidence_hash,
+        "the same counts in the same mode hash the same"
+    );
+
+    // (4) A quarantined legacy submission waits for a reviewer. With the gate
+    // driver off the report is not drained because of it, and the absent
+    // count does not hide it.
+    let quarantined =
+        legacy_quarantine_envelope(&format!("drain absent quarantine {suffix}")).await;
+    assert_eq!(
+        fixture.upload_ok(&fixture.contributor, &quarantined).await["status"],
+        "quarantined"
+    );
+    assert_eq!(fixture.runs_of(tenant, quarantined.submission_id).await, 0);
+    // What the gate driver selects, plus X: the number of legacy submissions
+    // with an envelope and no decision.
+    let selected = fixture.gate_selected(tenant).await;
+    assert!(selected.contains(&waiting.submission_id));
+    let absent = selected.len() as u64 + 1;
+    let off_quarantine = fixture.report_driver_off(tenant).await;
+    assert_counts_driver_off(
+        &off_quarantine,
+        &[("quarantine_review_pending", 1)],
+        absent,
+        "a quarantined submission, the gate driver off",
+    );
+    assert!(!off_quarantine.drained);
+    assert_eq!(off_quarantine.pending["quarantine_review_pending"], 1);
+    assert!(off_quarantine.not_blocking[ABSENT_LABEL] >= 2);
+    let on_quarantine = fixture.report(tenant).await;
+    assert_counts(
+        &on_quarantine,
+        &[
+            ("quarantine_review_pending", 1),
+            ("gate_decision_pending", selected.len() as u64),
+            ("gate_decision_exhausted", 1),
+        ],
+        "a quarantined submission, the gate driver runs",
+    );
+    assert_modes_agree(&off_quarantine, &on_quarantine, "a quarantined submission");
+
+    // (5) A submission whose submitted envelope is deleted has nothing for the
+    // gate to score: it is not absent, and not exhausted with the driver on.
+    assert_eq!(
+        fixture
+            .owner_execute(
+                tenant,
+                "UPDATE trace_object_refs SET deleted_at = now()
+                  WHERE tenant_id = $1 AND submission_id = $2
+                    AND artifact_kind = 'submitted_envelope'",
+                &[&tenant, &at_ceiling.submission_id],
+            )
+            .await,
+        1
+    );
+    let off_deleted = fixture.report_driver_off(tenant).await;
+    assert_eq!(off_deleted.not_blocking[ABSENT_LABEL], absent - 1);
+    let on_deleted = fixture.report(tenant).await;
+    assert_eq!(on_deleted.pending["gate_decision_exhausted"], 0);
+    assert_modes_agree(&off_deleted, &on_deleted, "X without its envelope");
+}
+
+/// The absent gate count leaves out a submission that a pipeline run owns, as
+/// every count does: P (a pipeline receipt) and L (a legacy receipt) have an
+/// active submitted envelope and no gate decision, and with the gate driver off
+/// the report shows L alone as absent. The raw rows are counted too, so the
+/// test cannot pass because P never met the predicate. P stays out in every
+/// state the test puts it in, and whatever the attempts of either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_absent_gate_count_leaves_out_a_pipeline_owned_submission() {
+    let Some(fixture) = DrainFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let tenant = tenant.as_str();
+    let suffix = Uuid::new_v4().simple().to_string();
+
+    write_routing_as_operator(tenant, "legacy").await;
+    let legacy = clean_envelope(&format!("drain_absent_twin_l_{suffix}")).await;
+    assert_eq!(
+        fixture.upload_ok(&fixture.contributor, &legacy).await["status"],
+        "accepted"
+    );
+    write_routing_as_operator(tenant, "pipeline").await;
+    let pipeline = clean_envelope(&format!("drain_absent_twin_p_{suffix}")).await;
+    assert_eq!(
+        fixture.upload_ok(&fixture.contributor, &pipeline).await["status"],
+        "processing"
+    );
+    assert_eq!(fixture.runs_of(tenant, legacy.submission_id).await, 0);
+    assert_eq!(fixture.runs_of(tenant, pipeline.submission_id).await, 1);
+    let (l, p) = (legacy.submission_id, pipeline.submission_id);
+    let twins = vec![l, p];
+
+    // (1) The pipeline receipt as the pipeline wrote it: both twins meet the
+    // predicate but for the run, and the report shows L alone. L's own vector
+    // index work is the only other thing owed.
+    assert_eq!(
+        fixture.rows_without_a_gate_decision(tenant, &twins).await,
+        2,
+        "both twins have an envelope and no gate decision"
+    );
+    assert_eq!(fixture.gate_selected(tenant).await, vec![l]);
+    let off = fixture.report_driver_off(tenant).await;
+    assert_counts_driver_off(
+        &off,
+        &[("vector_index_pending", 1)],
+        1,
+        "a pipeline twin, the gate driver off",
+    );
+    let on = fixture.report(tenant).await;
+    assert_counts(
+        &on,
+        &[("gate_decision_pending", 1), ("vector_index_pending", 1)],
+        "a pipeline twin, the gate driver runs",
+    );
+    assert_modes_agree(&off, &on, "a pipeline twin");
+
+    // (2) A review approval makes a pipeline receipt `accepted`: the same.
+    fixture.set_status(tenant, p, "accepted").await;
+    assert_eq!(
+        fixture.rows_without_a_gate_decision(tenant, &twins).await,
+        2
+    );
+    let accepted_off = fixture.report_driver_off(tenant).await;
+    assert_counts_driver_off(
+        &accepted_off,
+        &[("vector_index_pending", 1)],
+        1,
+        "an accepted pipeline twin, the gate driver off",
+    );
+    assert_eq!(fixture.gate_selected(tenant).await, vec![l]);
+
+    // (3) Both twins at the attempt ceiling: whatever the attempts, L is
+    // absent and P is not.
+    for id in [l, p] {
+        fixture
+            .seed_gate_attempts(tenant, id, GATE_MAX_ATTEMPTS)
+            .await;
+    }
+    assert_eq!(
+        fixture.rows_without_a_gate_decision(tenant, &twins).await,
+        2
+    );
+    let ceiling_off = fixture.report_driver_off(tenant).await;
+    assert_counts_driver_off(
+        &ceiling_off,
+        &[("vector_index_pending", 1)],
+        1,
+        "twins at the ceiling, the gate driver off",
+    );
+    let ceiling_on = fixture.report(tenant).await;
+    assert_counts(
+        &ceiling_on,
+        &[("gate_decision_exhausted", 1), ("vector_index_pending", 1)],
+        "twins at the ceiling, the gate driver runs",
+    );
+    assert_modes_agree(&ceiling_off, &ceiling_on, "twins at the ceiling");
+    assert!(fixture.gate_selected(tenant).await.is_empty());
 }
 
 /// A settlement line item as `main` writes it into `line_items_json`: a held
