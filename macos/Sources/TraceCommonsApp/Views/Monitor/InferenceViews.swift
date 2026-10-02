@@ -252,7 +252,11 @@ enum InferenceWords {
     }
 }
 
-extension MonitorWords {
+/// The single words the map, the Inference tab and the screens after it
+/// show. The Traces tab's words moved to the core (`MonitorTracesCopy`,
+/// `780d562a`); these are pending the same move, and stay single words
+/// until then (`ShellWordingTests`).
+enum MonitorWords {
     static let computer = "Computer"
     static let commons = "Commons"
     static let waiting = "Waiting"

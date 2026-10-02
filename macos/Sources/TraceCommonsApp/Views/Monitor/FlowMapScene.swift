@@ -135,7 +135,8 @@ struct FlowMapScene: Equatable {
         switch tool.mode {
         case .watch: parts.append(MonitorWords.watched)
         case .off: parts.append(MonitorWords.off)
-        case .unset: break
+        // Unset and unknown say nothing: neither is ever drawn as off.
+        case .unset, .unknown: break
         }
         parts.append(pair(MonitorWords.waiting, tool.waiting))
         parts.append(pair(MonitorWords.folders, tool.folders.count))
