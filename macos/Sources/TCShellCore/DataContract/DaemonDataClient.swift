@@ -70,7 +70,13 @@ public protocol DaemonDataClient: Sendable {
 
     // MARK: Queue actions
 
-    /// `approve` for one entry.
+    /// `approve` for one entry, with the contributor's verdict and, for a
+    /// `partly` or `failed` verdict, their written correction (R7). `nil`
+    /// omits the parameter, which is "no answer", never `null` or `""`
+    /// (those are refused as `outcome-invalid`). A correction without a
+    /// `partly` / `failed` verdict is refused as `correction-needs-outcome`,
+    /// one over the daemon's length cap as `correction-too-long`; either
+    /// refusal approves nothing.
     ///
     /// Returns the daemon's whole reply (`ApproveResponse`: `approved`,
     /// `flagged`, `redactions`, `skipped`, the hold) when the entry was
@@ -79,7 +85,7 @@ public protocol DaemonDataClient: Sendable {
     /// `not-pending`, `not-enrolled`, too large, `witness-review-stale`, ...
     /// -- this THROWS `DaemonDataError.notApproved(reasonLabel:)` with the
     /// `skipped` row's label, so a skip can never be drawn as success.
-    func approve(entryId: String) async throws -> ApproveResponse
+    func approve(entryId: String, verdict: ContributorVerdict?, correction: String?) async throws -> ApproveResponse
     /// `approve` with `project_id`: Contribute for a whole folder (R6).
     ///
     /// A group call means "every pending session here that can go", so it
@@ -89,6 +95,16 @@ public protocol DaemonDataClient: Sendable {
     /// neither of which is part of `skipped`. An id the daemon does not
     /// know is refused with `project-id-unrecognized`.
     func approveFolder(projectId: String) async throws -> ApproveResponse
+    /// `cancel` for one entry: Undo inside the hold window (R7). Only an
+    /// entry still `approved` can be cancelled, which the hold guarantees
+    /// until it ends; any other is refused with `not-cancelable`. The entry
+    /// goes back to waiting, and its verdict and correction go with the
+    /// approval.
+    func cancel(entryId: String) async throws
+    /// `cancel` with `project_id`: Undo for a folder approve. Returns how
+    /// many approved entries went back to waiting; `0` is a real answer
+    /// (nothing in that folder was still cancelable), not an error.
+    func cancelFolder(projectId: String) async throws -> Int
     /// `keep`: Keep on this Mac.
     func keep(entryId: String) async throws -> DaemonData.KeepResult
     /// `undo_keep`.
@@ -167,6 +183,13 @@ public protocol DaemonDataClient: Sendable {
     /// The daemon's events, for screens that refresh live. Each call returns
     /// a fresh stream. On `.resyncRequired`, refetch `status` and `listPending`.
     func events() -> AsyncStream<DaemonDataEvent>
+}
+
+extension DaemonDataClient {
+    /// `approve` for one entry with no verdict.
+    public func approve(entryId: String) async throws -> ApproveResponse {
+        try await approve(entryId: entryId, verdict: nil, correction: nil)
+    }
 }
 
 /// What the event stream carries: the contract's events, plus a

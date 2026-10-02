@@ -349,4 +349,58 @@ final class DaemonDataContractWireTests: XCTestCase {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "project-id-unrecognized"))
         }
     }
+
+    // MARK: - R7: verdict, correction, Undo
+
+    func testApproveSendsTheVerdictAndCorrectionOnlyWhenGiven() async throws {
+        let transport = FakeTransport { _, _ in
+            #"{"id":0,"result":{"approved":1,"hold_secs":30,"hold_until":null,"flagged":0,"redactions":{},"skipped":[]}}"#
+        }
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.approve(entryId: "e1")
+        _ = try await client.approve(entryId: "e1", verdict: .worked, correction: nil)
+        _ = try await client.approve(entryId: "e1", verdict: .partly, correction: "It missed the retry path")
+        XCTAssertEqual(
+            transport.calls.map(\.params),
+            [
+                #"{"entry_id":"e1"}"#,
+                #"{"entry_id":"e1","outcome":"worked"}"#,
+                #"{"correction":"It missed the retry path","entry_id":"e1","outcome":"partly"}"#,
+            ])
+    }
+
+    func testCancelSendsTheEntryOrTheFolderAndKeepsTheRefusal() async throws {
+        let transport = FakeTransport { _, params in
+            params.contains("project_id")
+                ? #"{"id":0,"result":{"canceled":3}}"#
+                : #"{"id":0,"error":{"code":"bad_params","message":"not-cancelable"}}"#
+        }
+        let client = LiveDaemonClient(transport: transport)
+        let canceled = try await client.cancelFolder(projectId: "proj_1")
+        XCTAssertEqual(canceled, 3)
+        do {
+            try await client.cancel(entryId: "e1")
+            XCTFail("a refused Undo answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "not-cancelable"))
+        }
+        XCTAssertEqual(transport.calls.map(\.method), ["cancel", "cancel"])
+        XCTAssertEqual(transport.calls.map(\.params), [#"{"project_id":"proj_1"}"#, #"{"entry_id":"e1"}"#])
+    }
+
+    func testSampleRefusesACorrectionWithoutAPartlyOrFailedVerdict() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let pending = try await client.listPending(projectId: nil)
+        let entry = try XCTUnwrap(pending.first)
+        for verdict in [nil, ContributorVerdict.worked] {
+            do {
+                _ = try await client.approve(entryId: entry.entryId, verdict: verdict, correction: "note")
+                XCTFail("a correction without partly or failed answered")
+            } catch {
+                XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "correction-needs-outcome"))
+            }
+        }
+        let approved = try await client.approve(entryId: entry.entryId, verdict: .failed, correction: "note")
+        XCTAssertEqual(approved.approved, 1)
+    }
 }

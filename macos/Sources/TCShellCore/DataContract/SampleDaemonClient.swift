@@ -136,12 +136,34 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     /// the daemon answers an entry it cannot act on: OK, `approved: 0`, and
     /// a `not-pending` skip, which `approve(entryId:)` throws as
     /// `notApproved`.
-    public func approve(entryId: String) async throws -> ApproveResponse {
+    public func approve(entryId: String, verdict: ContributorVerdict?, correction: String?) async throws
+        -> ApproveResponse
+    {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // The daemon's own checks, in its order: a correction needs a
+        // `partly` or `failed` verdict.
+        if let correction, !correction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            verdict != .partly, verdict != .failed
+        {
+            throw DaemonDataError.daemon(code: "bad_params", message: "correction-needs-outcome")
+        }
         let pending = try serve("list_pending", as: DaemonData.PendingList.self).pending
         let json = pending.contains(where: { $0.entryId == entryId })
             ? SampleDaemonData.approved
             : SampleDaemonData.approveSkipped(entryId: entryId, reason: "not-pending")
         return try decode(json, method: "approve", as: ApproveResponse.self).requireApproved(entryId: entryId)
+    }
+
+    /// Nothing is ever held in a sample set, so an Undo is always refused
+    /// the way the daemon refuses an entry that is not approved.
+    public func cancel(entryId: String) async throws {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        throw DaemonDataError.daemon(code: "bad_params", message: "not-cancelable")
+    }
+
+    public func cancelFolder(projectId: String) async throws -> Int {
+        _ = try await listPending(projectId: projectId)
+        return 0
     }
 
     /// Approves every pending entry of that folder in this set, held ones

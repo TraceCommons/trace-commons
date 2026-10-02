@@ -469,7 +469,11 @@ extension DaemonData {
         public let redactions: [String: Int]?
         /// Distinct VALUES removed, by category: one email address seen ten
         /// times is 10 in `redactions` and 1 here. `{}` when nothing was
-        /// removed; `nil` from a daemon that predates it.
+        /// removed. Sent only with the FULL summary -- `preview` of an entry
+        /// that holds a witness certificate, and `tc_preview_summary_json`
+        /// -- never with a card summary (`preview` of any other entry, and
+        /// `preview_request` / `preview_ready`), where it is `nil`: unknown,
+        /// not zero.
         public let redactionsDistinct: [String: Int]?
         /// Present only on the full preview, never on a card.
         public let tokenDistributionSummary: String?
@@ -478,6 +482,10 @@ extension DaemonData {
         public let residualRisk: String?
         public let envelopeDigest: String?
         public let inputFingerprint: String?
+        /// `false`: this device is not enrolled, the summary describes a
+        /// placeholder-identity build, and Contribute will be skipped as
+        /// `not-enrolled`. The check before Contribute (R7), with the
+        /// entry's `eligibility` (present only when eligibility applies).
         public let enrolled: Bool?
         public let subagentCount: Int?
         public let subagentsDropped: Int?
@@ -687,6 +695,16 @@ extension DaemonData {
     /// `preview_visible`: how many ids the daemon now treats as on screen.
     struct PreviewVisibleResult: Decodable {
         let visible: Int
+    }
+
+    /// `cancel` for one entry (and other methods that answer only `ok`).
+    struct OkReply: Decodable {
+        let ok: Bool?
+    }
+
+    /// `cancel` with `project_id`.
+    struct CancelFolderResult: Decodable {
+        let canceled: Int
     }
 
     /// `keep` (`kept: true`) and `undo_keep` (`kept: false`).

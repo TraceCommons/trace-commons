@@ -84,9 +84,22 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     // MARK: Queue actions
 
-    public func approve(entryId: String) async throws -> ApproveResponse {
-        try await call("approve", params: ["entry_id": entryId], as: ApproveResponse.self)
+    public func approve(entryId: String, verdict: ContributorVerdict?, correction: String?) async throws
+        -> ApproveResponse
+    {
+        var params: [String: Any] = ["entry_id": entryId]
+        if let verdict { params["outcome"] = verdict.rawValue }
+        if let correction { params["correction"] = correction }
+        return try await call("approve", params: params, as: ApproveResponse.self)
             .requireApproved(entryId: entryId)
+    }
+
+    public func cancel(entryId: String) async throws {
+        _ = try await call("cancel", params: ["entry_id": entryId], as: DaemonData.OkReply.self)
+    }
+
+    public func cancelFolder(projectId: String) async throws -> Int {
+        try await call("cancel", params: ["project_id": projectId], as: DaemonData.CancelFolderResult.self).canceled
     }
 
     public func approveFolder(projectId: String) async throws -> ApproveResponse {

@@ -348,6 +348,53 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "project-id-unrecognized"))
         }
     }
+
+    /// R7 against the real daemon: the verdict and correction reach
+    /// `approve` under the names it reads, Undo answers for an entry and a
+    /// folder, and the enrolled check is in the summary.
+    func testVerdictCorrectionUndoAndTheEnrolledCheckAgainstTheRealDaemon() async throws {
+        let daemon = try startDaemonWithOneSession()
+        let client = LiveDaemonClient(transport: Pipe(daemon))
+        let entry = try waitForPending(daemon)
+        let entryId = try XCTUnwrap(entry["entry_id"] as? String)
+        let projectId = try XCTUnwrap(entry["project_id"] as? String)
+
+        // The check before Contribute: this store is not enrolled, and the
+        // summary says so rather than leaving it unknown.
+        let summary = try await client.preview(entryId: entryId)
+        XCTAssertEqual(summary.enrolled, false)
+
+        // A correction needs a partly or failed verdict. The daemon refuses
+        // one sent with `worked`, so the refusal proves it read both params.
+        do {
+            _ = try await client.approve(entryId: entryId, verdict: .worked, correction: "It missed the retry path")
+            XCTFail("a correction with worked answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "correction-needs-outcome"))
+        }
+        // With `partly` it passes those checks and is skipped for the store
+        // not being enrolled: a refusal with its reason, never success.
+        do {
+            _ = try await client.approve(entryId: entryId, verdict: .partly, correction: "It missed the retry path")
+            XCTFail("an unenrolled approve was drawn as success")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .notApproved(reasonLabel: "not-enrolled"))
+        }
+
+        // Undo: nothing here was approved, so the entry is refused and the
+        // folder has nothing to send back.
+        do {
+            try await client.cancel(entryId: entryId)
+            XCTFail("an Undo of a waiting entry answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "not-cancelable"))
+        }
+        let canceled = try await client.cancelFolder(projectId: projectId)
+        XCTAssertEqual(canceled, 0)
+        assertDeclared(
+            DaemonData.CancelFolderResult.self, try result(daemon, "cancel", ["project_id": projectId]),
+            method: "cancel")
+    }
 }
 
 /// `TCDaemon` as a `DaemonTransport`, by forwarding. The app target
