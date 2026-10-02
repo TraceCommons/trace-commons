@@ -369,6 +369,8 @@ pub const METHODS: &[&str] = &[
     "search_original",
     "set_consent_scopes",
     "set_project_mode",
+    "set_contribution_override",
+    "clear_contribution_override",
     "set_public_profile",
     "set_settings",
     "shutdown",
@@ -2509,6 +2511,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
         "set_project_mode" => handle_set_project_mode(shared, req),
+        "set_contribution_override" => handle_set_contribution_override(shared, req),
+        "clear_contribution_override" => handle_clear_contribution_override(shared, req),
         "grant_automatic" => handle_grant_automatic(shared, req),
         "acknowledge_grant_voids" => handle_acknowledge_grant_voids(shared, req),
         "acknowledge_legacy_invite_migration" => {
@@ -3759,6 +3763,215 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
                 "retracted": retracted,
                 "from_now": from_now,
             }),
+        ),
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+    }
+}
+
+/// The wire name of a mode, as `set_project_mode` takes it and the audit
+/// detail records it.
+fn mode_label(mode: ProjectMode) -> &'static str {
+    match mode {
+        ProjectMode::AutoUpload => "auto_upload",
+        ProjectMode::NotifyOnly => "notify_only",
+        ProjectMode::Ignore => "ignore",
+    }
+}
+
+/// `status.contribution_override`, and the `contribution_override` both
+/// override methods answer with: `null`, or `{mode, since}`.
+fn contribution_override_value(policy: &ProjectPolicy) -> serde_json::Value {
+    match &policy.contribution_override {
+        None => serde_json::Value::Null,
+        Some(o) => serde_json::json!({ "mode": mode_label(o.mode), "since": o.since }),
+    }
+}
+
+/// Put back to waiting every unattended approval that a stopping override
+/// ("Ask me", "Never") leaves with no standing yes: one in a folder that no
+/// longer resolves to `AutoUpload`. Never refused, so clearing the override
+/// restores them. Call with the policy lock held and the queue lock taken
+/// after it.
+fn return_unattended_the_override_stops(
+    policy: &ProjectPolicy,
+    queue: &mut super::queue::Queue,
+) -> usize {
+    let keys: std::collections::BTreeSet<String> = queue
+        .all()
+        .iter()
+        .filter(|e| e.approved_unattended)
+        .map(|e| e.project_key.clone())
+        .filter(|k| policy.resolve(k) != ProjectMode::AutoUpload)
+        .collect();
+    let now = Utc::now();
+    keys.iter()
+        .map(|k| queue.return_unattended_to_waiting_for_project(k, now))
+        .sum()
+}
+
+/// #1173: set the menu-bar pill's global contribution override. See
+/// `policy::ContributionOverride` for what each mode does; per-folder modes
+/// are never written, so `clear_contribution_override` restores them.
+///
+/// `auto_upload` arms every folder not already armed, so it is held to the
+/// arming paths' rules: refused without `confirm: true` (the shell showed
+/// the confirmation, `consent_copy::contribution_override_copy`), recorded in
+/// the audit **before** it takes effect, and from now -- nothing already on
+/// disk is sent unattended. A stopping override (`notify_only`, `ignore`) is
+/// never refused for want of an audit row, and is recorded after.
+fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Response {
+    let mode: ProjectMode = match req
+        .params
+        .get("mode")
+        .cloned()
+        .map(serde_json::from_value::<ProjectMode>)
+    {
+        Some(Ok(m)) => m,
+        _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
+    };
+    let confirm = match req.params.get("confirm") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "confirm-invalid"),
+    };
+    if mode == ProjectMode::AutoUpload && !confirm {
+        return Response::err(req.id, ERR_BAD_PARAMS, "confirm-required");
+    }
+    // The same mode again is not a change: nothing is recorded, and an
+    // `auto_upload` override keeps the hold it had.
+    {
+        let policy = shared.policy.lock().expect("policy lock");
+        if policy
+            .contribution_override
+            .as_ref()
+            .is_some_and(|o| o.mode == mode)
+        {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "changed": false,
+                    "contribution_override": contribution_override_value(&policy),
+                    "returned": 0,
+                }),
+            );
+        }
+    }
+    let audit_entry = AuditEntry {
+        at: Utc::now(),
+        action: "contribution-override-set".to_string(),
+        project_label: None,
+        detail: Some(mode_label(mode).to_string()),
+    };
+    // Arming: recorded first, refused if it cannot be, as `set_project_mode`
+    // and `grant_automatic` do.
+    if mode == ProjectMode::AutoUpload && audit::append(&shared.store, &audit_entry).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
+    let queue_touched;
+    let outcome: Result<usize, &'static str> = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.contribution_override.clone();
+        let previous_record = policy.sessions_on_disk_at_arming.clone();
+        policy.set_contribution_override(mode, Utc::now());
+        if policy.save(&shared.store).is_err() {
+            // Rolled back, so nothing changed and there is nothing to
+            // announce.
+            policy.contribution_override = previous;
+            policy.sessions_on_disk_at_arming = previous_record;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        let mut queue = shared.queue.lock().expect("queue lock");
+        let returned = return_unattended_the_override_stops(&policy, &mut queue);
+        queue_touched = returned > 0;
+        // A failed queue write keeps the in-memory truth, as in
+        // `set_project_mode`, and is announced exactly as success is.
+        if queue_touched && queue.save(&shared.store).is_err() {
+            Err("queue-write-failed")
+        } else {
+            Ok(returned)
+        }
+    };
+    if mode != ProjectMode::AutoUpload {
+        let _ = audit::append(&shared.store, &audit_entry);
+    }
+    // The override itself is on `status`, so `status_changed` always
+    // follows, carrying any `decisions_owed` change with it.
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    if queue_touched {
+        shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    match outcome {
+        Ok(returned) => {
+            let policy = shared.policy.lock().expect("policy lock");
+            Response::ok(
+                req.id,
+                serde_json::json!({
+                    "changed": true,
+                    "contribution_override": contribution_override_value(&policy),
+                    "returned": returned,
+                }),
+            )
+        }
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+    }
+}
+
+/// #1173: clear the contribution override. Every folder is back on its own
+/// mode, which the override never wrote. Clearing a stopping override can
+/// resume unattended sending in folders armed by their own mode; that is the
+/// arming the contributor already gave and the audit already holds, so it is
+/// recorded after, like `withdraw_automatic_grant`.
+fn handle_clear_contribution_override(shared: &DaemonShared, req: &Request) -> Response {
+    let queue_touched;
+    let outcome: Result<(Option<ProjectMode>, usize), &'static str> = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.contribution_override.clone();
+        let previous_record = policy.sessions_on_disk_at_arming.clone();
+        if !policy.clear_contribution_override() {
+            return Response::ok(
+                req.id,
+                serde_json::json!({ "cleared": false, "returned": 0 }),
+            );
+        }
+        if policy.save(&shared.store).is_err() {
+            policy.contribution_override = previous;
+            policy.sessions_on_disk_at_arming = previous_record;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        // Clearing an "Auto contribute" override takes a folder that asks
+        // back to asking: what the override approved unattended there and
+        // has not sent goes back to waiting.
+        let mut queue = shared.queue.lock().expect("queue lock");
+        let returned = return_unattended_the_override_stops(&policy, &mut queue);
+        queue_touched = returned > 0;
+        let previous_mode = previous.map(|o| o.mode);
+        if queue_touched && queue.save(&shared.store).is_err() {
+            Err("queue-write-failed")
+        } else {
+            Ok((previous_mode, returned))
+        }
+    };
+    let _ = audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: Utc::now(),
+            action: "contribution-override-cleared".to_string(),
+            project_label: None,
+            detail: outcome
+                .as_ref()
+                .ok()
+                .and_then(|(m, _)| *m)
+                .map(|m| mode_label(m).to_string()),
+        },
+    );
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    if queue_touched {
+        shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    match outcome {
+        Ok((_, returned)) => Response::ok(
+            req.id,
+            serde_json::json!({ "cleared": true, "returned": returned }),
         ),
         Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
     }
@@ -13682,7 +13895,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 55, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 57, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -14532,5 +14745,221 @@ mod tests {
         ] {
             assert!(!a.contains(b) && !b.contains(a), "{a} and {b} overlap");
         }
+    }
+
+    // -- The contribution override (#1173) ---------------------------------
+
+    fn set_override(s: &DaemonShared, params: serde_json::Value) -> Response {
+        handle_request(s, &req("set_contribution_override", params))
+    }
+
+    /// An entry in `project_key` approved unattended, as the watcher would.
+    fn seed_unattended(s: &DaemonShared, project_key: &str) -> uuid::Uuid {
+        let id = seed_entry(s, project_key);
+        assert!(s.queue.lock().unwrap().approve_unattended(id, &[], None));
+        id
+    }
+
+    /// "Auto contribute" arms every folder at once, so it is refused unless
+    /// the shell says it showed the confirmation -- and a refusal records
+    /// and changes nothing.
+    #[test]
+    fn an_auto_override_is_refused_without_confirm() {
+        let s = enrolled_shared();
+        for (params, label) in [
+            (
+                serde_json::json!({"mode": "auto_upload"}),
+                "confirm-required",
+            ),
+            (
+                serde_json::json!({"mode": "auto_upload", "confirm": false}),
+                "confirm-required",
+            ),
+            (
+                serde_json::json!({"mode": "auto_upload", "confirm": "true"}),
+                "confirm-invalid",
+            ),
+            (serde_json::json!({"mode": "always"}), "mode-invalid"),
+        ] {
+            let r = set_override(&s, params);
+            let err = r.error.expect("refused");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, label);
+        }
+        assert!(s.policy.lock().unwrap().contribution_override.is_none());
+        assert!(audit::load(&s.store).unwrap().is_empty());
+
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let body = r.result.unwrap();
+        assert_eq!(body["changed"], true);
+        assert_eq!(body["contribution_override"]["mode"], "auto_upload");
+        let entries = audit::load(&s.store).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "contribution-override-set");
+        assert_eq!(entries[0].project_label, None, "label-only, and no folder");
+        assert_eq!(entries[0].detail.as_deref(), Some("auto_upload"));
+
+        // The same override again changes and records nothing.
+        let again = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert_eq!(again.result.unwrap()["changed"], false);
+        assert_eq!(audit::load(&s.store).unwrap().len(), 1);
+    }
+
+    /// "Ask me" puts what went unattended back to waiting, and says so on
+    /// both events; clearing restores the folder's own mode and the watcher
+    /// may approve again.
+    #[test]
+    fn an_ask_override_returns_unattended_approvals_and_clearing_restores_the_folder() {
+        let s = enrolled_shared();
+        let key = "/tmp/override-armed";
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode(key, ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        let id = seed_unattended(&s, key);
+        let mut rx = s.events.subscribe();
+
+        let r = set_override(&s, serde_json::json!({"mode": "notify_only"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["returned"], 1);
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            super::super::queue::QueueState::Pending
+        );
+        assert_eq!(s.decisions_owed_value(), 1, "it waits for a person now");
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e == EVENT_QUEUE_CHANGED),
+            "{events:?}"
+        );
+
+        let r = handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        assert_eq!(r.result.unwrap()["cleared"], true);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::AutoUpload
+        );
+        assert_eq!(s.decisions_owed_value(), 0);
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "{events:?}"
+        );
+        let actions: Vec<String> = audit::load(&s.store)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.action)
+            .collect();
+        assert_eq!(
+            actions,
+            ["contribution-override-set", "contribution-override-cleared"]
+        );
+
+        let r = handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        assert_eq!(r.result.unwrap()["cleared"], false);
+    }
+
+    /// "Never" queues and sends nothing, but refuses nothing either: what
+    /// was waiting is still waiting when the override clears.
+    #[test]
+    fn a_never_override_refuses_nothing_so_clearing_restores_the_queue() {
+        let s = enrolled_shared();
+        let key = "/tmp/override-never";
+        let waiting = seed_entry(&s, key);
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.policy.lock().unwrap().resolve(key), ProjectMode::Ignore);
+        assert_eq!(
+            s.queue.lock().unwrap().get(waiting).unwrap().state,
+            super::super::queue::QueueState::Pending
+        );
+        assert_eq!(s.decisions_owed_value(), 0);
+        handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::NotifyOnly
+        );
+        assert_eq!(s.decisions_owed_value(), 1);
+    }
+
+    /// An override that cannot be saved is rolled back, so nothing changed
+    /// and the call says so.
+    #[test]
+    fn an_override_that_cannot_be_saved_is_rolled_back() {
+        let s = enrolled_shared();
+        block_daemon_file(&s, crate::config::DAEMON_PROJECTS_FILE);
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert_eq!(r.error.unwrap().message, "policy-write-failed");
+        assert!(s.policy.lock().unwrap().contribution_override.is_none());
+    }
+
+    /// #1171: a queue write that fails after the queue changed in memory is
+    /// announced exactly as success is.
+    #[test]
+    fn an_override_queue_write_failure_still_publishes_what_it_changed() {
+        let s = enrolled_shared();
+        let key = "/tmp/override-queue-write";
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode(key, ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        seed_unattended(&s, key);
+        block_daemon_file(&s, crate::config::DAEMON_QUEUE_FILE);
+        let mut rx = s.events.subscribe();
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert_eq!(r.error.unwrap().message, "queue-write-failed");
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e == EVENT_QUEUE_CHANGED),
+            "{events:?}"
+        );
+    }
+
+    /// The backlog an "Auto contribute" override found waiting in an Ask me
+    /// folder still needs a person: the badge does not drop.
+    #[test]
+    fn an_auto_override_leaves_the_backlog_on_the_badge() {
+        let s = enrolled_shared();
+        seed_entry(&s, "/tmp/override-backlog");
+        assert_eq!(s.decisions_owed_value(), 1);
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve("/tmp/override-backlog"),
+            ProjectMode::AutoUpload
+        );
+        assert_eq!(s.decisions_owed_value(), 1);
     }
 }
