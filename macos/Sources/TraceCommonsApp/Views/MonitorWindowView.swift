@@ -55,7 +55,12 @@ struct MonitorWindowView: View {
     var body: some View {
         GlassThreePane(showsMap: showsMap, showsInspector: showsInspector, onFirstLayout: seedPanes) {
             MonitorMainPane(
-                tab: $tab, inferenceDot: inferenceDot,
+                tab: $tab,
+                inferenceDot: Self.inferenceDot(model.daemonSettings?.privateInferenceState?.surfaceState,
+                                                calls: model.privateInferenceCalls),
+                inferenceDescription: Self.inferenceDotDescription(
+                    model.daemonSettings?.privateInferenceState?.surfaceState,
+                    calls: model.privateInferenceCalls),
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() }
             ) {
@@ -95,11 +100,25 @@ struct MonitorWindowView: View {
         panesSeeded = true
     }
 
-    /// Inference's dot: Private AI on or off, and none while the daemon has
-    /// not said. Unknown is never drawn as off.
-    private var inferenceDot: GlassStatus? {
-        guard let settings = model.daemonSettings else { return nil }
-        return settings.privateInferenceOn ? .on : .off
+    /// Inference's dot: what the listener is doing, from the daemon's own
+    /// report, never the switch. The switch says what was asked for; a
+    /// switch that is on over a listener that refused to start, or is held,
+    /// is drawn as needing attention, not as on. Only the core's "clear"
+    /// tone is on. No report, or an unreported state, is no dot: unknown is
+    /// neither on nor off.
+    static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
+        guard let state, !state.label.isEmpty else { return nil }
+        switch PrivateInferenceSurface.tone(state, calls: calls) {
+        case .clear: return .on
+        case .held, .attention, .refused: return .ask
+        case .neutral: return .off
+        }
+    }
+
+    /// The dot's text equivalent: the core's sentence for the same state.
+    static func inferenceDotDescription(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> String? {
+        guard let state, !state.label.isEmpty else { return nil }
+        return calls.stateLine(state.label)
     }
 }
 
@@ -110,6 +129,7 @@ struct MonitorWindowView: View {
 private struct MonitorMainPane<Content: View>: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
+    let inferenceDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
     let onSettings: () -> Void
@@ -143,11 +163,18 @@ private struct MonitorMainPane<Content: View>: View {
                 // title bar centres 26pt below the window's top edge.
                 .padding(.top, Self.lightsCentre - GlassTokens.Space.windowPadding - GlassTokens.Space.panePadding
                     - GlassTokens.Size.controlLarge / 2)
+                // The same notices the main window puts above everything,
+                // here in the pane that is always shown, so a void or a gate
+                // hold during monitor use is told whatever the map and the
+                // inspector are doing.
+                ShellNotices()
                 GlassSegmentedTabs(
                     "Monitor",
                     selection: $tab,
                     segments: MonitorWindowView.Tab.allCases.map { item in
-                        GlassSegment(item.rawValue, value: item, dot: item == .inference ? inferenceDot : nil)
+                        GlassSegment(item.rawValue, value: item,
+                                     dot: item == .inference ? inferenceDot : nil,
+                                     accessibilityValue: item == .inference ? inferenceDescription : nil)
                     })
                 content()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

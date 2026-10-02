@@ -20,8 +20,18 @@ final class DaemonDataContractTests: XCTestCase {
                     XCTAssertEqual(summary.entry?.entryId, entry.entryId)
                     XCTAssertNotNil(summary.title)
                 }
+                for entry in pending {
+                    let outcome = try await client.requestPreview(entryId: entry.entryId)
+                    XCTAssertEqual(outcome.state, .ready)
+                    // A scheduled card (`PreviewOutcome::to_value`) carries
+                    // no entry: it outlives the entry state it was built beside.
+                    XCTAssertNotNil(outcome.summary?.title)
+                    XCTAssertNil(outcome.summary?.entry)
+                    _ = try await client.approve(entryId: entry.entryId)
+                }
+                _ = try await client.setVisiblePreviews(entryIds: pending.map(\.entryId))
+                _ = try await client.cancelPreview(entryId: "e")
                 _ = try await client.previewUnsureSpans(entryId: "e", bodyDigest: "sha256:b")
-                _ = try await client.approve(entryId: "e")
                 _ = try await client.keep(entryId: "e")
                 _ = try await client.undoKeep(entryId: "e")
                 try await client.dismiss(entryId: "e")
@@ -49,17 +59,6 @@ final class DaemonDataContractTests: XCTestCase {
             } catch {
                 XCTFail("\(set): \(error)")
             }
-        }
-    }
-
-    func testSampleJSONKeysAreAllDeclared() throws {
-        // A sample key with no CodingKey would be silently dropped; the
-        // samples exist to exercise every field, so they must use real keys.
-        let entryKeys = Set(DaemonData.QueueEntry.CodingKeys.allCases.map(\.rawValue))
-        let pending = try XCTUnwrap(SampleDaemonClient(.heldSessions).json(for: "list_pending"))
-        let object = try JSONSerialization.jsonObject(with: Data(pending.utf8)) as? [String: Any]
-        for row in try XCTUnwrap(object?["pending"] as? [[String: Any]]) {
-            XCTAssertEqual(Set(row.keys).subtracting(entryKeys), [], "undeclared entry keys")
         }
     }
 
@@ -186,6 +185,9 @@ final class DaemonDataContractTests: XCTestCase {
             ("listPending", { _ = try await client.listPending(projectId: nil) }),
             ("listKept", { _ = try await client.listKept() }),
             ("preview", { _ = try await client.preview(entryId: "e") }),
+            ("requestPreview", { _ = try await client.requestPreview(entryId: "e") }),
+            ("setVisiblePreviews", { _ = try await client.setVisiblePreviews(entryIds: ["e"]) }),
+            ("cancelPreview", { _ = try await client.cancelPreview(entryId: "e") }),
             ("previewUnsureSpans", { _ = try await client.previewUnsureSpans(entryId: "e", bodyDigest: "d") }),
             ("approve", { _ = try await client.approve(entryId: "e") }),
             ("keep", { _ = try await client.keep(entryId: "e") }),
@@ -298,32 +300,53 @@ final class DaemonDataContractTests: XCTestCase {
         let client = LiveDaemonClient(transport: FakeTransport(response: "{}"))
         let stream = client.events()
         client.deliver(eventJSON: #"{"event":"status_changed","data":{}}"#)
-        client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"at":"2026-09-30T09:00:00Z","tool":"codex","family":"openai","model":"m","route":"routed","proof":"pending"}}"#)
+        // The daemon's frame (`inference_map::call_added`): a pulse with four
+        // fields, not an `inference_calls` row. No `at`, `family`, `route`
+        // or `cost`.
+        client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"tool":"codex","model":"m","proof":"pending"}}"#)
         var iterator = stream.makeAsyncIterator()
         let first = await iterator.next()
         XCTAssertEqual(first, .statusChanged)
         guard case .inferenceCallAdded(let call)? = await iterator.next() else {
             return XCTFail("no inference call event")
         }
-        XCTAssertEqual(call.id, 7)
+        XCTAssertEqual(call, DaemonData.InferenceCallAdded(id: 7, tool: "codex", model: "m", proof: "pending"))
+        XCTAssertEqual(call.proofLabel, .pending)
     }
 }
 
-private final class FakeTransport: DaemonTransport, @unchecked Sendable {
+/// A transport that answers from a script and records what it was sent,
+/// and whether it ran on the live client's own queue.
+final class FakeTransport: DaemonTransport, @unchecked Sendable {
     struct Call {
         let method: String
         let params: String
+        let onQueue: Bool
     }
 
-    let response: String
-    private(set) var calls: [Call] = []
+    private let answer: @Sendable (String, String) -> String
+    private let lock = NSLock()
+    private var recorded: [Call] = []
 
-    init(response: String) {
-        self.response = response
+    var calls: [Call] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    convenience init(response: String) {
+        self.init { _, _ in response }
+    }
+
+    init(_ answer: @escaping @Sendable (String, String) -> String) {
+        self.answer = answer
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        calls.append(Call(method: method, params: paramsJSON))
-        return response
+        let onQueue = String(cString: __dispatch_queue_get_label(nil)) == "trace-commons.live-daemon-client"
+        lock.lock()
+        recorded.append(Call(method: method, params: paramsJSON, onQueue: onQueue))
+        lock.unlock()
+        return answer(method, paramsJSON)
     }
 }

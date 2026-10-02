@@ -6,16 +6,22 @@ public struct GlassSegment<Value: Hashable>: Identifiable {
     public let title: String
     /// Decisions owed, as a count pill. Never queue depth or credit.
     public let badge: Int?
-    /// A status dot after the title (Inference: Private AI on or off).
+    /// A status dot after the title (Inference: whether Private AI is
+    /// answering). Colour alone, so pair it with `accessibilityValue`.
     public let dot: GlassStatus?
+    /// What the dot and the badge say, in words, for VoiceOver: the dot is
+    /// hidden from assistive tech, so a tab with one must carry its text
+    /// equivalent here, from the core's copy.
+    public let accessibilityValue: String?
 
     public var id: Value { value }
 
-    public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil) {
+    public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil, accessibilityValue: String? = nil) {
         self.title = title
         self.value = value
         self.badge = badge
         self.dot = dot
+        self.accessibilityValue = accessibilityValue
     }
 }
 
@@ -56,19 +62,23 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                     .frame(maxWidth: floating ? nil : .infinity)
                     .frame(minHeight: floating ? 24 : GlassTokens.Size.tab)
                     .background {
+                        // The press darkens the selected fill, or a wash
+                        // behind an unselected label; never the label.
                         if selected {
                             if floating {
-                                Capsule().fill(Color.white.opacity(0.18))
+                                Capsule().fill(Color.white.opacity(0.18)).glassPressedFill()
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
+                                    .glassPressedFill()
                                     .glassEdge(GlassTokens.Shadow.controlSelectedEdge, in: Capsule())
                             }
                         }
                     }
-                    .glassPressedFill()
+                    .glassPressedWash(Capsule())
                     .contentShape(Capsule())
                 }
                 .buttonStyle(GlassPressStyle())
+                .accessibilityValue(segment.accessibilityValue ?? "")
                 .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
             }
         }
@@ -159,7 +169,8 @@ public struct GlassStepProgress: View {
         self.stateValues = stateValues
     }
 
-    private func value(at index: Int) -> String {
+    /// The accessibility value of the step at `index`.
+    func value(at index: Int) -> String {
         guard let stateValues else { return "" }
         return index < current ? stateValues.done : index == current ? stateValues.current : stateValues.pending
     }
