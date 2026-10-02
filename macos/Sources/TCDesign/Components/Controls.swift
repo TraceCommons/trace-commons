@@ -165,8 +165,10 @@ public struct GlassToolbarButton: View {
             Image(systemName: systemImage)
                 .glassGlyph(13)
                 .foregroundStyle(Self.glyph(pressed: pressed).color)
-                .glassPressedFill()
                 .frame(width: 28, height: 24)
+                // A glyph has no fill: the press darkens a wash behind it,
+                // never the glyph, which keeps its contrast.
+                .glassPressedWash(Capsule())
                 .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
