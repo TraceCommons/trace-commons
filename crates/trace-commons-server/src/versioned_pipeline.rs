@@ -12370,13 +12370,18 @@ impl PipelineService {
     ///   is something to submit, and the locked work runs on the lock's own
     ///   connection, never on a second one (the pool-size-one rule). Every
     ///   path to `NearPayoutAdapter::submit` runs under this lock.
-    /// - Before each run's dispatch, a confirmation lookup as much as a
-    ///   submit, the pass reads the Settle policy of the run's own bundle
-    ///   (GRD-004; `process_payout_on`). A run whose policy is not runnable
-    ///   is skipped for this pass: nothing is called, written, or charged,
-    ///   and it is not counted. The read is made on the connection the pass
-    ///   holds, in the transaction that reads the run, so the guard takes no
-    ///   second connection (the pool-size-one rule).
+    /// - Before each submit to the adapter -- a first submit, never a
+    ///   confirmation lookup -- the pass reads the Settle policy of the run's
+    ///   own bundle (GRD-004; `settle_policy_allows_dispatch`, called from
+    ///   `dispatch_near_settlements`). A submit that the policy holds back
+    ///   writes nothing, charges nothing, and leaves the payout as it was, so
+    ///   the run is due again in a later pass; the run is not counted, and the
+    ///   pass goes on to its other runs. A `submitted` payout is still
+    ///   confirmed while the policy is suspended: the policy guards what is
+    ///   dispatched, and an operation the adapter already accepted is
+    ///   neither retracted nor left unconfirmed. The read is made on the
+    ///   connection the pass holds, so the guard takes no second connection
+    ///   (the pool-size-one rule).
     ///
     /// Ruling T10-5: an error in one run's payout -- a missing batch, a
     /// call that cannot be built, confirmation evidence that is not
@@ -12443,6 +12448,13 @@ impl PipelineService {
     /// pass, this also takes up a `failed` payout again, does not wait for
     /// the confirmation interval, and returns a per-run error to its caller
     /// instead of recording it.
+    ///
+    /// It shares the pass's dispatch guard (GRD-004): a submit, a retry of a
+    /// `failed` payout included, is held back while the Settle policy of the
+    /// run's bundle is not runnable. Then nothing is written, charged, or
+    /// called, and the run is returned untouched, as for a run that has
+    /// nothing to pay now. A confirmation lookup of a `submitted` payout is
+    /// not a dispatch and proceeds.
     pub async fn process_payout(
         &self,
         tenant_id: &str,
@@ -12461,8 +12473,14 @@ impl PipelineService {
         };
         let result = match lock.client_mut() {
             Some(client) => {
-                self.process_payout_on(client, tenant_id, run_id, true, true, false)
+                self.process_payout_on(client, tenant_id, run_id, true, true)
                     .await
+                    .map(|attempt| match attempt {
+                        PayoutAttempt::NoRun => None,
+                        // A held run is returned as a run with nothing to pay
+                        // now is: untouched.
+                        PayoutAttempt::Done(run) | PayoutAttempt::Held(run) => Some(run),
+                    })
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
         };
@@ -12488,6 +12506,8 @@ impl PipelineService {
     /// connection that holds the tenant's NEAR submit lock. The pass never
     /// takes up a `failed` payout again (Ruling F-I3), including one that
     /// failed after the pass listed it: only `process_payout` retries one.
+    /// A run that does not exist, or whose dispatch the Settle policy held
+    /// back, is not counted, and does not stop the runs after it.
     async fn pay_out_runs_on(
         &self,
         client: &mut deadpool_postgres::Client,
@@ -12498,14 +12518,11 @@ impl PipelineService {
         let mut processed = 0;
         for &run_id in run_ids {
             match self
-                .process_payout_on(client, tenant_id, run_id, may_submit, false, true)
+                .process_payout_on(client, tenant_id, run_id, may_submit, false)
                 .await
             {
-                Ok(run) => {
-                    if run.is_some() {
-                        processed += 1;
-                    }
-                }
+                Ok(PayoutAttempt::Done(_)) => processed += 1,
+                Ok(PayoutAttempt::NoRun | PayoutAttempt::Held(_)) => {}
                 Err(error)
                     if error.to_string() == INJECTED_PIPELINE_CRASH
                         || is_database_error(&error) =>
@@ -12530,18 +12547,8 @@ impl PipelineService {
 
     /// `process_payout`'s body, on `client`. `may_submit` as in
     /// `pay_out_runs_on`; `retry_failed` as in `dispatch_near_settlements`.
-    ///
-    /// `guard_settle_policy` is true for the payout pass only (GRD-004): the
-    /// NEAR worker repeats its policy guard before dispatch, so a run whose
-    /// own bundle's Settle policy is not runnable is skipped for this pass --
-    /// no adapter call, no outbox write, no payout state change, no charge --
-    /// and comes back as `None`, which the pass does not count. The pass goes
-    /// on to its other runs. The policy is read in the transaction that reads
-    /// the run, on the connection the pass already holds, and no lock is kept
-    /// over the dispatch: a suspension that lands after the read takes effect
-    /// at the next pass, and a guard does not claim to retract an operation
-    /// the adapter already accepted. A direct `process_payout` is an
-    /// operator's explicit call for one run and does not read it.
+    /// `Held` when `dispatch_near_settlements` held a submit back because the
+    /// Settle policy of the run's bundle is not runnable (GRD-004).
     async fn process_payout_on(
         &self,
         client: &mut deadpool_postgres::Client,
@@ -12549,8 +12556,7 @@ impl PipelineService {
         run_id: Uuid,
         may_submit: bool,
         retry_failed: bool,
-        guard_settle_policy: bool,
-    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+    ) -> anyhow::Result<PayoutAttempt> {
         let tx = PgPipelineStore::tenant_transaction(client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -12558,34 +12564,24 @@ impl PipelineService {
                 &[&tenant_id, &run_id],
             )
             .await?;
-        let Some(run) = row.as_ref().map(pipeline_run_from_row).transpose()? else {
-            tx.commit().await?;
-            return Ok(None);
-        };
-        if guard_settle_policy {
-            let runnable = tx
-                .query_opt(
-                    "SELECT runnable FROM pipeline_bundle_policy_status
-                      WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'settle'",
-                    &[&tenant_id, &run.bundle_id],
-                )
-                .await?
-                .is_some_and(|row| row.get::<_, bool>("runnable"));
-            if !runnable {
-                tx.commit().await?;
-                return Ok(None);
-            }
-        }
         tx.commit().await?;
+        let Some(run) = row.as_ref().map(pipeline_run_from_row).transpose()? else {
+            return Ok(PayoutAttempt::NoRun);
+        };
         // Zaki review 1, round 2, finding 16: a leg Settle completed and
         // ledgered is final, whatever the run did afterwards -- a run that
         // then failed for good (attempts exhausted, or a crash before Settle's
         // own commit on its last attempt) still pays its completed leg, as a
         // withdrawal does not stop one. `dispatch_near_settlements` pays only
         // complete, payout-eligible legs.
-        self.dispatch_near_settlements(client, &run, may_submit, retry_failed)
+        let held = self
+            .dispatch_near_settlements(client, &run, may_submit, retry_failed)
             .await?;
-        Ok(Some(run))
+        Ok(if held {
+            PayoutAttempt::Held(run)
+        } else {
+            PayoutAttempt::Done(run)
+        })
     }
 
     /// Port lines 5114 to 5309, for PR 3. For each completed `trace_credit`
@@ -12632,15 +12628,29 @@ impl PipelineService {
     ///   re-read here sees that.
     /// - Confirmation evidence is hash-only (else `near_confirmation_invalid`);
     ///   the evidence and the `confirmed` status commit together.
+    /// - The one policy guard (GRD-004) sits at the dispatch, where a line
+    ///   would be sent to the adapter -- a first submit, or a new submit of a
+    ///   `failed` line under `retry_failed` -- and before anything that
+    ///   belongs to it is written (the outbox line, the payout state): the
+    ///   Settle policy of the run's bundle must be runnable
+    ///   (`settle_policy_allows_dispatch`). A line held back is left as it
+    ///   was, and the settlement's payout state is not recomputed, because a
+    ///   line without a row would otherwise read as paid. A confirmation
+    ///   lookup of a `submitted` line is not a dispatch and is never guarded;
+    ///   it records what the adapter reports. Both callers reach the submit
+    ///   here, so no path dispatches around the guard.
+    ///
+    /// Returns whether any submit was held back by the guard.
     async fn dispatch_near_settlements(
         &self,
         client: &mut deadpool_postgres::Client,
         run: &PipelineRunRecord,
         may_submit: bool,
         retry_failed: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
+        let mut any_held = false;
         let Some((injected, config)) = self.payout.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         // `main`'s NEAR settlement mode picks who pays, as it picks the
         // submitter and confirmer `main`'s outbox worker drives (Zaki review
@@ -12648,7 +12658,7 @@ impl PipelineService {
         // dry-run adapter under `dry_run`, and the injected one under `http`.
         let dry_run = DryRunNearPayoutAdapter;
         let adapter: &dyn NearPayoutAdapter = match config.controls.settlement_mode {
-            PipelineNearSettlementMode::Disabled => return Ok(()),
+            PipelineNearSettlementMode::Disabled => return Ok(false),
             PipelineNearSettlementMode::DryRun => &dry_run,
             PipelineNearSettlementMode::Http => injected.as_ref(),
         };
@@ -12724,6 +12734,7 @@ impl PipelineService {
 
             let mut contract_changed = false;
             let mut held_payout = None;
+            let mut dispatch_held = false;
             for (line, call, outbox_id, status) in &work {
                 let outbox_id = *outbox_id;
                 match status.as_deref() {
@@ -12732,6 +12743,13 @@ impl PipelineService {
                     Some("submitted") => {}
                     _ => {
                         if !may_submit {
+                            continue;
+                        }
+                        // GRD-004: the dispatch guard, before the contract
+                        // check, the outbox line, and the submit. A held line
+                        // changes nothing; it goes in a later pass.
+                        if !settle_policy_allows_dispatch(client, run).await? {
+                            dispatch_held = true;
                             continue;
                         }
                         if call.contract_id != near_contract_id {
@@ -12825,6 +12843,13 @@ impl PipelineService {
                 tx.commit().await?;
                 self.inject_crash(PipelineCrashPoint::AfterNearConfirm)?;
             }
+            if dispatch_held {
+                // A line was held back, so the lines that have a row do not
+                // say how the payout stands; its state stays as it was until
+                // the pass that dispatches the line.
+                any_held = true;
+                continue;
+            }
             if contract_changed {
                 set_payout_state_on(
                     client,
@@ -12850,8 +12875,53 @@ impl PipelineService {
                 record_payout_state_on(client, run, batch_id).await?;
             }
         }
-        Ok(())
+        Ok(any_held)
     }
+}
+
+/// What one run's payout attempt came to (`process_payout_on`).
+enum PayoutAttempt {
+    /// The run does not exist.
+    NoRun,
+    /// The attempt ran to its end: a confirmation lookup, a submit, or
+    /// nothing that was due.
+    Done(PipelineRunRecord),
+    /// A submit was held back because the Settle policy of the run's bundle
+    /// is not runnable (GRD-004). The run's payout is as it was; the pass
+    /// does not count it.
+    Held(PipelineRunRecord),
+}
+
+/// The payout's policy guard (GRD-004: the NEAR worker repeats its policy
+/// guard before dispatch): whether the Settle policy of the run's own bundle
+/// is runnable, so that a line may be sent to the adapter. No status row is
+/// not runnable, as at the start of a phase (`policy_is_runnable`). It is
+/// called immediately before a submit, by the one function both payout
+/// callers reach the submit through (`dispatch_near_settlements`), and
+/// never before a confirmation lookup.
+///
+/// The read is a short tenant transaction on `client`, the connection the
+/// payout already holds, so it takes no second connection (the pool-size-one
+/// rule) and no lock: the tenant's NEAR submit lock, which the caller holds
+/// across every submit, is unchanged, and nothing is held over the adapter
+/// call. A suspension that lands after the read takes effect at the next
+/// dispatch; a guard does not claim to retract an operation the adapter
+/// already accepted.
+async fn settle_policy_allows_dispatch(
+    client: &mut deadpool_postgres::Client,
+    run: &PipelineRunRecord,
+) -> anyhow::Result<bool> {
+    let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
+    let runnable = tx
+        .query_opt(
+            "SELECT runnable FROM pipeline_bundle_policy_status
+              WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'settle'",
+            &[&run.tenant_id, &run.bundle_id],
+        )
+        .await?
+        .is_some_and(|row| row.get::<_, bool>("runnable"));
+    tx.commit().await?;
+    Ok(runnable)
 }
 
 /// The payout's result once the tenant's NEAR submit lock is released

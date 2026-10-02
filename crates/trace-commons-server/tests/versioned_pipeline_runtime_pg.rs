@@ -34040,10 +34040,11 @@ async fn a_suspension_waits_for_a_commit_that_holds_the_policy_row() {
 }
 
 /// GRD-004: the payout pass reads the Settle policy of each run's own bundle
-/// before it dispatches. While that policy is suspended the pass submits
-/// nothing, looks nothing up, and changes no payout row, and it does not count
-/// the run; a run under another bundle is paid in the same pass. After
-/// `resume` the pass submits once.
+/// before it submits to the adapter. While that policy is suspended the pass
+/// submits nothing, writes no outbox line, and changes no payout row, and it
+/// does not count the run; a run under another bundle is paid in the same
+/// pass. After `resume` the pass submits once. (A confirmation lookup is not a
+/// dispatch: `a_submitted_payout_is_confirmed_while_the_settle_policy_is_suspended`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_payout_waits_for_a_suspended_settle_policy() {
     let Some(backend) = runtime_backend(4).await else {
@@ -34599,4 +34600,290 @@ async fn the_summary_counts_suspended_policies() {
             .unwrap();
     }
     assert_eq!(count().await, 0);
+}
+
+/// GRD-004: the payout guard sits at the dispatch, in the code both payout
+/// callers submit through, so the single-run call is held back like the pass.
+/// With the Settle policy of the run's bundle suspended, `process_payout`
+/// makes no adapter call and writes no outbox line, no payout state, and no
+/// charge, and returns the run untouched, as it does for a run with nothing to
+/// pay now. After `resume` it submits once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_direct_payout_call_does_not_dispatch_under_a_suspended_settle_policy() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("direct-payout");
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "pending"
+    );
+    let actor = policy_actor();
+    service
+        .intervene_policy(
+            &tenant,
+            &run.bundle_id,
+            Phase::Settle,
+            "suspend",
+            &actor,
+            "hold_payouts",
+        )
+        .await
+        .unwrap();
+
+    let settlement_before = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    let run_before = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let held = service
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("a held dispatch is not an error")
+        .expect("the run is returned");
+    assert_eq!(held, run_before, "the run is returned untouched");
+    assert_eq!(near.submits(), 0, "the adapter saw no submit");
+    assert_eq!(near.confirmations(), 0);
+    assert!(recording.requests().is_empty());
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id).await,
+        settlement_before,
+        "no payout row changed"
+    );
+    assert_eq!(
+        service
+            .store()
+            .get_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        run_before,
+        "nothing was charged to the run"
+    );
+
+    service
+        .intervene_policy(
+            &tenant,
+            &run.bundle_id,
+            Phase::Settle,
+            "resume",
+            &actor,
+            "release_payouts",
+        )
+        .await
+        .unwrap();
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    assert_eq!(near.submits(), 1, "after the resume the call submits once");
+    assert_eq!(recording.requests().len(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    assert_eq!(near_outbox_rows(&backend, &tenant).await.len(), 1);
+}
+
+/// GRD-004: a confirmation lookup is not a dispatch. A payout the adapter
+/// already accepted is confirmed while the Settle policy is suspended, in the
+/// pass and in the single-run call: the lookup runs, the confirmed state is
+/// recorded, and the adapter sees no second submit. A guard does not claim to
+/// retract an accepted payout, and a resume changes nothing more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submitted_payout_is_confirmed_while_the_settle_policy_is_suspended() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("confirm-suspended");
+    let first = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let second = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(first.bundle_id, second.bundle_id);
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 2);
+    assert_eq!(near.submits(), 2, "each run's payout was submitted once");
+    for run in [&first, &second] {
+        assert_eq!(
+            trace_credit_settlement(&service, &tenant, run.run_id)
+                .await
+                .payout_state,
+            "submitted"
+        );
+    }
+
+    service
+        .intervene_policy(
+            &tenant,
+            &first.bundle_id,
+            Phase::Settle,
+            "suspend",
+            &policy_actor(),
+            "hold_payouts",
+        )
+        .await
+        .unwrap();
+    confirm_every_near_request(&recording);
+    let lookups_before = near.confirmations();
+
+    // The single-run call confirms the second run while the policy is
+    // suspended.
+    service
+        .process_payout(&tenant, second.run_id)
+        .await
+        .expect("the confirmation is not held back");
+    assert_eq!(near.confirmations(), lookups_before + 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, second.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+
+    // The pass confirms the first run, and counts it.
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        1,
+        "the confirmation is work the pass did"
+    );
+    assert_eq!(near.confirmations(), lookups_before + 2);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, first.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 2);
+    assert!(outbox.iter().all(|row| row.status == "confirmed"));
+    assert_eq!(near.submits(), 2, "no second submit under the suspension");
+    assert_eq!(recording.requests().len(), 2);
+
+    service
+        .intervene_policy(
+            &tenant,
+            &first.bundle_id,
+            Phase::Settle,
+            "resume",
+            &policy_actor(),
+            "release_payouts",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a confirmed payout is not listed again"
+    );
+    assert_eq!(near.submits(), 2, "the resume changes nothing more");
+    assert_eq!(near_outbox_rows(&backend, &tenant).await.len(), 2);
+}
+
+/// GRD-004: a new submit of a `failed` payout is a dispatch. The single-run
+/// call, the only caller that takes a `failed` payout up again, does not
+/// re-submit it while the Settle policy is suspended, leaves the payout
+/// `failed` as it was, and re-submits it once after `resume`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_payout_is_not_resubmitted_while_the_settle_policy_is_suspended() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("failed-suspended");
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    recording.fail_next();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1, "the one submit failed");
+    let failed = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(failed.payout_state, "failed");
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "failed"
+    );
+
+    let actor = policy_actor();
+    service
+        .intervene_policy(
+            &tenant,
+            &run.bundle_id,
+            Phase::Settle,
+            "suspend",
+            &actor,
+            "hold_payouts",
+        )
+        .await
+        .unwrap();
+    service
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("a held dispatch is not an error");
+    assert_eq!(near.submits(), 1, "no re-submit under the suspension");
+    assert!(recording.requests().is_empty());
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed", "the line is as it was");
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id).await,
+        failed,
+        "the payout stays failed, under the same label"
+    );
+
+    service
+        .intervene_policy(
+            &tenant,
+            &run.bundle_id,
+            Phase::Settle,
+            "resume",
+            &actor,
+            "release_payouts",
+        )
+        .await
+        .unwrap();
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    assert_eq!(near.submits(), 2, "after the resume the call submits once");
+    assert_eq!(recording.requests().len(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1, "the re-submit reuses the outbox line");
+    assert_eq!(outbox[0].status, "submitted");
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "submitted");
+    assert_eq!(settlement.last_error_label, None);
 }
