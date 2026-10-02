@@ -5430,3 +5430,58 @@ no group counts, costs, or proof totals are merged or lost. Older daemons may om
 `group_id`; clients may retain their existing tuple fallback for those versions.
 The summary wrapper preserves the validated upstream groups and totals, with these
 explicit identity and privacy normalizations.
+
+## Configured activity missions (Z7)
+
+`activity_missions_catalogue` and `activity_missions_status` each accept only
+an empty params object `{}`. Both are async methods advertised in `hello`.
+Unknown fields, including profile, matching results, session/account identifiers,
+URLs and pagination, are `bad_params` / `activity-missions-params-invalid` before
+credentials or HTTP are read. This is separate from the `mission_catalogue`
+skill-evaluation domain.
+
+`activity_missions_catalogue` returns
+`{"catalogue":<ActivityCatalogue>,"disclosure":<Rust-owned string>}`. Its inner
+schema-v1 protocol DTO comes from anonymous `GET /v1/activity-missions` at the
+stored ingest origin; an upload endpoint such as `/v1/traces` contributes only
+its origin. The complete bounded common policy is fetched independently of local
+matching. `kind` is `trace_activity`; `state: unconfigured` with null policy and
+digest is a real fetched state, not a fallback for a failed request. A configured
+policy and its canonical SHA-256 digest must agree. No account/device credential,
+profile or matching result goes to the public request.
+
+`activity_missions_status` returns
+`{"status":<ActivityProgress>,"disclosure":<Rust-owned string>}` from authenticated
+`GET /v1/account/activity-missions/status`, using the stored native account
+session. It accepts no caller-supplied principal or completion assertion. The
+unchanged DTO includes authoritative contribution qualification/source, UTC
+coverage/month dates, observation time, nullable daily/streak/level/badge fields
+and the policy digest. Unconfigured daily rules, levels and badges retain their
+null semantics; they do not become zero progress or invented defaults. Progress
+may decrease after withdrawal/revocation and is a current projection, not an
+irrevocable award. Account-token rotation is retained on success and refusal;
+rotation persistence failure refuses the result. Account/config snapshot checks
+before sending and after HTTP also refuse late progress from an account that
+signed out or changed while the request was in flight.
+
+Both replies carry `consent_copy::ACTIVITY_MISSIONS_DISCLOSURE` assembled in Rust.
+Neither read changes capture, contribution consent, project modes, scopes,
+approvals or uploads. Status can update only a rotated account credential.
+Rewards are hard-disabled: `rewards_enabled` is false,
+`credit_points_pending` is null, and `credit_condition` is
+`mission_credit_ledger_unavailable`. A response claiming activated rewards or
+mission credit is refused. Corpus credit and skill-evaluation awards remain
+separate.
+
+Responses are limited to 128 KiB, HTTP is allowed only on literal loopback IPs,
+and configured host allowlists apply. Proxies and redirects are disabled. Safe
+errors never include URLs or remote bodies: `unavailable` /
+`activity-missions-unavailable` for config, host, transport, status, bounds or
+response-validation failure; `unavailable` / `account-session-required` for no
+live native account; `unavailable` / `commons_credential_storage_unavailable`
+for credential read or rotation persistence failure. Unavailable is never an
+empty catalogue or a zero progress response.
+
+See `docs/superpowers/specs/2026-10-02-configured-activity-missions-design.md`
+for the operator policy and qualification rules. The policy is optional; this
+adapter does not choose thresholds or activate economics.

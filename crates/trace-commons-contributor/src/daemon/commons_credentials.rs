@@ -175,7 +175,17 @@ impl Snapshot {
             .transpose()
             .map_err(|_| unavailable())
     }
+
+    /// Whether config and sign-out generation survived a token-record rotation.
+    /// This alone does not prove the payload is still the same account: callers
+    /// allowing a record change must also compare the original account identity.
+    pub(crate) fn same_lifecycle(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.config == other.config
+            && self.kind == other.kind
+    }
 }
+
 pub(crate) fn snapshot(store: &ConfigStore, kind: Kind) -> Result<Snapshot> {
     let locks = coordination(store.dir())?;
     let _commit = locks.commit.lock()?;

@@ -77,6 +77,9 @@
 //! is [`GATE_STATEMENT`] and whose one action is "Look, then decide". Both
 //! **DRAFT, NEEDS APPROVAL**.
 
+/// Core-owned disclosure for configured activity missions with rewards disabled.
+pub const ACTIVITY_MISSIONS_DISCLOSURE: &str = "Matching stays on this Mac; no activity profile or match result is sent. Missions change no capture or contribution permissions and send no sessions. Progress uses contributions made through your existing consent. Mission rewards are disabled, and no mission credit is available. Any future mission credit would remain pending and conditional until settlement.";
+
 /// Core-owned disclosure for discovery, separate from daily activity mechanics.
 /// Skill awards do not become corpus credit or authorize a contribution.
 pub const MISSION_CATALOGUE_DISCLOSURE: &str = "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no sessions. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit.";

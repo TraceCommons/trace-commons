@@ -22,6 +22,7 @@
 
 pub mod account_admission;
 pub mod account_onboarding;
+pub mod activity_missions;
 pub mod admission_setup;
 pub mod approved_envelope;
 pub mod arming_wording;
