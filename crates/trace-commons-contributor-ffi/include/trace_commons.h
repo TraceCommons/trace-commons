@@ -2289,6 +2289,97 @@ void        tc_string_free(char*);
  */
 const char* tc_last_error(void);
 
+/* ------------------------------------------------------------------------
+ * K3 (#1173): the copy commands that reached only Tauri. Each is the C ABI
+ * route to a sentence, or a table of them, the contributor core already
+ * assembles; none chooses or writes a word of its own. Every returned char*
+ * is owned; free it with tc_string_free.
+ * ------------------------------------------------------------------------ */
+
+/* The line for secrets found and left in what would be sent
+ * (preview_copy::residual_secret_line). count is detection SITES, never
+ * secrets. sites_json, if non-null, is a JSON array of the sites' schema
+ * paths, named in the sentence; NULL or anything else names none.
+ * NULL only on a caught panic.
+ */
+char*       tc_residual_secret_line_text(uint32_t count, const char* sites_json);
+
+/* The preview's removed-summary panel (redaction_summary::summary_copy):
+ * {"removed": [row], "still_present": [row]}, each row {family, display,
+ * description, occurrences, distinct, detail}. redactions_json and
+ * distinct_json are the preview summary's redaction_counts and
+ * redactions_distinct objects passed through; a NULL or unparseable
+ * distinct_json reads as no distinct counts. Which rows are removals and
+ * which are still present is the core's choice. NULL for an unreadable
+ * redactions_json and on a caught panic.
+ */
+char*       tc_redaction_summary_json(const char* redactions_json, const char* distinct_json);
+
+/* The ignore-project control and confirmation (project_copy::
+ * ignore_project_copy): {title, body, button, tooltip}. pending is the count
+ * the confirmation names; negative clamps to 0. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_project_ignore_copy_json(const char* project_label, int64_t pending);
+
+/* What is said after an ignore when the daemon's purged count differs from
+ * the promised one (project_copy::ignore_project_reconciled). The EMPTY
+ * STRING when they agree. Negative values clamp to 0. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_project_ignore_reconciled_text(const char* project_label, int64_t promised, int64_t purged);
+
+/* The arming offer and confirmation (project_copy::arming_offer_copy):
+ * {evidence, question, confirm, decline, body, body_with_backlog, customize}.
+ * count is arming_suggestion's contributed_count; a confirmation shown from
+ * Settings passes 0 and does not render evidence. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count);
+
+/* The legacy invite migration offer (consent_copy::legacy_migration_offer),
+ * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
+ */
+char*       tc_legacy_migration_offer_json(void);
+
+/* The sentence for a refused legacy_invite_migrate, from the IPC error's
+ * label (consent_copy::legacy_migration_refusal_line). An unknown, NULL or
+ * non-UTF-8 label gets the core's fallback. NULL only on a caught panic.
+ */
+char*       tc_legacy_migration_refusal_text(const char* label);
+
+/* The connecting-inference step's sentences (K12,
+ * consent_copy::inference_connection_copy). NULL only on a caught panic.
+ */
+char*       tc_inference_connection_copy_json(void);
+
+/* The Flow 1 grant screens' sentences for the configuration in config_dir
+ * (consent_copy::automatic_contribution_copy). The core chooses the
+ * disclosure: exactly one of patterns_only and model_scrubbed is present.
+ * NULL for an unreadable config_dir or configuration and on a caught panic.
+ */
+char*       tc_automatic_contribution_copy_json(const char* config_dir);
+
+/* The quit prompt true for the process holding handle (quit_copy::
+ * quit_prompt): {role, title, body, confirm, cancel}. The role is read off
+ * the handle: hosting for a daemon run in this process, attached for one
+ * another process runs, unavailable for NULL, a handle that is not live, or
+ * a stopped daemon. NULL only on a caught panic.
+ */
+char*       tc_quit_prompt_json(const tc_handle* handle);
+
+/* The withdrawal confirmation for a trace whose reach this machine cannot
+ * know (withdraw::confirmation_prompt_unknown), paragraphs separated by a
+ * blank line. NULL only on a caught panic.
+ */
+char*       tc_withdrawal_confirmation_prompt_text(void);
+
+/* The extra privacy scan's words (privacy_scan_copy::privacy_scan_copy), for
+ * onboarding's scan screen and the near-ai-notice recovery prompt. NULL only
+ * on a caught panic.
+ */
+char*       tc_privacy_scan_copy_json(void);
+
 /*
  * Can this process reach the Cloud credential store?
  *
