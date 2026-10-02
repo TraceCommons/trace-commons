@@ -34,9 +34,13 @@ struct MonitorWindowView: View {
     /// without touching this, so widening the window brings it back.
     @SceneStorage("monitor.showsMap") private var showsMap = true
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
+    /// False until this window has seeded the two preferences from its
+    /// width (map from 1100pt, inspector from 900pt). After that the
+    /// window restores whatever the person chose.
+    @SceneStorage("monitor.panesSeeded") private var panesSeeded = false
 
     var body: some View {
-        GlassThreePane(showsMap: showsMap, showsInspector: showsInspector) {
+        GlassThreePane(showsMap: showsMap, showsInspector: showsInspector, onFirstLayout: seedPanes) {
             MonitorMainPane(
                 tab: $tab, inferenceDot: inferenceDot,
                 showsMap: $showsMap, showsInspector: $showsInspector,
@@ -49,6 +53,15 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
+    }
+
+    /// The first time this window lays out, open the panes its width suits.
+    private func seedPanes(windowWidth: CGFloat) {
+        guard !panesSeeded else { return }
+        let seed = GlassPaneLayout.firstLaunch(windowWidth: windowWidth)
+        showsMap = seed.showsMap
+        showsInspector = seed.showsInspector
+        panesSeeded = true
     }
 
     /// Inference's dot: Private AI on or off, and none while the daemon has
@@ -69,6 +82,9 @@ private struct MonitorMainPane: View {
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
     let onSettings: () -> Void
+    /// The window is too narrow for the map: the toggle shows it hidden and
+    /// cannot show it, and widening the window brings back the preference.
+    @Environment(\.glassMapCompacted) private var mapCompacted
     /// Half the unified title bar's 52pt height.
     static let lightsCentre: CGFloat = 26
 
@@ -78,9 +94,10 @@ private struct MonitorMainPane: View {
                 HStack(spacing: GlassTokens.Space.s4) {
                     Spacer(minLength: 0)
                     GlassToolbarGroup {
-                        GlassToolbarButton("Map", systemImage: "map", pressed: showsMap) {
+                        GlassToolbarButton("Map", systemImage: "map", pressed: showsMap && !mapCompacted) {
                             showsMap.toggle()
                         }
+                        .disabled(mapCompacted)
                         GlassToolbarButton("Inspector", systemImage: "sidebar.right", pressed: showsInspector) {
                             showsInspector.toggle()
                         }

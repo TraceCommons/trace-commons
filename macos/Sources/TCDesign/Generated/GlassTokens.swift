@@ -288,6 +288,7 @@ public enum GlassTokens {
         public static let paneLeftMinWidth: CGFloat = 320
         public static let paneLeftWindowShare: CGFloat = 0.34
         public static let mapBreakpoint: CGFloat = 1100
+        public static let inspectorBreakpoint: CGFloat = 900
         public static let windowMinWidth: CGFloat = 760
         public static let windowMinHeight: CGFloat = 560
         public static let nodeCardWidth: CGFloat = 260
@@ -321,6 +322,7 @@ public enum GlassTokens {
             "paneLeftMinWidth": paneLeftMinWidth,
             "paneLeftWindowShare": paneLeftWindowShare,
             "mapBreakpoint": mapBreakpoint,
+            "inspectorBreakpoint": inspectorBreakpoint,
             "windowMinWidth": windowMinWidth,
             "windowMinHeight": windowMinHeight,
             "nodeCardWidth": nodeCardWidth,
