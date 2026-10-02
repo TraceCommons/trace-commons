@@ -593,6 +593,25 @@ invite identity" below.
 wrong. It is one of the labels in "Health precedence" below, or `null` when
 healthy.
 
+The banner's words -- a title, a sentence stating what is held and the data
+consequence, and an action label where there is a real recovery step -- are
+`health_copy::health_copy_for_label`, across the C ABI as `tc_health_copy_json`
+(R6/R7, #1173). Pass `reachable: 0` instead of a label when the daemon
+cannot be reached at all; that returns the separate core-down sentence
+(`health_copy::core_down_copy`, **DRAFT, NEEDS APPROVAL** -- no shell has
+shown a contributor-facing sentence for a fully unreachable daemon before).
+`reachable` is never derived from this call: it is the caller's own
+liveness fact, from whatever probe or IPC failure told it the daemon is
+down. A reachable daemon with `last_error_label: null` has nothing to show
+and should not call this at all; passed anyway with an empty label it
+answers `NULL`, not a banner. Moved into the core from
+`macos/Sources/TraceCommonsApp/HealthCopy.swift`, which has shipped this
+table since before this export existed; Windows
+(`windows/src/TraceCommons.Interop/HealthCopy.cs`) independently wrote the
+same sentences by hand. Neither shell has been switched over to the export
+yet -- that is follow-up work, not part of this change -- so the two Swift
+and C# tables still carry their own copies for now.
+
 `next_digest_at` depends on `digest_schedule` (see `set_settings`). Under
 `interval` it is `null` until a first digest has fired, then that digest's
 time plus `digest_interval_secs` -- unchanged from before `digest_schedule`

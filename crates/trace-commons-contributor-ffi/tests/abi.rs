@@ -5201,6 +5201,47 @@ fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
 }
 
 #[test]
+fn the_health_copy_crosses_the_abi_core_down_and_per_label() {
+    use trace_commons_contributor::daemon::health::LABEL_NOT_LOGGED_IN;
+    use trace_commons_contributor::health_copy::{core_down_copy, health_copy_for_label};
+    use trace_commons_contributor_ffi::tc_health_copy_json;
+
+    // Unreachable: the core-down sentence, whatever label is passed (even
+    // one that would otherwise answer), because `reachable` governs.
+    let label = cstr_str(LABEL_NOT_LOGGED_IN);
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(0, label.as_ptr()) }),
+        serde_json::to_value(core_down_copy()).unwrap()
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(0, std::ptr::null()) }),
+        serde_json::to_value(core_down_copy()).unwrap()
+    );
+
+    // Reachable with a known label: the per-label table.
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(1, label.as_ptr()) }),
+        serde_json::to_value(health_copy_for_label(LABEL_NOT_LOGGED_IN)).unwrap()
+    );
+
+    // Reachable with an unrecognised label still gets a banner, never raw
+    // label text.
+    let unknown = cstr_str("a-future-label");
+    let banner = json_owned(unsafe { tc_health_copy_json(1, unknown.as_ptr()) });
+    assert_eq!(
+        banner,
+        serde_json::to_value(health_copy_for_label("a-future-label")).unwrap()
+    );
+    assert_eq!(banner["title"], "Contributions are on hold.");
+
+    // Reachable with no label (NULL or empty): nothing is wrong, so there is
+    // no banner to draw.
+    assert!(unsafe { tc_health_copy_json(1, std::ptr::null()) }.is_null());
+    let empty = cstr_str("");
+    assert!(unsafe { tc_health_copy_json(1, empty.as_ptr()) }.is_null());
+}
+
+#[test]
 fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
     use trace_commons_contributor::consent_copy::automatic_contribution_copy;
     use trace_commons_contributor_ffi::tc_automatic_contribution_copy_json;

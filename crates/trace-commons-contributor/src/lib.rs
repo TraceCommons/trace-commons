@@ -17,6 +17,7 @@ pub mod daemon;
 pub mod disclosure;
 pub mod envelope;
 pub mod harness_state;
+pub mod health_copy;
 pub mod history_copy;
 pub mod identity;
 pub mod inference_connection;

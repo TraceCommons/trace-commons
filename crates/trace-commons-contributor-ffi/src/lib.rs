@@ -5542,6 +5542,39 @@ pub extern "C" fn tc_privacy_scan_copy_json() -> *mut c_char {
     })
 }
 
+/// The health banner's words (R6/R7, #1173): `health_copy::core_down_copy`
+/// when `reachable` is 0, or `health_copy::health_copy_for_label` for
+/// `label` when the daemon answered.
+///
+/// `reachable` is the caller's own liveness fact -- whether its IPC call to
+/// the daemon answered at all -- and is never derived here; this export has
+/// no way to probe a daemon on its own. When `reachable` is non-zero, a NULL,
+/// non-UTF-8 or empty `label` means a reachable daemon reported nothing
+/// wrong, and this returns NULL: there is no banner to draw. A non-empty
+/// `label` this build does not know still gets a banner, never raw-label
+/// text.
+///
+/// Returns an owned JSON string of `{title, detail, action}`; free it with
+/// [`tc_string_free`]. NULL for nothing to show, and on a caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_health_copy_json(reachable: i32, label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if reachable == 0 {
+            let copy = trace_commons_contributor::health_copy::core_down_copy();
+            return Ok(to_owned_cstring(&serde_json::to_string(&copy)?));
+        }
+        let Some(label) = unsafe { borrow_optional_str(label) }.filter(|label| !label.is_empty())
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let copy = trace_commons_contributor::health_copy::health_copy_for_label(label);
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// Can this process reach the Cloud credential store?
 ///
 /// Exists so a release pipeline can ask a *signed bundle* the question, which

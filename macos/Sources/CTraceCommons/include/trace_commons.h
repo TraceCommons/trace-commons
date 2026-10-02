@@ -2380,6 +2380,16 @@ char*       tc_withdrawal_confirmation_prompt_text(void);
  */
 char*       tc_privacy_scan_copy_json(void);
 
+/* The health banner's words (R6/R7, #1173): health_copy::core_down_copy when
+ * reachable is 0, or health_copy::health_copy_for_label for label when the
+ * daemon answered. reachable is the caller's own liveness fact and is never
+ * derived here. When reachable is non-zero, a NULL, non-UTF-8 or empty label
+ * means a reachable daemon reported nothing wrong, and this returns NULL:
+ * there is no banner to draw. {title, detail, action}. NULL for nothing to
+ * show and on a caught panic.
+ */
+char*       tc_health_copy_json(int32_t reachable, const char* label);
+
 /*
  * Can this process reach the Cloud credential store?
  *
