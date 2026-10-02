@@ -21,6 +21,7 @@
     "sceneBase": { "hex": "#0f1219" },
     "sceneWarm": { "hex": "#1d2430" },
     "paneBase": { "hex": "#161a22", "alpha": 0.96, "note": "The neutral dark a pane's glass sits on where there is no native material." },
+    "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec)." },
     "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast." },
     "wellFill": { "hex": "#000000", "alpha": 0.22 },
     "controlHover": { "hex": "#ffffff", "alpha": 0.16 },
@@ -208,7 +209,7 @@
   },
   "type": {
     "micro": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 13 },
-    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
+    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "semibold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
     "caption": { "textStyle": "subheadline", "size": 11, "weight": "regular", "lineHeight": 16 },
     "label": { "textStyle": "callout", "size": 12, "weight": "medium", "lineHeight": 16 },
     "body": { "textStyle": "body", "size": 13, "weight": "regular", "lineHeight": 18 },

@@ -43,3 +43,17 @@ final class FloatingLayerTests: XCTestCase {
             .sorted { $0.0 < $1.0 }
     }
 }
+
+/// Before macOS 26 a floating surface is the painted tier over a real
+/// within-window blur, not a flat translucent fill.
+final class FloatingBlurTests: XCTestCase {
+    @MainActor
+    func test_theFallbackBlurBlendsWithinTheWindow() {
+        let host = NSHostingView(rootView: GlassFloatingBlur(cornerRadius: 14).frame(width: 100, height: 60))
+        host.layoutSubtreeIfNeeded()
+        func all(_ view: NSView) -> [NSView] { view.subviews + view.subviews.flatMap(all) }
+        let effect = all(host).compactMap { $0 as? NSVisualEffectView }.first
+        XCTAssertEqual(effect?.blendingMode, .withinWindow)
+        XCTAssertEqual(effect?.state, .active)
+    }
+}
