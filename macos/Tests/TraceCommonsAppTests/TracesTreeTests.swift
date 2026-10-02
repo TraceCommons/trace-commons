@@ -85,3 +85,45 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertEqual(store.tree.allSessions.count, 3)
     }
 }
+
+/// Review of #1183: a folder keeps its three modes, and ignoring one says
+/// what the core actually cleared.
+@MainActor
+final class TracesFolderModeTests: XCTestCase {
+    func test_foldersCarryTheModesTheyCanBeSetTo() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let folders = store.tree.tools.flatMap(\.folders) + store.tree.unplaced
+        XCTAssertFalse(folders.isEmpty)
+        for folder in folders where folder.mode != nil {
+            XCTAssertEqual(Set(folder.offerableModes), [.ask, .autoUpload, .ignore], folder.label)
+        }
+    }
+
+    /// The core's `purged` is the authority. When it differs from the count
+    /// the confirmation named, the difference is said in the core's words.
+    func test_ignoringSaysWhenTheQueueChanged() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let folder = try XCTUnwrap(store.tree.tools.flatMap(\.folders).first { !$0.sessions.isEmpty })
+        // The sample core answers purged 0; the confirmation promised more.
+        await store.setFolderMode(folder, .ignore, promised: folder.sessions.count)
+        XCTAssertEqual(
+            store.folderNotice,
+            ProjectIgnoreCopy.reconciliation(project: folder.label, promised: folder.sessions.count, purged: 0))
+        XCTAssertNotNil(store.folderNotice)
+
+        // When they agree, nothing is said.
+        await store.setFolderMode(folder, .ignore, promised: 0)
+        XCTAssertNil(store.folderNotice)
+    }
+
+    /// A refused write keeps its error and leaves the tree as the core has it.
+    func test_aRefusedModeWriteKeepsItsError() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.coreDown))
+        let folder = TracesTree.FolderNode(id: "p1", label: "docs", mode: .ask, offerableModes: [.ask, .ignore], sessions: [])
+        await store.setFolderMode(folder, .ignore, promised: 0)
+        XCTAssertEqual(store.phase, .failed(.unreachable))
+        XCTAssertTrue(store.writing.isEmpty)
+    }
+}

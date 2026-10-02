@@ -22,42 +22,45 @@ final class TracesStore {
     private(set) var writing: Set<String> = []
 
     let client: any DaemonDataClient
-    private var events: Task<Void, Never>?
+    /// The last folder change whose result differed from what the
+    /// confirmation promised, in the core's words (`ProjectIgnoreCopy`).
+    private(set) var folderNotice: String?
+    /// Each load's number; a load that finishes after a newer one started is
+    /// dropped, so an older read never overwrites a newer tree.
+    private var generation = 0
 
     init(client: any DaemonDataClient) {
         self.client = client
     }
 
-    /// Loads once and follows the event stream until `stop()`.
-    func start() {
-        guard events == nil else { return }
-        let stream = client.events()
-        events = Task { [weak self] in
-            await self?.load()
-            for await event in stream {
-                switch event {
-                case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
-                    await self?.load()
-                case .digestDue, .previewReady, .inferenceCallAdded, .unknown:
-                    break
-                }
+    /// Loads, then follows the event stream for as long as the calling task
+    /// runs. Call it from a view's `.task`: when the view goes, the task is
+    /// cancelled and the stream with it.
+    func run() async {
+        await load()
+        for await event in client.events() {
+            if Task.isCancelled { break }
+            switch event {
+            case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
+                await load()
+            case .digestDue, .previewReady, .inferenceCallAdded, .unknown:
+                break
             }
         }
     }
 
-    func stop() {
-        events?.cancel()
-        events = nil
-    }
-
     func load() async {
+        generation += 1
+        let mine = generation
         do {
             async let entries = client.listPending(projectId: nil)
             async let projects = client.listProjects()
             // Settings only decide the tool switches. Unreadable settings
             // leave every tool unset, which draws no switch: never off.
             async let settings = try? client.settings()
-            tree = TracesTree.build(entries: try await entries, projects: try await projects.projects, settings: await settings)
+            let built = TracesTree.build(entries: try await entries, projects: try await projects.projects, settings: await settings)
+            guard mine == generation else { return }
+            tree = built
             phase = .loaded
         } catch let error as DaemonDataError {
             phase = .failed(error)
@@ -66,16 +69,23 @@ final class TracesStore {
         }
     }
 
-    /// The folder switch: on is "Ask me first", off is "Never offer this
-    /// one". Turning a folder on never arms it.
-    func setFolderOffered(_ folderId: String, _ offered: Bool) async {
-        guard !writing.contains(folderId) else { return }
-        writing.insert(folderId)
-        defer { writing.remove(folderId) }
+    /// A folder's mode, chosen from its three-way picker after any
+    /// confirmation the view showed (arming, or ignoring a folder with
+    /// sessions waiting). `promised` is the waiting count that confirmation
+    /// named; the core's `purged` is the authority, and a difference is said.
+    func setFolderMode(_ folder: TracesTree.FolderNode, _ mode: ProjectMode, promised: Int) async {
+        guard !writing.contains(folder.id) else { return }
+        writing.insert(folder.id)
+        defer { writing.remove(folder.id) }
+        folderNotice = nil
         do {
-            _ = try await client.setProjectMode(projectId: folderId, mode: offered ? .ask : .ignore, includeBacklog: nil)
+            let result = try await client.setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
+            if mode == .ignore {
+                folderNotice = ProjectIgnoreCopy.reconciliation(
+                    project: folder.label, promised: promised, purged: result.purged ?? promised)
+            }
         } catch {
-            // The switch redraws from the core's answer, so a refused write
+            // The picker redraws from the core's answer, so a refused write
             // shows the folder as it still is; the error is kept.
             phase = .failed(error as? DaemonDataError ?? .undecodable(method: "set_project_mode"))
             return

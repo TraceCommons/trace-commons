@@ -74,7 +74,7 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
-        .task { traces.start() }
+        .task { await traces.run() }
     }
 
     /// The selected session, while it is still in the tree.

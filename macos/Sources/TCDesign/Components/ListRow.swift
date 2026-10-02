@@ -17,6 +17,8 @@ public struct GlassListRow: View {
     private let submitTitle: String?
     private let submitDone: Bool
     private let watched: Binding<Bool>?
+    private let watchDisabled: Bool
+    private let accessory: AnyView?
     private let watchLabel: String
     private let expandLabel: String?
     private let menuLabel: String
@@ -26,7 +28,9 @@ public struct GlassListRow: View {
     private let onSubmit: (() -> Void)?
     private let onMenu: (() -> Void)?
 
-    /// `expanded` is nil for a row that cannot expand. `watched` is nil for
+    /// `accessory` is a control drawn before the row menu (a folder's mode
+    /// picker). `watchDisabled` shows the switch's state without letting it
+    /// change. `expanded` is nil for a row that cannot expand. `watched` is nil for
     /// a row with no switch of its own (a session). A nil `onSubmit` with a
     /// `submitTitle` shows the pill disabled. Every word is the caller's:
     /// `watchLabel` names the switch, `expandLabel` the chevron and
@@ -43,6 +47,8 @@ public struct GlassListRow: View {
         submitTitle: String? = nil,
         submitDone: Bool = false,
         watched: Binding<Bool>? = nil,
+        watchDisabled: Bool = false,
+        accessory: AnyView? = nil,
         watchLabel: String = "",
         expandLabel: String? = nil,
         menuLabel: String = "",
@@ -63,6 +69,8 @@ public struct GlassListRow: View {
         self.submitTitle = submitTitle
         self.submitDone = submitDone
         self.watched = watched
+        self.watchDisabled = watchDisabled
+        self.accessory = accessory
         self.watchLabel = watchLabel
         self.expandLabel = expandLabel
         self.menuLabel = menuLabel
@@ -120,9 +128,16 @@ public struct GlassListRow: View {
                     .disabled(onSubmit == nil)
             }
 
+            if let accessory {
+                accessory
+            }
+
             if let watched {
                 Toggle(watchLabel, isOn: watched)
                     .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
+                    // A switch the person cannot change here is disabled, so
+                    // assistive tech does not offer a control that does nothing.
+                    .disabled(watchDisabled)
             }
 
             Group {

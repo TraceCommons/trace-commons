@@ -13,9 +13,15 @@ struct TracesTreeView: View {
     @Binding var selection: String
 
     @State private var collapsed: Set<String> = []
+    /// A mode change waiting on the core's confirmation: arming always,
+    /// ignoring when the folder has sessions waiting.
+    @State private var confirming: (folder: TracesTree.FolderNode, mode: ProjectMode)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            if let notice = store.folderNotice {
+                GlassNotice(tone: .ask) { Text(notice) }
+            }
             if case .failed(let error) = store.phase {
                 // The core's own fixed label until K4 gives this state its
                 // words. The last good tree stays below it.
@@ -43,8 +49,104 @@ struct TracesTreeView: View {
                     }
                 }
                 .scrollIndicators(.never)
+                // Full Keyboard Access: focus the tree, then the arrow keys
+                // move the selection through the sessions as drawn.
+                .focusable()
+                .onMoveCommand(perform: move)
             }
         }
+        .confirmationDialog(
+            confirming.map(Self.confirmationTitle) ?? "",
+            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+            titleVisibility: .visible,
+            presenting: confirming
+        ) { pending in
+            if pending.mode == .ignore {
+                Button(ProjectIgnoreCopy.buttonLabel, role: .destructive) { apply(pending.folder, pending.mode) }
+                Button(ProjectArmingCopy.cancel, role: .cancel) { confirming = nil }
+            } else {
+                Button(ProjectArmingCopy.confirm) { apply(pending.folder, pending.mode) }
+                Button(ProjectArmingCopy.cancel, role: .cancel) { confirming = nil }
+            }
+        } message: { pending in
+            if pending.mode == .ignore {
+                Text(ProjectIgnoreCopy.confirmationBody(project: pending.folder.label, pendingCount: pending.folder.sessions.count))
+            } else {
+                Text(ProjectArmingCopy.confirmationBody)
+            }
+        }
+    }
+
+    // MARK: Folder modes
+
+    private static func confirmationTitle(_ pending: (folder: TracesTree.FolderNode, mode: ProjectMode)) -> String {
+        pending.mode == .ignore
+            ? ProjectIgnoreCopy.confirmationTitle(project: pending.folder.label)
+            : ProjectArmingCopy.confirmationTitle(project: pending.folder.label)
+    }
+
+    /// The three modes, as Settings offers them. Arming always asks first,
+    /// in the core's words; ignoring asks when it would clear waiting
+    /// sessions, with their count. Asking first is a direct call.
+    private func request(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
+        guard mode != folder.mode else { return }
+        if mode == .autoUpload || (mode == .ignore && !folder.sessions.isEmpty) {
+            confirming = (folder, mode)
+        } else {
+            apply(folder, mode)
+        }
+    }
+
+    private func apply(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
+        confirming = nil
+        Task { await store.setFolderMode(folder, mode, promised: folder.sessions.count) }
+    }
+
+    private func modePicker(_ folder: TracesTree.FolderNode) -> AnyView? {
+        guard let mode = folder.mode, !folder.offerableModes.isEmpty else { return nil }
+        return AnyView(
+            GlassPicker(
+                folder.label,
+                selection: Binding(get: { mode }, set: { wanted in if let wanted { request(folder, wanted) } }),
+                options: folder.offerableModes.map {
+                    GlassPickerOption(ProjectCopy.modeChoiceLabel($0), value: $0, dot: Self.status($0))
+                },
+                placeholder: "—"
+            )
+            .disabled(store.writing.contains(folder.id)))
+    }
+
+    private static func status(_ mode: ProjectMode) -> GlassStatus {
+        switch mode {
+        case .ask: .ask
+        case .autoUpload: .on
+        case .ignore: .off
+        }
+    }
+
+    // MARK: Keyboard
+
+    /// The sessions in drawing order, skipping collapsed tools and folders.
+    private var visibleSessions: [DaemonData.QueueEntry] {
+        var sessions: [DaemonData.QueueEntry] = []
+        for tool in store.tree.tools where isOpen(tool.id) {
+            for folder in tool.folders where isOpen(folder.id) { sessions += folder.sessions }
+        }
+        for folder in store.tree.unplaced where isOpen(folder.id) { sessions += folder.sessions }
+        return sessions
+    }
+
+    private func move(_ direction: MoveCommandDirection) {
+        let sessions = visibleSessions
+        guard !sessions.isEmpty else { return }
+        let current = sessions.firstIndex { $0.entryId == selection }
+        let next: Int
+        switch direction {
+        case .down: next = current.map { min($0 + 1, sessions.count - 1) } ?? 0
+        case .up: next = current.map { max($0 - 1, 0) } ?? 0
+        default: return
+        }
+        selection = sessions[next].entryId
     }
 
     private var isEmpty: Bool { store.tree.tools.isEmpty && store.tree.unplaced.isEmpty }
@@ -64,8 +166,10 @@ struct TracesTreeView: View {
             off: tool.mode == .off,
             expanded: tool.folders.isEmpty ? nil : isOpen(tool.id),
             // The source declaration. Unset draws no switch: never off.
-            // Read-only until the contract carries a source-mode write.
+            // Disabled until the contract carries a source-mode write, so it
+            // is not announced as a control that does nothing.
             watched: tool.mode == .unset ? nil : .constant(tool.mode == .watch),
+            watchDisabled: true,
             watchLabel: tool.kind.displayName,
             expandLabel: tool.kind.displayName,
             onToggleExpand: { toggle(tool.id) }
@@ -78,16 +182,12 @@ struct TracesTreeView: View {
             depth: .folder,
             tile: .folder,
             title: folder.label,
-            sub: folder.mode.map(ProjectCopy.modeChoiceLabel),
+            // The mode is the picker's; the sub-line counts what is waiting.
+            sub: folder.sessions.isEmpty ? nil : String(folder.sessions.count),
             expanded: folder.sessions.isEmpty ? nil : isOpen(folder.id),
-            // On is offered (Ask me first); off is Never offer this one. A
-            // folder the core has not listed has no mode, so no switch.
-            watched: folder.mode.map { mode in
-                Binding(
-                    get: { mode != .ignore },
-                    set: { offered in Task { await store.setFolderOffered(folder.id, offered) } })
-            },
-            watchLabel: folder.label,
+            // The folder's mode: the three-way choice, with the core's
+            // confirmations. A folder the core has not listed has no mode.
+            accessory: modePicker(folder),
             expandLabel: folder.label,
             onToggleExpand: { toggle(folder.id) }
         )
@@ -112,7 +212,7 @@ struct TracesTreeView: View {
         )
     }
 
-    static let reviewTitle = "Review"
+    static let reviewTitle = MonitorWords.review
 
     // MARK: Formatting
 
@@ -213,19 +313,36 @@ struct SessionInspectorView: View {
         func number(_ value: Int?) -> String { value.map(String.init) ?? dash }
         let tool = SourceKind(rawValue: entry.declaredSource ?? entry.source)?.displayName ?? entry.source
         return [
-            .init("Tool", tool),
-            .init("Folder", entry.projectLabel),
-            .init("Started", entry.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? dash),
-            .init("Length", entry.durationSecs.map {
+            .init(MonitorWords.tool, tool),
+            .init(MonitorWords.folder, entry.projectLabel),
+            .init(MonitorWords.started, entry.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? dash),
+            .init(MonitorWords.length, entry.durationSecs.map {
                 Duration.seconds($0).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
             } ?? dash),
-            .init("Prompts", number(entry.userTurns)),
-            .init("Size", bytes(entry.sizeBytes)),
-            .init("Sends", bytes(summary?.wouldSendBytes)),
+            .init(MonitorWords.prompts, number(entry.userTurns)),
+            .init(MonitorWords.size, bytes(entry.sizeBytes)),
+            .init(MonitorWords.sends, bytes(summary?.wouldSendBytes)),
             // Absent until scrubbed: a dash, never zero.
-            .init("Marks", number(entry.marks)),
-            .init("Unsure", number(entry.unsureSpans)),
+            .init(MonitorWords.marks, number(entry.marks)),
+            .init(MonitorWords.unsure, number(entry.unsureSpans)),
         ]
     }
+}
+/// The monitor's own words, in one place, while the core has none for
+/// them. TODO(K4): every one of these moves to the Rust core's copy and is
+/// read across the ABI, like the consent words already are; this enum is
+/// the list to move, and nothing outside it may add a label. Debug-only,
+/// with the monitor.
+enum MonitorWords {
+    static let review = "Review"
+    static let tool = "Tool"
+    static let folder = "Folder"
+    static let started = "Started"
+    static let length = "Length"
+    static let prompts = "Prompts"
+    static let size = "Size"
+    static let sends = "Sends"
+    static let marks = "Marks"
+    static let unsure = "Unsure"
 }
 #endif
