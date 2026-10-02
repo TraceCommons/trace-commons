@@ -63,11 +63,14 @@ fn swift_sources() -> Vec<(String, String)> {
     let sources: Vec<(String, String)> = paths
         .iter()
         .map(|path| {
+            // Keyed with `/` on every host, so the allowlist and the
+            // surface table match on the Windows runner too.
             let rel = path
                 .strip_prefix(&root)
                 .unwrap_or(path)
                 .display()
-                .to_string();
+                .to_string()
+                .replace('\\', "/");
             let text = std::fs::read_to_string(path)
                 .unwrap_or_else(|error| panic!("{} is unreadable: {error}", path.display()));
             (rel, text)
