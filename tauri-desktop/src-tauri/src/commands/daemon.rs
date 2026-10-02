@@ -46,44 +46,31 @@ pub(crate) fn redaction_summary_copy(
     redactions: std::collections::BTreeMap<String, u32>,
     distinct: Option<std::collections::BTreeMap<String, u32>>,
 ) -> serde_json::Value {
-    let (removed, still_present) = trace_commons_contributor::redaction_summary::rows(
+    serde_json::json!(trace_commons_contributor::redaction_summary::summary_copy(
         &redactions,
         &distinct.unwrap_or_default(),
-    );
-    serde_json::json!({
-        "removed": removed,
-        "still_present": still_present,
-    })
+    ))
 }
 
+/// The ignore-project words, assembled in the contributor core
+/// (`project_copy::ignore_project_copy`).
 #[tauri::command]
 pub(crate) fn project_ignore_copy(project_label: String, pending: usize) -> serde_json::Value {
-    use trace_commons_contributor::project_copy;
-
-    serde_json::json!({
-        "title": project_copy::ignore_project_title(&project_label),
-        "body": project_copy::ignore_project_body(pending),
-        "button": project_copy::IGNORE_PROJECT,
-        "tooltip": project_copy::IGNORE_PROJECT_TOOLTIP,
-    })
+    serde_json::json!(
+        trace_commons_contributor::project_copy::ignore_project_copy(&project_label, pending)
+    )
 }
 
+/// The arming offer and confirmation, assembled in the contributor core
+/// (`project_copy::arming_offer_copy`): the evidence and question, both
+/// confirmation bodies (K5's `body_with_backlog` for `include_backlog`) and
+/// Customize's table. DRAFT, NEEDS APPROVAL where that module says so.
 #[tauri::command]
 pub(crate) fn arming_offer_copy(project_label: String, count: u32) -> serde_json::Value {
-    use trace_commons_contributor::project_copy;
-
-    serde_json::json!({
-        "evidence": project_copy::arming_offer_evidence(&project_label, count),
-        "question": project_copy::arming_offer_question(&project_label),
-        "confirm": project_copy::ARMING_OFFER_CONFIRM,
-        "decline": project_copy::ARMING_OFFER_DECLINE,
-        "body": project_copy::ARMING_BODY,
-        // K5: the body for arming with the backlog (`include_backlog`), and
-        // Customize's copy for the picker and "Keep on this Mac". DRAFT,
-        // NEEDS APPROVAL; see `project_copy::customize_copy`.
-        "body_with_backlog": project_copy::ARMING_BODY_WITH_BACKLOG,
-        "customize": project_copy::customize_copy(),
-    })
+    serde_json::json!(trace_commons_contributor::project_copy::arming_offer_copy(
+        &project_label,
+        count
+    ))
 }
 
 #[tauri::command]

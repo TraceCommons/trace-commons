@@ -30,6 +30,12 @@ struct GlassBackdrop: NSViewRepresentable {
     let cornerRadius: CGFloat
 
     func makeNSView(context: Context) -> NSView {
+        Self.makeView(material, cornerRadius: cornerRadius)
+    }
+
+    /// The native view for a material. `.opaque` is no material at all, so
+    /// it is a solid layer in the opaque pane base, never a vibrancy view.
+    static func makeView(_ material: GlassMaterial, cornerRadius: CGFloat) -> NSView {
         switch material {
         case .liquidGlass:
             if #available(macOS 26.0, *) {
@@ -38,9 +44,11 @@ struct GlassBackdrop: NSViewRepresentable {
                 glass.cornerRadius = cornerRadius
                 return glass
             }
-            return Self.vibrancy(cornerRadius)
-        case .vibrancy, .opaque:
-            return Self.vibrancy(cornerRadius)
+            return vibrancy(cornerRadius)
+        case .vibrancy:
+            return vibrancy(cornerRadius)
+        case .opaque:
+            return opaque(cornerRadius)
         }
     }
 
@@ -50,6 +58,17 @@ struct GlassBackdrop: NSViewRepresentable {
         } else {
             view.layer?.cornerRadius = cornerRadius
         }
+    }
+
+    private static func opaque(_ cornerRadius: CGFloat) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        let base = GlassTokens.Color.paneOpaque
+        view.layer?.backgroundColor = CGColor(srgbRed: base.red, green: base.green, blue: base.blue, alpha: base.alpha)
+        view.layer?.cornerRadius = cornerRadius
+        view.layer?.cornerCurve = .continuous
+        view.layer?.masksToBounds = true
+        return view
     }
 
     private static func vibrancy(_ cornerRadius: CGFloat) -> NSView {

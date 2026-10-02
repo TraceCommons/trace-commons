@@ -273,6 +273,23 @@ public final class TCDaemon {
     /// holds can only find out by trying and failing in front of somebody.
     public let isAttached: Bool
 
+    /// The quit prompt that is true for this process, as JSON
+    /// (`tc_quit_prompt_json`). Decoded by `TCShellCore.QuitPrompt`.
+    ///
+    /// The ABI reads the role off the handle -- hosting the watcher, attached
+    /// to one another process runs, or neither -- so this shell never picks
+    /// the sentence. Once teardown has begun the handle is not offered and
+    /// the answer is the no-watcher prompt, which is then the true one.
+    public func quitPromptJSON() -> String? {
+        let raw: UnsafeMutablePointer<CChar>?? = withHandle { h in
+            tc_quit_prompt_json(h)
+        }
+        guard let inner = raw else { return TCCoreCopy.quitPromptWithoutWatcherJSON() }
+        guard let pointer = inner else { return nil }
+        defer { tc_string_free(pointer) }
+        return String(cString: pointer)
+    }
+
     /// Calls `method` with `paramsJSON` (a JSON object literal, e.g. "{}")
     /// and returns the daemon's JSON response as a Swift String. Never
     /// throws: per the header, tc_call never returns NULL, it returns a

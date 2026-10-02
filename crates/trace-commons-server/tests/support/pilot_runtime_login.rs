@@ -137,11 +137,19 @@ pub async fn migrate_like_the_pilot(url: &str) {
 }
 
 /// Makes `login` a `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS` role whose only
-/// privilege source is membership in `trace_ingest_runtime`, and checks that
-/// it is: no other membership, a group that cannot bypass RLS, and no
-/// privilege of its own on any schema, table, column, sequence, or function
-/// in the database at `url`.
-pub async fn provision_member_only_login(url: &str, login: &str) {
+/// privilege sources are membership in `trace_ingest_runtime` and in each of
+/// `extra_memberships`, and checks that they are: exactly those memberships
+/// (every one granted before the check runs), a group that cannot bypass RLS,
+/// and no privilege of its own on any schema, table, column, sequence, or
+/// function in the database at `url`.
+///
+/// A pilot-shaped harness names `trace_account_admission_runtime` (V77) as
+/// its one extra: `main`'s legacy session withdrawal, and the pipeline
+/// withdrawal through `main`'s helper, read `trace_account_admission_submissions`
+/// under that role, which no pipeline migration grants again (owner ruling
+/// RB-11), and the pilot's ingest login holds it for the same reason (Zaki
+/// review 1, round 2, finding 17).
+pub async fn provision_runtime_login(url: &str, login: &str, extra_memberships: &[&str]) {
     let (client, connection) = tokio_postgres::connect(url, NoTls)
         .await
         .expect("connect as the migration owner");
@@ -159,11 +167,18 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
     // Since PostgreSQL 16 a membership carries its own inherit option, taken
     // from the member's INHERIT attribute when it is granted. Say it outright,
     // so a membership granted while the login was NOINHERIT is repaired too.
-    let membership = if sixteen_or_later {
-        format!("GRANT trace_ingest_runtime TO {login} WITH INHERIT TRUE;")
-    } else {
-        format!("GRANT trace_ingest_runtime TO {login};")
+    let grant = |role: &str| {
+        if sixteen_or_later {
+            format!("GRANT {role} TO {login} WITH INHERIT TRUE;")
+        } else {
+            format!("GRANT {role} TO {login};")
+        }
     };
+    let membership = grant("trace_ingest_runtime");
+    let extra_grants = extra_memberships
+        .iter()
+        .map(|role| grant(role))
+        .collect::<String>();
     client
         .batch_execute(&format!(
             "DO $$ BEGIN
@@ -172,14 +187,24 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
                  END IF;
              END $$;
              ALTER ROLE {login} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-             {membership}"
+             {membership}
+             -- Roles are server-wide, so a prior run's grant of
+             -- trace_account_admission_runtime (V77) survives a database
+             -- drop; revoke it here, and grant back only what this login
+             -- is meant to hold, before the exclusivity check below.
+             DO $$ BEGIN
+                 IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_account_admission_runtime') THEN
+                     REVOKE trace_account_admission_runtime FROM {login};
+                 END IF;
+             END $$;
+             {extra_grants}"
         ))
         .await
         .expect("provision the runtime login");
     let row = client
         .query_one(
             "SELECT
-                 (SELECT array_agg(g.rolname::TEXT ORDER BY g.rolname)
+                 (SELECT array_agg(DISTINCT g.rolname::TEXT ORDER BY g.rolname::TEXT)
                     FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
                    WHERE m.member = to_regrole($1)),
                  (SELECT rolsuper OR rolbypassrls FROM pg_roles
@@ -216,10 +241,16 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
     let group_privileged: bool = row.get(1);
     let own_privileges: i64 = row.get(2);
     let group_memberships: Vec<String> = row.get::<_, Option<Vec<String>>>(3).unwrap_or_default();
+    let mut expected_memberships = extra_memberships
+        .iter()
+        .map(|role| role.to_string())
+        .chain(["trace_ingest_runtime".to_string()])
+        .collect::<Vec<_>>();
+    expected_memberships.sort();
+    expected_memberships.dedup();
     assert_eq!(
-        memberships,
-        vec!["trace_ingest_runtime".to_string()],
-        "the runtime login must be a member of trace_ingest_runtime and of nothing else"
+        memberships, expected_memberships,
+        "the runtime login must be a member of exactly trace_ingest_runtime and the named roles"
     );
     assert!(
         !group_privileged,

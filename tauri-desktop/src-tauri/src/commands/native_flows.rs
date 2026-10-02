@@ -145,9 +145,10 @@ pub(crate) fn witness_review_copy() -> Value {
 /// The sentences a contributor reads on the Flow 1 grant screens.
 ///
 /// Both the words and the choice between them come from the contributor
-/// core: `automatic_gate::disclosure` picks the disclosure (R1), and
-/// `consent_copy::automatic_grant_copy` carries only the scrub wording that
-/// answer allows.
+/// core: `consent_copy::automatic_contribution_copy` asks
+/// `automatic_gate::disclosure` for the disclosure (R1) and passes it to
+/// `consent_copy::automatic_grant_copy`, which carries only the scrub
+/// wording that answer allows. Tauri chooses nothing.
 ///
 /// `disclosure(cfg)` reads configuration only, so it answers
 /// `PatternsOnly`, and that is the right answer for a screen shown before
@@ -167,8 +168,7 @@ pub(crate) async fn automatic_contribution_copy(
 fn automatic_contribution_value(
     config: Option<&trace_commons_contributor::config::ContributorConfig>,
 ) -> Value {
-    let disclosure = trace_commons_contributor::daemon::automatic_gate::disclosure(config);
-    json!(trace_commons_contributor::consent_copy::automatic_grant_copy(disclosure))
+    json!(trace_commons_contributor::consent_copy::automatic_contribution_copy(config))
 }
 
 /// What an armed project is told about its sessions (K6).
