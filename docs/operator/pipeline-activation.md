@@ -77,7 +77,7 @@ described, and a document `main` holds carries no pipeline block.
 
 Activation replaces this list with qualified routing.
 
-The pipeline's own tables (V92 to V95, V105 and V106) grant the ingest runtime group,
+The pipeline's own tables (V92 to V95 and V105 to V108) grant the ingest runtime group,
 `trace_ingest_runtime`, exactly what the pipeline reads and writes there. The
 pipeline also reads and writes tables from V62 and earlier -- submissions,
 object refs, derived records, tombstones, withdrawals, credit holds, the
@@ -90,8 +90,8 @@ pipeline fails closed with `permission denied`. To withdraw a submission
 that belongs to a source session, both withdrawal routes also need the
 ingest login to be a member of `trace_account_admission_runtime`, as
 `main`'s withdrawal already does ([deployment.md](deployment.md), "V92 to
-V95: the pipeline tables" and "V105 and V106: review, invalidation, and export
-tables").
+V95: the pipeline tables", "V105 and V106: review, invalidation, and export
+tables", and "V107 and V108: qualification and attempt artifact tables").
 
 ## Fail-closed dependency qualification
 
@@ -123,6 +123,29 @@ never set it.** Setting it:
   refuses startup at once with
   `pipeline_test_dependencies_not_allowed_when_required`, regardless of
   whether the injected dependency is actually qualified.
+
+This check is scoped to one bundle, not to every dependency the service
+happens to hold (decision P4-D7): `pipeline_runtime_is_production_qualified`
+inspects only the dependencies `PipelineService::default_package()` --
+the package this service registers as every rollout tenant's active bundle
+-- actually uses: the scorer and embedder it names, the held index reader
+and writer, one settlement-adapter check per instrument the package pins,
+the authority provider, and the privacy boundary. A non-production-qualified
+scorer, embedder, or settlement adapter the default bundle never touches
+(for example, a scorer registered for a different bundle that is not yet
+the active one) does not block startup.
+
+The NEAR payout adapter is the exception: it is checked whenever payout is
+enabled, whatever the default package pins. Payout is service-wide, like
+the index writer: the payout pass pays the complete runs of every bundle,
+including runs bound to an earlier default package. An unqualified payout
+adapter with payout enabled refuses startup under the same conditions as
+any other unqualified dependency.
+
+The same per-bundle check, with payout, is available as
+`PipelineService::bundle_qualification` for any package, which is what the
+`pipeline_bundle_qualification` required check
+(`qualification_inspects_the_objects_the_constructor_receives`) exercises.
 
 ## Per-phase claim lease
 
@@ -193,10 +216,24 @@ reset `attempt_count` to 0. So Review, Score and Settle each get the whole
 budget, and a phase that commits on its last attempt leaves the next phase
 claimable.
 
-Lease renewal (extending a lease a phase still holds, mid-phase) is PR 4
-work and not implemented yet. It is what will close both gaps above -- a
-live worker renewing its lease before it expires, rather than a phase
-finding out only after the fact (or a crash never finding out at all).
+While a phase runs, a background task renews its lease: every
+`max(lease / 3, 100ms)`, it extends the live claim's lease, stopping as soon
+as the phase ends, the lease is lost (reclaimed by someone else, or already
+cleared), or renewal reaches its cap. The cap is
+`PIPELINE_LEASE_RENEWAL_CAP_FACTOR` (4) times the phase's own configured
+lease, measured from the moment the phase claimed the run: an honest phase
+that is merely slow keeps being renewed, but a phase that never comes back
+at all still surrenders its claim within a bounded multiple of its own
+lease rather than being renewed forever. The commit fences
+(`ensure_current_lease`, `ensure_live_lease`, every lease-checked `UPDATE`)
+stay the only authority over what a phase is allowed to write; renewal only
+keeps an honest slow phase from being reclaimed out from under it before it
+finishes. Renewal closes only the second gap above, and only for a live
+worker: it renews its own lease before `lease_expires_at` passes, so no
+other worker reclaims a phase that is merely slow. The first gap stays: a
+crashed worker still records nothing. The second gap reopens when a live
+worker's lease expires anyway -- its phase runs past the renewal cap, or
+its renewal does not get to run before the lease expires.
 
 ## Authority and privacy at the receipt
 
@@ -313,12 +350,18 @@ not the trace's fault:
   that call from the first one.
 - `artifact_store_unavailable` (Review and Score): an object-store call of
   the run failed -- Review's source read or approved write, or Score's
-  approved read or object writes. A check of what the store returned (a
-  decode or hash mismatch) is still charged. The store's errors carry no
-  type, so an integrity failure the store itself reports waits here too,
-  retried at most once an hour; look for a run that stays on this label.
-  Settle's read of the stored index command is still charged
-  (`index_command_invalid`).
+  approved read, its object keys' derivation, or its object writes. A check
+  of what the store returned (a decode or hash mismatch) is still charged.
+  The store's errors carry no type, so an integrity failure the store itself
+  reports waits here too, retried at most once an hour; look for a run that
+  stays on this label. Settle's read of the stored index command is still
+  charged (`index_command_invalid`).
+- `serialized_json_object_key_unavailable` and
+  `pipeline_attempt_object_key_mismatch` (compatibility Score): the same
+  rule, under the store's own label -- a store that cannot derive an object
+  key, or one that prepares an object under a key other than the one it
+  derived (see "The attempt artifact sweep" below). The store, not the
+  trace, is at fault, so neither is charged.
 
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
@@ -678,7 +721,12 @@ floors positive, `main`'s pilot value, is accepted. A runtime that routes or
 drains a tenant must bind a qualifiable configuration: the local reference
 configuration (all floors zero) fails the qualification gate
 (`pipeline_runtime_dependencies_not_production_qualified`) unless
-`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. The configuration holds `main`'s gate configuration, as
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. The gate reads it
+as the bundle qualification's configuration term
+(`bundle_configuration_not_qualifiable`), the same one `qualify_bundle`
+refuses a package on, so a signed package whose configuration is not
+qualifiable cannot be recorded as qualified either. The configuration holds
+`main`'s gate configuration, as
 ingest parses it, when a pipeline runtime is assembled: the three floors
 (`TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS`,
 `TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS`,
@@ -826,7 +874,7 @@ to start on the first failure:
 | The package is a policy family the runtime runs. | `pipeline_tenant_bundle_not_runnable` |
 | A compatibility package holds `main`'s gate configuration (floors, top-k, chunk knobs, index-insert threshold, delta). | `pipeline_runtime_main_gate_config_mismatch` |
 | A compatibility package has the pipeline's issuer configured. | `pipeline_credit_issuer_principal_missing` |
-| A compatibility package is qualifiable, unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. | `pipeline_runtime_dependencies_not_production_qualified` |
+| The package passes the default package's qualification gate, unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set: every dependency it names is production-qualified (the runtime may hold one that is not, as long as its default package does not name it), and a compatibility package's configuration is qualifiable. | `pipeline_runtime_dependencies_not_production_qualified` |
 | The tenant's bundles can be read. | `pipeline_tenant_bundle_unreadable` |
 
 To change a value the default package carries (a floor, the threshold, the
@@ -947,6 +995,142 @@ unaffected: the failed attempt never created a run, so the retry is a new
 attempt that creates the run itself, and the caller gets the same 200 it
 would have gotten on a first success.
 
+### The attempt artifact sweep
+
+A second, parallel table, `pipeline_attempt_artifacts` (V108), stages the
+objects a phase attempt writes mid-phase -- Review's approved revision,
+and Score's index command and neighbour set -- the same way
+`pipeline_receipt_artifacts` stages the receipt's envelope. Who owns
+deleting which row is a fixed split (controller ruling R2-1):
+
+- A `staged` row's object is named by no object ref yet, so no withdrawal
+  can ever reach it. `PipelineService::sweep_attempt_artifacts` owns it: on
+  each pass, for up to 32 of the tenant's `staged` rows whose
+  `cleanup_after` has passed, oldest first, it deletes the object (skipping
+  the delete only when the store confirms the object is already absent) and
+  then the row. `cleanup_after` is set when the row is staged, to
+  `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times that phase's configured lease
+  plus one hour of margin for the commit to land -- the same bound a live
+  lease renewal is capped at, so an attempt that is still legitimately
+  renewing its lease never has its own object swept out from under it. A
+  delete failure logs `pipeline_attempt_sweep_delete_failed` (with the
+  store's own refusal label beside it, `store_label`, when the store gave
+  one) and keeps the row for the next pass. A kept row keeps its
+  `cleanup_after`, but it does not stop the pass: the pass goes on to the
+  next due rows, a page at a time, until it has removed 32 rows or examined
+  128 (four for each row it may remove). The worker keeps where the pass
+  stopped, and the tenant's next pass resumes there; a pass that reaches
+  the last due row makes the next one start over at the oldest. So however
+  many rows are kept, kept rows never stall a tenant's sweep. A pass
+  removes at most 32 rows and examines at most 128, so clearing N due rows
+  takes between about N / 128 passes (most rows kept) and N / 32 passes
+  (most rows removed). The position is held in the worker's memory only: a
+  restarted worker starts over at the oldest. One pass is one database
+  transaction: it examines up to 128 rows and makes up to about 256 object
+  store calls (a presence check or key derivation, then a delete, for each
+  row), while it holds a pooled connection and the row locks of the rows it
+  has read.
+- A `committed` row's object is an object ref of the submission, recorded
+  by the same phase commit that committed the row. Deleting it belongs to
+  the withdrawal, not this sweep: a withdrawal invalidates the object ref
+  and queues its payload deletion in the same transaction as the tombstone
+  (see "Withdrawal follow-ups and index invalidation" above), and `main`'s
+  revocation-propagation worker deletes it. This sweep never touches a
+  `committed` row.
+- A phase attempt whose commit is refused, for any reason (an inoperable
+  submission, a stale lease, a missing settlement adapter), deletes the
+  objects it wrote itself, best effort (Review its approved object, Score
+  its index command and neighbour set), and so does a Score attempt whose
+  second write fails after its first. Its `staged` row stays either way;
+  this sweep later finds the object already absent and drops the row with
+  no delete, or deletes an object that path failed to clean up. The
+  objects only this sweep deletes are those of an attempt that stopped
+  after writing and before any commit or refusal -- a crashed process --
+  and those kept when the connection was lost during the commit, which
+  may have landed, and did not.
+
+Review and the minimal bundle's Score stage each row just before they
+write its object, with the object's ciphertext hash. A compatibility Score
+stages its two rows earlier, before it takes its tenant's Score lock (see
+"Compatibility credit" above), so that it holds one database connection at
+a time while it holds the lock. At that point the object key
+is already fixed -- the store derives it from the tenant, the run, the
+attempt's lease token and the artifact -- but the content, and so its hash,
+is not. Those rows are staged with no hash:
+
+- The Score commit sets each written row's hash, from the object ref it
+  records, as it moves the row to `committed`, and deletes the row of an
+  artifact the Score did not write (a duplicate at Score writes no index
+  command). A `committed` row always has its hash; V108's guard lets only
+  the commit set a missing hash. Review stages its `approved` row with its
+  hash, and V108 refuses an `approved` row without one, so a row with no
+  hash only ever names a compatibility Score's object.
+- Every commit that records an attempt's object must move exactly the
+  `staged` row that names it: the same object key, and no hash yet or the
+  same hash. The Score commit moves one row for each object it wrote; a
+  Review approval moves its one `approved` row, and a rejection moves none;
+  a receipt's final transaction moves its one receipt row. Anything else --
+  the row gone, or naming another object or hash -- refuses the commit as
+  `pipeline_attempt_artifact_missing`. The lease was live when the commit
+  checked it, and the sweep removes a row only past any lease the attempt
+  could hold, so this is an out-of-band change or a defect, not a lease
+  expiry: a phase records it as a charged retry under that label (it ends
+  in `failed`/`attempts_exhausted` if it persists), and the refusal deletes
+  the attempt's objects like any other.
+- For a due `staged` row with no hash, the sweep first derives the key
+  again, through the store, from the row's artifact, run and lease token.
+  Only when the row's key is that key does it delete whatever object is
+  stored there, and then the row. It compares no hash, and needs none to
+  pick the object: the key carries the attempt's own lease token, so no
+  other object is ever stored there. If the attempt wrote nothing, the
+  store answers that nothing was there and the row goes. A row whose key
+  is not its derived key is kept, the object at that key is not touched,
+  and the sweep logs `pipeline_attempt_sweep_key_mismatch` on each pass.
+- A compatibility Score publishes nothing after the latest moment its lease
+  could still be live (four leases after its rows were staged), so an object
+  is never written after its row could have been swept. It stops as an
+  uncharged `lease_expired` instead.
+- A compatibility Score that finds its tenant's Score lock held
+  (`score_lock_busy`, see "Compatibility credit") has staged its two rows
+  and published nothing. The transaction that releases its run deletes
+  them, so a busy try, which repeats every 2 seconds while another Score of
+  the tenant runs, leaves no rows for this sweep.
+- The artifact store must be able to derive an object key before the
+  content exists and delete at a key alone. The local store, the
+  filesystem-remote provider and the GCS provider can. Three labels name a
+  store that cannot, and only the first, and a key mismatch, stop a Score:
+  - `serialized_json_object_key_unavailable`: the store cannot derive a
+    key. A compatibility Score stops before it scores, and its run waits in
+    retry under this label without being charged, as for any other failed
+    store call (`artifact_store_unavailable`, ruling FR3). So does a Score
+    whose store prepares an object under a key other than the one it
+    derived (`pipeline_attempt_object_key_mismatch`); it publishes nothing.
+  - `artifact_delete_at_object_key_unavailable`: the store cannot delete at
+    a key. A compatibility Score still runs and publishes.
+  - `remote_trace_artifact_delete_at_key_unavailable`: the remote provider
+    behind the service-owned store cannot delete at a key. The service-owned
+    store still derives keys, so a compatibility Score runs and publishes as
+    usual.
+
+  The sweep is affected in each case: for a due row with no hash, the store
+  refuses with that label, and the sweep keeps the row and logs
+  `pipeline_attempt_sweep_delete_failed`, with that label as `store_label`,
+  on each pass that reaches it, until the store is fixed. The sweep goes
+  on past such rows to later ones (see the first bullet above), so the
+  tenant's other due rows, hashed rows included, are still swept. For the
+  last two labels, a Score itself is not affected.
+
+Score's withdrawal rule follows from the same split: withdrawing a
+submission whose run already committed Score deletes the index command and
+neighbour set through the ordinary object-ref invalidation path above, the
+same as Review's approved revision -- never through the attempt sweep. A
+run withdrawn before Score commits has nothing there yet; a run whose Score
+attempt staged an object and then stopped before any commit or refusal -- a
+crashed process -- leaves that object to the attempt sweep, not to any
+withdrawal, because no object ref names it yet. A refused Score commit
+deletes its own object itself, the same as any other refusal; the sweep's
+part there is only to remove the row once it finds the object already gone.
+
 ## Submission quota at switch-over
 
 The pipeline counts only pipeline receipts against the hourly submission
@@ -960,6 +1144,10 @@ therefore receive a legacy 429 for a pipeline receipt.
 
 ## Rehearse the switch
 
+This section describes activation tooling that is not in this repository
+yet -- the `versioned_pipeline_pg` test target it names below does not
+exist.
+
 Set `TRACE_COMMONS_PG_TEST_DATABASE_URL` to a PostgreSQL test database.
 Then run this command:
 
@@ -972,10 +1160,17 @@ pre-switch receipt, unique ledger sources, tenant expansion gates,
 rollback, containment, suspension instead of rebinding, and writer
 retirement after pending work completes.
 
-The [local pipeline lab](pipeline-lab.md) `qualify` command runs this suite as part of pipeline qualification. Lab corpus and package evidence remains in local files;
-these PostgreSQL integration tests remain separate schema and recovery checks.
+[`pipeline.py qualify`](pipeline-qualification.md) runs nine exact tests
+from the `versioned_pipeline_runtime_pg` suite as required database checks;
+`pipeline.py test --check postgres` runs the whole suite. Corpus and package
+evidence stays in local files; these PostgreSQL integration tests remain
+separate schema and recovery checks.
 
 ## Local operator routes
+
+This section describes activation tooling that is not in this repository
+yet -- the `trace-commons-pipeline-local` binary it names below does not
+exist.
 
 `trace-commons-pipeline-local` adds these routes:
 
@@ -989,8 +1184,13 @@ The switched route is the dual-path receipt used during migration.
 
 ## Current completion
 
-None of the redesign is in this repository yet. The versioned pipeline
-contracts are defined; the runtime, qualification, and activation work
-follows in later changes. `SCR-005` stays deferred until the external
-valuation protocol exists. New valuation rules use a later bundle through
-the same qualification and activation process.
+The versioned pipeline contracts, runtime, compatibility capabilities, and
+qualification tooling are in this repository: `pipeline.py test`, `run`,
+`package`, `restore-drill`, and `qualify` (see
+[pipeline-qualification.md](pipeline-qualification.md)) exercise them
+against a real PostgreSQL server today. Activation -- the
+switched-submission route, tenant routing, containment, and
+legacy-writer retirement described above -- arrives with a later change.
+`SCR-005` stays deferred until the external valuation protocol exists. New
+valuation rules use a later bundle through the same qualification and
+activation process.

@@ -22,7 +22,7 @@ use super::*;
 #[path = "../../../tests/support/pilot_runtime_grants.rs"]
 mod pilot_runtime_grants;
 #[path = "../../../tests/support/pilot_runtime_login.rs"]
-mod pilot_runtime_login;
+pub(super) mod pilot_runtime_login;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -57,13 +57,14 @@ use trace_commons_server::versioned_pipeline_credit::{
     RecordingNearAdapter, RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+use trace_commons_server::versioned_pipeline_qualification::PipelineCheckEmitter;
 use trace_commons_server::witness_service;
 
 /// This suite's own runtime login, distinct from `trace_pipeline_runtime_test`
 /// (`tests/versioned_pipeline_runtime_pg.rs`). Like that one, its only
 /// privilege sources are membership in `trace_ingest_runtime`, the ingest
 /// runtime group V90 names, and in `trace_account_admission_runtime` (V77).
-const PIPELINE_HTTP_RUNTIME_ROLE: &str = "trace_pipeline_http_runtime_test";
+pub(super) const PIPELINE_HTTP_RUNTIME_ROLE: &str = "trace_pipeline_http_runtime_test";
 static PIPELINE_HTTP_DATABASE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
 
 /// The database this suite runs in, created once per process: a sibling of
@@ -149,9 +150,17 @@ async fn pipeline_http_database_url() -> Option<String> {
 /// legacy ingest path (`state.db_mirror`, the NEAR admission functions) and
 /// the pipeline as this login, so both are held to what
 /// `trace_ingest_runtime` is granted.
-async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
+pub(super) async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     let url = pipeline_http_database_url().await?;
-    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    Some(runtime_backend_at(&url, pool_size).await)
+}
+
+/// `runtime_backend` for a database the caller names: connects to `url` as
+/// this suite's runtime login and checks that the login is neither
+/// `SUPERUSER` nor `BYPASSRLS`. The restore drill's resume
+/// (`pipeline_restore_pg_tests`) connects to the restored database this way.
+pub(super) async fn runtime_backend_at(url: &str, pool_size: usize) -> Arc<PgBackend> {
+    let mut runtime_url = reqwest::Url::parse(url).expect("parse test URL");
     runtime_url
         .set_username(PIPELINE_HTTP_RUNTIME_ROLE)
         .expect("set runtime user");
@@ -176,7 +185,7 @@ async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
         !row.get::<_, bool>(0) && !row.get::<_, bool>(1),
         "runtime role must not bypass RLS"
     );
-    Some(Arc::new(backend))
+    Arc::new(backend)
 }
 
 /// Pinned per amendments-971 ruling A4: an off-chain credit account, whole
@@ -195,7 +204,7 @@ fn storage_rebate_descriptor() -> InstrumentDescriptor {
 /// `versioned_pipeline_runtime_pg.rs`'s `PassThroughPipelinePrivacyBoundary`
 /// (test doubles live in the test files, so this file holds its own copy
 /// rather than sharing one).
-struct PassThroughPipelinePrivacyBoundary;
+pub(super) struct PassThroughPipelinePrivacyBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
@@ -227,6 +236,8 @@ fn local_artifacts(dir: &tempfile::TempDir) -> Arc<LocalEncryptedTraceArtifactSt
 /// fills in, exercised here with reference dependencies instead.
 struct TestAssembler {
     index: Arc<IsolatedPipelineIndex>,
+    /// The service's index writer when it is not `index` itself.
+    writer: Option<Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>>,
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     crash_point: Option<PipelineCrashPoint>,
 }
@@ -238,19 +249,7 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
     ) -> anyhow::Result<Arc<PipelineService>> {
         let scorer = Arc::new(ReferencePerplexityScorer::new());
         let embedder = Arc::new(ReferenceEmbedder::new());
-        let package = MinimalPolicyBundle::minimal_package(
-            &PipelineBundleConfig {
-                instrument_awards: vec![PipelineInstrumentAwardConfig {
-                    instrument_id: "storage_rebate".into(),
-                    atomic_units: AtomicUnits::from_raw(5),
-                    descriptor: storage_rebate_descriptor(),
-                }],
-                include_index: true,
-                variant: None,
-            },
-            scorer.as_ref(),
-            embedder.as_ref(),
-        )?;
+        let package = minimal_storage_rebate_package(scorer.as_ref(), embedder.as_ref())?;
         let registry = SettlementAdapterRegistry::new(self.adapters.clone())?;
         let caps = PipelineCaps {
             per_instrument_atomic_units: BTreeMap::from([
@@ -269,7 +268,7 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
             context.artifact_store,
             package,
             self.index.clone(),
-            self.index.clone(),
+            self.writer.clone().unwrap_or_else(|| self.index.clone()),
             registry,
             caps,
         )
@@ -286,9 +285,47 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
     }
 }
 
+/// PR 2's minimal package with the `storage_rebate` award (5 whole units),
+/// naming `scorer` and `embedder`: the package `TestAssembler` serves, and
+/// the `minimal` bundle of `pipeline.py run` (`pipeline_corpus_pg_tests`).
+pub(super) fn minimal_storage_rebate_package(
+    scorer: &ReferencePerplexityScorer,
+    embedder: &ReferenceEmbedder,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: true,
+            variant: None,
+        },
+        scorer,
+        embedder,
+    )
+}
+
+/// The compatibility package over `CompatibilityBundleConfig::local_reference()`
+/// with the given `NoveltyUtility` delta, naming `scorer` and `embedder`: the
+/// package `CompatibilityTestAssembler` serves, and (with 2_500_000) the
+/// `compatibility` bundle of `pipeline.py run` (`pipeline_corpus_pg_tests`).
+pub(super) fn compatibility_reference_package(
+    novelty_utility_microcredits: u64,
+    scorer: &ReferencePerplexityScorer,
+    embedder: &ReferenceEmbedder,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    MinimalPolicyBundle::compatibility_package(
+        &compatibility_test_config(novelty_utility_microcredits),
+        scorer,
+        embedder,
+    )
+}
+
 /// The authority every test service in this file holds: each tenant gets
 /// empty allowlists, which restrict nothing, and no tenant policy.
-fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider> {
+pub(super) fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider> {
     Arc::new(StaticPipelineAuthorityProvider::test_only(
         SubmissionAuthority {
             tenant: SubmissionAllowlists::default(),
@@ -320,8 +357,29 @@ fn assemble_test_pipeline_service(
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     crash_point: Option<PipelineCrashPoint>,
 ) -> Arc<PipelineService> {
+    assemble_test_pipeline_service_with_writer(
+        backend,
+        artifacts,
+        index,
+        None,
+        adapters,
+        crash_point,
+    )
+}
+
+/// `assemble_test_pipeline_service`, with `writer` as the service's index
+/// writer when one is given (`index` stays its reader).
+fn assemble_test_pipeline_service_with_writer(
+    backend: Arc<PgBackend>,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    index: Arc<IsolatedPipelineIndex>,
+    writer: Option<Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
     let assembler = TestAssembler {
         index,
+        writer,
         adapters,
         crash_point,
     };
@@ -351,7 +409,7 @@ fn assemble_test_pipeline_service(
 /// Opens a tenant-scoped transaction the way every raw-SQL helper below
 /// needs one: `set_config('trace_commons.trace_tenant_id', ...)` first, so
 /// RLS admits only `tenant_id`'s own rows.
-async fn tenant_tx<'a>(
+pub(super) async fn tenant_tx<'a>(
     client: &'a mut deadpool_postgres::Client,
     tenant_id: &str,
 ) -> deadpool_postgres::Transaction<'a> {
@@ -370,7 +428,7 @@ async fn tenant_tx<'a>(
 /// test learns app 1's worker reached and durably committed the Settle
 /// selection -- immediately before the injected `AfterSettleSelection`
 /// crash -- without calling the processor directly.
-async fn wait_for_settle_selection(
+pub(super) async fn wait_for_settle_selection(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: uuid::Uuid,
@@ -411,7 +469,7 @@ async fn wait_for_settle_selection(
 /// 60 s, then panics with a clear message. This is how the test learns app
 /// 2's worker reclaimed the expired lease and drove the run to completion on
 /// its own -- no manual `process_run` call.
-async fn wait_for_run_complete(
+pub(super) async fn wait_for_run_complete(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: uuid::Uuid,
@@ -451,7 +509,7 @@ async fn wait_for_run_complete(
 /// up to 10 s -- bounded so a broken worker fails the test instead of
 /// hanging it, generous enough to absorb the gap between a freshly spawned
 /// worker task and its first readiness probe.
-async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
+pub(super) async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let response = client
@@ -476,7 +534,11 @@ async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
 /// lease directly, in a tenant-scoped transaction, only when it is still
 /// `leased` -- exactly what a real lease does on its own once its duration
 /// elapses, done immediately instead of waiting it out.
-async fn expire_run_lease(backend: &Arc<PgBackend>, tenant_id: &str, submission_id: uuid::Uuid) {
+pub(super) async fn expire_run_lease(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+) {
     let mut client = backend
         .trace_pool_for_test()
         .get()
@@ -551,7 +613,7 @@ fn reqwest_headers(headers: axum::http::HeaderMap) -> reqwest::header::HeaderMap
 /// stop-and-join path: `run_pipeline_app` asks the worker to stop only
 /// after HTTP has finished shutting down, and bounds the wait on the same
 /// grace period ingest itself uses.
-async fn serve_pipeline_app(
+pub(super) async fn serve_pipeline_app(
     state: Arc<AppState>,
 ) -> (
     String,
@@ -577,7 +639,7 @@ async fn serve_pipeline_app(
 /// serve future itself returned. Used to assert app 1's join returns `Ok`
 /// within the shutdown grace period after the stop signal, and to shut app
 /// 2 down cleanly at the end of the test.
-async fn join_within(
+pub(super) async fn join_within(
     server: tokio::task::JoinHandle<anyhow::Result<()>>,
     timeout_secs: u64,
     label: &str,
@@ -780,7 +842,14 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
     expire_run_lease(&backend, "tenant-a", envelope.submission_id).await;
 
     // ---- App 2: same database, artifact root, index, and adapters; no crash point ----
-    let (base, stop, server) = serve_pipeline_app(start(None)).await;
+    let resumed_state = start(None);
+    let package = resumed_state
+        .pipeline_service
+        .as_ref()
+        .expect("app 2 serves the injected pipeline service")
+        .default_package()
+        .clone();
+    let (base, stop, server) = serve_pipeline_app(resumed_state).await;
 
     // Readiness is live while app 2 runs.
     wait_for_pipeline_ready(&client, &base).await;
@@ -939,6 +1008,18 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 
     stop.send(()).expect("send shutdown to app 2");
     join_within(server, 20, "app 2").await;
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_http_restart_recovery",
+        Some(&package),
+        serde_json::json!({
+            "phase_outcomes": 4,
+            "replay_status": 200,
+            "conflict_status": 409,
+            "bad_credential_status": 403,
+            "other_tenant_rows": 0,
+        }),
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -1659,6 +1740,7 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
 
     let dir = tempfile::tempdir().expect("temp dir");
     let service = o1_pipeline_service(backend.clone(), &dir);
+    let package = service.default_package().clone();
 
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
@@ -1771,6 +1853,17 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
 
     stop.send(()).expect("send shutdown");
     join_within(server, 20, "ownership-on-replay test server").await;
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_http_receipt_ownership",
+        Some(&package),
+        serde_json::json!({
+            "other_principal_refusals": 2,
+            "refusal_status": 409,
+            "owner_replay_status": 200,
+            "owner_replay_same_receipt": true,
+        }),
+    );
 }
 
 /// Requirement in the completed-admission branch when the tenant is routed
@@ -1934,7 +2027,7 @@ async fn mark_admission_completed(
 /// resolver URL the database configuration reads names the configured test
 /// database, so its database is replaced with that one. Panics on any setup
 /// failure once `TRACE_COMMONS_PG_TEST_DATABASE_URL` is set.
-async fn account_owner_backend() -> Option<Arc<PgBackend>> {
+pub(super) async fn account_owner_backend() -> Option<Arc<PgBackend>> {
     let url = pipeline_http_database_url().await?;
     let login_resolver_url = DatabaseConfig::login_resolver_url_from_env().map(|resolver| {
         let mut resolver_url =
@@ -1971,11 +2064,17 @@ async fn account_owner_backend() -> Option<Arc<PgBackend>> {
 /// never as the owner superuser (Zaki review 1, round 2, finding 17).
 /// Fixture writes that are not the ingest runtime's go through
 /// `account_owner_backend` instead.
-async fn mains_database() -> Arc<dyn Database> {
+pub(super) async fn mains_database() -> Arc<dyn Database> {
     let url = pipeline_http_database_url()
         .await
         .expect("the same variable runtime_backend read is set");
-    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    mains_database_at(&url).await
+}
+
+/// `mains_database` for a database the caller names: the restore drill's
+/// resume serves `main` from the restored database this way.
+pub(super) async fn mains_database_at(url: &str) -> Arc<dyn Database> {
+    let mut runtime_url = reqwest::Url::parse(url).expect("parse test URL");
     runtime_url
         .set_username(PIPELINE_HTTP_RUNTIME_ROLE)
         .expect("set runtime user");
@@ -2829,6 +2928,287 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
     );
 }
 
+/// The number of `run_id`'s attempt rows for `artifact` in `state`.
+async fn attempt_rows_in_state(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: Uuid,
+    artifact: &str,
+    state: &str,
+) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND artifact = $3 AND state = $4",
+            &[&tenant_id, &run_id, &artifact, &state],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+/// Rebase 9 review, M3 (wave 2): the worker's tenant drain
+/// (`drain_pipeline_tenant`) runs the attempt sweep, so a cadence change
+/// cannot gate it unnoticed. A Score attempt of a completed run that
+/// crashed after publishing its index command leaves a `staged` row whose
+/// `cleanup_after` has passed (staged here under an earlier lease token,
+/// with the object published at that attempt's own key); one drain, with no
+/// direct call into the sweep, deletes the object and the row, and leaves
+/// the run's committed rows alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_sweeps_a_due_attempt_artifact() {
+    use trace_commons_server::versioned_pipeline::{
+        PipelineAttemptArtifact, pipeline_attempt_object_id, pipeline_tenant_storage_ref,
+    };
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_drain_sweep_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-worker-attempt-sweep-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-worker-attempt-sweep-{suffix}"));
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+    let committed_before =
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "committed").await;
+    assert_eq!(committed_before, 1, "the completed Score committed its row");
+
+    let mut crashed = run.clone();
+    crashed.lease_token = Some(Uuid::new_v4());
+    let object_id = pipeline_attempt_object_id(
+        PipelineAttemptArtifact::IndexCommand.as_str(),
+        run.run_id,
+        crashed.lease_token.unwrap(),
+    );
+    let prepared = artifacts
+        .prepare_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &object_id,
+            br#"{"probe":"crashed_score_attempt"}"#,
+        )
+        .expect("prepare the crashed attempt's object");
+    service
+        .store()
+        .stage_attempt_artifact(
+            &crashed,
+            PipelineAttemptArtifact::IndexCommand,
+            &prepared.receipt().object_key,
+            &prepared.receipt().ciphertext_sha256,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("stage the crashed attempt's row, already due");
+    let receipt = artifacts
+        .publish_serialized_json(&prepared)
+        .expect("publish the crashed attempt's object");
+    let present = || {
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .unwrap()
+    };
+    assert_eq!(present(), Some(true));
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        1
+    );
+
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
+
+    assert_eq!(
+        present(),
+        Some(false),
+        "the drain's sweep deleted the object"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        0,
+        "and then its row"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "committed").await,
+        committed_before,
+        "the run's committed row is not the sweep's"
+    );
+}
+
+/// Wave 2 (follow-up review, m2): the worker carries each tenant's attempt
+/// sweep position from one drain to the next. With more kept rows due than
+/// one pass examines (`PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times
+/// the worker's limit, 128) ahead of a deletable row, the first drain keeps
+/// all it examines and leaves the row; the second, on the same worker
+/// cadence, resumes where the first stopped and deletes it with its object.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_resumes_the_attempt_sweep_past_kept_rows() {
+    use trace_commons_server::versioned_pipeline::{
+        PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL, PipelineAttemptArtifact,
+        pipeline_attempt_object_id, pipeline_tenant_storage_ref,
+    };
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_drain_resume_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-worker-sweep-resume-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-worker-sweep-resume-{suffix}"));
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+
+    // More kept rows than one pass examines: no hash, and keys that are not
+    // the keys the store derives for them, so the sweep keeps each one.
+    let examined_per_pass = PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL
+        * pipeline_runtime::PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT;
+    let kept = i32::try_from(examined_per_pass + 1).unwrap();
+    {
+        let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "INSERT INTO pipeline_attempt_artifacts (
+                 tenant_id, run_id, lease_token, artifact, object_key,
+                 ciphertext_sha256, cleanup_after
+             )
+             SELECT $1, $2, gen_random_uuid(), 'index-command', 'kept-object-' || g, NULL,
+                    NOW() - make_interval(secs => 1000 - g)
+               FROM generate_series(1, $3) AS g",
+            &[&tenant, &run.run_id, &kept],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    // Behind them, a crashed attempt's row at its own key, with its object.
+    let mut crashed = run.clone();
+    crashed.lease_token = Some(Uuid::new_v4());
+    let prepared = artifacts
+        .prepare_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &pipeline_attempt_object_id(
+                PipelineAttemptArtifact::IndexCommand.as_str(),
+                run.run_id,
+                crashed.lease_token.unwrap(),
+            ),
+            br#"{"probe":"crashed_score_attempt"}"#,
+        )
+        .expect("prepare the crashed attempt's object");
+    service
+        .store()
+        .stage_attempt_artifact(
+            &crashed,
+            PipelineAttemptArtifact::IndexCommand,
+            &prepared.receipt().object_key,
+            &prepared.receipt().ciphertext_sha256,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("stage the crashed attempt's row, already due");
+    let receipt = artifacts
+        .publish_serialized_json(&prepared)
+        .expect("publish the crashed attempt's object");
+    let present = || {
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .unwrap()
+    };
+
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence.clone(),
+    )
+    .await;
+    assert_eq!(
+        present(),
+        Some(true),
+        "the first drain examined only kept rows"
+    );
+    assert!(
+        cadence
+            .lock()
+            .unwrap()
+            .attempt_sweep_resume_after(&tenant)
+            .is_some(),
+        "the worker kept where the first pass stopped"
+    );
+
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
+    assert_eq!(
+        present(),
+        Some(false),
+        "the second drain resumed past the kept rows and deleted the object"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        i64::from(kept),
+        "only the kept rows stay"
+    );
+}
+
 /// Zaki review 1, item 1: Score stores the index command (embeddings and
 /// content hashes) and the neighbour set as objects of their own. A run of
 /// the compatibility bundle has both. The run is withdrawn after Score and
@@ -3082,6 +3462,183 @@ async fn the_worker_drains_a_tenant_on_the_drain_list() {
     join_within(server, 20, "the drain app").await;
 }
 
+/// Controller ruling R2-2: every object a complete pipeline run stored is an
+/// object ref of its submission -- the receipt's source envelope, Review's
+/// approved revision, and Score's index command and neighbour set -- so
+/// once the owner withdraws the submission, one pass of `main`'s
+/// revocation-propagation worker deletes all four from the service-owned
+/// store and marks each ref deleted. The pipeline's own attempt sweep
+/// (`sweep_attempt_artifacts`) never runs here and is not needed: it sweeps
+/// only attempts that never committed (ruling R2-1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_revocation_worker_deletes_every_object_of_a_withdrawn_complete_run() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-complete-objects-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-complete-objects-{suffix}"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let configured_store = || {
+        ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifacts.clone(),
+        )
+    };
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &configured_store(),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).artifact_store = Some(configured_store());
+
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    for _ in 0..3 {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the phase runs");
+    }
+    let settled = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert!(
+        settled.index_command_ref.is_some() && settled.score_neighbor_ref.is_some(),
+        "Score stored both of its objects"
+    );
+
+    let object_refs = owner
+        .list_trace_object_refs(&tenant, settled.submission_id)
+        .await
+        .unwrap();
+    let mut kinds: Vec<StorageTraceObjectArtifactKind> = object_refs
+        .iter()
+        .map(|object_ref| object_ref.artifact_kind)
+        .collect();
+    kinds.sort_by_key(|kind| format!("{kind:?}"));
+    assert_eq!(
+        kinds,
+        vec![
+            StorageTraceObjectArtifactKind::ReviewSnapshot,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            StorageTraceObjectArtifactKind::WorkerIntermediate,
+            StorageTraceObjectArtifactKind::WorkerIntermediate,
+        ],
+        "the source, the approved revision, and the two Score objects are object refs"
+    );
+    let tenant_ref = tenant_storage_ref(&tenant);
+    // The local store answers presence from the object key alone.
+    let present = |object_key: &str| {
+        artifacts
+            .artifact_present_by_object_key(
+                &tenant_ref,
+                TraceArtifactKind::VectorPayload,
+                object_key,
+                "",
+            )
+            .expect("the store answers")
+    };
+    for object_ref in &object_refs {
+        assert_eq!(
+            present(&object_ref.object_key),
+            Some(true),
+            "{:?} is stored before the withdrawal",
+            object_ref.artifact_kind
+        );
+    }
+
+    let outcome = service
+        .withdraw_submission(&tenant, settled.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    assert_eq!(
+        outcome.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    let auth = revocation_worker_tenant_auth(&tenant);
+    let pass = run_revocation_propagation_worker(
+        state.as_ref(),
+        &auth,
+        TraceRevocationPropagationWorkerRequest {
+            purpose: Some("complete run object deletion".to_string()),
+            dry_run: false,
+            limit: 100,
+        },
+    )
+    .await
+    .expect("the worker runs");
+    assert_eq!(
+        (pass.checked, pass.completed, pass.failed, pass.skipped),
+        (4, 4, 0, 0),
+        "one completed deletion per object"
+    );
+
+    let after = owner
+        .list_trace_object_refs(&tenant, settled.submission_id)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), object_refs.len());
+    for object_ref in &after {
+        assert_eq!(
+            present(&object_ref.object_key),
+            Some(false),
+            "{:?} is deleted from the store",
+            object_ref.artifact_kind
+        );
+        assert!(
+            object_ref.deleted_at.is_some(),
+            "{:?} is marked deleted",
+            object_ref.artifact_kind
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline product routes through the router: the status block, the score
 // attestation, exports, and the administrator reads, with the product store
@@ -3291,6 +3848,397 @@ async fn the_operator_route_requeues_the_tenants_failed_invalidations() {
         "{metadata}"
     );
     assert!(!metadata.to_string().contains(&run.run_id.to_string()));
+}
+
+/// Final review M4 (ruling FR-7): `POST /v1/workers/pipeline/index-rebuild`
+/// rebuilds the caller's tenant's index from its sealed commands and appends
+/// one hash-only, label-only index maintenance audit row: `main`'s
+/// `vector_index` action, the fixed purpose `pipeline_index_rebuild` as a
+/// hash, and the report's counts, with no run or submission id. A
+/// contributor is refused and appends nothing.
+///
+/// Merge review M1: the route also refuses, and appends nothing for, a
+/// tenant this process drains (or routes), with `409`
+/// `pipeline_index_rebuild_tenant_active`; the rebuild runs once the tenant
+/// is on neither list, as the restore runbook's step 3 sets it up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_index_rebuild_route_appends_an_audit_row() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let uri = "/v1/workers/pipeline/index-rebuild";
+
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.base.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a contributor is refused");
+
+    assert!(
+        state.pipeline_drain_tenant_ids.contains(tenant),
+        "the product fixture drains its tenant"
+    );
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"], "pipeline_index_rebuild_tenant_active",
+        "{body}"
+    );
+    let mut routed = state.clone();
+    let routed_mut = Arc::make_mut(&mut routed);
+    routed_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::new());
+    routed_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant],
+    );
+    let (status, body) = route_request(
+        routed,
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"], "pipeline_index_rebuild_tenant_active",
+        "a routed tenant is refused too: {body}"
+    );
+
+    // The restore runbook's step 3: the tenant on neither list.
+    let mut quiet = state.clone();
+    Arc::make_mut(&mut quiet).pipeline_drain_tenant_ids = Arc::new(BTreeSet::new());
+    let state = &quiet;
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["command_count"], 1, "{body}");
+    assert_eq!(body["skipped_run_count"], 0, "{body}");
+    let entry_count = body["entry_count"].as_u64().expect("an entry count");
+    assert!(entry_count > 0, "{body}");
+    assert_eq!(
+        body["unchanged_entry_count"].as_u64(),
+        Some(entry_count),
+        "the live index already holds every entry Settle wrote"
+    );
+
+    let mut client = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query(
+            "SELECT action, metadata_json FROM trace_audit_events
+              WHERE tenant_id = $1
+                AND metadata_json->'action_counts' ? 'pipeline_index_commands_replayed'
+              ORDER BY audit_sequence",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(rows.len(), 1, "one row for the one admitted call");
+    assert_eq!(rows[0].get::<_, String>("action"), "vector_index");
+    let metadata: serde_json::Value = rows[0].get("metadata_json");
+    let counts = &metadata["action_counts"];
+    assert_eq!(counts["pipeline_index_commands_replayed"], 1, "{metadata}");
+    assert_eq!(
+        counts["pipeline_index_entries_written"], entry_count,
+        "{metadata}"
+    );
+    assert_eq!(
+        counts["pipeline_index_entries_unchanged"], entry_count,
+        "{metadata}"
+    );
+    assert_eq!(counts["pipeline_index_runs_skipped"], 0, "{metadata}");
+    assert_eq!(
+        metadata["purpose_hash"],
+        sha256_prefixed("pipeline_index_rebuild"),
+        "{metadata}"
+    );
+    let text = metadata.to_string();
+    assert!(!text.contains(&run.run_id.to_string()));
+    assert!(!text.contains(&run.submission_id.to_string()));
+}
+
+/// An index writer over a real `IsolatedPipelineIndex` whose next `upsert`
+/// after `arm` is held until the test releases it; every other call goes
+/// straight to the index underneath.
+struct HeldRebuildWriter {
+    inner: Arc<IsolatedPipelineIndex>,
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl HeldRebuildWriter {
+    fn new(inner: Arc<IsolatedPipelineIndex>) -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = Arc::new(Self {
+            inner,
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: std::sync::Mutex::new(release_rx),
+        });
+        (writer, release_tx)
+    }
+}
+
+impl trace_commons_gate_api::VectorIndexWriter for HeldRebuildWriter {
+    fn upsert(
+        &self,
+        key: &trace_commons_gate_api::IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<trace_commons_gate_api::IndexUpsertResult, trace_commons_gate_api::IndexWriteError>
+    {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the test releases the held write within 30 s");
+        }
+        self.inner.upsert(key, embedding, content_hash)
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, trace_commons_gate_api::IndexWriteError> {
+        self.inner
+            .invalidate_revision(tenant_storage_ref, index_id, revision_id)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexWriter for HeldRebuildWriter {
+    fn dependency_identity(&self) -> &str {
+        "held_rebuild_writer_test_only"
+    }
+}
+
+/// Whether another transaction holds a lock on the run's row that a
+/// withdrawal's `FOR UPDATE` would wait for.
+async fn run_row_locked(runtime: &Arc<PgBackend>, tenant: &str, run_id: Uuid) -> bool {
+    let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let locked = match tx
+        .query_opt(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE NOWAIT",
+            &[&tenant, &run_id],
+        )
+        .await
+    {
+        Ok(row) => {
+            assert!(row.is_some(), "the run row exists");
+            false
+        }
+        Err(error) => {
+            assert_eq!(
+                error.code(),
+                Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE),
+                "{error}"
+            );
+            true
+        }
+    };
+    drop(tx);
+    locked
+}
+
+/// Review of the follow-up wave, m1: a client that disconnects in the middle
+/// of `POST /v1/workers/pipeline/index-rebuild` drops the handler's future,
+/// but not the rebuild. While the rebuild's write is held, the run row stays
+/// locked, so a withdrawal's `FOR UPDATE` waits for the write; once it is
+/// released the rebuild commits and still appends its audit row. Before the
+/// handler spawned the rebuild, dropping it rolled the transaction back and
+/// released the lock while the write went on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_index_rebuild_request_keeps_its_run_locked_until_its_writes_commit() {
+    let index = IsolatedPipelineIndex::new();
+    let (writer, release) = HeldRebuildWriter::new(index.clone());
+    let service_writer = writer.clone();
+    let Some(mut fixture) = withdrawal_fixture_with(
+        move |runtime, artifacts| {
+            assemble_test_pipeline_service_with_writer(
+                runtime,
+                artifacts,
+                index,
+                Some(service_writer as Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_withdrawal_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let admin = format!("token-admin-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &admin, TokenRole::Admin);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    assert!(!run_row_locked(&fixture.runtime, &tenant, run.run_id).await);
+
+    writer
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut request = Box::pin(pipeline_index_rebuild_handler(
+        State(fixture.state.clone()),
+        auth_headers(&admin),
+    ));
+    tokio::select! {
+        _ = request.as_mut() => panic!("the rebuild returned while its write was held"),
+        () = writer.entered.notified() => {}
+    }
+    // The client disconnects.
+    drop(request);
+
+    // A second's worth of checks: a dropped transaction would have rolled
+    // back, and released the lock, well within it.
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            run_row_locked(&fixture.runtime, &tenant, run.run_id).await,
+            "the run row stays locked while the rebuild's write runs"
+        );
+    }
+
+    release.send(()).expect("the held write is waiting");
+    let audit_rows = || async {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM trace_audit_events
+                  WHERE tenant_id = $1
+                    AND metadata_json->'action_counts' ? 'pipeline_index_commands_replayed'",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while run_row_locked(&fixture.runtime, &tenant, run.run_id).await || audit_rows().await == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the released rebuild commits and appends its audit row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(audit_rows().await, 1, "one audit row for the one rebuild");
+}
+
+/// Zaki's re-review of #1166, Low: `POST /v1/workers/pipeline/index-rebuild`
+/// runs one rebuild per tenant. While a tenant's rebuild is held at its
+/// write, a second request for that tenant is refused with `409`
+/// `pipeline_index_rebuild_in_progress` and starts nothing; once the first
+/// ends, the tenant can be rebuilt again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_index_rebuild_of_a_tenant_is_refused_while_one_runs() {
+    let index = IsolatedPipelineIndex::new();
+    let (writer, release) = HeldRebuildWriter::new(index.clone());
+    let service_writer = writer.clone();
+    let Some(mut fixture) = withdrawal_fixture_with(
+        move |runtime, artifacts| {
+            assemble_test_pipeline_service_with_writer(
+                runtime,
+                artifacts,
+                index,
+                Some(service_writer as Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_withdrawal_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let admin = format!("token-admin-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &admin, TokenRole::Admin);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+
+    writer
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first = tokio::spawn(pipeline_index_rebuild_handler(
+        State(fixture.state.clone()),
+        auth_headers(&admin),
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        writer.entered.notified(),
+    )
+    .await
+    .expect("the first rebuild reaches its write");
+
+    let refused =
+        pipeline_index_rebuild_handler(State(fixture.state.clone()), auth_headers(&admin))
+            .await
+            .expect_err("a second rebuild of the tenant is refused while one runs");
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert_eq!(refused.1.0.error, "pipeline_index_rebuild_in_progress");
+
+    release.send(()).expect("the held write is waiting");
+    let report = tokio::time::timeout(std::time::Duration::from_secs(10), first)
+        .await
+        .expect("the first rebuild ends once released")
+        .expect("the first rebuild did not panic")
+        .expect("the first rebuild succeeds");
+    assert_eq!(report.0.command_count, 1);
+    let again = pipeline_index_rebuild_handler(State(fixture.state.clone()), auth_headers(&admin))
+        .await
+        .expect("the tenant can be rebuilt again once its rebuild ended");
+    assert_eq!(again.0.command_count, 1);
 }
 
 /// `POST /v1/pipeline/exports` for `use`, with `limit`, keyed by `key`.
@@ -4624,12 +5572,16 @@ async fn db_reconciliation_leaves_pipeline_rows_out_of_the_file_comparison() {
 /// P5: `TestAssembler` with the compatibility bundle instead of the minimal
 /// one: `CompatibilityBundleConfig::local_reference()` with the given
 /// `NoveltyUtility` delta, the reference scorer and embedder, the isolated
-/// index, one `trace_credit` recording adapter on payout rail `none`, and
-/// the given privacy boundary. Payout stays disabled (the default).
+/// index, the given settlement adapters (one `trace_credit` recording
+/// adapter on payout rail `none` unless a caller shares its own), the given
+/// privacy boundary, and an optional crash point. Payout stays disabled
+/// (the default).
 struct CompatibilityTestAssembler {
     index: Arc<IsolatedPipelineIndex>,
     novelty_utility_microcredits: u64,
     privacy: Arc<dyn PipelinePrivacyBoundary>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
 }
 
 impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
@@ -4645,19 +5597,14 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
             scorer.as_ref(),
             embedder.as_ref(),
         )?;
-        let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
-            InstrumentId::trace_credit(),
-            "recording_trace_credit_compatibility_http_test_only",
-            "none",
-        );
-        let registry = SettlementAdapterRegistry::new(vec![trace_credit])?;
+        let registry = SettlementAdapterRegistry::new(self.adapters.clone())?;
         let caps = PipelineCaps {
             per_instrument_atomic_units: BTreeMap::from([(
                 InstrumentId::trace_credit().as_str().to_string(),
                 AtomicUnits::from_raw(u128::MAX),
             )]),
         };
-        let service = PipelineServiceBuilder::new(
+        let mut builder = PipelineServiceBuilder::new(
             context.backend,
             context.artifact_store,
             package,
@@ -4671,15 +5618,17 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
         .with_object_store_name(context.object_store_name)
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
-        .with_privacy(self.privacy.clone())
-        .build()?;
-        Ok(Arc::new(service))
+        .with_privacy(self.privacy.clone());
+        if let Some(crash_point) = self.crash_point {
+            builder = builder.with_crash_point(crash_point);
+        }
+        Ok(Arc::new(builder.build()?))
     }
 }
 
 /// The pipeline credit issuer the compatibility HTTP tests configure
 /// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`).
-const TEST_PIPELINE_CREDIT_ISSUER: &str =
+pub(super) const TEST_PIPELINE_CREDIT_ISSUER: &str =
     "principal_sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
 /// The configuration `CompatibilityTestAssembler` binds: the local reference,
@@ -4820,7 +5769,8 @@ async fn a_busy_tenant_score_lock_ends_the_tenants_worker_batch() {
 
 /// `assemble_test_pipeline_service` for `CompatibilityTestAssembler`: the
 /// service comes out of `assemble_ingest_pipeline_runtime`, the seam ingest's
-/// real boot uses, over `configured_store`.
+/// real boot uses, over `configured_store`, with its own `trace_credit`
+/// recording adapter and no crash point.
 fn assemble_compatibility_pipeline_service(
     backend: Arc<PgBackend>,
     configured_store: &ConfiguredTraceArtifactStore,
@@ -4828,10 +5778,42 @@ fn assemble_compatibility_pipeline_service(
     novelty_utility_microcredits: u64,
     privacy: Arc<dyn PipelinePrivacyBoundary>,
 ) -> Arc<PipelineService> {
+    let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_compatibility_http_test_only",
+        "none",
+    );
+    assemble_compatibility_pipeline_service_with(
+        backend,
+        configured_store,
+        index,
+        novelty_utility_microcredits,
+        privacy,
+        vec![trace_credit],
+        None,
+    )
+}
+
+/// `assemble_compatibility_pipeline_service` with the caller's settlement
+/// adapters and crash point: the restore drill's seed shares one recording
+/// adapter across two app lifetimes and crashes the second one
+/// (`pipeline_restore_pg_tests`), as `TestAssembler` does for the minimal
+/// bundle.
+pub(super) fn assemble_compatibility_pipeline_service_with(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    index: Arc<IsolatedPipelineIndex>,
+    novelty_utility_microcredits: u64,
+    privacy: Arc<dyn PipelinePrivacyBoundary>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
     let assembler = CompatibilityTestAssembler {
         index,
         novelty_utility_microcredits,
         privacy,
+        adapters,
+        crash_point,
     };
     let connections = TraceCorpusDbConnections {
         database: backend.clone() as Arc<dyn Database>,
@@ -5521,7 +6503,7 @@ async fn run_of_submission(
 /// Sends `body` (JSON, when given) to `url` over real HTTP with `headers`,
 /// and returns the status and the response body, parsed as JSON when it is
 /// JSON and as a string otherwise.
-async fn send_http(
+pub(super) async fn send_http(
     client: &reqwest::Client,
     method: reqwest::Method,
     url: String,
@@ -5547,7 +6529,7 @@ async fn send_http(
 }
 
 /// `POST /v1/traces` of `body` with `token`.
-async fn post_trace(
+pub(super) async fn post_trace(
     client: &reqwest::Client,
     base: &str,
     token: &str,
@@ -5569,7 +6551,7 @@ async fn post_trace(
 
 /// `POST /v1/contributors/me/submission-status` for `submission_ids` with
 /// `token`.
-async fn post_submission_status(
+pub(super) async fn post_submission_status(
     client: &reqwest::Client,
     base: &str,
     token: &str,

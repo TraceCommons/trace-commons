@@ -245,35 +245,30 @@ pub(crate) fn validate_pipeline_privacy_filter_requirement(
     Ok(())
 }
 
-/// Whether every dependency an injected pipeline runtime holds is
-/// production-qualified.
+/// Whether every dependency the default bundle actually uses is
+/// production-qualified (decision P4-D7).
 ///
-/// Checks `scorer`, `embedder`, `index_reader`, `index_writer`, every
-/// registered settlement adapter (decision P4's
-/// `PipelineDependencyQualification`), and now `authority` and `privacy`
-/// (Ruling T2-2): an unqualified authority provider or privacy boundary
-/// fails closed the same way an unqualified scorer or index does, whenever
-/// tenants are routed. The NEAR payout adapter counts only when payout is
-/// enabled (`PipelineService::payout_enabled`): a service that pays nothing
-/// out holds no payout dependency to qualify. A compatibility bundle's
-/// configuration must be qualifiable (`bundle`, Zaki review 1, round 2,
-/// finding 11), so the all-zero local reference never binds for real
-/// tenants.
+/// Scoped to `PipelineService::bundle_qualification` for
+/// `service.default_package()`, not every dependency the service holds: a
+/// held-but-unnamed scorer, embedder, or settlement adapter the default
+/// bundle never touches no longer blocks startup. What the default bundle
+/// does use -- its named scorer and embedder, the held index reader and
+/// writer, one settlement adapter per instrument it pins, authority, privacy
+/// (Ruling T2-2) -- and the payout adapter whenever payout is enabled
+/// (service-wide: payout pays every bundle's runs, final review M5) still
+/// fail closed the same way, whenever tenants are routed; an invalid or
+/// unresolvable default package (`bundle_package_invalid`,
+/// `bundle_dependency_missing`) fails closed the same as an unqualified one.
+/// A compatibility bundle's configuration must also be qualifiable (Zaki
+/// review 1, round 2, finding 11), so the all-zero local reference never
+/// binds for real tenants: that is the bundle qualification's own
+/// configuration term (`PipelineBundleQualification::configuration_qualifiable`,
+/// `bundle_configuration_not_qualifiable`), the same one `qualify_bundle`
+/// sees, so startup reads no separate flag for it.
 pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService) -> bool {
-    let qualification = service.dependency_qualification();
-    qualification.scorer
-        && qualification.embedder
-        && qualification.index_reader
-        && qualification.index_writer
-        && !qualification.settlement_adapters.is_empty()
-        && qualification
-            .settlement_adapters
-            .values()
-            .all(|ready| *ready)
-        && qualification.authority
-        && qualification.privacy
-        && qualification.bundle
-        && (!service.payout_enabled() || qualification.payout)
+    service
+        .bundle_qualification(service.default_package())
+        .is_ok_and(|qualification| qualification.is_production_qualified())
 }
 
 /// Label-only readiness body. `reason` is present only when `status` is
@@ -331,6 +326,284 @@ pub(crate) async fn pipeline_readiness_handler(
     )
 }
 
+/// `POST /v1/workers/pipeline/index-rebuild`: rebuilds the injected pipeline
+/// runtime's vector index for the caller's tenant from the sealed index
+/// commands Settle already committed -- no new outcome, no policy
+/// evaluation, and no credit (`PipelineService::rebuild_index_from_authoritative_commands`).
+/// Meant for after a restore, once the pipeline's rows are back but the
+/// vector index is a fresh, empty store.
+///
+/// Sits behind the same vector worker credential as `vector_index_handler`
+/// (`/v1/workers/vector-index`) -- an admin token or a bearer token scoped
+/// `TokenRole::VectorWorker` -- and copies that route's authentication shape
+/// exactly: `authenticate_with_tenant_access_grant` then
+/// `require_vector_operator`. Without an injected pipeline runtime
+/// (`state.pipeline_service`), it returns 404, the same refusal the
+/// pipeline review routes use for the same reason: there is nothing to
+/// rebuild.
+///
+/// The tenant is the authenticated credential's own tenant, never a request
+/// field -- the same tenant-scoping rule every other pipeline route follows
+/// (Envelope tenant fields are attribution only; auth derives the tenant
+/// that is actually read and written).
+///
+/// It refuses, with `409` `pipeline_index_rebuild_tenant_active`, a tenant
+/// this process routes or drains (merge review M1). A withdrawal of a
+/// complete run queues its invalidation at once, and it can come from the
+/// client, from `main`'s retention maintenance, or from the
+/// revocation-propagation reconciler, so the route's guarantee is not that
+/// no withdrawal happens: it is that the worker processes none of the
+/// tenant's invalidations while the rebuild writes (the restore runbook's
+/// step 3, `backup-restore.md`). A queued invalidation waits for a later
+/// worker. This holds for this process only: another replica that routes
+/// or drains the tenant still processes its invalidations. Closing that (a
+/// committed rebuild fence that a withdrawal's invalidation reads) is PR 5's.
+///
+/// A rebuild that completes appends one index maintenance audit row, as the
+/// vector index worker route does (final review M4, ruling FR-7): `main`'s
+/// `vector_index` event with the fixed purpose `pipeline_index_rebuild`
+/// (hashed) and the report's counts under their own labels. Hash-only and
+/// label-only: no run, submission, or command id. It needs no migration:
+/// the event, its action, and its metadata shape are `main`'s, as the
+/// pipeline's invalidation requeue route already uses them.
+///
+/// The rebuild and its audit row run in a task of their own, which this
+/// handler awaits (review of the follow-up wave, m1). A client that
+/// disconnects drops this handler's future, but not that task: each run's
+/// writes still finish under the run and submission locks its transaction
+/// holds, and the audit row is still appended. The task is tracked in
+/// `AppState::pipeline_index_rebuilds` (Zaki's re-review of #1166, Low):
+/// one rebuild per tenant at a time, so a second request for a tenant whose
+/// rebuild is running is refused with `409`
+/// `pipeline_index_rebuild_in_progress`, and the shutdown waits for running
+/// rebuilds with the worker's grace period (`run_pipeline_app`) before it
+/// aborts what is left. An abort past the grace period, the process exit
+/// itself, or a lost database session can still release a run's locks
+/// while a write goes on; see `PipelineService::rebuild_index_run`.
+pub(crate) async fn pipeline_index_rebuild_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PipelineIndexRebuildReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_vector_operator(&tenant)?;
+    require_pipeline_service(state.as_ref())?;
+    // Merge review M1: a rebuild is safe from a withdrawal's removal racing
+    // its writes only while the worker processes no invalidation of the
+    // tenant, so it runs only for a tenant this process neither routes nor
+    // drains (`backup-restore.md`, step 3).
+    if pipeline_worker_tenant_ids(state.as_ref()).contains(&tenant.tenant_id) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            PIPELINE_INDEX_REBUILD_TENANT_ACTIVE_LABEL,
+        ));
+    }
+    let tenant_id = tenant.tenant_id.clone();
+    let rebuild = state
+        .pipeline_index_rebuilds
+        .start(&tenant_id, rebuild_index_and_audit(state.clone(), tenant))
+        .map_err(|refusal| match refusal {
+            PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL => {
+                api_error(StatusCode::SERVICE_UNAVAILABLE, refusal)
+            }
+            _ => api_error(StatusCode::CONFLICT, refusal),
+        })?;
+    rebuild
+        .await
+        .map_err(|_| internal_error("pipeline_index_rebuild_task_failed"))?
+}
+
+/// Safe label of a rebuild request for a tenant this process routes
+/// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) or drains
+/// (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`): its worker processes the
+/// tenant's invalidations, so one could remove a run's entries before the
+/// rebuild's last write lands (merge review M1).
+pub(crate) const PIPELINE_INDEX_REBUILD_TENANT_ACTIVE_LABEL: &str =
+    "pipeline_index_rebuild_tenant_active";
+/// Safe label of a rebuild request for a tenant whose rebuild is already
+/// running in this process (`PipelineIndexRebuilds::start`).
+pub(crate) const PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL: &str =
+    "pipeline_index_rebuild_in_progress";
+/// Safe label of a rebuild request that arrives once the shutdown has
+/// started draining the rebuilds (`PipelineIndexRebuilds::drain`).
+pub(crate) const PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL: &str =
+    "pipeline_index_rebuild_shutting_down";
+
+/// The index rebuilds this process runs (Zaki's re-review of #1166, Low):
+/// at most one per tenant, each in a task the shutdown drains
+/// (`drain`). Held in `AppState` behind an `Arc`, so every clone of the
+/// state shares it. The tenant ids it holds stay in memory and are never
+/// logged.
+#[derive(Default)]
+pub(crate) struct PipelineIndexRebuilds {
+    state: std::sync::Mutex<PipelineIndexRebuildsState>,
+}
+
+#[derive(Default)]
+struct PipelineIndexRebuildsState {
+    running: BTreeSet<String>,
+    tasks: tokio::task::JoinSet<()>,
+    closed: bool,
+}
+
+impl PipelineIndexRebuilds {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PipelineIndexRebuildsState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Runs `rebuild` for `tenant_id` in a tracked task and returns a
+    /// receiver for its result; dropping the receiver does not stop the
+    /// rebuild. Refuses with `pipeline_index_rebuild_in_progress` while a
+    /// rebuild of the same tenant runs, and with
+    /// `pipeline_index_rebuild_shutting_down` once `drain` has started.
+    pub(crate) fn start<F, T>(
+        self: &Arc<Self>,
+        tenant_id: &str,
+        rebuild: F,
+    ) -> Result<tokio::sync::oneshot::Receiver<T>, &'static str>
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let mut state = self.lock();
+        if state.closed {
+            return Err(PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL);
+        }
+        // Finished tasks keep their slot until they are joined.
+        while state.tasks.try_join_next().is_some() {}
+        if !state.running.insert(tenant_id.to_string()) {
+            return Err(PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL);
+        }
+        let running = RunningIndexRebuild {
+            rebuilds: self.clone(),
+            tenant_id: tenant_id.to_string(),
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        state.tasks.spawn(async move {
+            // Dropped when the task ends, is aborted, or panics, so the
+            // tenant can be rebuilt again. Freed before the result is sent,
+            // so a client that retries as soon as it has its answer is not
+            // refused as still in progress.
+            let running = running;
+            let output = rebuild.await;
+            drop(running);
+            let _ = sender.send(output);
+        });
+        Ok(receiver)
+    }
+
+    /// Refuses new rebuilds, waits up to `grace` for the running ones, and
+    /// aborts what is left (as `join_or_abort` does for the worker).
+    pub(crate) async fn drain(&self, grace: StdDuration) {
+        let mut tasks = {
+            let mut state = self.lock();
+            state.closed = true;
+            std::mem::take(&mut state.tasks)
+        };
+        let drained =
+            tokio::time::timeout(grace, async { while tasks.join_next().await.is_some() {} }).await;
+        if drained.is_err() {
+            tracing::warn!(
+                "pipeline index rebuild did not stop within the shutdown grace period; aborting it"
+            );
+            tasks.shutdown().await;
+        }
+    }
+}
+
+/// A tenant's slot in `PipelineIndexRebuilds::running`, released on drop.
+struct RunningIndexRebuild {
+    rebuilds: Arc<PipelineIndexRebuilds>,
+    tenant_id: String,
+}
+
+impl Drop for RunningIndexRebuild {
+    fn drop(&mut self) {
+        self.rebuilds.lock().running.remove(&self.tenant_id);
+    }
+}
+
+/// `pipeline_index_rebuild_handler`'s rebuild and audit row, for the
+/// authenticated `tenant`, as one task.
+async fn rebuild_index_and_audit(
+    state: Arc<AppState>,
+    tenant: TenantAuth,
+) -> ApiResult<Json<PipelineIndexRebuildReport>> {
+    let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let writer = pipeline_service.index_writer();
+    let report = pipeline_service
+        .rebuild_index_from_authoritative_commands(&tenant.tenant_id, writer)
+        .await
+        .map_err(pipeline_index_rebuild_error)?;
+    let purpose = "pipeline_index_rebuild";
+    let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+    let action_counts = BTreeMap::from([
+        (
+            "pipeline_index_commands_replayed".to_string(),
+            count(report.command_count),
+        ),
+        (
+            "pipeline_index_entries_written".to_string(),
+            count(report.entry_count),
+        ),
+        (
+            "pipeline_index_entries_unchanged".to_string(),
+            count(report.unchanged_entry_count),
+        ),
+        (
+            "pipeline_index_runs_skipped".to_string(),
+            count(report.skipped_run_count),
+        ),
+    ]);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::vector_index(&tenant, false, Some(purpose), action_counts.clone()),
+        StorageTraceAuditAction::VectorIndex,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("vector_index".to_string()),
+            purpose_hash: Some(sha256_prefixed(purpose)),
+            dry_run: false,
+            action_counts,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        command_count = report.command_count,
+        entry_count = report.entry_count,
+        skipped_run_count = report.skipped_run_count,
+        "pipeline index rebuilt from sealed commands"
+    );
+    Ok(Json(report))
+}
+
+/// Maps `rebuild_index_from_authoritative_commands`'s anyhow errors to their
+/// HTTP shape. `index_command_invalid` -- a sealed command that failed
+/// validation against its run or its own committed Score evidence -- is
+/// surfaced as 409 Conflict, a state of the store rather than a transient
+/// service fault, and `index_unavailable` -- a run's writes that passed
+/// their deadline -- as 503. Everything else falls back to the generic
+/// hash-only internal error.
+fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    if error.to_string() == "index_command_invalid" {
+        return api_error(StatusCode::CONFLICT, "index_command_invalid");
+    }
+    // Merge review I1: a run's writes passed their deadline (the index is
+    // slow or down); the rows were freed and a rerun is safe.
+    if error.to_string()
+        == trace_commons_server::versioned_pipeline::PIPELINE_INDEX_UNAVAILABLE_LABEL
+    {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::versioned_pipeline::PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        );
+    }
+    internal_error(error)
+}
+
 /// Handle to the worker loop `spawn_pipeline_worker` starts. `stop` asks the
 /// loop to exit at its next check (best-effort: the loop checks between
 /// iterations, not mid-`process_one`); `join` is awaited -- bounded by the
@@ -353,6 +626,13 @@ const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 /// pass (`PipelineService::sweep_staged_receipts`), after draining its runs.
 /// The rest wait for the next pass.
 const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
+
+/// How many pipeline phase attempt artifacts the worker sweeps for one
+/// tenant per pass (`PipelineService::sweep_attempt_artifacts_from`), right
+/// after the receipt sweep, examining at most
+/// `PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times as many due rows. The
+/// rest wait for the next pass, which resumes where this one stopped.
+pub(crate) const PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT: usize = 32;
 
 /// How many of one tenant's due index invalidations the worker processes
 /// each time it runs the tenant's invalidation step
@@ -397,13 +677,40 @@ pub(crate) enum PipelineFollowUpStep {
 /// When the worker last ran each tenant's follow-up steps, so an idle
 /// tenant costs no invalidation or payout query on most passes (Zaki review
 /// 1, round 2, item 4). One per worker loop; the run drain and the
-/// staged-receipt sweep are not scheduled here and run on every pass.
+/// staged-receipt sweep are not scheduled here and run on every pass. It
+/// also keeps where each tenant's attempt sweep stopped, so the next pass
+/// resumes there (wave 2; follow-up review, m2).
 #[derive(Debug, Default)]
 pub(crate) struct PipelineFollowUpCadence {
     last_run: HashMap<(String, PipelineFollowUpStep), std::time::Instant>,
+    attempt_sweep_resume: HashMap<String, AttemptSweepCursor>,
 }
 
 impl PipelineFollowUpCadence {
+    /// Where `tenant_id`'s next attempt sweep pass resumes; `None` to start
+    /// at its oldest due row.
+    pub(crate) fn attempt_sweep_resume_after(&self, tenant_id: &str) -> Option<AttemptSweepCursor> {
+        self.attempt_sweep_resume.get(tenant_id).cloned()
+    }
+
+    /// Records where `tenant_id`'s last attempt sweep pass said the next
+    /// one resumes.
+    pub(crate) fn record_attempt_sweep(
+        &mut self,
+        tenant_id: &str,
+        resume_after: Option<AttemptSweepCursor>,
+    ) {
+        match resume_after {
+            Some(cursor) => {
+                self.attempt_sweep_resume
+                    .insert(tenant_id.to_string(), cursor);
+            }
+            None => {
+                self.attempt_sweep_resume.remove(tenant_id);
+            }
+        }
+    }
+
     /// The follow-up steps that run for `tenant_id` on the pass at `now`,
     /// each recorded as run at `now`. A step runs when `woken` names it
     /// (this process queued work for it: `PipelineService::take_follow_ups`),
@@ -571,10 +878,18 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// and the payouts after them). Last, on every pass, it sweeps up to
 /// `PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT` of the tenant's receipt
 /// attempts that never committed: each staged object whose
-/// row's `cleanup_after` has passed is deleted with its row. An
-/// invalidation, payout, or sweep failure is logged the same way, and the
-/// drain goes on to the next step. All of it runs in the pass's supervised
-/// task for the tenant (`run_pipeline_worker_pass`).
+/// row's `cleanup_after` has passed is deleted with its row. Then, also on
+/// every pass, it sweeps up to
+/// `PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT` of the tenant's
+/// pipeline phase attempt objects
+/// (`PipelineService::sweep_attempt_artifacts`): the same shape, for the
+/// Review and Score objects a phase attempt writes under its own lease
+/// token and never commits. A committed attempt's objects are object refs
+/// of the submission, which a withdrawal queues for `main`'s
+/// revocation-propagation worker to delete. An invalidation, payout, or
+/// sweep failure is logged the same way, and the drain goes on to the next
+/// step. All of it runs in the pass's supervised task for the tenant
+/// (`run_pipeline_worker_pass`).
 pub(crate) async fn drain_pipeline_tenant(
     state: Arc<AppState>,
     service: Arc<PipelineService>,
@@ -705,6 +1020,25 @@ pub(crate) async fn drain_pipeline_tenant(
             error_hash = %safe_display_error_hash(&error),
             "pipeline worker receipt sweep failed"
         );
+    }
+    let resume_after = lock_cadence().attempt_sweep_resume_after(&tenant_id);
+    match service
+        .sweep_attempt_artifacts_from(
+            &tenant_id,
+            PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT,
+            resume_after,
+        )
+        .await
+    {
+        Ok(pass) => lock_cadence().record_attempt_sweep(&tenant_id, pass.resume_after),
+        Err(error) => {
+            tracing::warn!(
+                error_class = "pipeline_worker_attempt_sweep_failed",
+                tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker attempt sweep failed"
+            );
+        }
     }
 }
 
@@ -959,7 +1293,8 @@ pub(crate) async fn join_or_abort<T>(mut handle: tokio::task::JoinHandle<T>, gra
 /// resolves, the worker (if any) is asked to stop and given the same grace
 /// period to confirm it did. A worker that does not stop in time is aborted
 /// (`join_or_abort`) rather than left running -- shutdown still completes
-/// either way.
+/// either way. The index rebuilds still running (`PipelineIndexRebuilds`)
+/// get the same grace period, at the same time, and are aborted past it.
 pub async fn run_pipeline_app(
     state: Arc<AppState>,
     listener: TcpListener,
@@ -967,6 +1302,7 @@ pub async fn run_pipeline_app(
 ) -> anyhow::Result<()> {
     register_default_bundles_for_rollout_tenants(&state).await?;
     let worker = spawn_pipeline_worker(state.clone());
+    let rebuilds = state.pipeline_index_rebuilds.clone();
     let grace = parse_usize_env(
         TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
         TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS,
@@ -974,15 +1310,20 @@ pub async fn run_pipeline_app(
     let result =
         serve_ingest_with_graceful_shutdown(listener, build_pipeline_app(state), grace, shutdown)
             .await;
-    if let Some(worker) = worker {
-        let _ = worker.stop.send(true);
-        // Stop advertising ready the moment shutdown is requested, rather
-        // than leaving the last readiness probe's result standing until the
-        // loop wakes for its next (possibly final) iteration.
-        worker
-            .ready
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        join_or_abort(worker.join, StdDuration::from_secs(grace)).await;
-    }
+    let stop_worker = async {
+        if let Some(worker) = worker {
+            let _ = worker.stop.send(true);
+            // Stop advertising ready the moment shutdown is requested, rather
+            // than leaving the last readiness probe's result standing until
+            // the loop wakes for its next (possibly final) iteration.
+            worker
+                .ready
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            join_or_abort(worker.join, StdDuration::from_secs(grace)).await;
+        }
+    };
+    // Zaki's re-review of #1166, Low: an index rebuild whose client has gone
+    // still runs; it gets the worker's grace period, at the same time.
+    tokio::join!(stop_worker, rebuilds.drain(StdDuration::from_secs(grace)));
     result
 }
