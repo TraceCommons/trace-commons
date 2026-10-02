@@ -4678,10 +4678,6 @@ pub const TC_WITNESS_STATE_UNREADABLE: i32 = -2;
 const ERR_WITNESS_NOT_ENROLLED: &str = "witness-not-enrolled";
 const ERR_WITNESS_CONFIG_UNREADABLE: &str = "witness-config-unreadable";
 const ERR_WITNESS_CONFIG_WRITE_FAILED: &str = "witness-config-write-failed";
-const ERR_WITNESS_URL_INVALID: &str = "witness-url-invalid";
-const ERR_WITNESS_SIGNING_ADDRESS_INVALID: &str = "witness-signing-address-invalid";
-const ERR_WITNESS_PIN_REQUIRED: &str = "witness-pin-required";
-const ERR_WITNESS_PIN_MALFORMED: &str = "witness-pin-malformed";
 const ERR_WITNESS_PINS_INVALID_JSON: &str = "witness-pins-invalid-json";
 
 /// Open the store at `config_dir` and load the contributor config.
@@ -4835,24 +4831,6 @@ pub unsafe extern "C" fn tc_witness_status_json(
     })
 }
 
-/// Whether a string is shaped like a witness base URL.
-///
-/// Deliberately shallow: a scheme and a host. The real check is the
-/// contributor's host allowlist, applied at submission time before any
-/// request is made, and duplicating a URL parser here would create a second,
-/// weaker opinion about what is reachable.
-fn witness_url_usable(url: &str) -> bool {
-    let url = url.trim();
-    let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    else {
-        return false;
-    };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    !host.is_empty() && !host.contains(char::is_whitespace)
-}
-
 /// Configure a witness. Returns 0 on success, -1 on failure with `*err` set
 /// (owned; free with [`tc_string_free`]).
 ///
@@ -4901,17 +4879,29 @@ pub unsafe extern "C" fn tc_witness_configure(
             }
         };
 
+        // Two C strings that are just text, read through `borrow_str` and
+        // handed on. Only the JSON array needs parsing here -- the rest of
+        // the validation (the URL's shape, the signing address, the pin
+        // list) is `WitnessSettings::configure`, the same function Tauri's
+        // `configure_witness` calls, so there is one implementation rather
+        // than a second copy of these checks per shell.
         let url = match unsafe { borrow_str(url) } {
-            Ok(url) if witness_url_usable(url) => url.trim().to_string(),
-            _ => {
-                witness_fail(ERR_WITNESS_URL_INVALID, err);
+            Ok(url) => url,
+            Err(_) => {
+                witness_fail(
+                    trace_commons_contributor::config::ERR_WITNESS_URL_INVALID,
+                    err,
+                );
                 return Ok(-1);
             }
         };
         let signing_address = match unsafe { borrow_str(signing_address) } {
-            Ok(address) if !address.trim().is_empty() => address.trim().to_string(),
-            _ => {
-                witness_fail(ERR_WITNESS_SIGNING_ADDRESS_INVALID, err);
+            Ok(address) => address,
+            Err(_) => {
+                witness_fail(
+                    trace_commons_contributor::config::ERR_WITNESS_SIGNING_ADDRESS_INVALID,
+                    err,
+                );
                 return Ok(-1);
             }
         };
@@ -4919,39 +4909,26 @@ pub unsafe extern "C" fn tc_witness_configure(
             .ok()
             .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
         {
-            Some(entries) => entries
-                .into_iter()
-                .map(|entry| entry.trim().to_string())
-                .filter(|entry| !entry.is_empty())
-                .collect(),
+            Some(entries) => entries,
             None => {
                 witness_fail(ERR_WITNESS_PINS_INVALID_JSON, err);
                 return Ok(-1);
             }
         };
 
-        if measurements.is_empty() {
-            witness_fail(ERR_WITNESS_PIN_REQUIRED, err);
-            return Ok(-1);
-        }
-
-        let settings = trace_commons_contributor::config::WitnessSettings {
-            admission_evidence: cfg.witness.as_ref().is_some_and(|w| w.admission_evidence),
+        let admission_evidence = cfg.witness.as_ref().is_some_and(|w| w.admission_evidence);
+        let settings = match trace_commons_contributor::config::WitnessSettings::configure(
+            admission_evidence,
             url,
             signing_address,
-            expected_measurements: measurements,
-        };
-        // Parsed BEFORE it is saved. Writing a pin this build cannot read
-        // would leave a client refusing every submission, with the mistake
-        // recorded on disk and reported later as a config problem rather
-        // than now as a rejected input.
-        match settings.trust() {
-            Ok(trust) if trust.is_pinned() => {}
-            _ => {
-                witness_fail(ERR_WITNESS_PIN_MALFORMED, err);
+            measurements,
+        ) {
+            Ok(settings) => settings,
+            Err(label) => {
+                witness_fail(label, err);
                 return Ok(-1);
             }
-        }
+        };
 
         // Recorded as entered in Settings, for the disclosure screens (K11).
         cfg.set_witness(
