@@ -869,7 +869,11 @@ pub fn validate_production_package(package: &BundlePackage) -> Result<(), String
 
 /// The immutable digests a qualification records alongside a
 /// [`BundleQualificationRecord`]'s package and signature identity. Every
-/// field must be a `sha256:` digest.
+/// field must be a `sha256:` digest. `qualify_bundle` binds
+/// `configuration_digest`, `runtime_dependency_digest`, `evidence_hash` and
+/// `code_revision_hash` to the package, the profile and the evidence;
+/// `corpus_digest` and `input_digest` are the caller's input until PR 5
+/// (see `qualify_bundle`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BundleQualificationMetadata {
     pub corpus_digest: String,
@@ -975,6 +979,14 @@ impl PipelineQualificationStore {
     /// already recorded its row included: a repeat made after its evidence
     /// went stale is refused as `bundle_qualification_promotion_not_ready`,
     /// not answered with the existing row (fail closed; fix round 2).
+    ///
+    /// `metadata.corpus_digest` and `metadata.input_digest` are the caller's
+    /// input until PR 5, as the result files are (Zaki's re-review of #1166,
+    /// Minor): they are checked for shape and recorded, not derived. A check
+    /// result carries only the hash of its evidence (`evidence_hash`), not
+    /// the corpus report or the input it ran on, so nothing here can
+    /// recompute either digest from `evidence`. Binding them needs signed
+    /// results that carry those digests, which is PR 5's.
     pub async fn qualify_bundle(
         &self,
         tenant_id: &str,

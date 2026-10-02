@@ -333,7 +333,13 @@ a malformed result is refused with its own label). Until PR 5 signs check
 results, the result files, their `observed_at` and each result's maximum
 age are the caller's input, not facts the server checked: the server only
 bounds the maximum age, refusing one above seven days
-(`bundle_qualification_evidence_age_above_ceiling`). The decision must be
+(`bundle_qualification_evidence_age_above_ceiling`). So are the metadata's
+`corpus_digest` and `input_digest`: a check result carries only its
+evidence's hash, not the corpus or input it ran on, so `qualify_bundle`
+checks their shape and records them, and binding them to the evidence is
+PR 5 work. The other four metadata digests are bound: the configuration
+digest to the signed package, the runtime dependency digest to the
+profile, and the evidence hash and code revision to the decision. The decision must be
 ready (`bundle_qualification_promotion_not_ready`), its evidence hash must
 be the metadata's (`bundle_qualification_evidence_mismatch`), its one code
 revision the metadata's (`bundle_qualification_code_revision_mismatch`),
