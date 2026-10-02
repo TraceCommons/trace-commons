@@ -258,7 +258,8 @@ inputs; PostgreSQL serialization failures require a new snapshot. Do not reuse
 an evaluation computed from an earlier generation when retrying.
 
 The forced-RLS frontier table advances transactionally on fact mutations,
-account/principal mutations, and completed merge hooks. This includes merges
+account/principal mutations, current gate projections and their shared cluster
+dependencies, and completed merge hooks. This includes merges
 with no newly copied facts. Admission holds a scoped definer frontier lock
 until reservation commit; the login gains no frontier write privilege. The
 writer locks account before frontier, matching admission's order. Legacy
@@ -272,3 +273,16 @@ forced RLS. Missing controls refuse startup with
 consumption boundary, not that all upstream outcomes have been recorded as
 facts. Operators must separately qualify recorder coverage before activating
 applied evaluations. This migration does not activate production admission.
+
+
+Gate changes invalidate accounts whose recorded gate inputs name the decision or
+submission, plus all recorded gate-input accounts in affected old/new clusters
+across tenants. Internal dependency lock rows serialize gate and fact mutations
+before dependency enumeration; a conflicting repeatable-read writer must retry
+from a new snapshot. Only a NOLOGIN input guard reads dependency keys and
+advances generations; it returns no cross-tenant inputs to either login. This
+internal lock table uses guard-only forced RLS and is tracked separately from
+ordinary tenant-readable tables. Dependency and account frontier locks are
+acquired in deterministic key order within each trigger; the trigger acquires
+no account row locks afterward. Multi-row transactions must still roll back and
+retry on PostgreSQL serialization or deadlock failures.

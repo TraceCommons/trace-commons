@@ -47,6 +47,13 @@ ALTER TABLE trace_account_trust_evaluations ADD COLUMN input_generation BIGINT C
 CREATE FUNCTION trace_account_trust_advance_frontier() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 BEGIN
+    IF TG_TABLE_NAME='trace_account_trust_facts' THEN
+        PERFORM public.trace_account_trust_lock_fact_dependencies(
+            CASE WHEN TG_OP<>'INSERT' THEN OLD.tenant_id END,
+            CASE WHEN TG_OP<>'INSERT' THEN OLD.submission_id END,
+            CASE WHEN TG_OP<>'DELETE' THEN NEW.tenant_id END,
+            CASE WHEN TG_OP<>'DELETE' THEN NEW.submission_id END);
+    END IF;
         IF TG_OP <> 'INSERT' THEN
             INSERT INTO public.trace_account_trust_frontiers(tenant_id,account_id,generation)
             VALUES(OLD.tenant_id,OLD.account_id,1)
@@ -164,3 +171,121 @@ ALTER FUNCTION trace_account_trust_merge(TEXT,UUID,UUID,UUID) OWNER TO trace_acc
 REVOKE CREATE ON SCHEMA public FROM trace_account_trust_merge_guard;
 GRANT EXECUTE ON FUNCTION trace_account_trust_merge(TEXT,UUID,UUID,UUID) TO PUBLIC;
 REVOKE trace_account_trust_merge_guard FROM CURRENT_USER;
+
+-- Current gate projections and shared cluster membership are evaluation inputs.
+-- Dependency keys serialize gate/fact mutations before cross-tenant enumeration.
+-- They are internal lock state, with no login read or write surface.
+DO $$ BEGIN
+    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='trace_account_trust_input_guard') THEN
+        CREATE ROLE trace_account_trust_input_guard NOLOGIN NOSUPERUSER NOBYPASSRLS;
+    END IF;
+END $$;
+ALTER ROLE trace_account_trust_input_guard NOLOGIN NOSUPERUSER NOBYPASSRLS;
+GRANT trace_account_trust_input_guard,trace_account_trust_evaluation_guard TO CURRENT_USER;
+GRANT USAGE ON SCHEMA public TO trace_account_trust_input_guard;
+CREATE TABLE trace_account_trust_dependency_locks (
+    dependency_key TEXT PRIMARY KEY,
+    revision BIGINT NOT NULL DEFAULT 0 CHECK(revision >= 0)
+);
+ALTER TABLE trace_account_trust_dependency_locks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_account_trust_dependency_locks FORCE ROW LEVEL SECURITY;
+CREATE POLICY account_trust_dependency_guard ON trace_account_trust_dependency_locks
+    TO trace_account_trust_input_guard USING(TRUE) WITH CHECK(TRUE);
+GRANT SELECT,INSERT,UPDATE ON trace_account_trust_dependency_locks TO trace_account_trust_input_guard;
+GRANT SELECT(tenant_id,submission_id,decision_id,dedup_cluster_id) ON trace_gate_decisions TO trace_account_trust_input_guard;
+CREATE POLICY account_trust_input_gate_keys ON trace_gate_decisions
+    FOR SELECT TO trace_account_trust_input_guard USING(TRUE);
+GRANT SELECT(tenant_id,account_id,source_kind,source_id,submission_id) ON trace_account_trust_facts TO trace_account_trust_input_guard;
+CREATE POLICY account_trust_input_fact_keys ON trace_account_trust_facts
+    FOR SELECT TO trace_account_trust_input_guard USING(TRUE);
+GRANT SELECT,UPDATE ON trace_account_trust_frontiers TO trace_account_trust_input_guard;
+CREATE POLICY account_trust_input_frontiers ON trace_account_trust_frontiers
+    TO trace_account_trust_input_guard USING(TRUE) WITH CHECK(TRUE);
+
+CREATE FUNCTION trace_account_trust_lock_dependencies(p_keys TEXT[]) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_key TEXT;
+BEGIN
+    FOR v_key IN SELECT DISTINCT k COLLATE "C" AS k FROM pg_catalog.unnest(p_keys) k WHERE k IS NOT NULL ORDER BY k COLLATE "C" LOOP
+        -- Unlike an advisory lock, updating a versioned row also aborts a
+        -- REPEATABLE READ mutation whose snapshot predates a competing writer.
+        INSERT INTO public.trace_account_trust_dependency_locks(dependency_key,revision)
+        VALUES(v_key,1) ON CONFLICT(dependency_key) DO UPDATE
+        SET revision=trace_account_trust_dependency_locks.revision+1;
+    END LOOP;
+END $$;
+CREATE FUNCTION trace_account_trust_lock_fact_dependencies(
+    p_old_tenant TEXT,p_old_submission UUID,p_new_tenant TEXT,p_new_submission UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_keys TEXT[];
+BEGIN
+    SELECT pg_catalog.array_agg(k) INTO v_keys FROM (
+        SELECT 'submission:' || p_old_tenant || ':' || p_old_submission::text AS k
+        UNION SELECT 'submission:' || p_new_tenant || ':' || p_new_submission::text
+        UNION SELECT 'cluster:' || g.dedup_cluster_id::text FROM public.trace_gate_decisions g
+         WHERE (g.tenant_id,g.submission_id) IN ((p_old_tenant,p_old_submission),(p_new_tenant,p_new_submission))
+    ) dependencies;
+    PERFORM public.trace_account_trust_lock_dependencies(v_keys);
+END $$;
+CREATE FUNCTION trace_account_trust_advance_gate_frontiers() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_old_tenant TEXT; v_new_tenant TEXT; v_old_submission UUID; v_new_submission UUID;
+    v_old_decision UUID; v_new_decision UUID; v_old_cluster UUID; v_new_cluster UUID;
+    v_clusters UUID[]; v_keys TEXT[]; v_account RECORD;
+BEGIN
+    IF TG_OP='UPDATE' AND
+        (OLD.tenant_id,OLD.submission_id,OLD.decision_id,OLD.credit_quality_micros,
+         OLD.credit_quality_calibration_version,OLD.dedup_signal_version,OLD.dedup_cluster_id,OLD.decided_at)
+        IS NOT DISTINCT FROM
+        (NEW.tenant_id,NEW.submission_id,NEW.decision_id,NEW.credit_quality_micros,
+         NEW.credit_quality_calibration_version,NEW.dedup_signal_version,NEW.dedup_cluster_id,NEW.decided_at)
+    THEN RETURN NULL; END IF;
+    IF TG_OP<>'INSERT' THEN
+        v_old_tenant:=OLD.tenant_id; v_old_submission:=OLD.submission_id;
+        v_old_decision:=OLD.decision_id; v_old_cluster:=OLD.dedup_cluster_id;
+    END IF;
+    IF TG_OP<>'DELETE' THEN
+        v_new_tenant:=NEW.tenant_id; v_new_submission:=NEW.submission_id;
+        v_new_decision:=NEW.decision_id; v_new_cluster:=NEW.dedup_cluster_id;
+    END IF;
+    SELECT pg_catalog.array_agg(DISTINCT cluster_id) INTO v_clusters FROM (
+        SELECT v_old_cluster AS cluster_id UNION SELECT v_new_cluster
+        UNION SELECT g.dedup_cluster_id FROM public.trace_gate_decisions g
+         WHERE (g.tenant_id,g.submission_id) IN ((v_old_tenant,v_old_submission),(v_new_tenant,v_new_submission))
+    ) clusters WHERE cluster_id IS NOT NULL;
+    SELECT pg_catalog.array_agg(k) INTO v_keys FROM (
+        SELECT 'submission:' || v_old_tenant || ':' || v_old_submission::text AS k
+        UNION SELECT 'submission:' || v_new_tenant || ':' || v_new_submission::text
+        UNION SELECT 'cluster:' || c::text FROM pg_catalog.unnest(v_clusters) c
+    ) dependencies;
+    PERFORM public.trace_account_trust_lock_dependencies(v_keys);
+    -- No account or gate-row locks after dependency/frontier locks. Read only
+    -- dependency keys and advance every affected account in deterministic order.
+    FOR v_account IN
+        SELECT DISTINCT f.tenant_id COLLATE "C" AS tenant_id,f.account_id FROM public.trace_account_trust_facts f
+         WHERE f.source_kind='gate_evaluation' AND (
+             (f.tenant_id,f.submission_id) IN ((v_old_tenant,v_old_submission),(v_new_tenant,v_new_submission))
+             OR (f.tenant_id,f.source_id) IN ((v_old_tenant,v_old_decision),(v_new_tenant,v_new_decision))
+             OR EXISTS(SELECT 1 FROM public.trace_gate_decisions g
+                  WHERE g.tenant_id=f.tenant_id AND g.submission_id=f.submission_id
+                    AND g.dedup_cluster_id=ANY(v_clusters)))
+         ORDER BY f.tenant_id COLLATE "C",f.account_id
+    LOOP
+        UPDATE public.trace_account_trust_frontiers SET generation=generation+1
+         WHERE tenant_id=v_account.tenant_id AND account_id=v_account.account_id;
+    END LOOP;
+    RETURN NULL;
+END $$;
+CREATE TRIGGER account_trust_gate_frontier AFTER INSERT OR UPDATE OR DELETE ON trace_gate_decisions
+    FOR EACH ROW EXECUTE FUNCTION trace_account_trust_advance_gate_frontiers();
+GRANT CREATE ON SCHEMA public TO trace_account_trust_input_guard;
+ALTER FUNCTION trace_account_trust_lock_dependencies(TEXT[]) OWNER TO trace_account_trust_input_guard;
+ALTER FUNCTION trace_account_trust_lock_fact_dependencies(TEXT,UUID,TEXT,UUID) OWNER TO trace_account_trust_input_guard;
+ALTER FUNCTION trace_account_trust_advance_gate_frontiers() OWNER TO trace_account_trust_input_guard;
+REVOKE CREATE ON SCHEMA public FROM trace_account_trust_input_guard;
+REVOKE ALL ON FUNCTION trace_account_trust_lock_dependencies(TEXT[]),
+    trace_account_trust_lock_fact_dependencies(TEXT,UUID,TEXT,UUID),
+    trace_account_trust_advance_gate_frontiers() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION trace_account_trust_lock_fact_dependencies(TEXT,UUID,TEXT,UUID)
+    TO trace_account_trust_evaluation_guard;
+REVOKE trace_account_trust_input_guard,trace_account_trust_evaluation_guard FROM CURRENT_USER;

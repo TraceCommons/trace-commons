@@ -178,6 +178,10 @@ pub struct PgBackend {
 /// see the exclusion notes at the bottom of
 /// `migrations/V56__community_withdrawal_eviction_rls.sql` for why that is
 /// opt-in published data and does not change the answer.
+/// Global internal lock state; these tables have guard-only forced RLS and
+/// deliberately carry no tenant-readable rows or ordinary login grants.
+pub const TRACE_COMMONS_INTERNAL_RLS_TABLES: &[&str] = &["trace_account_trust_dependency_locks"];
+
 pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",

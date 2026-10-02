@@ -646,10 +646,20 @@ impl PgBackend {
             AND NOT has_table_privilege(e.oid,g.oid,'INSERT,UPDATE,DELETE')
             AND NOT has_table_privilege(e.oid,c.oid,'INSERT,UPDATE,DELETE')
             AND NOT has_table_privilege(current_user,g.oid,'INSERT,UPDATE,DELETE')
+            AND l.relrowsecurity AND l.relforcerowsecurity AND l.relowner<>r.oid
+            AND NOT has_table_privilege(current_user,l.oid,'SELECT,INSERT,UPDATE,DELETE')
+            AND NOT has_table_privilege(e.oid,l.oid,'SELECT,INSERT,UPDATE,DELETE')
+            AND NOT i.rolsuper AND NOT i.rolbypassrls AND NOT i.rolcanlogin
+            AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+                WHERE t.tgrelid=to_regclass('public.trace_gate_decisions')
+                AND t.tgname='account_trust_gate_frontier' AND t.tgenabled='O'
+                AND p.prosecdef AND p.proowner=i.oid)
             FROM pg_roles r LEFT JOIN pg_roles e ON e.rolname='trace_account_trust_evaluator'
             LEFT JOIN pg_proc f ON f.oid=to_regprocedure('public.trace_record_external_account_trust_evaluation(text,uuid,uuid,text,text,timestamp with time zone,integer,bigint,text,bigint)')
             LEFT JOIN pg_class c ON c.oid=to_regclass('public.trace_account_trust_evaluations')
             LEFT JOIN pg_class g ON g.oid=to_regclass('public.trace_account_trust_frontiers')
+            LEFT JOIN pg_class l ON l.oid=to_regclass('public.trace_account_trust_dependency_locks')
+            LEFT JOIN pg_roles i ON i.rolname='trace_account_trust_input_guard'
             WHERE r.rolname=current_user"#, &[]).await.map_err(|_| database_refused())?.get(0);
         Ok(ready == Some(true))
     }
