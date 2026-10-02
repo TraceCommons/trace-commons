@@ -2492,6 +2492,30 @@ async fn count_credit_ledger_rows_for_run(
     count
 }
 
+/// poldsam P-5: `run_id`'s `trace_credit_ledger` rows whose event type is
+/// `novelty_utility`. `count_credit_ledger_rows_for_run` counts every event
+/// type, so a test that means "the NoveltyUtility row" reads this one.
+async fn count_novelty_utility_rows_for_run(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2
+                AND event_type = 'novelty_utility'",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("count NoveltyUtility ledger rows")
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
 /// The `status` column of `trace_credit_settlement_batches` for
 /// `settlement_batch_id`, or `None` if no row exists.
 async fn settlement_batch_status(
@@ -14919,8 +14943,12 @@ async fn compatibility_credit_matches_main_gate_path() {
     // Exactly one ledger row, with the `NoveltyUtility` event type and the
     // configured delta, and carried by no finalized batch.
     assert_eq!(
-        count_credit_ledger_rows_for_run(&backend, &tenant_positive, run_positive.run_id).await,
-        1
+        (
+            count_credit_ledger_rows_for_run(&backend, &tenant_positive, run_positive.run_id).await,
+            count_novelty_utility_rows_for_run(&backend, &tenant_positive, run_positive.run_id)
+                .await,
+        ),
+        (1, 1)
     );
     let (event_type, points_delta) =
         credit_ledger_event_for_run(&backend, &tenant_positive, run_positive.run_id)
@@ -15146,6 +15174,11 @@ async fn settled_compatibility_award(
     );
     let leg = trace_credit_settlement(service, &tenant, run.run_id).await;
     let rows = count_credit_ledger_rows_for_run(backend, &tenant, run.run_id).await;
+    assert_eq!(
+        count_novelty_utility_rows_for_run(backend, &tenant, run.run_id).await,
+        rows,
+        "every ledger row of a compatibility run is a NoveltyUtility event"
+    );
     let status = PipelineProductStore::new(backend.clone())
         .contributor_statuses(&tenant, principal, &[run.submission_id])
         .await
@@ -15675,6 +15708,11 @@ async fn a_compatibility_award_needs_a_consent_scope_the_tenant_policy_allows() 
         assert_eq!(settled.state, PipelineRunState::Complete);
         let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
         let rows = count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await;
+        assert_eq!(
+            count_novelty_utility_rows_for_run(&backend, &tenant, created.run_id).await,
+            rows,
+            "every ledger row of a compatibility run is a NoveltyUtility event"
+        );
         let status = PipelineProductStore::new(backend.clone())
             .contributor_statuses(&tenant, RECEIPT_PRINCIPAL, &[env.submission_id])
             .await
@@ -22967,9 +23005,12 @@ async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
     assert_eq!(leg.operation_state, "complete", "{leg:?}");
     assert!(leg.credit_event_id.is_some(), "{leg:?}");
     assert_eq!(
-        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
-        1,
-        "the NoveltyUtility ledger row is written despite the hold"
+        (
+            count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+            count_novelty_utility_rows_for_run(&backend, &tenant, run.run_id).await,
+        ),
+        (1, 1),
+        "the NoveltyUtility ledger row, and no other, is written despite the hold"
     );
     let snapshot = create_snapshot(
         &PipelineProductStore::new(backend.clone()),
