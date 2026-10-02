@@ -101,3 +101,58 @@ collaborators, production capture consent or proposed screen-copy approval
 follows from these contracts. Native tokens remain daemon-side; sign-out/wipe
 invalidates stale ceremony/account-owned work. The existing source-offer and
 permissive-to-AGPL dependency boundary remain load-bearing.
+
+## Continuation and published review branches, 2026-10-02
+
+This section supersedes the operational status above; the earlier counts remain
+historical evidence for their named checkpoints. Core implementation checkpoint
+`41449b646` includes main `67403a212` and is published in draft PR #1187. C1
+`3f142ad53` is draft PR #1188, stacked on Kristi's #1175. The two-file Monitor
+unknown-state correction is draft PR #1189 (`4b1bdf955`), stacked on Ron's #1182
+base `336d7c139`. None of these three implementation PRs has been merged.
+
+Fresh integration evidence after the main update:
+
+- Contributor library repeat: 3,069 passed, 11 ignored. The first full run hit
+  the existing five-second wallet-listener rebind timeout under load; both its
+  isolated rerun and the full repeat passed. No timeout or runtime change was
+  made; the intermittent cause is not proven.
+- FFI: 216 passed with 16 test threads. The stale-pointer probes now preserve
+  their original assertions in isolated subprocesses so other tests cannot
+  reuse a freed address during the probe. Production registry and ABI unchanged.
+- Combined core/C1 Swift against freshly rebuilt FFI: 1,158 XCTest cases, one
+  skipped, zero failures, plus eight Swift Testing cases passed.
+- The activity-missions PostgreSQL test is now explicitly wired into CI with
+  its own database and the existing transaction guard. Its independent local
+  run passed without skips, with 403 committed transactions.
+- Deployment inventory explicitly classifies the new mission routes; 50 tooling
+  tests pass. Unknown interfaces remain rejected.
+- C1 has 36 passing PR checks at its exact published head. Duplicate branch-push
+  checks were intentionally cancelled. Core and Monitor follow-up CI remain
+  pending; local results are not a claim that their complete remote checks pass.
+- Monitor correction: five focused tests pass on the updated R5 base, covering
+  missing settings, missing/null Private AI, explicit false, and explicit true.
+
+The user separately authorized merging and deploying community PR #46. It
+merged as `0ed30579e1693272839edeecd2bb2b65b76e8c65`; both community and docs
+deployment jobs succeeded. The live AASA origin returns HTTP 200 JSON with
+`KXSWJN7WY8.ai.tracecommons.shell`, matching the qualified artifact. Apple CDN
+reads currently vary between that valid response and an older cached 404;
+propagation remains an open qualification gate.
+
+The existing documented `ingest.tracecommons.ai` backend is the live pilot,
+not an established separate staging deployment. Using a new qualification
+account there awaits the user's answer. Native create/sign-in has not been
+performed. The platform adapter is implemented, but the current application
+has no production ceremony call site; the R12 screen or a dedicated signed
+qualification harness is still needed for runtime qualification. No new native
+release, notarization, installation, or economic activation is claimed.
+
+Z15 was refreshed against R6 `5befed586` and R7 `639f9a6d8`. Permissions and
+Review controls remain in the Trace Tree, contrary to the supplied Inspector
+placement feedback. R7 Contribute checks preview/copy availability but does not
+yet consume the existing enrollment and eligibility fields. These are screen
+acceptance gaps, not evidence of bypassing daemon admission. The bounded remote
+branch/PR query found no published R8 source; it does not establish whether Ron
+has local R8 work. The Monitor unknown-dot fix addresses only its narrow state
+projection, not those later placement or action-gating gaps.
