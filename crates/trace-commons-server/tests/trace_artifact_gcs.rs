@@ -15,13 +15,13 @@ use secrecy::SecretString;
 use serde_json::json;
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_gcs::{
-    GcsRemoteTraceArtifactProvider, InMemoryGcsObjectClient,
+    GcsObjectClient, GcsObjectFetch, GcsRemoteTraceArtifactProvider, InMemoryGcsObjectClient,
 };
 use trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper;
 use trace_commons_server::trace_artifact_store::{
     RemoteTraceArtifactProvider, ServiceOwnedTraceArtifactStore,
     TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2, TraceArtifactInvalidationReason, TraceArtifactKind,
-    TraceArtifactProviderConfig, TraceArtifactScope,
+    TraceArtifactProviderConfig, TraceArtifactScope, is_trace_artifact_integrity_error,
 };
 
 #[test]
@@ -212,4 +212,60 @@ fn gcs_remote_provider_exposes_versioning_support_flag() {
         "trace-commons-prod",
     );
     assert!(versioned.supports_versioning());
+}
+
+/// Zaki's approval of #1143, ZA-2 follow-up: a fetch the bucket answers with
+/// "not found" reaches the store's caller typed as an integrity failure,
+/// through the provider and the store; a fetch that fails for any other
+/// reason reaches it untyped (transport).
+#[test]
+fn a_missing_gcs_object_reads_as_an_integrity_failure_and_an_outage_does_not() {
+    struct DownClient;
+    impl GcsObjectClient for DownClient {
+        fn put_object(
+            &self,
+            _key: &str,
+            _body: bytes::Bytes,
+            _metadata: std::collections::BTreeMap<String, String>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("GcsPutFailed: 503 backend unavailable")
+        }
+        fn get_object(&self, _key: &str) -> anyhow::Result<GcsObjectFetch> {
+            anyhow::bail!("GcsGetFailed: 503 backend unavailable")
+        }
+        fn delete_object(&self, _key: &str) -> anyhow::Result<bool> {
+            anyhow::bail!("GcsDeleteFailed: 503 backend unavailable")
+        }
+        fn restore_deleted_object(&self, _key: &str) -> anyhow::Result<bool> {
+            anyhow::bail!("GcsRestoreFailed: 503 backend unavailable")
+        }
+    }
+
+    let client = Arc::new(InMemoryGcsObjectClient::default());
+    let (store, provider, receipt, scope) = seed_artifact(Arc::clone(&client));
+    assert!(
+        provider
+            .delete_encrypted_artifact(&receipt.object_ref, Utc::now())
+            .unwrap()
+    );
+    let missing = store
+        .read_scoped_json::<serde_json::Value>(&scope, &receipt.object_ref)
+        .expect_err("a missing object does not read");
+    assert!(
+        is_trace_artifact_integrity_error(&missing),
+        "a missing object is an integrity failure"
+    );
+
+    let down = GcsRemoteTraceArtifactProvider::new(
+        DownClient,
+        "trace-commons-prod-bucket",
+        "trace-commons-prod",
+    );
+    let Err(outage) = down.read_encrypted_artifact(&receipt.object_ref) else {
+        panic!("a fetch during an outage does not read");
+    };
+    assert!(
+        !is_trace_artifact_integrity_error(&outage),
+        "an outage is not an integrity failure"
+    );
 }

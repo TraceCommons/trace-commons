@@ -37,9 +37,14 @@ use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::secrets::SecretsCrypto;
+use trace_commons_server::trace_artifact_gcs::{
+    GcsObjectClient, GcsObjectFetch, GcsRemoteTraceArtifactProvider, InMemoryGcsObjectClient,
+};
+use trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper;
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
-    PreparedSerializedJsonArtifact, TraceArtifactKind, TraceArtifactStore,
+    PreparedSerializedJsonArtifact, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
+    TraceArtifactProviderConfig, TraceArtifactStore,
 };
 use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::trace_corpus_storage::{
@@ -24482,6 +24487,148 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
         .await
         .unwrap()
         .expect("Review runs");
+    assert_eq!(
+        (
+            first.state,
+            first.last_error_label.as_deref(),
+            first.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+            1
+        ),
+        "a missing object is charged"
+    );
+    let mut last = first;
+    for _ in 1..last.max_attempts {
+        force_due(&backend, &tenant, created.run_id).await;
+        last = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review runs again");
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        ),
+        "the attempt budget ends the run"
+    );
+}
+
+/// ZA-2 follow-up: an in-memory Google Cloud Storage client that records
+/// each key written, and whose fetches fail with an untyped error (an
+/// outage, as a 503 or a refused connection is) while `fetches_down` is set.
+#[derive(Default)]
+struct ProbeGcsClient {
+    inner: InMemoryGcsObjectClient,
+    keys: std::sync::Mutex<Vec<String>>,
+    fetches_down: AtomicBool,
+}
+
+impl GcsObjectClient for ProbeGcsClient {
+    fn put_object(
+        &self,
+        key: &str,
+        body: bytes::Bytes,
+        metadata: BTreeMap<String, String>,
+    ) -> anyhow::Result<()> {
+        self.keys.lock().unwrap().push(key.to_string());
+        self.inner.put_object(key, body, metadata)
+    }
+
+    fn get_object(&self, key: &str) -> anyhow::Result<GcsObjectFetch> {
+        anyhow::ensure!(
+            !self.fetches_down.load(Ordering::SeqCst),
+            "GcsGetFailed: 503 backend unavailable"
+        );
+        self.inner.get_object(key)
+    }
+
+    fn delete_object(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.delete_object(key)
+    }
+
+    fn restore_deleted_object(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.restore_deleted_object(key)
+    }
+}
+
+/// Zaki's approval of #1143, ZA-2 follow-up: on the Google Cloud Storage
+/// store, a fetch the bucket answers with "not found" is an integrity
+/// failure, charged as `artifact_integrity_failed`, so Review's attempt
+/// budget ends the run; any other fetch failure stays the uncharged
+/// `artifact_store_unavailable`.
+#[tokio::test]
+async fn a_missing_gcs_object_is_charged_and_any_other_gcs_fetch_failure_is_not() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let master_key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let crypto = SecretsCrypto::new(SecretString::from(master_key.clone())).unwrap();
+    let kek = LocalMasterKeyWrapper::new(
+        SecretsCrypto::new(SecretString::from(master_key)).unwrap(),
+        "pipeline-runtime-gcs-test",
+    );
+    let client = Arc::new(ProbeGcsClient::default());
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(ServiceOwnedTraceArtifactStore::new(
+        TraceArtifactProviderConfig::service_owned_remote("pipeline-runtime-gcs").unwrap(),
+        crypto,
+        kek,
+        GcsRemoteTraceArtifactProvider::new(
+            Arc::clone(&client),
+            "pipeline-runtime-gcs-bucket",
+            "pipeline-runtime-gcs",
+        ),
+    ));
+    let (service, _, _) = test_service(backend.clone(), store, minimal_config(true), None).await;
+    let tenant = format!("integrity-missing-gcs-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let written = client.keys.lock().unwrap().clone();
+    assert!(!written.is_empty(), "the receipt wrote its source object");
+
+    client.fetches_down.store(true, Ordering::SeqCst);
+    let outage = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(
+        (
+            outage.state,
+            outage.last_error_label.as_deref(),
+            outage.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL),
+            0
+        ),
+        "a fetch that fails for another reason is uncharged"
+    );
+    client.fetches_down.store(false, Ordering::SeqCst);
+
+    for object in &written {
+        assert!(client.inner.delete_object(object).unwrap());
+    }
+    force_due(&backend, &tenant, created.run_id).await;
+    let first = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs again");
     assert_eq!(
         (
             first.state,

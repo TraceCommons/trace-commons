@@ -314,14 +314,14 @@ not the trace's fault:
 - `artifact_store_unavailable` (Review and Score): an object-store call of
   the run failed for a transport or availability reason -- Review's source
   read or approved write, or Score's approved read or object writes. When
-  the store reached the object and found it missing (on a store that reports
-  a missing object as such: the local and file stores) or not what its
+  the store reached the object and found it missing (a missing file on the
+  local and file stores, a 404 from Google Cloud Storage) or not what its
   receipt names (a hash or reference mismatch, a decode or decrypt failure),
   the attempt is charged instead, as `artifact_integrity_failed`, and the
-  phase's attempt budget ends the run. A Google Cloud Storage fetch that
-  fails is not typed, so a missing object there still waits here, retried
-  at most once an hour. Settle's read of the stored index command is always
-  charged (`index_command_invalid`).
+  phase's attempt budget ends the run. Any other Google Cloud Storage fetch
+  failure (credentials, network, 429, 5xx) and a KMS unwrap failure wait
+  here, retried at most once an hour. Settle's read of the stored index
+  command is always charged (`index_command_invalid`).
 
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
