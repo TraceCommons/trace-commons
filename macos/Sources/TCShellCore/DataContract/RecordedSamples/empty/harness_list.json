@@ -6,7 +6,7 @@
       "name": "Claude Code",
       "installed": true,
       "connected": false,
-      "config_path": "/Users/poldsam/.claude/settings.json",
+      "config_path": "/Users/sample/.claude/settings.json",
       "connect_command": "ironwire connect claude",
       "family": "anthropic",
       "answers_at": "Anthropic",
@@ -20,14 +20,14 @@
       "name": "Codex",
       "installed": true,
       "connected": false,
-      "config_path": "/Users/poldsam/.codex/config.toml",
+      "config_path": "/Users/sample/.codex/config.toml",
       "connect_command": "ironwire connect codex",
       "family": "openai",
       "answers_at": "OpenAI",
       "state": "not_connected",
       "last_call_at": null,
-      "can_connect": false,
-      "can_disconnect": true
+      "can_connect": true,
+      "can_disconnect": false
     }
   ],
   "activity": {

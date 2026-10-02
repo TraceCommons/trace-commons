@@ -64,6 +64,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -412,6 +413,49 @@ fn enroll(store: &ConfigStore) {
     store.save_config(&cfg).unwrap();
 }
 
+/// The home directory every recording sees, in place of the real one.
+///
+/// The harness, IronWire and source probes all resolve the home through the
+/// environment (`dirs::home_dir`, `$HOME`, `$IRONWIRE_HOME`), not through
+/// the store, so a temp store alone records the machine it runs on: its
+/// username in `config_path`, and whichever tools it has installed and
+/// credentialed. This points all of them at one fake home, seeded with an
+/// installed Claude Code and Codex and no IronWire, before any daemon
+/// starts. `normalize` rewrites its path to [`RECORDED_HOME`].
+///
+/// Process-wide on purpose: the environment is, and both tests in this
+/// binary go through `record_all`, which initializes it before either
+/// starts a daemon.
+struct SampleHome {
+    fake: PathBuf,
+    /// `$HOME` as the process started, so a recording can be checked for it.
+    real: Option<String>,
+}
+
+const RECORDED_HOME: &str = "/Users/sample";
+
+fn sample_home() -> &'static SampleHome {
+    static HOME: OnceLock<SampleHome> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let real = std::env::var("HOME")
+            .ok()
+            .filter(|h| !h.is_empty() && h != "/");
+        let fake = std::env::temp_dir().join(format!("k2-sample-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fake);
+        std::fs::create_dir_all(fake.join(".claude")).unwrap();
+        std::fs::write(fake.join(".claude/settings.json"), "{}\n").unwrap();
+        std::fs::create_dir_all(fake.join(".codex")).unwrap();
+        std::fs::write(fake.join(".codex/config.toml"), "").unwrap();
+        // SAFETY: set once, before any daemon or other thread in this test
+        // binary reads the environment (see the doc above).
+        unsafe {
+            std::env::set_var("HOME", &fake);
+            std::env::set_var("IRONWIRE_HOME", fake.join(".ironwire"));
+        }
+        SampleHome { fake, real }
+    })
+}
+
 /// Starts the real daemon over a real unix socket on a fresh temp store, and
 /// returns a connected client. `build` runs with the store open but before
 /// the daemon starts, which is where the queue, the policy and the history
@@ -497,6 +541,12 @@ fn normalize(value: &mut Value, key: Option<&str>) {
         Value::String(s) if key.is_some_and(|k| VOLATILE_KEYS.contains(&k)) && !s.is_empty() => {
             *s = VOLATILE_TIMESTAMP_PLACEHOLDER.to_string();
         }
+        Value::String(s) => {
+            let fake = sample_home().fake.to_string_lossy();
+            if s.contains(fake.as_ref()) {
+                *s = s.replace(fake.as_ref(), RECORDED_HOME);
+            }
+        }
         _ => {}
     }
 }
@@ -506,6 +556,7 @@ fn normalize(value: &mut Value, key: Option<&str>) {
 /// set, and `shared/method` for the four that do not (`SampleDaemonData`
 /// never reads `set` for them either).
 async fn record_all() -> BTreeMap<String, Value> {
+    sample_home();
     let mut out = BTreeMap::new();
 
     for (state, value) in [
@@ -525,7 +576,29 @@ async fn record_all() -> BTreeMap<String, Value> {
             out.entry(format!("shared/{method}")).or_insert(reply);
         }
     }
+    for (key, value) in &out {
+        assert_no_machine_home(key, value);
+    }
     out
+}
+
+/// Fails if a recording names the machine it was made on: its real home
+/// (and so its username), or the fake home `normalize` should have
+/// rewritten.
+fn assert_no_machine_home(key: &str, value: &Value) {
+    let home = sample_home();
+    let text = value.to_string();
+    let fake = home.fake.to_string_lossy();
+    assert!(
+        !text.contains(fake.as_ref()),
+        "{key}: the fake home leaked unrewritten"
+    );
+    if let Some(real) = &home.real {
+        assert!(
+            !text.contains(real.as_str()),
+            "{key}: records this machine's home directory"
+        );
+    }
 }
 
 struct StateRecording {
@@ -930,6 +1003,16 @@ const HAND_WRITTEN_OVERRIDES: &[&str] = &[
     "busyQueue/inference_calls",
 ];
 
+/// For an override that edits a real recording rather than replacing it,
+/// the keys it touches. The drift test removes these from both sides and
+/// compares the rest, so the untouched fields are still held to the daemon.
+fn override_touched_keys(key: &str) -> Option<&'static [&'static str]> {
+    match key {
+        "unknownCounts/status" => Some(&["decisions_owed", "_sample"]),
+        _ => None,
+    }
+}
+
 /// Applied to a fresh `record_all()` map before it is written to disk, never
 /// before it is compared in the drift test -- so the drift test's own
 /// "fresh" values stay the honest real capture, and these three committed
@@ -1018,12 +1101,18 @@ fn first_diff(expected: &Value, actual: &Value, path: &str) -> Option<String> {
                 } else {
                     format!("{path}.{key}")
                 };
-                let (ev, av) = (
-                    e.get(key).unwrap_or(&Value::Null),
-                    a.get(key).unwrap_or(&Value::Null),
-                );
-                if let Some(d) = first_diff(ev, av, &next) {
-                    return Some(d);
+                // Absent is not null: a field added or removed is drift even
+                // when its value is null.
+                let d = match (e.get(key), a.get(key)) {
+                    (Some(ev), Some(av)) => first_diff(ev, av, &next),
+                    (Some(_), None) => Some(format!("{next}: no longer sent by the daemon")),
+                    (None, Some(_)) => Some(format!(
+                        "{next}: sent by the daemon, absent from the committed file"
+                    )),
+                    (None, None) => None,
+                };
+                if d.is_some() {
+                    return d;
                 }
             }
             None
@@ -1054,16 +1143,25 @@ async fn drift_sample_data_matches_the_real_daemon() {
         // the raw real capture by design (see `apply_hand_written_overrides`),
         // so comparing them against `fresh`'s honest capture would fail on
         // every run for a reason that is not drift.
-        if HAND_WRITTEN_OVERRIDES.contains(&key.as_str()) {
+        let touched = override_touched_keys(key);
+        if HAND_WRITTEN_OVERRIDES.contains(&key.as_str()) && touched.is_none() {
             continue;
         }
         let path = file_for(key);
         let committed_text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             panic!("{key}: no committed recording at {path:?} ({e}); run record_samples_to_disk")
         });
-        let committed: Value =
+        let mut committed: Value =
             serde_json::from_str(&committed_text).unwrap_or_else(|e| panic!("{key}: {e}"));
-        if let Some(diff) = first_diff(&committed, actual, "") {
+        let mut actual = actual.clone();
+        for k in touched.unwrap_or(&[]) {
+            for side in [&mut committed, &mut actual] {
+                if let Value::Object(map) = side {
+                    map.remove(*k);
+                }
+            }
+        }
+        if let Some(diff) = first_diff(&committed, &actual, "") {
             failures.push(format!("{key}: {diff}"));
         }
     }
@@ -1100,5 +1198,21 @@ async fn drift_sample_data_matches_the_real_daemon() {
         failures.is_empty(),
         "the real daemon no longer matches the committed samples:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn first_diff_reports_a_field_added_or_removed_even_when_null() {
+    let committed = json!({"a": 1, "gone": null});
+    let fresh = json!({"a": 1, "new": null});
+    let diff = first_diff(&committed, &fresh, "").expect("a key set change is drift");
+    assert!(diff.starts_with("gone:"), "{diff}");
+    assert_eq!(
+        first_diff(&json!({"a": 1}), &json!({"a": 1, "new": null}), ""),
+        Some("new: sent by the daemon, absent from the committed file".into())
+    );
+    assert_eq!(
+        first_diff(&json!({"a": null}), &json!({"a": null}), ""),
+        None
     );
 }

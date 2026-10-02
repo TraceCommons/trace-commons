@@ -31,8 +31,8 @@
         ]
       },
       "model_calls": {
-        "to": "unknown",
-        "basis": "unknown"
+        "to": "openai",
+        "basis": "tool_default"
       }
     },
     {
