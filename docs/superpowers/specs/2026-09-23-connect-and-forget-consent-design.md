@@ -1,6 +1,7 @@
 # Connect-and-Forget Contribution Consent — Design
 
-Date: 2026-09-23 (rev 8, 2026-09-25; Flow 3 amended 2026-09-27)
+Date: 2026-09-23 (rev 8, 2026-09-25; Flow 3 amended 2026-09-27; Missions
+added 2026-10-01, amended 2026-10-02)
 Status: draft for review
 Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
 Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
@@ -912,6 +913,17 @@ contributed, and no sentence covers that.
 > badges, and missions matched to vendor requests from what a contributor
 > works on. Those mechanics are still open. These rules are not, and every
 > shell and server change for Missions must meet them.
+>
+> **These are contribution missions, a new concept.** They are not the
+> published mission packages already on main (`GET /v1/missions`,
+> `mission_catalog.rs`, `mission_attempt.rs`, and the operator runbooks
+> `docs/operator/mission-packages.md` and
+> `docs/operator/mission-insight-rewards.md`). Those are skill-evaluation
+> tasks: an issuer submits evidence, an independent reviewer accepts it, and
+> they pay fixed units through the reward ledger. A contribution mission is
+> completed by contributing sessions (M2). The one pattern the two share is
+> an anonymous catalogue read that is the same for every contributor (M1).
+> Whether contribution missions reuse that catalogue endpoint is a mechanic.
 
 ### M1. Matching stays on this Mac
 
@@ -924,16 +936,20 @@ folders. **That matching runs only on the device.**
   record leaves the Mac because of matching.
 - A catalogue request carries no per-contributor matching input. It is the
   same request for every contributor of the commons.
-- Matching may read sessions in folders that are not armed and not shared.
-  That is allowed only because nothing from the read leaves the device.
+- Matching reads only sessions from tools the contributor has left on, in
+  folders not set to `Never`. A folder set to `Never` and a tool switched off
+  are not read for matching, even though nothing from the read would leave
+  the device. Folders that are not armed and not shared may be read, on that
+  same condition that nothing leaves the device.
 
 ### M2. A mission sends nothing by itself
 
 Accepting, starting or completing a mission **never arms a folder, never
 approves a session and never widens a scope**. A session counts toward a
-mission only when it is contributed through the existing paths: Ask me, an
-armed folder, or the review. The consent and holds it went through are the
-ones it would have gone through anyway.
+mission only when it is contributed through one of the existing paths in
+"The three paths": Flow 1 (automatic from the grant), Flow 2 (the
+contributor's per-folder choice), or Flow 3 (earned allowance). The consent
+and holds it went through are the ones it would have gone through anyway.
 
 - A mission may *suggest* arming or reviewing. The suggestion is an offer
   with the usual disclosure, never a default.
@@ -941,15 +957,26 @@ ones it would have gone through anyway.
   server already has. It is never worked out from a separate report of local
   activity.
 
-### M3. Mission credit is pending credit
+### M3. Mission credit is projected, then pending, never earned early
 
-A mission bonus, level multiplier or streak is shown as **pending credit**,
-in `credit_points_pending`. It follows the same rule as all credit: pending
-until the commons settles, never "earned" before then. A shell may show
-what a mission is worth only as pending, with the condition attached (for
-example, "+20 pending credit when the commons accepts it"). Standing and
-ranking ("Top 8%") show only settled or pending credit already recorded,
-never a projection.
+What a mission is worth (a bonus, a level step or a streak) may be shown
+before the work is done, as **projected credit**. The label says so and
+attaches the condition, for example "+20 projected, if the commons accepts
+it". Projected credit is never called earned or pending, and never shown in
+the same place or style as settled credit.
+
+Once the server records a mission bonus it is pending, under the same rule
+as all credit: pending until the commons settles, never "earned" before
+then. Which ledger records it is a mechanic (see "Open"). A per-submission
+field such as `credit_points_pending` cannot hold a streak bonus, because a
+streak has no single submission to sit on.
+
+Standing and ranking ("Top 8%") may be computed from pending and projected
+credit, and say that they are.
+
+> Owner ruling 2026-10-02 (on #1174): projected mission credit is allowed
+> when it is clearly labelled, and rankings may use pending credit. This
+> reverses the "projected credit is off-limits" entry in #1146's Gaps.
 
 ### M4. The disclosure says so
 
@@ -957,10 +984,12 @@ The first time Missions is opened, and in Settings, the core's copy states
 three things:
 - matching happens on this Mac;
 - nothing is sent because of a mission;
-- mission credit is pending.
+- a mission's credit is projected until the commons records it, then
+  pending until it settles.
 
 Like every consent string, this copy lives in Rust (`consent_copy.rs`) and
-is pinned by the shell copy tests.
+is pinned by the shell copy tests. Until it is approved, it is marked
+**DRAFT, NEEDS APPROVAL** there.
 
 ## Open
 
@@ -997,8 +1026,10 @@ approving").
   migration step (R6). What is open is the wording and which PR carries each
   shell's notice.
 - **Missions mechanics.** One mission a day, or missions generated from the
-  kind of work. The bonus factor, level thresholds and badge set. Everything
-  under "Missions" M1-M4 is settled; the mechanics are not.
+  kind of work. The bonus factor, level thresholds and badge set. Which
+  ledger records mission credit: the existing reward ledger, or a new one.
+  Whether the catalogue reuses `GET /v1/missions`. The rules in M1-M4 are
+  settled; the mechanics are not.
 - **Legal posture**, unchanged: a one-time grant is a different consent basis,
   and review established that withdrawing it is currently much harder than
   giving it.
