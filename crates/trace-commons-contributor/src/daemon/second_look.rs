@@ -194,8 +194,11 @@ pub fn second_look_reasons(scrub: Scrub, subagents_dropped: u32) -> Vec<&'static
 
 /// The fields every surface publishes, inserted into a JSON object:
 /// `scrub` (always), `marks`, `content_marks` and `unsure_spans` (only when
-/// scrubbed -- ABSENT, never `0` or `null`, before) and `second_look`
-/// (always, possibly empty).
+/// scrubbed -- ABSENT, never `0` or `null`, before), `second_look` (always,
+/// possibly empty) and `second_look_lines` (R6/R7, #1173; **DRAFT, NEEDS
+/// APPROVAL**, since `preview_copy::second_look_line` is itself draft):
+/// `second_look`'s reasons, in the same order, each turned into the
+/// sentence a person reads for it.
 ///
 /// One writer, so `entry_value` and the preview summaries cannot publish the
 /// state under two spellings.
@@ -215,10 +218,13 @@ pub fn insert_fields(value: &mut serde_json::Value, scrub: Scrub, subagents_drop
             serde_json::Value::from(counts.unsure_spans),
         );
     }
-    object.insert(
-        "second_look".into(),
-        serde_json::Value::from(second_look_reasons(scrub, subagents_dropped)),
-    );
+    let reasons = second_look_reasons(scrub, subagents_dropped);
+    let lines: Vec<&'static str> = reasons
+        .iter()
+        .filter_map(|reason| crate::preview_copy::second_look_line(reason))
+        .collect();
+    object.insert("second_look".into(), serde_json::Value::from(reasons));
+    object.insert("second_look_lines".into(), serde_json::Value::from(lines));
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +455,40 @@ mod tests {
         assert_eq!(clean["scrub"], SCRUB_SCRUBBED);
         assert_eq!(clean["marks"], 0);
         assert_eq!(clean["second_look"][0], REASON_NOTHING_MATCHED);
+    }
+
+    /// R6/R7 (#1173): `second_look_lines` carries the sentence for each
+    /// `second_look` reason, in the same order, wherever a queue entry or a
+    /// card summary already carries the reasons themselves -- `entry_value`
+    /// and the preview/card summaries all go through this one writer.
+    #[test]
+    fn insert_fields_carries_a_line_per_second_look_reason_in_order() {
+        use crate::preview_copy::second_look_line;
+
+        let mut everything = serde_json::json!({});
+        insert_fields(&mut everything, counts(0, 0, 2), 1);
+        assert_eq!(
+            everything["second_look"],
+            serde_json::json!(SECOND_LOOK_REASONS)
+        );
+        let lines: Vec<&str> = everything["second_look_lines"]
+            .as_array()
+            .expect("second_look_lines is an array")
+            .iter()
+            .map(|v| v.as_str().expect("each line is a string"))
+            .collect();
+        let expected: Vec<&str> = SECOND_LOOK_REASONS
+            .iter()
+            .map(|reason| second_look_line(reason).expect("every reason has a line"))
+            .collect();
+        assert_eq!(lines, expected, "lines must line up with reasons, in order");
+
+        // An all-clear scrub has no reasons, and so no lines either -- never
+        // a placeholder sentence for a condition that is not present.
+        let mut clean = serde_json::json!({});
+        insert_fields(&mut clean, counts(7, 7, 0), 0);
+        assert!(clean["second_look"].as_array().unwrap().is_empty());
+        assert!(clean["second_look_lines"].as_array().unwrap().is_empty());
     }
 
     #[test]

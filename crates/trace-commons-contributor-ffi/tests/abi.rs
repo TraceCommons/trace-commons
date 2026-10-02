@@ -5242,6 +5242,30 @@ fn the_health_copy_crosses_the_abi_core_down_and_per_label() {
 }
 
 #[test]
+fn the_second_look_line_crosses_the_abi() {
+    use trace_commons_contributor::daemon::second_look::{
+        REASON_LOOKS_UNSURE, REASON_NOTHING_MATCHED, REASON_TRIMMED_TO_FIT,
+    };
+    use trace_commons_contributor::preview_copy::second_look_line;
+    use trace_commons_contributor_ffi::tc_second_look_line_text;
+
+    for reason in [
+        REASON_NOTHING_MATCHED,
+        REASON_LOOKS_UNSURE,
+        REASON_TRIMMED_TO_FIT,
+    ] {
+        let c = cstr_str(reason);
+        assert_eq!(
+            take_owned(unsafe { tc_second_look_line_text(c.as_ptr()) }),
+            second_look_line(reason).unwrap()
+        );
+    }
+    let unknown = cstr_str("not-a-real-reason");
+    assert!(unsafe { tc_second_look_line_text(unknown.as_ptr()) }.is_null());
+    assert!(unsafe { tc_second_look_line_text(std::ptr::null()) }.is_null());
+}
+
+#[test]
 fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
     use trace_commons_contributor::consent_copy::automatic_contribution_copy;
     use trace_commons_contributor_ffi::tc_automatic_contribution_copy_json;

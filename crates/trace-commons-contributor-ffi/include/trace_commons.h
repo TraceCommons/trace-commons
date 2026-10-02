@@ -2390,6 +2390,15 @@ char*       tc_privacy_scan_copy_json(void);
  */
 char*       tc_health_copy_json(int32_t reachable, const char* label);
 
+/* The explanatory line under a second_look reason (R6/R7, #1173; DRAFT,
+ * NEEDS APPROVAL -- preview_copy::second_look_line is itself unapproved):
+ * why one scrubbed session waits for a person instead of moving on its own.
+ * reason is one of the fixed second_look labels (nothing-matched,
+ * looks-unsure, trimmed-to-fit). NULL for a NULL, non-UTF-8 or unrecognised
+ * reason, and on a caught panic.
+ */
+char*       tc_second_look_line_text(const char* reason);
+
 /*
  * Can this process reach the Cloud credential store?
  *

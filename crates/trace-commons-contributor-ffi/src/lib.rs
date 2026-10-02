@@ -5575,6 +5575,34 @@ pub unsafe extern "C" fn tc_health_copy_json(reachable: i32, label: *const c_cha
     })
 }
 
+/// The explanatory line under a `second_look` reason (R6/R7, #1173;
+/// **DRAFT, NEEDS APPROVAL** -- `preview_copy::second_look_line` is itself
+/// unapproved): why one scrubbed session waits for a person instead of
+/// moving on its own.
+///
+/// `reason` is one of `preview_copy`'s fixed `second_look` labels
+/// (`nothing-matched`, `looks-unsure`, `trimmed-to-fit`). A NULL, non-UTF-8
+/// or unrecognised `reason` returns NULL: this build has no sentence for it,
+/// and a shell must not invent one or show the raw label.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL for an
+/// unrecognised reason, and on a caught panic.
+///
+/// # Safety
+/// `reason`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_second_look_line_text(reason: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(reason) = (unsafe { borrow_optional_str(reason) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        match trace_commons_contributor::preview_copy::second_look_line(reason) {
+            Some(line) => Ok(to_owned_cstring(line)),
+            None => Ok(std::ptr::null_mut()),
+        }
+    })
+}
+
 /// Can this process reach the Cloud credential store?
 ///
 /// Exists so a release pipeline can ask a *signed bundle* the question, which

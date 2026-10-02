@@ -1055,6 +1055,16 @@ in additive fields on every queue entry (`list_pending`, `snapshot`, the
 | `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
 | `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
 | `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
+| `second_look_lines` | always, possibly empty (R6/R7, #1173; **DRAFT, NEEDS APPROVAL**) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
+
+`second_look_lines` exists so a card or the review sheet can render the
+explanation without separately asking `tc_second_look_line_text` for each
+reason; it is the same table, inlined. It is exactly as long as
+`second_look` and lines up with it index for index -- never reordered,
+never deduplicated. **DRAFT, NEEDS APPROVAL** because the sentences it
+quotes (`preview_copy::second_look_line`) are themselves unapproved spec
+wording; a client that renders it should expect the words, not the
+presence or absence of the field, to still change.
 
 The reasons:
 
