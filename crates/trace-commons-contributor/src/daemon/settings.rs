@@ -1526,6 +1526,73 @@ fn parse_optional_root(
     }
 }
 
+/// Refusal for an `ironwire` `Watch` port of zero. Shared by every caller
+/// that validates a routing port: `set_settings`'s own `ironwire` field
+/// (through [`parse_ironwire_declaration`]) and the Tauri shell's
+/// `configure_routing`/`probe_routing`/`probe_routed_tools` commands. Before
+/// this existed, only Tauri's command layer carried this check -- a raw
+/// `set_settings` caller (another shell, or a future one) had no floor
+/// between it and a persisted port of zero.
+pub const ERR_ROUTING_PORT_INVALID: &str = "routing-port-invalid";
+/// Refusal for a `token_dir` that is not an absolute path. A relative path
+/// would be resolved against whatever directory happens to be the reading
+/// process' current one, which a contributor typing a path into a settings
+/// field has no way to predict or control.
+pub const ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE: &str = "routing-token-dir-must-be-absolute";
+
+/// A routing port: non-zero. Port 0 is the ask-the-kernel sentinel, never a
+/// port a proxy actually listens on.
+pub fn validate_routing_port(port: u16) -> std::result::Result<(), &'static str> {
+    if port == 0 {
+        Err(ERR_ROUTING_PORT_INVALID)
+    } else {
+        Ok(())
+    }
+}
+
+/// `token_dir` as a shell collects it: trimmed, with an absent or
+/// empty-after-trim value collapsing to "not declared" (falls back to the
+/// discovery pointer, then `IRONWIRE_HOME`, then the conventional home --
+/// see [`ironwire_token_path`]), and anything else required to be absolute.
+pub fn validate_routing_token_dir(
+    token_dir: Option<&str>,
+) -> std::result::Result<Option<String>, &'static str> {
+    let Some(token_dir) = token_dir else {
+        return Ok(None);
+    };
+    let token_dir = token_dir.trim();
+    if token_dir.is_empty() {
+        return Ok(None);
+    }
+    if !std::path::Path::new(token_dir).is_absolute() {
+        return Err(ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE);
+    }
+    Ok(Some(token_dir.to_owned()))
+}
+
+/// `IronWireDeclaration::Watch`'s port must be non-zero, and its `token_dir`
+/// -- when present and non-empty -- must be absolute. An empty `token_dir`
+/// is normalized to `None`, the same "not declared" state a shell's own
+/// collection already collapses it to (see [`validate_routing_token_dir`]).
+fn validate_ironwire_declaration(
+    declaration: IronWireDeclaration,
+) -> std::result::Result<IronWireDeclaration, &'static str> {
+    match declaration {
+        IronWireDeclaration::Watch { port, token_dir } => {
+            validate_routing_port(port)?;
+            let token_dir = match token_dir {
+                Some(dir) if dir.as_os_str().is_empty() => None,
+                Some(dir) if !dir.is_absolute() => {
+                    return Err(ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE);
+                }
+                other => other,
+            };
+            Ok(IronWireDeclaration::Watch { port, token_dir })
+        }
+        off @ IronWireDeclaration::Off => Ok(off),
+    }
+}
+
 /// `{"mode":"watch","port":8463}` or null to turn it off. `{"mode":"off"}`
 /// is also accepted since it round-trips `IronWireDeclaration::Off`, but null
 /// is the documented way to reach the same state over IPC. Never formats
@@ -1535,9 +1602,11 @@ fn parse_ironwire_declaration(
 ) -> std::result::Result<Option<IronWireDeclaration>, &'static str> {
     match value {
         serde_json::Value::Null => Ok(None),
-        serde_json::Value::Object(_) => serde_json::from_value(value.clone())
-            .map(Some)
-            .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
+        serde_json::Value::Object(_) => {
+            let declaration: IronWireDeclaration =
+                serde_json::from_value(value.clone()).map_err(|_| ERR_SETTINGS_INVALID_VALUE)?;
+            validate_ironwire_declaration(declaration).map(Some)
+        }
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
 }
@@ -1800,6 +1869,99 @@ mod tests {
                 port: 8463,
                 token_dir: None
             })
+        );
+    }
+
+    /// Port 0 used to deserialize fine through `set_settings` -- only
+    /// Tauri's `configure_routing` command refused it before the call ever
+    /// reached the daemon. A raw caller had no such floor. Port 0 is the
+    /// ask-the-kernel sentinel, never a port a proxy actually listens on.
+    #[test]
+    fn set_settings_refuses_a_routing_port_of_zero() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"ironwire": {"mode": "watch", "port": 0}}),
+            ),
+            Err(ERR_ROUTING_PORT_INVALID)
+        );
+        assert!(
+            s.ironwire.is_none(),
+            "a rejected declaration changes nothing"
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"ironwire": {"mode": "watch", "port": 1}}),
+            ),
+            Ok(true)
+        );
+    }
+
+    /// A relative `token_dir` used to persist fine through `set_settings`;
+    /// again, only Tauri's command layer refused it. A relative path would
+    /// be resolved against whatever directory the daemon happens to be
+    /// running from, which a contributor typing a path into a settings
+    /// field has no way to predict.
+    #[test]
+    fn set_settings_refuses_a_relative_routing_token_dir() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({
+                    "ironwire": {"mode": "watch", "port": 8463, "token_dir": "relative/dir"},
+                }),
+            ),
+            Err(ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE)
+        );
+        assert!(s.ironwire.is_none());
+    }
+
+    /// An empty `token_dir` collapses to "not declared", the same leniency
+    /// a shell's own collection already applies, rather than being refused
+    /// as a relative path.
+    #[test]
+    fn set_settings_treats_an_empty_token_dir_as_not_declared() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({
+                    "ironwire": {"mode": "watch", "port": 8463, "token_dir": ""},
+                }),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            s.ironwire,
+            Some(IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None,
+            })
+        );
+    }
+
+    /// [`validate_routing_token_dir`] is the exact function the Tauri shell
+    /// calls from `configure_routing`/`probe_routing`/`probe_routed_tools`;
+    /// pinned here against the behaviour that file used to implement
+    /// locally.
+    #[test]
+    fn validate_routing_token_dir_is_optional_but_never_relative() {
+        assert_eq!(validate_routing_token_dir(None).unwrap(), None);
+        assert_eq!(validate_routing_token_dir(Some("  ")).unwrap(), None);
+        let absolute = std::env::temp_dir()
+            .join("ironwire")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            validate_routing_token_dir(Some(&absolute)).unwrap(),
+            Some(absolute)
+        );
+        assert_eq!(
+            validate_routing_token_dir(Some(".ironwire")).unwrap_err(),
+            ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE
         );
     }
 

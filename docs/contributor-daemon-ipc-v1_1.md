@@ -2967,6 +2967,17 @@ without guessing or hard-coding a second copy: the C ABI's
 `tc_settings_ranges_json` returns them as one JSON object, so a shell can
 draw its controls' bounds from the same numbers this method enforces.
 
+`ironwire`'s `{"mode":"watch","port":P,"token_dir":D}` now validates `P` and
+`D` the same way `probe_routing` already did: `port` must be non-zero (`0` is
+the ask-the-kernel sentinel, never a port a proxy actually listens on,
+`bad_params` / `settings-invalid-value` -- more precisely
+`routing-port-invalid`), and `token_dir`, when present and non-empty, must be
+an absolute path (`routing-token-dir-must-be-absolute`); an empty `token_dir`
+is treated as absent. Before this, only the Tauri shell's own command layer
+refused these two shapes -- a raw `set_settings` caller (another shell, or a
+future one) had no such floor and could persist a declaration nothing would
+ever actually route through.
+
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user
 location); setting either here only takes effect from the daemon's *next*
