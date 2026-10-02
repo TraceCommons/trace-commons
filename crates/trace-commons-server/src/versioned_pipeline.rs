@@ -136,6 +136,18 @@ pub const PIPELINE_OPERATIONAL_ERROR_LABEL: &str = "minimal_policy_failed";
 pub const PIPELINE_ATTEMPTS_EXHAUSTED_LABEL: &str = "attempts_exhausted";
 pub const PIPELINE_BUNDLE_MISSING_LABEL: &str = "bundle_package_missing";
 pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable";
+/// `intervene_policy` accepts `suspend` and `resume`. `terminate` has a
+/// database state (V111) but no behavior: no specification says what happens
+/// to a run bound to a terminated policy (CMP-003), so it is refused and
+/// writes nothing.
+pub const PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL: &str =
+    "policy_intervention_not_supported";
+/// An unknown action, or an actor or reason that fails the operator-action
+/// rule (`validate_actor`).
+pub const PIPELINE_POLICY_INTERVENTION_INVALID_LABEL: &str = "policy_intervention_invalid";
+/// A `suspend` of a policy that is not runnable, or a `resume` of one that is.
+pub const PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL: &str =
+    "policy_intervention_no_transition";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
 /// A phase commit, or a receipt's final transaction, found no `staged`
 /// attempt row naming the object it is about to record (or the row names
@@ -695,6 +707,30 @@ pub(crate) fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+/// The rule for who an operator action is recorded under and why, shared by
+/// every operator action of the pipeline (a routing change in
+/// `versioned_pipeline_activation.rs`, a policy intervention here). The actor
+/// is the credential's `principal_ref`, already a hash-derived reference on
+/// `main`: 1 to 160 of `A-Za-z0-9_:.-`, the shape the tables check. The
+/// reason is a safe label. Either failing is a `Constraint` carrying
+/// `refusal_label`, which each caller chooses, so a refusal names the action
+/// that was refused. Nothing of the actor or the reason is in the error.
+pub(crate) fn validate_actor(
+    actor_principal_ref: &str,
+    reason_code: &str,
+    refusal_label: &str,
+) -> Result<(), DatabaseError> {
+    let actor_ok = !actor_principal_ref.is_empty()
+        && actor_principal_ref.len() <= 160
+        && actor_principal_ref
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'.' | b'-'));
+    if !actor_ok || !crate::versioned_pipeline_qualification::is_safe_label(reason_code) {
+        return Err(DatabaseError::Constraint(refusal_label.to_string()));
+    }
+    Ok(())
+}
+
 fn enum_string<T: Serialize>(value: &T) -> anyhow::Result<String> {
     serde_json::to_value(value)?
         .as_str()
@@ -945,6 +981,58 @@ pub struct PhaseOutcomeRecord {
     pub decision: serde_json::Value,
     pub evidence: serde_json::Value,
     pub evaluation: serde_json::Value,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Why a bound policy is or is not runnable (V111). `runnable` (V93) stays
+/// the flag every reader uses; the database keeps the two equal
+/// (`runnable = (operational_status = 'runnable')`). `Terminated` is a state
+/// the schema holds and no code writes: `terminate` is refused
+/// (`PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyOperationalStatus {
+    Runnable,
+    Suspended,
+    Terminated,
+}
+
+impl PolicyOperationalStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Runnable => "runnable",
+            Self::Suspended => "suspended",
+            Self::Terminated => "terminated",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self, DatabaseError> {
+        match value {
+            "runnable" => Ok(Self::Runnable),
+            "suspended" => Ok(Self::Suspended),
+            "terminated" => Ok(Self::Terminated),
+            _ => Err(DatabaseError::Serialization(
+                "unknown policy operational status".to_string(),
+            )),
+        }
+    }
+}
+
+/// One operator intervention on a bound policy, as recorded: hash-only and
+/// label-only. The actor is the credential's `principal_ref`, the reason a
+/// safe label, and `evidence_hash` the SHA-256 of the intervention's fields.
+/// The tenant is the caller's, never part of the record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelinePolicyInterventionRecord {
+    pub intervention_id: Uuid,
+    pub bundle_id: String,
+    pub phase: Phase,
+    pub action: String,
+    pub actor_principal_ref: String,
+    pub reason_code: String,
+    pub previous_status: PolicyOperationalStatus,
+    pub resulting_status: PolicyOperationalStatus,
+    pub evidence_hash: String,
     pub recorded_at: DateTime<Utc>,
 }
 
@@ -1216,6 +1304,11 @@ enum ReceiptCommit {
     /// is due (a sweep that failed may have deleted its object), so it
     /// cannot commit.
     StagingMissing,
+    /// The Admission policy of the run's bound bundle was suspended after the
+    /// staging transaction read it (GRD-004). Nothing was written, so the
+    /// attempt's object and row are discarded, and the receipt is the error
+    /// `bundle_policy_not_runnable`, as when the staging transaction finds it.
+    PolicyNotRunnable,
 }
 
 /// The run half of index-rebuild eligibility, over `pipeline_runs p`:
@@ -1483,6 +1576,175 @@ impl PgPipelineStore {
             .unwrap_or(false);
         tx.commit().await?;
         Ok(runnable)
+    }
+
+    /// An operator suspends or resumes one policy of a bound bundle (port
+    /// `ef97a459` lines 678 to 829, with `terminate` refused). The status row
+    /// is the only row it locks (`FOR UPDATE`), so it takes no lock a phase
+    /// commit takes before the policy row, and it waits for every commit that
+    /// holds the row `FOR SHARE` (`lock_runnable_policy`): a commit that
+    /// passed its guard lands before the suspension returns, and one that
+    /// starts after it is refused.
+    ///
+    /// Only `suspend` of a runnable policy and `resume` of a suspended one
+    /// are transitions. `terminate` is `policy_intervention_not_supported`,
+    /// any other action, and an actor or reason that fails `validate_actor`,
+    /// is `policy_intervention_invalid`, and a transition that does not
+    /// exist is `policy_intervention_no_transition`; each refusal, and a
+    /// bundle the tenant has no policy row for (`NotFound`), writes nothing.
+    ///
+    /// A suspension keeps `runnable` and `operational_status` equal (V111's
+    /// check) and puts the reason in `error_label`, which a resume clears.
+    /// It changes no run and no bundle: a run bound to the policy waits in
+    /// `retry`, uncharged, and continues under the same bundle after the
+    /// resume. The record's `recorded_at` is the database clock at the write,
+    /// not the transaction's start, so a resume that waited for a suspension
+    /// is never listed before it.
+    pub async fn intervene_policy(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+        phase: Phase,
+        action: &str,
+        actor_principal_ref: &str,
+        reason_code: &str,
+    ) -> Result<PipelinePolicyInterventionRecord, DatabaseError> {
+        validate_actor(
+            actor_principal_ref,
+            reason_code,
+            PIPELINE_POLICY_INTERVENTION_INVALID_LABEL,
+        )?;
+        let resulting = match action {
+            "suspend" => PolicyOperationalStatus::Suspended,
+            "resume" => PolicyOperationalStatus::Runnable,
+            "terminate" => {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL.to_string(),
+                ));
+            }
+            _ => {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_POLICY_INTERVENTION_INVALID_LABEL.to_string(),
+                ));
+            }
+        };
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT operational_status
+                   FROM pipeline_bundle_policy_status
+                  WHERE tenant_id = $1 AND bundle_id = $2 AND phase = $3
+                  FOR UPDATE",
+                &[&tenant_id, &bundle_id, &phase_as_db(Some(phase))],
+            )
+            .await?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "pipeline_bundle_policy".to_string(),
+                id: format!("{bundle_id}:{}", phase_as_db(Some(phase))),
+            })?;
+        let previous =
+            PolicyOperationalStatus::from_db(row.get::<_, String>("operational_status").as_str())?;
+        if !matches!(
+            (previous, resulting),
+            (
+                PolicyOperationalStatus::Runnable,
+                PolicyOperationalStatus::Suspended
+            ) | (
+                PolicyOperationalStatus::Suspended,
+                PolicyOperationalStatus::Runnable
+            )
+        ) {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL.to_string(),
+            ));
+        }
+        let evidence_hash = sha256_prefixed(
+            format!(
+                "trace-commons-policy-intervention\0{tenant_id}\0{bundle_id}\0{}\0{action}\0{actor_principal_ref}\0{reason_code}\0{}\0{}",
+                phase_as_db(Some(phase)),
+                previous.as_db(),
+                resulting.as_db()
+            )
+            .as_bytes(),
+        );
+        let runnable = resulting == PolicyOperationalStatus::Runnable;
+        let error_label = (!runnable).then_some(reason_code);
+        tx.execute(
+            "UPDATE pipeline_bundle_policy_status
+                SET runnable = $4, operational_status = $5, error_label = $6,
+                    updated_at = clock_timestamp()
+              WHERE tenant_id = $1 AND bundle_id = $2 AND phase = $3",
+            &[
+                &tenant_id,
+                &bundle_id,
+                &phase_as_db(Some(phase)),
+                &runnable,
+                &resulting.as_db(),
+                &error_label,
+            ],
+        )
+        .await?;
+        let intervention_id = Uuid::new_v4();
+        let recorded_at: DateTime<Utc> = tx
+            .query_one(
+                "INSERT INTO pipeline_policy_interventions (
+                    tenant_id, intervention_id, bundle_id, phase, action,
+                    actor_principal_ref, reason_code, previous_status,
+                    resulting_status, evidence_hash, recorded_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, clock_timestamp())
+                 RETURNING recorded_at",
+                &[
+                    &tenant_id,
+                    &intervention_id,
+                    &bundle_id,
+                    &phase_as_db(Some(phase)),
+                    &action,
+                    &actor_principal_ref,
+                    &reason_code,
+                    &previous.as_db(),
+                    &resulting.as_db(),
+                    &evidence_hash,
+                ],
+            )
+            .await?
+            .get("recorded_at");
+        tx.commit().await?;
+        Ok(PipelinePolicyInterventionRecord {
+            intervention_id,
+            bundle_id: bundle_id.to_string(),
+            phase,
+            action: action.to_string(),
+            actor_principal_ref: actor_principal_ref.to_string(),
+            reason_code: reason_code.to_string(),
+            previous_status: previous,
+            resulting_status: resulting,
+            evidence_hash,
+            recorded_at,
+        })
+    }
+
+    /// The interventions on `bundle_id`'s policies, oldest first.
+    pub async fn list_policy_interventions(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+    ) -> Result<Vec<PipelinePolicyInterventionRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT intervention_id, bundle_id, phase, action, actor_principal_ref,
+                        reason_code, previous_status, resulting_status, evidence_hash,
+                        recorded_at
+                   FROM pipeline_policy_interventions
+                  WHERE tenant_id = $1 AND bundle_id = $2
+                  ORDER BY recorded_at ASC, intervention_id ASC",
+                &[&tenant_id, &bundle_id],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter().map(policy_intervention_from_row).collect()
     }
 
     pub async fn get_run(
@@ -1857,6 +2119,12 @@ impl PgPipelineStore {
     /// commit (`PIPELINE_SUBMISSION_INOPERABLE_LABEL`) rather than resurrect
     /// the trace: no object ref, no derived record, no status change, no
     /// outcome, no run update.
+    ///
+    /// The same holds for the Review policy (GRD-004): the commit locks its
+    /// status row `FOR SHARE` after those two guards and refuses with
+    /// `PIPELINE_POLICY_NOT_RUNNABLE_LABEL`, writing nothing, when an operator
+    /// suspended the policy while the attempt ran. The worker releases the run
+    /// uncharged, and it commits after the resume.
     pub async fn commit_review(
         &self,
         run: &PipelineRunRecord,
@@ -1873,7 +2141,7 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         // Lock order: the run row (`ensure_current_lease`), then the
         // submission row (below) -- held the same way everywhere both are
-        // touched.
+        // touched -- then the policy row (`lock_runnable_policy`).
         ensure_current_lease(&tx, run, lease_token).await?;
 
         // Fix round 1, finding I2 / Ruling T3-8: this re-check used to
@@ -1887,6 +2155,16 @@ impl PgPipelineStore {
         if !review_submission_is_operable(&tx, &run.tenant_id, run.submission_id).await? {
             return Err(DatabaseError::Constraint(
                 PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+        // GRD-004: the Review policy must still be runnable, and stays so
+        // until this commit ends (`lock_runnable_policy`, the last lock before
+        // the first write). A policy suspended while this attempt ran refuses
+        // the commit as the checks above do: no object ref, no derived record,
+        // no status change, no outcome, no run update.
+        if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Review).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string(),
             ));
         }
 
@@ -2546,6 +2824,11 @@ impl PgPipelineStore {
     /// refuses the whole commit with `PIPELINE_SUBMISSION_INOPERABLE_LABEL`:
     /// no outcome, no settlement rows, no run update.
     ///
+    /// The Score policy gets the same guard (GRD-004): after the submission
+    /// guard, the commit locks the policy's status row `FOR SHARE` and refuses
+    /// with `PIPELINE_POLICY_NOT_RUNNABLE_LABEL`, writing nothing, when the
+    /// policy is no longer runnable.
+    ///
     /// The commit resets `attempt_count` to 0, so Settle has the run's whole
     /// `max_attempts` budget (multi-lens review L2-1; see `commit_review`).
     #[allow(clippy::too_many_arguments)]
@@ -2603,6 +2886,15 @@ impl PgPipelineStore {
             // Dropping the transaction rolls it back: nothing was written.
             return Err(DatabaseError::Constraint(
                 PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+        // GRD-004: the Score policy must still be runnable, and stays so
+        // until this commit ends. The policy row comes after the run row, the
+        // submission row, and (for a compatibility Score) the tenant's Score
+        // lock, and before the first write; a refusal writes nothing.
+        if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Score).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string(),
             ));
         }
 
@@ -3958,6 +4250,14 @@ impl PgPipelineStore {
     /// `persist_settle_selection`; this call sets it again on the same row
     /// as part of the same transition guard the other `commit_*` methods
     /// use, together with the outcome row and the terminal state change.
+    ///
+    /// After its lease check the commit locks the Settle policy's status row
+    /// `FOR SHARE` (GRD-004) and refuses with
+    /// `PIPELINE_POLICY_NOT_RUNNABLE_LABEL`, writing nothing, when the policy
+    /// is no longer runnable. The row is held for this short transaction
+    /// only, not over the Settle phase's index write or settlement legs, which
+    /// run before it: a suspension waits for a commit that is already in
+    /// flight and takes effect on the next one.
     pub async fn commit_settle(
         &self,
         run: &PipelineRunRecord,
@@ -3972,7 +4272,17 @@ impl PgPipelineStore {
         let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        // Lock order: the run row, then the policy row.
         ensure_current_lease(&tx, run, lease_token).await?;
+        // GRD-004: the Settle policy must still be runnable, and stays so
+        // until this commit ends. A refusal writes nothing; the legs the
+        // attempt completed stay complete, and the run's next attempt, after
+        // the policy resumes, commits from them.
+        if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Settle).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string(),
+            ));
+        }
         insert_outcome(
             &tx,
             &run.tenant_id,
@@ -5587,6 +5897,33 @@ async fn ensure_current_lease(
     Ok(())
 }
 
+/// Whether the policy of `phase` in `bundle_id` is runnable, with its status
+/// row locked `FOR SHARE` for the rest of `tx`: an intervention waits for
+/// this commit, and a commit that starts after a suspension is refused
+/// (GRD-004). A bundle with no status row is not runnable, as at the start of
+/// a phase (`policy_is_runnable`).
+///
+/// Every phase commit calls this once, after its own lease, submission, and
+/// routing guards and before its first write, so the policy row is the last
+/// lock before the writes. An intervention takes only this row, so no
+/// transaction that holds it waits for a lock an intervention holds.
+async fn lock_runnable_policy(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    bundle_id: &str,
+    phase: Phase,
+) -> Result<bool, DatabaseError> {
+    Ok(tx
+        .query_opt(
+            "SELECT runnable FROM pipeline_bundle_policy_status
+              WHERE tenant_id = $1 AND bundle_id = $2 AND phase = $3
+              FOR SHARE",
+            &[&tenant_id, &bundle_id, &phase_as_db(Some(phase))],
+        )
+        .await?
+        .is_some_and(|row| row.get::<_, bool>("runnable")))
+}
+
 /// The one Review-phase submission-operability predicate: neither pre-review
 /// status, nor revoked, purged, withdrawn, or expired, and no separate
 /// `trace_withdrawals` tombstone. `commit_review` calls this directly
@@ -6155,6 +6492,29 @@ fn pipeline_settlement_from_row(row: &Row) -> Result<PipelineSettlementRecord, D
         attempt_count,
         last_error_label: row.get("last_error_label"),
         dispatched_at: row.get("dispatched_at"),
+    })
+}
+
+fn policy_intervention_from_row(
+    row: &Row,
+) -> Result<PipelinePolicyInterventionRecord, DatabaseError> {
+    Ok(PipelinePolicyInterventionRecord {
+        intervention_id: row.get("intervention_id"),
+        bundle_id: row.get("bundle_id"),
+        phase: phase_from_db(row.get("phase"))?.ok_or_else(|| {
+            DatabaseError::Serialization("intervention phase cannot be none".to_string())
+        })?,
+        action: row.get("action"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        reason_code: row.get("reason_code"),
+        previous_status: PolicyOperationalStatus::from_db(
+            row.get::<_, String>("previous_status").as_str(),
+        )?,
+        resulting_status: PolicyOperationalStatus::from_db(
+            row.get::<_, String>("resulting_status").as_str(),
+        )?,
+        evidence_hash: row.get("evidence_hash"),
+        recorded_at: row.get("recorded_at"),
     })
 }
 
@@ -7401,6 +7761,43 @@ impl PipelineService {
         Ok(())
     }
 
+    /// `PgPipelineStore::intervene_policy`: suspend or resume one policy of a
+    /// bound bundle.
+    pub async fn intervene_policy(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+        phase: Phase,
+        action: &str,
+        actor_principal_ref: &str,
+        reason_code: &str,
+    ) -> anyhow::Result<PipelinePolicyInterventionRecord> {
+        Ok(self
+            .store
+            .intervene_policy(
+                tenant_id,
+                bundle_id,
+                phase,
+                action,
+                actor_principal_ref,
+                reason_code,
+            )
+            .await?)
+    }
+
+    /// `PgPipelineStore::list_policy_interventions`: the interventions on a
+    /// bundle's policies, oldest first.
+    pub async fn list_policy_interventions(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+    ) -> anyhow::Result<Vec<PipelinePolicyInterventionRecord>> {
+        Ok(self
+            .store
+            .list_policy_interventions(tenant_id, bundle_id)
+            .await?)
+    }
+
     /// The startup checks of every bundle a worker may run for `tenant_id`
     /// (multi-lens review L5-2, Zaki review 3, Z3-2): its active bundle and
     /// the bundle of each run in flight (`runnable_bundle_ids`), which a
@@ -7993,6 +8390,10 @@ impl PipelineService {
                 self.discard_receipt_attempt(&attempt).await;
                 Err(anyhow::anyhow!(PIPELINE_RECEIPT_STAGING_MISSING_LABEL))
             }
+            ReceiptCommit::PolicyNotRunnable => {
+                self.discard_receipt_attempt(&attempt).await;
+                Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL))
+            }
         }
     }
 
@@ -8290,8 +8691,13 @@ impl PipelineService {
     /// `submit` discards the attempt's object and row. Then it re-checks the
     /// tombstones (one can arrive while the object is written), locks the
     /// attempt's row, which must still be `staged` and not due
-    /// (`lock_committable_receipt_artifact`), and inserts the records and
-    /// the row's move to `committed` together.
+    /// (`lock_committable_receipt_artifact`), takes the Admission policy row
+    /// of the bound bundle `FOR SHARE` and refuses when the policy is no
+    /// longer runnable (`ReceiptCommit::PolicyNotRunnable`: the policy can be
+    /// suspended while the object is written, and an intervention waits for
+    /// this transaction), and inserts the records and the row's move to
+    /// `committed` together. The locks, in order: the receipt lock, the
+    /// session row, the routing lock, the attempt's row, the policy row.
     ///
     /// Retention is derived on the server, as the legacy receipt derives it
     /// (`retention_policy_for_trace` over the envelope's allowed uses and
@@ -8387,6 +8793,17 @@ impl PipelineService {
         if !PgPipelineStore::lock_committable_receipt_artifact(&tx, attempt).await? {
             tx.commit().await?;
             return Ok(ReceiptCommit::StagingMissing);
+        }
+        // GRD-004: the Admission policy of the bundle the run is bound to must
+        // still be runnable, and stays so until this transaction ends. The
+        // staging transaction read the flag without a lock, and a suspension
+        // can land while the object is written. This is the last lock before
+        // the first write, after the receipt lock, the session row, the
+        // routing lock, and the attempt's row; an intervention takes only the
+        // policy row. A refusal commits nothing.
+        if !lock_runnable_policy(&tx, tenant_id, &run.bundle_id, Phase::Admission).await? {
+            tx.commit().await?;
+            return Ok(ReceiptCommit::PolicyNotRunnable);
         }
 
         let retention_policy = retention_policy_for_trace(envelope);
@@ -9437,6 +9854,20 @@ impl PipelineService {
                         )
                         .await;
                 }
+                // GRD-004 / FR3: the phase's own commit found its bound policy
+                // no longer runnable -- an operator suspended it after the
+                // load-time check above passed. The commit wrote nothing, so
+                // this is the same uncharged suspension with backoff as a
+                // policy that was not runnable at load: the run keeps its
+                // bundle and continues under it after the resume.
+                if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL {
+                    return self
+                        .mark_transient_retry_or_record_lease_expired(
+                            &run,
+                            PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+                        )
+                        .await;
+                }
                 // D9 / FR3: a typed `PolicyError` raised while a
                 // phase runs is budgeted by kind, ahead of the P2 string
                 // allowlist below -- a transient failure (an outage or a
@@ -9906,7 +10337,8 @@ impl PipelineService {
                         return Err(match error {
                             DatabaseError::Constraint(label)
                                 if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
-                                    || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL =>
+                                    || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL
+                                    || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
                             {
                                 anyhow::anyhow!(label)
                             }
@@ -10339,7 +10771,8 @@ impl PipelineService {
                     DatabaseError::Constraint(label)
                         if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL
                             || label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
-                            || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL =>
+                            || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL
+                            || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
                     {
                         anyhow::anyhow!(label)
                     }
@@ -11227,10 +11660,25 @@ impl PipelineService {
             evaluation,
         };
         let outcome = StoredPhaseResult::from_result(Phase::Settle, &result)?;
-        let updated = self
+        let updated = match self
             .store
             .commit_settle(run, outcome, final_membership)
-            .await?;
+            .await
+        {
+            Ok(updated) => updated,
+            // GRD-004: the Settle policy was suspended while the phase ran.
+            // The store's `Display` prefixes every `Constraint` error, which
+            // would not match the label `process_claimed_run` classifies
+            // verbatim (as for Review and Score above), so it is re-raised
+            // bare. The commit wrote nothing; the legs this attempt completed
+            // stay complete, and the retry after the resume commits from them.
+            Err(DatabaseError::Constraint(label))
+                if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+            {
+                return Err(anyhow::anyhow!(label));
+            }
+            Err(error) => return Err(error.into()),
+        };
         self.inject_crash(PipelineCrashPoint::AfterSettleCommit)?;
         Ok(updated)
     }
@@ -11922,6 +12370,13 @@ impl PipelineService {
     ///   is something to submit, and the locked work runs on the lock's own
     ///   connection, never on a second one (the pool-size-one rule). Every
     ///   path to `NearPayoutAdapter::submit` runs under this lock.
+    /// - Before each run's dispatch, a confirmation lookup as much as a
+    ///   submit, the pass reads the Settle policy of the run's own bundle
+    ///   (GRD-004; `process_payout_on`). A run whose policy is not runnable
+    ///   is skipped for this pass: nothing is called, written, or charged,
+    ///   and it is not counted. The read is made on the connection the pass
+    ///   holds, in the transaction that reads the run, so the guard takes no
+    ///   second connection (the pool-size-one rule).
     ///
     /// Ruling T10-5: an error in one run's payout -- a missing batch, a
     /// call that cannot be built, confirmation evidence that is not
@@ -12006,7 +12461,7 @@ impl PipelineService {
         };
         let result = match lock.client_mut() {
             Some(client) => {
-                self.process_payout_on(client, tenant_id, run_id, true, true)
+                self.process_payout_on(client, tenant_id, run_id, true, true, false)
                     .await
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
@@ -12043,7 +12498,7 @@ impl PipelineService {
         let mut processed = 0;
         for &run_id in run_ids {
             match self
-                .process_payout_on(client, tenant_id, run_id, may_submit, false)
+                .process_payout_on(client, tenant_id, run_id, may_submit, false, true)
                 .await
             {
                 Ok(run) => {
@@ -12075,6 +12530,18 @@ impl PipelineService {
 
     /// `process_payout`'s body, on `client`. `may_submit` as in
     /// `pay_out_runs_on`; `retry_failed` as in `dispatch_near_settlements`.
+    ///
+    /// `guard_settle_policy` is true for the payout pass only (GRD-004): the
+    /// NEAR worker repeats its policy guard before dispatch, so a run whose
+    /// own bundle's Settle policy is not runnable is skipped for this pass --
+    /// no adapter call, no outbox write, no payout state change, no charge --
+    /// and comes back as `None`, which the pass does not count. The pass goes
+    /// on to its other runs. The policy is read in the transaction that reads
+    /// the run, on the connection the pass already holds, and no lock is kept
+    /// over the dispatch: a suspension that lands after the read takes effect
+    /// at the next pass, and a guard does not claim to retract an operation
+    /// the adapter already accepted. A direct `process_payout` is an
+    /// operator's explicit call for one run and does not read it.
     async fn process_payout_on(
         &self,
         client: &mut deadpool_postgres::Client,
@@ -12082,6 +12549,7 @@ impl PipelineService {
         run_id: Uuid,
         may_submit: bool,
         retry_failed: bool,
+        guard_settle_policy: bool,
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
         let tx = PgPipelineStore::tenant_transaction(client, tenant_id).await?;
         let row = tx
@@ -12090,10 +12558,25 @@ impl PipelineService {
                 &[&tenant_id, &run_id],
             )
             .await?;
-        tx.commit().await?;
         let Some(run) = row.as_ref().map(pipeline_run_from_row).transpose()? else {
+            tx.commit().await?;
             return Ok(None);
         };
+        if guard_settle_policy {
+            let runnable = tx
+                .query_opt(
+                    "SELECT runnable FROM pipeline_bundle_policy_status
+                      WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'settle'",
+                    &[&tenant_id, &run.bundle_id],
+                )
+                .await?
+                .is_some_and(|row| row.get::<_, bool>("runnable"));
+            if !runnable {
+                tx.commit().await?;
+                return Ok(None);
+            }
+        }
+        tx.commit().await?;
         // Zaki review 1, round 2, finding 16: a leg Settle completed and
         // ledgered is final, whatever the run did afterwards -- a run that
         // then failed for good (attempts exhausted, or a crash before Settle's
@@ -13759,5 +14242,36 @@ mod tests {
         assert!(is_transient_database_error(&bare.into()));
         let wrapped: anyhow::Error = DatabaseError::Postgres(refused().await).into();
         assert!(is_transient_database_error(&wrapped));
+    }
+
+    /// The operator-action rule is one function for every caller, and a
+    /// refusal carries the label its caller passed, never text of the actor
+    /// or the reason.
+    #[test]
+    fn the_operator_action_rule_refuses_with_the_callers_label() {
+        let actor = format!("operator_sha256:{}", "a".repeat(64));
+        assert!(validate_actor(&actor, "suspend_policy", "any_label").is_ok());
+        let too_long = "a".repeat(161);
+        for (actor, reason) in [
+            (actor.as_str(), "Bad Reason"),
+            (actor.as_str(), ""),
+            (actor.as_str(), "has space"),
+            ("", "suspend_policy"),
+            ("an actor with spaces", "suspend_policy"),
+            ("actor/with/slashes", "suspend_policy"),
+            (too_long.as_str(), "suspend_policy"),
+        ] {
+            for label in [
+                PIPELINE_POLICY_INTERVENTION_INVALID_LABEL,
+                "activation_actor_invalid",
+            ] {
+                let refused = validate_actor(actor, reason, label)
+                    .expect_err("an invalid actor or reason is refused");
+                assert!(
+                    matches!(&refused, DatabaseError::Constraint(text) if text == label),
+                    "actor {actor:?} with reason {reason:?} is refused under {label}: {refused:?}"
+                );
+            }
+        }
     }
 }

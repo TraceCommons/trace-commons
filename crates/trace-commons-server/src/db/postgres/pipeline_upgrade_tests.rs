@@ -85,7 +85,7 @@ async fn set_tenant(client: &Client, tenant: &str) {
         .expect("set migration test tenant");
 }
 
-const PIPELINE_TABLES: [&str; 18] = [
+const PIPELINE_TABLES: [&str; 19] = [
     "pipeline_runs",
     "phase_outcomes",
     "pipeline_bundle_packages",
@@ -104,10 +104,11 @@ const PIPELINE_TABLES: [&str; 18] = [
     "pipeline_tenant_routing",
     "pipeline_activation_events",
     "pipeline_receipt_ownership",
+    "pipeline_policy_interventions",
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95, V105 to V108, and V110 have run, as
+/// the pipeline tables once V92 to V95, V105 to V108, V110, and V111 have run, as
 /// `(table, privilege, columns)`; no columns means the whole table. It holds
 /// what the pipeline code reads and writes and nothing broader. The only
 /// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
@@ -270,6 +271,21 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_activation_events", "INSERT", &[]),
     ("pipeline_receipt_ownership", "SELECT", &[]),
     ("pipeline_receipt_ownership", "INSERT", &[]),
+    // V111: an intervention updates the status row's four columns (a phase
+    // commit locks the row FOR SHARE, which needs a column UPDATE) and
+    // appends its record, which is never updated or deleted.
+    (
+        "pipeline_bundle_policy_status",
+        "UPDATE",
+        &[
+            "runnable",
+            "operational_status",
+            "error_label",
+            "updated_at",
+        ],
+    ),
+    ("pipeline_policy_interventions", "SELECT", &[]),
+    ("pipeline_policy_interventions", "INSERT", &[]),
 ];
 
 /// What `main`'s gate driver role, `trace_gate_driver`, holds on the pipeline
@@ -343,7 +359,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 110] {
+    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 110, 111] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
@@ -403,7 +419,8 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // The pipeline's row-guard triggers, as the upgrade leaves them: present,
     // on their tables, and enabled. V108's guard is what keeps a committed
     // attempt artifact from going back to `staged` (final review M6). V110's
-    // four triggers keep an activation event and a receipt owner immutable.
+    // four triggers keep an activation event and a receipt owner immutable,
+    // and V111's two keep a policy intervention immutable.
     for (table, trigger) in [
         ("phase_outcomes", "phase_outcomes_reject_update"),
         ("phase_outcomes", "phase_outcomes_reject_delete"),
@@ -442,6 +459,14 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         (
             "pipeline_receipt_ownership",
             "pipeline_receipt_ownership_reject_delete",
+        ),
+        (
+            "pipeline_policy_interventions",
+            "pipeline_policy_interventions_reject_update",
+        ),
+        (
+            "pipeline_policy_interventions",
+            "pipeline_policy_interventions_reject_delete",
         ),
     ] {
         let enabled: bool = admin
@@ -696,6 +721,156 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     ] {
         assert_eq!(
             owner_counts(table).await,
+            0,
+            "deleting the tenant removes its {table} rows"
+        );
+    }
+
+    // V111: a status row starts runnable with the status `runnable`, and a
+    // check keeps `runnable` equal to `operational_status = 'runnable'`, so
+    // no change can leave the flag and the status apart. An intervention
+    // record is never updated or deleted directly, needs its status row, and
+    // goes with its tenant (the cascade is let through by the trigger's
+    // `pg_trigger_depth() > 1` rule).
+    let policy_tenant = "upgrade-v111";
+    let policy_bundle = format!("sha256:{}", "d".repeat(64));
+    let policy_evidence = format!("sha256:{}", "e".repeat(64));
+    admin
+        .batch_execute(&format!(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ('{policy_tenant}')
+                 ON CONFLICT DO NOTHING;
+             INSERT INTO pipeline_bundle_packages
+                 (tenant_id, bundle_id, manifest_format_version, package)
+                 VALUES ('{policy_tenant}', '{policy_bundle}', 1, '{{}}'::jsonb);
+             INSERT INTO pipeline_bundle_policy_status (tenant_id, bundle_id, phase)
+                 VALUES ('{policy_tenant}', '{policy_bundle}', 'score');"
+        ))
+        .await
+        .expect("insert a package and one policy status row");
+    set_tenant(&admin, policy_tenant).await;
+    let status_row = admin
+        .query_one(
+            "SELECT runnable, operational_status, error_label
+               FROM pipeline_bundle_policy_status WHERE tenant_id = $1",
+            &[&policy_tenant],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            status_row.get::<_, bool>("runnable"),
+            status_row.get::<_, String>("operational_status"),
+            status_row.get::<_, Option<String>>("error_label"),
+        ),
+        (true, "runnable".to_string(), None),
+        "a status row starts runnable"
+    );
+    for statement in [
+        "UPDATE pipeline_bundle_policy_status SET runnable = FALSE",
+        "UPDATE pipeline_bundle_policy_status SET operational_status = 'suspended'",
+        "UPDATE pipeline_bundle_policy_status
+            SET runnable = TRUE, operational_status = 'terminated'",
+    ] {
+        let refused = admin
+            .batch_execute(&format!("{statement} WHERE tenant_id = '{policy_tenant}';"))
+            .await
+            .expect_err("a status row that disagrees with itself is refused");
+        assert_eq!(
+            refused.code(),
+            Some(&SqlState::CHECK_VIOLATION),
+            "`{statement}` is a check violation: {refused}"
+        );
+        assert!(
+            refused
+                .as_db_error()
+                .is_some_and(|error| error.constraint()
+                    == Some("pipeline_bundle_policy_status_runnable_shape")),
+            "`{statement}` names the shape check: {refused}"
+        );
+    }
+    let unknown_status = admin
+        .batch_execute(&format!(
+            "UPDATE pipeline_bundle_policy_status
+                SET runnable = FALSE, operational_status = 'paused'
+              WHERE tenant_id = '{policy_tenant}';"
+        ))
+        .await
+        .expect_err("an unknown status is refused");
+    assert_eq!(unknown_status.code(), Some(&SqlState::CHECK_VIOLATION));
+    admin
+        .batch_execute(&format!(
+            "UPDATE pipeline_bundle_policy_status
+                SET runnable = FALSE, operational_status = 'suspended',
+                    error_label = 'unsafe_bound_policy'
+              WHERE tenant_id = '{policy_tenant}';
+             INSERT INTO pipeline_policy_interventions
+                 (tenant_id, intervention_id, bundle_id, phase, action,
+                  actor_principal_ref, reason_code, previous_status,
+                  resulting_status, evidence_hash)
+                 VALUES ('{policy_tenant}', gen_random_uuid(), '{policy_bundle}', 'score',
+                         'suspend', 'operator_sha256:test', 'unsafe_bound_policy',
+                         'runnable', 'suspended', '{policy_evidence}');"
+        ))
+        .await
+        .expect("a suspended row and its intervention record");
+    let orphan = admin
+        .batch_execute(&format!(
+            "INSERT INTO pipeline_policy_interventions
+                 (tenant_id, intervention_id, bundle_id, phase, action,
+                  actor_principal_ref, reason_code, previous_status,
+                  resulting_status, evidence_hash)
+                 VALUES ('{policy_tenant}', gen_random_uuid(), '{policy_bundle}', 'review',
+                         'suspend', 'operator_sha256:test', 'unsafe_bound_policy',
+                         'runnable', 'suspended', '{policy_evidence}');"
+        ))
+        .await
+        .expect_err("an intervention needs the status row of its phase");
+    assert_eq!(orphan.code(), Some(&SqlState::FOREIGN_KEY_VIOLATION));
+    for statement in [
+        "UPDATE pipeline_policy_interventions SET reason_code = 'rewritten'",
+        "DELETE FROM pipeline_policy_interventions",
+    ] {
+        let refused = admin
+            .batch_execute(&format!("{statement} WHERE tenant_id = '{policy_tenant}';"))
+            .await
+            .expect_err("an intervention record is immutable");
+        assert_eq!(
+            refused.as_db_error().map(|error| error.message()),
+            Some("pipeline policy interventions are immutable"),
+            "`{statement}` must fail with the trigger's message: {refused}"
+        );
+    }
+    let policy_counts = |table: &'static str| {
+        let admin = &admin;
+        async move {
+            admin
+                .query_one(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = $1"),
+                    &[&policy_tenant],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+        }
+    };
+    assert_eq!(
+        policy_counts("pipeline_policy_interventions").await,
+        1,
+        "the record keeps its row through every refused change"
+    );
+    admin
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&policy_tenant],
+        )
+        .await
+        .expect("deleting the tenant cascades through the immutable record");
+    for table in [
+        "pipeline_bundle_policy_status",
+        "pipeline_policy_interventions",
+    ] {
+        assert_eq!(
+            policy_counts(table).await,
             0,
             "deleting the tenant removes its {table} rows"
         );

@@ -265,6 +265,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_tenant_routing",
     "pipeline_activation_events",
     "pipeline_receipt_ownership",
+    "pipeline_policy_interventions",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1690,6 +1691,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         110,
         "versioned_pipeline_activation",
         include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+    ),
+    // V111 (PR 5) adds the operator's policy interventions: an `operational_status`
+    // column beside V93's `runnable` (the two kept equal by a check), the
+    // immutable intervention record, and the runtime's UPDATE on the status
+    // row, which nothing wrote before. No cross-tenant claim function, same as
+    // V105/V106/V107/V108/V110.
+    (
+        111,
+        "versioned_pipeline_policy_interventions",
+        include_str!("../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"),
     ),
 ];
 
@@ -7049,6 +7060,7 @@ mod tests {
         (107, 4),
         (108, 4),
         (110, 4),
+        (111, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7793,6 +7805,9 @@ mod tests {
             include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
             include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
             include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+            include_str!(
+                "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+            ),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7829,6 +7844,9 @@ mod tests {
             include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
             include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
             include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+            include_str!(
+                "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+            ),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -8161,6 +8179,82 @@ mod tests {
             assert!(
                 !activation.contains(forbidden),
                 "V110 must not contain `{forbidden}`"
+            );
+        }
+    }
+
+    /// V111 (delivery PR 5) adds the operator's policy interventions: the
+    /// intervention record (an immutable, forced-RLS table with the tenant
+    /// policy and the V107-shaped triggers), an `operational_status` column on
+    /// V93's status row that a check keeps equal to `runnable`, and the
+    /// runtime's grants (an UPDATE on four columns of the status row and an
+    /// append-only grant on the record). It holds no `SECURITY DEFINER`
+    /// function and no role attribute change, and it grants the runtime no
+    /// DELETE and no UPDATE on the record, nor an UPDATE on a status column
+    /// other than the four.
+    #[test]
+    fn v111_defines_policy_interventions() {
+        let interventions = include_str!(
+            "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+        );
+        for required in [
+            "CREATE TABLE pipeline_policy_interventions",
+            "ADD COLUMN operational_status TEXT NOT NULL DEFAULT 'runnable'",
+            "CHECK (operational_status IN ('runnable', 'suspended', 'terminated'))",
+            "ADD CONSTRAINT pipeline_bundle_policy_status_runnable_shape CHECK (\n        runnable = (operational_status = 'runnable')\n    );",
+            "CREATE FUNCTION reject_pipeline_policy_intervention_mutation()",
+            "IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN",
+            "CREATE TRIGGER pipeline_policy_interventions_reject_update",
+            "CREATE TRIGGER pipeline_policy_interventions_reject_delete",
+            "ALTER TABLE pipeline_policy_interventions ENABLE ROW LEVEL SECURITY;",
+            "GRANT UPDATE (runnable, operational_status, error_label, updated_at)\n    ON pipeline_bundle_policy_status TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_policy_interventions TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                interventions.contains(required),
+                "V111 is missing `{required}`"
+            );
+        }
+        let force = "ALTER TABLE pipeline_policy_interventions FORCE ROW LEVEL SECURITY;";
+        assert_eq!(
+            interventions.matches(force).count(),
+            1,
+            "V111 must force RLS on pipeline_policy_interventions exactly once"
+        );
+        let policy =
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_policy_interventions\n";
+        assert_eq!(
+            interventions.matches(policy).count(),
+            1,
+            "V111 must create the tenant policy on pipeline_policy_interventions exactly once"
+        );
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SET search_path",
+            "ON DELETE RESTRICT",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
+            "updated_by_principal_ref",
+            "pipeline_tenant_routing",
+            "pipeline_index_rebuild_fences",
+        ] {
+            assert!(
+                !interventions.contains(forbidden),
+                "V111 must not contain `{forbidden}`"
+            );
+        }
+        // The only statements that write grants name the intervention record
+        // (SELECT, INSERT) or the four status columns (UPDATE).
+        for grant in interventions
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+        {
+            assert!(
+                grant.starts_with("GRANT SELECT, INSERT ON pipeline_policy_interventions ")
+                    || grant.starts_with("GRANT UPDATE (runnable, operational_status, "),
+                "V111 grants something the pins do not list: `{grant}`"
             );
         }
     }

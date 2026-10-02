@@ -185,11 +185,11 @@ const RUNTIME_PRIVILEGES_SQL: &str = r"
     )
     SELECT COALESCE(string_agg(entry, E'\n' ORDER BY entry), ''), COUNT(*) FROM entries";
 
-/// Every table the pipeline migrations create (V92 to V95, V105 to V108, and
-/// V110), sorted: the set the resume requires to enable and force RLS in the
-/// restored database. A new pipeline table must be added here, or the drill
-/// fails.
-const PIPELINE_TABLES: [&str; 18] = [
+/// Every table the pipeline migrations create (V92 to V95, V105 to V108,
+/// V110, and V111), sorted: the set the resume requires to enable and force
+/// RLS in the restored database. A new pipeline table must be added here, or
+/// the drill fails.
+const PIPELINE_TABLES: [&str; 19] = [
     "phase_outcomes",
     "pipeline_activation_events",
     "pipeline_active_bundles",
@@ -201,6 +201,7 @@ const PIPELINE_TABLES: [&str; 18] = [
     "pipeline_export_snapshot_items",
     "pipeline_export_snapshots",
     "pipeline_index_invalidations",
+    "pipeline_policy_interventions",
     "pipeline_receipt_artifacts",
     "pipeline_receipt_ownership",
     "pipeline_review_assessments",

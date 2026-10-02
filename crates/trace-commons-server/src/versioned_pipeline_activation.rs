@@ -19,10 +19,9 @@ use uuid::Uuid;
 use crate::db::postgres::PgBackend;
 use crate::error::DatabaseError;
 use crate::versioned_pipeline::{
-    PIPELINE_ROUTING_LOCK_SEED, pipeline_routing_lock, sha256_prefixed,
+    PIPELINE_ROUTING_LOCK_SEED, pipeline_routing_lock, sha256_prefixed, validate_actor,
 };
 use crate::versioned_pipeline_product::PipelineOperationalSummary;
-use crate::versioned_pipeline_qualification::is_safe_label;
 
 pub const PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL: &str = "pipeline_receipt_intake_contained";
 pub const PIPELINE_TENANT_NOT_SERVED_LABEL: &str = "pipeline_tenant_not_served";
@@ -276,20 +275,6 @@ pub fn evaluate_activation_readiness(
     } else {
         Err(ACTIVATION_READINESS_FAILED_LABEL.to_string())
     }
-}
-
-fn validate_actor(actor_principal_ref: &str, reason_code: &str) -> Result<(), DatabaseError> {
-    let actor_ok = !actor_principal_ref.is_empty()
-        && actor_principal_ref.len() <= 160
-        && actor_principal_ref
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'.' | b'-'));
-    if !actor_ok || !is_safe_label(reason_code) {
-        return Err(DatabaseError::Constraint(
-            ACTIVATION_ACTOR_INVALID_LABEL.to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Takes the tenant's routing lock exclusively for the rest of `tx`. A
@@ -549,7 +534,11 @@ impl PipelineActivationStore {
         actor_principal_ref: &str,
         reason_code: &str,
     ) -> Result<TenantRouting, DatabaseError> {
-        validate_actor(actor_principal_ref, reason_code)?;
+        validate_actor(
+            actor_principal_ref,
+            reason_code,
+            ACTIVATION_ACTOR_INVALID_LABEL,
+        )?;
         self.change_routing(
             tenant_id,
             actor_principal_ref,
@@ -568,7 +557,11 @@ impl PipelineActivationStore {
         actor_principal_ref: &str,
         reason_code: &str,
     ) -> Result<TenantRouting, DatabaseError> {
-        validate_actor(actor_principal_ref, reason_code)?;
+        validate_actor(
+            actor_principal_ref,
+            reason_code,
+            ACTIVATION_ACTOR_INVALID_LABEL,
+        )?;
         self.change_routing(
             tenant_id,
             actor_principal_ref,
@@ -837,6 +830,7 @@ mod tests {
             pending_invalidation_count: 0,
             failed_invalidation_count: 0,
             incomplete_export_count: 0,
+            suspended_policy_count: 0,
             tenant_isolation_control_passed: true,
             audit_immutability_control_passed: true,
         };
@@ -849,7 +843,14 @@ mod tests {
     #[test]
     fn an_actor_and_a_reason_are_validated() {
         let actor = format!("principal_sha256:{}", "a".repeat(64));
-        assert!(validate_actor(&actor, "contain_first_rollout").is_ok());
+        assert!(
+            validate_actor(
+                &actor,
+                "contain_first_rollout",
+                ACTIVATION_ACTOR_INVALID_LABEL
+            )
+            .is_ok()
+        );
         for (actor, reason) in [
             (actor.as_str(), "Bad Reason"),
             ("", "contain_first_rollout"),
@@ -858,7 +859,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate_actor(actor, reason),
+                    validate_actor(actor, reason, ACTIVATION_ACTOR_INVALID_LABEL),
                     Err(DatabaseError::Constraint(label)) if label == ACTIVATION_ACTOR_INVALID_LABEL
                 ),
                 "actor {actor:?} with reason {reason:?} must be refused"
@@ -866,7 +867,11 @@ mod tests {
         }
         let too_long = "a".repeat(161);
         assert!(matches!(
-            validate_actor(&too_long, "contain_first_rollout"),
+            validate_actor(
+                &too_long,
+                "contain_first_rollout",
+                ACTIVATION_ACTOR_INVALID_LABEL
+            ),
             Err(DatabaseError::Constraint(label)) if label == ACTIVATION_ACTOR_INVALID_LABEL
         ));
     }

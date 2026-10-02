@@ -33205,3 +33205,1398 @@ async fn a_tenant_with_a_pipeline_receipt_can_be_deleted() {
         );
     }
 }
+
+// Policy interventions and their guards (delivery PR 5, Task 5). Each test
+// uses a fresh tenant, so the tests do not share rows.
+
+fn policy_actor() -> String {
+    format!("operator_sha256:{}", "cd".repeat(32))
+}
+
+fn policy_tenant(tag: &str) -> String {
+    format!("policy-{tag}-{}", uuid::Uuid::new_v4())
+}
+
+/// The status row of one policy as `(runnable, operational_status,
+/// error_label)`, read through an owner connection.
+async fn policy_status_row(
+    tenant_id: &str,
+    bundle_id: &str,
+    phase: &str,
+) -> (bool, String, Option<String>) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT runnable, operational_status, error_label
+               FROM pipeline_bundle_policy_status
+              WHERE tenant_id = $1 AND bundle_id = $2 AND phase = $3",
+            &[&tenant_id, &bundle_id, &phase],
+        )
+        .await
+        .expect("the policy has a status row");
+    tx.commit().await.expect("commit policy_status_row");
+    (
+        row.get("runnable"),
+        row.get("operational_status"),
+        row.get("error_label"),
+    )
+}
+
+/// The phases of the run's recorded outcomes, in phase order.
+async fn outcome_phases(
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Vec<Phase> {
+    service
+        .store()
+        .list_outcomes(tenant_id, run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|outcome| outcome.phase)
+        .collect()
+}
+
+/// A receipt that creates a run for a fresh envelope, with the service's
+/// default bundle registered and active for `tenant`.
+async fn policy_test_run(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    created
+}
+
+/// `PausingArtifactStore` with no write held yet: a test arms it
+/// (`arm_pause`) once the writes it does not want to hold are done.
+fn unarmed_pausing_store(inner: Arc<dyn TraceArtifactStore>) -> Arc<PausingArtifactStore> {
+    Arc::new(PausingArtifactStore {
+        inner,
+        reached: std::sync::Mutex::new(None),
+        release: std::sync::Mutex::new(None),
+    })
+}
+
+/// Holds the next `publish_serialized_json` of `store`. Returns the channel
+/// that says the write began and the channel that lets it go.
+fn arm_pause(
+    store: &PausingArtifactStore,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *store.reached.lock().unwrap() = Some(reached_tx);
+    *store.release.lock().unwrap() = Some(release_rx);
+    (reached_rx, release_tx)
+}
+
+async fn wait_for_held_write(reached: std::sync::mpsc::Receiver<()>) {
+    tokio::task::spawn_blocking(move || reached.recv_timeout(std::time::Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the held write began");
+}
+
+/// A Trace Credit settlement adapter that holds its first `settle` call until
+/// the test lets it go, then delegates to a recording adapter. Settle calls it
+/// after the selection is stored and before `commit_settle`.
+struct GatedSettlementAdapter {
+    inner: Arc<RecordingSettlementAdapter>,
+    reached: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[async_trait::async_trait]
+impl SettlementAdapter for GatedSettlementAdapter {
+    fn instrument_id(&self) -> &InstrumentId {
+        self.inner.instrument_id()
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "gated_recording_test_only"
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
+        let release = self.release.lock().unwrap().take();
+        if let Some(release) = release {
+            if let Some(reached) = self.reached.lock().unwrap().take() {
+                let _ = reached.send(());
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(20), release)
+                .await
+                .expect("the test released the held settle call within the bound")
+                .expect("the test did not drop the release sender");
+        }
+        self.inner.settle(request).await
+    }
+}
+
+/// SCN-008: a suspended policy leaves the run retryable, charges nothing, and
+/// keeps the run's bundle; after `resume` the same run completes under it. The
+/// two interventions are recorded, oldest first, and the status row says why
+/// the policy was not runnable and says nothing after the resume.
+#[tokio::test]
+async fn a_suspended_policy_leaves_the_run_retryable_and_resumes_under_the_same_bundle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("suspend");
+    let created = policy_test_run(&service, &tenant).await;
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(reviewed.state, PipelineRunState::Pending);
+    let bundle_id = reviewed.bundle_id.clone();
+    assert_eq!(
+        policy_status_row(&tenant, &bundle_id, "score").await,
+        (true, "runnable".to_string(), None)
+    );
+
+    let actor = policy_actor();
+    let suspended = service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Score,
+            "suspend",
+            &actor,
+            "unsafe_bound_policy",
+        )
+        .await
+        .expect("suspend the Score policy");
+    assert_eq!(suspended.previous_status, PolicyOperationalStatus::Runnable);
+    assert_eq!(
+        suspended.resulting_status,
+        PolicyOperationalStatus::Suspended
+    );
+    assert_eq!(
+        (
+            suspended.bundle_id.as_str(),
+            suspended.phase,
+            suspended.action.as_str(),
+            suspended.actor_principal_ref.as_str(),
+            suspended.reason_code.as_str(),
+        ),
+        (
+            bundle_id.as_str(),
+            Phase::Score,
+            "suspend",
+            actor.as_str(),
+            "unsafe_bound_policy"
+        )
+    );
+    assert!(
+        suspended.evidence_hash.starts_with("sha256:") && suspended.evidence_hash.len() == 71,
+        "the record carries a sha256 evidence hash"
+    );
+    assert_eq!(
+        policy_status_row(&tenant, &bundle_id, "score").await,
+        (
+            false,
+            "suspended".to_string(),
+            Some("unsafe_bound_policy".to_string())
+        ),
+        "the row says why the policy is not runnable"
+    );
+    assert_eq!(
+        policy_status_row(&tenant, &bundle_id, "review").await,
+        (true, "runnable".to_string(), None),
+        "the other phases of the bundle are untouched"
+    );
+
+    let held = service
+        .process_one(&tenant)
+        .await
+        .unwrap()
+        .expect("the run is claimed");
+    assert_eq!(held.run_id, created.run_id);
+    assert_eq!(held.state, PipelineRunState::Retry);
+    assert_eq!(held.next_phase, Some(Phase::Score));
+    assert_eq!(
+        held.last_error_label.as_deref(),
+        Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL)
+    );
+    assert_eq!(
+        held.attempt_count, reviewed.attempt_count,
+        "the claim's attempt is not charged"
+    );
+    assert_eq!(held.bundle_id, bundle_id, "the run stays under its bundle");
+    assert_eq!(
+        outcome_phases(&service, &tenant, created.run_id).await,
+        vec![Phase::Admission, Phase::Review]
+    );
+
+    let resumed = service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Score,
+            "resume",
+            &actor,
+            "policy_rechecked",
+        )
+        .await
+        .expect("resume the Score policy");
+    assert_eq!(resumed.previous_status, PolicyOperationalStatus::Suspended);
+    assert_eq!(resumed.resulting_status, PolicyOperationalStatus::Runnable);
+    assert_eq!(
+        policy_status_row(&tenant, &bundle_id, "score").await,
+        (true, "runnable".to_string(), None),
+        "a resume restores the flag and clears the label"
+    );
+
+    force_due(&backend, &tenant, created.run_id).await;
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs after the resume");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert_eq!(scored.bundle_id, bundle_id);
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.bundle_id, bundle_id);
+    assert_eq!(
+        outcome_phases(&service, &tenant, created.run_id).await,
+        vec![Phase::Admission, Phase::Review, Phase::Score, Phase::Settle],
+        "one outcome for each phase"
+    );
+
+    let history = service
+        .list_policy_interventions(&tenant, &bundle_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|record| (record.action.as_str(), record.resulting_status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("suspend", PolicyOperationalStatus::Suspended),
+            ("resume", PolicyOperationalStatus::Runnable)
+        ],
+        "oldest first"
+    );
+    assert_eq!(history[0], suspended);
+    assert_eq!(history[1], resumed);
+}
+
+/// Review Focus 4 (GRD-004): a policy suspended while a phase runs cannot
+/// commit that phase. Each block suspends the phase's policy after the phase
+/// did its work and before its commit: the commit is refused and writes
+/// nothing, the run waits in `Retry` uncharged under the same bundle, the
+/// objects the attempt wrote are deleted, and after `resume` the run
+/// completes with one outcome for each phase.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_policy_suspended_during_a_phase_cannot_commit_it() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let actor = policy_actor();
+
+    // Review, through the service: the approved object's write is held.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let pausing = unarmed_pausing_store(artifact_store(&dir));
+        let (service, _, _) = test_service(
+            backend.clone(),
+            pausing.clone() as Arc<dyn TraceArtifactStore>,
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let tenant = policy_tenant("during-review");
+        let created = policy_test_run(&service, &tenant).await;
+        let bundle_id = created.bundle_id.clone();
+        let files_before = count_files_under(dir.path());
+        let (reached, release) = arm_pause(&pausing);
+        let attempt = tokio::spawn({
+            let service = service.clone();
+            let tenant = tenant.clone();
+            async move { service.process_run(&tenant, created.run_id).await }
+        });
+        wait_for_held_write(reached).await;
+        service
+            .intervene_policy(
+                &tenant,
+                &bundle_id,
+                Phase::Review,
+                "suspend",
+                &actor,
+                "suspend_during_review",
+            )
+            .await
+            .expect("a suspension does not wait for a commit that has not begun");
+        release.send(()).unwrap();
+        let held = attempt
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("the Review attempt returns the run");
+        assert_eq!(
+            (
+                held.state,
+                held.next_phase,
+                held.last_error_label.as_deref(),
+                held.attempt_count
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(Phase::Review),
+                Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+                created.attempt_count
+            ),
+            "refused, uncharged, retryable"
+        );
+        assert_eq!(held.bundle_id, bundle_id);
+        assert_eq!(
+            outcome_phases(&service, &tenant, created.run_id).await,
+            vec![Phase::Admission],
+            "no Review outcome exists while the policy is suspended"
+        );
+        assert_eq!(
+            count_files_under(dir.path()),
+            files_before,
+            "the refused attempt deleted the approved object it wrote"
+        );
+        assert_eq!(
+            attempt_artifact_rows(&backend, &tenant, created.run_id).await,
+            vec![("approved".to_string(), "staged".to_string())],
+            "the refused commit committed no attempt row"
+        );
+        backdate_attempt_artifacts(&tenant, created.run_id, None).await;
+        assert_eq!(
+            service.sweep_attempt_artifacts(&tenant, 10).await.unwrap(),
+            1,
+            "the sweep removes the refused attempt's row"
+        );
+
+        service
+            .intervene_policy(
+                &tenant,
+                &bundle_id,
+                Phase::Review,
+                "resume",
+                &actor,
+                "resume_after_review",
+            )
+            .await
+            .unwrap();
+        force_due(&backend, &tenant, created.run_id).await;
+        for _ in 0..3 {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .unwrap()
+                .expect("the next phase runs");
+        }
+        let done = service
+            .store()
+            .get_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.state, PipelineRunState::Complete);
+        assert_eq!(done.bundle_id, bundle_id);
+        assert_eq!(
+            outcome_phases(&service, &tenant, created.run_id).await,
+            vec![Phase::Admission, Phase::Review, Phase::Score, Phase::Settle]
+        );
+    }
+
+    // Review, through the store's own commit: a leased run, the policy
+    // suspended, and `commit_review` refuses with the label and writes nothing.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(false),
+            None,
+        )
+        .await;
+        let store = service.store();
+        let tenant = policy_tenant("store-review");
+        let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+        let claimed = store
+            .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+            .await
+            .unwrap()
+            .expect("claim the run");
+        store
+            .intervene_policy(
+                &tenant,
+                &run.bundle_id,
+                Phase::Review,
+                "suspend",
+                &actor,
+                "suspend_before_commit",
+            )
+            .await
+            .unwrap();
+        let source_hash = dependency_content_hash(b"policy-suspended-review-source");
+        let rejected = ReviewOutput::rejected(PhaseResult {
+            decision: ReviewDecision::Rejected {
+                reason: ReasonCode::new("policy_rejected").unwrap(),
+            },
+            evidence: ReviewEvidence {
+                source_content_hash: source_hash.clone(),
+                result_content_hash: source_hash,
+                content_changed: false,
+                worker_identity: None,
+                transformation_metadata_hash: None,
+                human_assessment_hash: None,
+                resolved_quarantine_reasons: Vec::new(),
+            },
+            evaluation: ReviewEvaluation {
+                rule_id: "test_rejection_v1".to_string(),
+            },
+        })
+        .unwrap();
+        let stored = StoredPhaseResult::from_result(Phase::Review, rejected.result()).unwrap();
+        let refused = store
+            .commit_review(&claimed, stored, None)
+            .await
+            .expect_err("a suspended Review policy cannot commit");
+        assert!(
+            matches!(
+                &refused,
+                DatabaseError::Constraint(label) if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL
+            ),
+            "unexpected refusal: {refused:?}"
+        );
+        assert!(
+            store
+                .list_outcomes(&tenant, run.run_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the refused commit wrote no outcome"
+        );
+        let unchanged = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+        assert_eq!(unchanged.state, PipelineRunState::Leased);
+        assert_eq!(unchanged.next_phase, Some(Phase::Review));
+    }
+
+    // Score, through the service: the first object write of the attempt is held.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let pausing = unarmed_pausing_store(artifact_store(&dir));
+        let (service, _, _) = test_service(
+            backend.clone(),
+            pausing.clone() as Arc<dyn TraceArtifactStore>,
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let tenant = policy_tenant("during-score");
+        let created = policy_test_run(&service, &tenant).await;
+        let bundle_id = created.bundle_id.clone();
+        let reviewed = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review runs");
+        assert_eq!(reviewed.next_phase, Some(Phase::Score));
+        let files_before = count_files_under(dir.path());
+        let (reached, release) = arm_pause(&pausing);
+        let attempt = tokio::spawn({
+            let service = service.clone();
+            let tenant = tenant.clone();
+            async move { service.process_run(&tenant, created.run_id).await }
+        });
+        wait_for_held_write(reached).await;
+        service
+            .intervene_policy(
+                &tenant,
+                &bundle_id,
+                Phase::Score,
+                "suspend",
+                &actor,
+                "suspend_during_score",
+            )
+            .await
+            .expect("a suspension does not wait for a commit that has not begun");
+        release.send(()).unwrap();
+        let held = attempt
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("the Score attempt returns the run");
+        assert_eq!(
+            (
+                held.state,
+                held.next_phase,
+                held.last_error_label.as_deref(),
+                held.attempt_count
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(Phase::Score),
+                Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+                reviewed.attempt_count
+            ),
+            "refused, uncharged, retryable"
+        );
+        assert_eq!(held.bundle_id, bundle_id);
+        assert_eq!(
+            outcome_phases(&service, &tenant, created.run_id).await,
+            vec![Phase::Admission, Phase::Review],
+            "no Score outcome exists while the policy is suspended"
+        );
+        assert_eq!(
+            count_files_under(dir.path()),
+            files_before,
+            "the refused attempt deleted the Score objects it wrote"
+        );
+        let rows = attempt_artifact_rows(&backend, &tenant, created.run_id).await;
+        assert!(
+            rows.iter()
+                .filter(|(artifact, _)| artifact != "approved")
+                .all(|(_, state)| state == "staged")
+                && rows.iter().any(|(artifact, _)| artifact != "approved"),
+            "the refused commit committed no Score row, and the attempt staged some: {rows:?}"
+        );
+        backdate_attempt_artifacts(&tenant, created.run_id, None).await;
+        service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+        assert_eq!(
+            attempt_artifact_rows(&backend, &tenant, created.run_id).await,
+            vec![("approved".to_string(), "committed".to_string())],
+            "the sweep removes the refused attempt's rows and leaves Review's"
+        );
+
+        service
+            .intervene_policy(
+                &tenant,
+                &bundle_id,
+                Phase::Score,
+                "resume",
+                &actor,
+                "resume_after_score",
+            )
+            .await
+            .unwrap();
+        force_due(&backend, &tenant, created.run_id).await;
+        for _ in 0..2 {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .unwrap()
+                .expect("the next phase runs");
+        }
+        let done = service
+            .store()
+            .get_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.state, PipelineRunState::Complete);
+        assert_eq!(
+            outcome_phases(&service, &tenant, created.run_id).await,
+            vec![Phase::Admission, Phase::Review, Phase::Score, Phase::Settle]
+        );
+    }
+
+    // Settle, through the service: the Trace Credit adapter's call is held,
+    // after the selection is stored and before `commit_settle`.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let gated = Arc::new(GatedSettlementAdapter {
+            inner: RecordingSettlementAdapter::new(
+                InstrumentId::trace_credit(),
+                "recording_trace_credit_test_only",
+                "none",
+            ),
+            reached: std::sync::Mutex::new(Some(reached_tx)),
+            release: std::sync::Mutex::new(Some(release_rx)),
+        });
+        let service = test_service_with_adapters(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![gated.clone() as Arc<dyn SettlementAdapter>],
+        )
+        .await;
+        let tenant = policy_tenant("during-settle");
+        let created = policy_test_run(&service, &tenant).await;
+        let bundle_id = created.bundle_id.clone();
+        for _ in 0..2 {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .unwrap()
+                .expect("Review and Score run");
+        }
+        let scored = service
+            .store()
+            .get_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(scored.next_phase, Some(Phase::Settle));
+        let attempt = tokio::spawn({
+            let service = service.clone();
+            let tenant = tenant.clone();
+            async move { service.process_run(&tenant, created.run_id).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), reached_rx)
+            .await
+            .expect("Settle reached the held adapter call")
+            .unwrap();
+        service
+            .intervene_policy(
+                &tenant,
+                &bundle_id,
+                Phase::Settle,
+                "suspend",
+                &actor,
+                "suspend_during_settle",
+            )
+            .await
+            .expect("a suspension does not wait for a commit that has not begun");
+        release_tx.send(()).unwrap();
+        let held = attempt
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("the Settle attempt returns the run");
+        assert_eq!(
+            (
+                held.state,
+                held.next_phase,
+                held.last_error_label.as_deref(),
+                held.attempt_count
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(Phase::Settle),
+                Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+                scored.attempt_count
+            ),
+            "refused, uncharged, retryable"
+        );
+        assert_eq!(held.bundle_id, bundle_id);
+        assert_eq!(
+            outcome_phases(&service, &tenant, created.run_id).await,
+            vec![Phase::Admission, Phase::Review, Phase::Score],
+            "no Settle outcome exists while the policy is suspended"
+        );
+        // The load-time guard holds the run too, still uncharged.
+        force_due(&backend, &tenant, created.run_id).await;
+        let still = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("the claim is released again");
+        assert_eq!(
+            (
+                still.state,
+                still.last_error_label.as_deref(),
+                still.attempt_count
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+                scored.attempt_count
+            )
+        );
+
+        service
+            .intervene_policy(
+                &tenant,
+                &bundle_id,
+                Phase::Settle,
+                "resume",
+                &actor,
+                "resume_after_settle",
+            )
+            .await
+            .unwrap();
+        force_due(&backend, &tenant, created.run_id).await;
+        let done = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs after the resume");
+        assert_eq!(done.state, PipelineRunState::Complete);
+        assert_eq!(done.bundle_id, bundle_id);
+        assert_eq!(
+            outcome_phases(&service, &tenant, created.run_id).await,
+            vec![Phase::Admission, Phase::Review, Phase::Score, Phase::Settle],
+            "one outcome for each phase"
+        );
+        assert_eq!(
+            count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+            1,
+            "one credit event"
+        );
+    }
+}
+
+/// An intervention takes the policy row `FOR UPDATE`, and a phase commit holds
+/// it `FOR SHARE` until it ends: a suspension waits for a commit that holds the
+/// row, so no commit that already passed the guard can land after the
+/// suspension returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_suspension_waits_for_a_commit_that_holds_the_policy_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("waits");
+    service.register_default_bundle(&tenant).await.unwrap();
+    let bundle_id = service.bundle_id().to_string();
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let commit = tenant_tx(&mut client, &tenant).await;
+    let held = commit
+        .query_opt(
+            "SELECT runnable FROM pipeline_bundle_policy_status
+              WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'score'
+              FOR SHARE",
+            &[&tenant, &bundle_id],
+        )
+        .await
+        .expect("the runtime login can lock the status row FOR SHARE")
+        .expect("the Score policy has a status row");
+    assert!(held.get::<_, bool>("runnable"));
+
+    let mut suspension = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let bundle_id = bundle_id.clone();
+        async move {
+            service
+                .intervene_policy(
+                    &tenant,
+                    &bundle_id,
+                    Phase::Score,
+                    "suspend",
+                    &policy_actor(),
+                    "suspend_behind_commit",
+                )
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut suspension)
+            .await
+            .is_err(),
+        "the suspension does not return while a commit holds the policy row"
+    );
+    assert!(
+        policy_status_row(&tenant, &bundle_id, "score").await.0,
+        "the policy stays runnable until the suspension gets the row"
+    );
+    commit.commit().await.unwrap();
+    let record = tokio::time::timeout(std::time::Duration::from_secs(2), suspension)
+        .await
+        .expect("the suspension returns once the commit ends")
+        .unwrap()
+        .expect("the suspension succeeds");
+    assert_eq!(record.resulting_status, PolicyOperationalStatus::Suspended);
+    assert!(
+        !policy_status_row(&tenant, &bundle_id, "score").await.0,
+        "the suspension took effect once it got the row"
+    );
+}
+
+/// GRD-004: the payout pass reads the Settle policy of each run's own bundle
+/// before it dispatches. While that policy is suspended the pass submits
+/// nothing, looks nothing up, and changes no payout row, and it does not count
+/// the run; a run under another bundle is paid in the same pass. After
+/// `resume` the pass submits once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_payout_waits_for_a_suspended_settle_policy() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("payout");
+    let first = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(first.state, PipelineRunState::Complete);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, first.run_id)
+            .await
+            .payout_state,
+        "pending"
+    );
+    let actor = policy_actor();
+    service
+        .intervene_policy(
+            &tenant,
+            &first.bundle_id,
+            Phase::Settle,
+            "suspend",
+            &actor,
+            "hold_payouts",
+        )
+        .await
+        .unwrap();
+
+    let settlement_before = trace_credit_settlement(&service, &tenant, first.run_id).await;
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a skipped run is not a processed run"
+    );
+    assert_eq!(near.submits(), 0, "the adapter saw no submit");
+    assert_eq!(near.confirmations(), 0, "the adapter saw no lookup");
+    assert!(recording.requests().is_empty());
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, first.run_id).await,
+        settlement_before,
+        "no payout row changed"
+    );
+
+    // A second bundle, active for new runs: its run is paid while the first
+    // bundle's Settle policy stays suspended.
+    let second_package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+                atomic_units: AtomicUnits::from_raw(2_000_000),
+                descriptor: trace_credit_descriptor(),
+            }],
+            include_index: false,
+            variant: None,
+        },
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+    .expect("build the second bundle");
+    assert_ne!(second_package.bundle_id, first.bundle_id);
+    service
+        .store()
+        .register_bundle(&tenant, &second_package)
+        .await
+        .unwrap();
+    activate_bundle_as_operator(&tenant, &second_package.bundle_id).await;
+    let second = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(second.bundle_id, second_package.bundle_id);
+    assert_eq!(second.state, PipelineRunState::Complete);
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        1,
+        "the pass pays the run whose Settle policy is runnable, and only it"
+    );
+    assert_eq!(near.submits(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, second.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, first.run_id).await,
+        settlement_before,
+        "the suspended bundle's run is still untouched"
+    );
+
+    service
+        .intervene_policy(
+            &tenant,
+            &first.bundle_id,
+            Phase::Settle,
+            "resume",
+            &actor,
+            "release_payouts",
+        )
+        .await
+        .unwrap();
+    let before_resume = near.submits();
+    service.process_payouts(&tenant, 32).await.unwrap();
+    assert_eq!(
+        near.submits(),
+        before_resume + 1,
+        "after the resume the pass submits the held run once"
+    );
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, first.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    assert_eq!(near_outbox_rows(&backend, &tenant).await.len(), 2);
+}
+
+/// A receipt between its staging transaction and its commit transaction
+/// cannot commit after its Admission policy was suspended: the commit
+/// transaction takes the policy row and refuses with the label the staging
+/// transaction uses. No run, outcome, submission, object ref, or ownership row
+/// exists, and the refused attempt's object and staging row are discarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_admission_policy_suspended_before_the_receipt_commit_refuses_the_receipt() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let pausing = unarmed_pausing_store(artifact_store(&dir));
+    let (service, _, _) = test_service(
+        backend.clone(),
+        pausing.clone() as Arc<dyn TraceArtifactStore>,
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("admission");
+    service.register_default_bundle(&tenant).await.unwrap();
+    let bundle_id = service.bundle_id().to_string();
+    let (reached, release) = arm_pause(&pausing);
+
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let in_flight = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+        }
+    });
+    wait_for_held_write(reached).await;
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Admission,
+            "suspend",
+            &policy_actor(),
+            "suspend_admission",
+        )
+        .await
+        .expect("a suspension does not wait for a receipt that holds no lock");
+    release.send(()).unwrap();
+    let refused = tokio::time::timeout(std::time::Duration::from_secs(10), in_flight)
+        .await
+        .expect("the receipt finishes once its write is released")
+        .expect("the receipt task does not panic")
+        .expect_err("the receipt is refused with an error");
+    assert_eq!(refused.to_string(), PIPELINE_POLICY_NOT_RUNNABLE_LABEL);
+    assert_eq!(
+        receipt_rows(&tenant).await,
+        ReceiptRows {
+            // The staging transaction counted the key before the suspension.
+            usage: 1,
+            ..ReceiptRows::default()
+        },
+        "no run, outcome, submission, object ref, ownership row, or staging row"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        0,
+        "the refused attempt deleted its own object"
+    );
+}
+
+/// `terminate` is not supported in this release, an unknown action is
+/// invalid, an invalid transition has no transition, an invalid actor or
+/// reason is invalid, and a bundle the tenant does not have is not found. Each
+/// refusal writes nothing: no record, and the status row as it was.
+#[tokio::test]
+async fn terminate_is_refused_and_an_unknown_action_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = service.store();
+    let tenant = policy_tenant("refusals");
+    service.register_default_bundle(&tenant).await.unwrap();
+    let bundle_id = service.bundle_id().to_string();
+    let actor = policy_actor();
+
+    let refusal = |result: Result<PipelinePolicyInterventionRecord, DatabaseError>| match result {
+        Err(DatabaseError::Constraint(label)) => label,
+        other => panic!("expected a constraint refusal, got {other:?}"),
+    };
+    assert_eq!(
+        refusal(
+            store
+                .intervene_policy(
+                    &tenant,
+                    &bundle_id,
+                    Phase::Score,
+                    "terminate",
+                    &actor,
+                    "end_policy"
+                )
+                .await
+        ),
+        PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL
+    );
+    assert_eq!(
+        PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL,
+        "policy_intervention_not_supported"
+    );
+    assert_eq!(
+        refusal(
+            store
+                .intervene_policy(
+                    &tenant,
+                    &bundle_id,
+                    Phase::Score,
+                    "pause",
+                    &actor,
+                    "pause_policy"
+                )
+                .await
+        ),
+        "policy_intervention_invalid"
+    );
+    assert_eq!(
+        refusal(
+            store
+                .intervene_policy(
+                    &tenant,
+                    &bundle_id,
+                    Phase::Score,
+                    "resume",
+                    &actor,
+                    "resume_runnable"
+                )
+                .await
+        ),
+        "policy_intervention_no_transition",
+        "a runnable policy cannot resume"
+    );
+    for (bad_actor, bad_reason) in [
+        ("an actor with spaces", "suspend_policy"),
+        ("", "suspend_policy"),
+        (actor.as_str(), "Bad Reason"),
+        (actor.as_str(), ""),
+    ] {
+        assert_eq!(
+            refusal(
+                store
+                    .intervene_policy(
+                        &tenant,
+                        &bundle_id,
+                        Phase::Score,
+                        "suspend",
+                        bad_actor,
+                        bad_reason
+                    )
+                    .await
+            ),
+            "policy_intervention_invalid",
+            "actor {bad_actor:?} with reason {bad_reason:?}"
+        );
+    }
+    assert!(
+        store
+            .list_policy_interventions(&tenant, &bundle_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        policy_status_row(&tenant, &bundle_id, "score").await,
+        (true, "runnable".to_string(), None)
+    );
+
+    // A suspended policy cannot be suspended again, and `terminate` is still
+    // refused from that state.
+    store
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Score,
+            "suspend",
+            &actor,
+            "suspend_policy",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        refusal(
+            store
+                .intervene_policy(
+                    &tenant,
+                    &bundle_id,
+                    Phase::Score,
+                    "suspend",
+                    &actor,
+                    "suspend_again"
+                )
+                .await
+        ),
+        "policy_intervention_no_transition"
+    );
+    assert_eq!(
+        refusal(
+            store
+                .intervene_policy(
+                    &tenant,
+                    &bundle_id,
+                    Phase::Score,
+                    "terminate",
+                    &actor,
+                    "end_policy"
+                )
+                .await
+        ),
+        PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL
+    );
+    assert_eq!(
+        store
+            .list_policy_interventions(&tenant, &bundle_id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "only the one accepted suspension is recorded"
+    );
+    assert_eq!(
+        policy_status_row(&tenant, &bundle_id, "score").await,
+        (
+            false,
+            "suspended".to_string(),
+            Some("suspend_policy".to_string())
+        )
+    );
+
+    // A bundle the tenant does not have, and another tenant's bundle.
+    let other_bundle = format!("sha256:{}", "9".repeat(64));
+    let missing = store
+        .intervene_policy(
+            &tenant,
+            &other_bundle,
+            Phase::Score,
+            "suspend",
+            &actor,
+            "suspend_policy",
+        )
+        .await;
+    assert!(
+        matches!(missing, Err(DatabaseError::NotFound { .. })),
+        "unexpected result: {missing:?}"
+    );
+    let other_tenant = policy_tenant("refusals-other");
+    let foreign = store
+        .intervene_policy(
+            &other_tenant,
+            &bundle_id,
+            Phase::Score,
+            "suspend",
+            &actor,
+            "suspend_policy",
+        )
+        .await;
+    assert!(
+        matches!(foreign, Err(DatabaseError::NotFound { .. })),
+        "another tenant cannot reach this tenant's policy: {foreign:?}"
+    );
+    assert!(
+        store
+            .list_policy_interventions(&other_tenant, &bundle_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The same holds in the database: the runtime login sees the record only
+    // under its own tenant's setting.
+    assert_eq!(
+        visible_rows(&backend, &other_tenant, "pipeline_policy_interventions").await,
+        0
+    );
+    assert_eq!(
+        visible_rows(&backend, &tenant, "pipeline_policy_interventions").await,
+        1
+    );
+    assert_eq!(
+        store
+            .list_policy_interventions(&tenant, &bundle_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// The status row cannot say `runnable` while its status says otherwise, even
+/// to its owner: V111's check ties the two columns together, so no reader of
+/// `runnable` can disagree with the intervention record.
+#[tokio::test]
+async fn the_policy_status_row_keeps_runnable_and_status_equal() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("shape");
+    service.register_default_bundle(&tenant).await.unwrap();
+    let bundle_id = service.bundle_id().to_string();
+    let mut owner = owner_client().await;
+    for statement in [
+        "UPDATE pipeline_bundle_policy_status SET runnable = FALSE
+          WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'score'",
+        "UPDATE pipeline_bundle_policy_status SET operational_status = 'suspended'
+          WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'score'",
+        "UPDATE pipeline_bundle_policy_status
+            SET runnable = TRUE, operational_status = 'terminated'
+          WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'score'",
+    ] {
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let error = tx
+            .execute(statement, &[&tenant, &bundle_id])
+            .await
+            .expect_err("a status row that disagrees with itself is refused");
+        assert!(
+            db_error_message(&error).contains("pipeline_bundle_policy_status_runnable_shape"),
+            "unexpected error: {error:?}"
+        );
+        drop(tx);
+    }
+    assert_eq!(
+        policy_status_row(&tenant, &bundle_id, "score").await,
+        (true, "runnable".to_string(), None)
+    );
+}
+
+/// OPS-003: the operational summary counts the tenant's suspended policies.
+#[tokio::test]
+async fn the_summary_counts_suspended_policies() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let product = PipelineProductStore::new(backend.clone());
+    let tenant = policy_tenant("summary");
+    service.register_default_bundle(&tenant).await.unwrap();
+    let bundle_id = service.bundle_id().to_string();
+    let actor = policy_actor();
+    let count = || async {
+        product
+            .operational_summary(&tenant)
+            .await
+            .unwrap()
+            .suspended_policy_count
+    };
+    assert_eq!(count().await, 0);
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Score,
+            "suspend",
+            &actor,
+            "suspend_policy",
+        )
+        .await
+        .unwrap();
+    assert_eq!(count().await, 1);
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Review,
+            "suspend",
+            &actor,
+            "suspend_policy",
+        )
+        .await
+        .unwrap();
+    assert_eq!(count().await, 2);
+    // Another tenant's suspension is not counted.
+    let other = policy_tenant("summary-other");
+    service.register_default_bundle(&other).await.unwrap();
+    service
+        .intervene_policy(
+            &other,
+            &bundle_id,
+            Phase::Settle,
+            "suspend",
+            &actor,
+            "suspend_policy",
+        )
+        .await
+        .unwrap();
+    assert_eq!(count().await, 2);
+    for phase in [Phase::Score, Phase::Review] {
+        service
+            .intervene_policy(
+                &tenant,
+                &bundle_id,
+                phase,
+                "resume",
+                &actor,
+                "resume_policy",
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(count().await, 0);
+}
