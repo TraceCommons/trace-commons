@@ -144,6 +144,15 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try decode(json, method: "approve", as: ApproveResponse.self).requireApproved(entryId: entryId)
     }
 
+    /// Approves every pending entry of that folder in this set, held ones
+    /// excepted, as the daemon's group selector does.
+    public func approveFolder(projectId: String) async throws -> ApproveResponse {
+        let pending = try await listPending(projectId: projectId)
+        let held = pending.filter { $0.heldForSecondLook || $0.heldByManualScrubCheck }.count
+        let json = SampleDaemonData.approvedGroup(approved: pending.count - held, excludedHeld: held)
+        return try decode(json, method: "approve", as: ApproveResponse.self)
+    }
+
     public func keep(entryId: String) async throws -> DaemonData.KeepResult {
         try serve("keep", as: DaemonData.KeepResult.self)
     }
@@ -170,6 +179,11 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func harnessList() async throws -> HarnessList {
         try serve("harness_list", as: HarnessList.self)
+    }
+
+    public func setSource(_ kind: SourceKind, _ choice: SourceChoice) async throws -> DaemonData.Settings {
+        guard choice.settingsParams(for: kind) != nil else { throw DaemonData.unansweredSource }
+        return try serve("get_settings", as: DaemonData.Settings.self)
     }
 
     // MARK: Settings

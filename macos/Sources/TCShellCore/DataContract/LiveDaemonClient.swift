@@ -89,6 +89,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
             .requireApproved(entryId: entryId)
     }
 
+    public func approveFolder(projectId: String) async throws -> ApproveResponse {
+        try await call("approve", params: ["project_id": projectId], as: ApproveResponse.self)
+    }
+
     public func keep(entryId: String) async throws -> DaemonData.KeepResult {
         try await call("keep", params: ["entry_id": entryId], as: DaemonData.KeepResult.self)
     }
@@ -120,6 +124,11 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func harnessList() async throws -> HarnessList {
         try await call("harness_list", as: HarnessList.self)
+    }
+
+    public func setSource(_ kind: SourceKind, _ choice: SourceChoice) async throws -> DaemonData.Settings {
+        guard let params = choice.settingsParams(for: kind) else { throw DaemonData.unansweredSource }
+        return try await call("set_settings", params: params, as: DaemonData.Settings.self)
     }
 
     // MARK: Settings

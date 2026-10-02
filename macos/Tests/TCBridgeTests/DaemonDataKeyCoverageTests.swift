@@ -317,6 +317,37 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             XCTAssertEqual(error as? DaemonDataError, .unreachable)
         }
     }
+
+    /// R6 against the real daemon: the tool switch writes the declaration
+    /// and reads back its mode, and a folder approve answers for the group.
+    func testTheToolSwitchAndFolderApproveAgainstTheRealDaemon() async throws {
+        let daemon = try startDaemonWithOneSession()
+        let client = LiveDaemonClient(transport: Pipe(daemon))
+        let entry = try waitForPending(daemon)
+        let projectId = try XCTUnwrap(entry["project_id"] as? String)
+
+        let off = try await client.setSource(.geminiCli, .off)
+        XCTAssertEqual(off.geminiSourceMode, "off")
+        assertDeclared(
+            DaemonData.Settings.self, try result(daemon, "set_settings", ["cline_source": ["mode": "off"]]),
+            method: "set_settings")
+        let reread = try await client.settings()
+        XCTAssertEqual(reread.clineSourceMode, "off")
+
+        // A store that is not enrolled approves nothing; the group reply
+        // still says so, with its group-only counts, and does not throw.
+        let group = try await client.approveFolder(projectId: projectId)
+        XCTAssertEqual(group.approved, 0)
+        XCTAssertNotNil(group.excludedHeld, "a group call always reports what it held back")
+        XCTAssertEqual(group.skipped.map(\.reasonLabel), ["not-enrolled"])
+        assertDeclared(ApproveResponse.self, try result(daemon, "approve", ["project_id": projectId]), method: "approve")
+        do {
+            _ = try await client.approveFolder(projectId: "proj_does_not_exist")
+            XCTFail("an unknown project answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "project-id-unrecognized"))
+        }
+    }
 }
 
 /// `TCDaemon` as a `DaemonTransport`, by forwarding. The app target

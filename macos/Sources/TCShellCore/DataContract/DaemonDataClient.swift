@@ -80,6 +80,15 @@ public protocol DaemonDataClient: Sendable {
     /// -- this THROWS `DaemonDataError.notApproved(reasonLabel:)` with the
     /// `skipped` row's label, so a skip can never be drawn as success.
     func approve(entryId: String) async throws -> ApproveResponse
+    /// `approve` with `project_id`: Contribute for a whole folder (R6).
+    ///
+    /// A group call means "every pending session here that can go", so it
+    /// does NOT throw when it approves nothing: the reply says what became
+    /// of the rest -- `skipped[]` per entry, `excludedHeld` (held for a
+    /// person's review) and `excludedIneligible` (cannot be contributed),
+    /// neither of which is part of `skipped`. An id the daemon does not
+    /// know is refused with `project-id-unrecognized`.
+    func approveFolder(projectId: String) async throws -> ApproveResponse
     /// `keep`: Keep on this Mac.
     func keep(entryId: String) async throws -> DaemonData.KeepResult
     /// `undo_keep`.
@@ -96,6 +105,13 @@ public protocol DaemonDataClient: Sendable {
         -> DaemonData.ProjectModeResult
     /// `harness_list`.
     func harnessList() async throws -> HarnessList
+    /// `set_settings` with `<tool>_source`: the tool switch (R6). `.off` is
+    /// "I do not use this tool" (watch nothing, no fallback); `.watch` names
+    /// the folder. `.undecided`, or `.watch` with an empty path, is not an
+    /// answer: nothing is sent and this throws the daemon's own
+    /// `settings-invalid-value` refusal. The reply's `<tool>_source_mode`
+    /// reads back `off` / `watch` (`unset` is never drawn as off).
+    func setSource(_ kind: SourceKind, _ choice: SourceChoice) async throws -> DaemonData.Settings
 
     // MARK: Settings
 

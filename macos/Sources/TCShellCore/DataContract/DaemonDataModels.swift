@@ -603,6 +603,11 @@ extension DaemonData {
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
     }
 
+    /// What `setSource` throws for a choice that is not an answer, sending
+    /// nothing: the label the daemon's settings validator gives the same
+    /// input (`daemon::settings::ERR_SETTINGS_INVALID_VALUE`).
+    static let unansweredSource = DaemonDataError.daemon(code: "bad_params", message: "settings-invalid-value")
+
     public enum ScrubCheckMode: String, Codable, Sendable, CaseIterable {
         case automatic, manual
     }

@@ -301,4 +301,52 @@ final class DaemonDataContractWireTests: XCTestCase {
         let event = DaemonDataEventParser.parse(#"{"event":"digest_due","data":{"pending":2,"text":"2 waiting"}}"#)
         XCTAssertEqual(event, .digestDue(DaemonData.DigestDue(pending: 2, text: "2 waiting")))
     }
+
+    // MARK: - R6: the tool switch and folder approve
+
+    func testSetSourceSendsTheDeclarationAndSendsNothingForANonAnswer() async throws {
+        let transport = FakeTransport { _, _ in #"{"id":0,"result":{"codex_source_mode":"off"}}"# }
+        let client = LiveDaemonClient(transport: transport)
+        let settings = try await client.setSource(.codex, .off)
+        XCTAssertEqual(settings.codexSourceMode, "off")
+        _ = try await client.setSource(.claudeCode, .watch(path: "/Users/me/.claude/projects"))
+        XCTAssertEqual(
+            transport.calls.map(\.params),
+            [#"{"codex_source":{"mode":"off"}}"#, #"{"claude_source":{"mode":"watch","path":"\/Users\/me\/.claude\/projects"}}"#])
+        for choice in [SourceChoice.undecided, .watch(path: "  ")] {
+            do {
+                _ = try await client.setSource(.geminiCli, choice)
+                XCTFail("\(choice) was sent")
+            } catch {
+                XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "settings-invalid-value"))
+            }
+        }
+        XCTAssertEqual(transport.calls.count, 2, "a non-answer sends nothing")
+    }
+
+    func testAFolderApproveSendsTheProjectAndNeverThrowsForWhatItLeftOut() async throws {
+        let transport = FakeTransport { _, _ in
+            #"{"id":0,"result":{"approved":0,"hold_secs":30,"hold_until":null,"flagged":0,"redactions":{},"skipped":[],"excluded_held":2,"excluded_ineligible":1}}"#
+        }
+        let response = try await LiveDaemonClient(transport: transport).approveFolder(projectId: "proj_1")
+        XCTAssertEqual(transport.calls.map(\.method), ["approve"])
+        XCTAssertEqual(transport.calls.first?.params, #"{"project_id":"proj_1"}"#)
+        XCTAssertEqual(response.approved, 0)
+        XCTAssertEqual(response.excludedHeld, 2)
+        XCTAssertEqual(response.excludedIneligible, 1)
+    }
+
+    func testSampleFolderApproveLeavesHeldSessionsOut() async throws {
+        let client = SampleDaemonClient(.heldSessions)
+        let pending = try await client.listPending(projectId: nil)
+        let project = try XCTUnwrap(pending.first { $0.heldForSecondLook }?.projectId)
+        let response = try await client.approveFolder(projectId: project)
+        XCTAssertGreaterThan(try XCTUnwrap(response.excludedHeld), 0)
+        do {
+            _ = try await client.approveFolder(projectId: "proj_does_not_exist")
+            XCTFail("an unknown project answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "project-id-unrecognized"))
+        }
+    }
 }
