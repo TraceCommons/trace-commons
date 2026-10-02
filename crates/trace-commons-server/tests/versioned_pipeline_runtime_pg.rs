@@ -23600,6 +23600,48 @@ async fn a_score_that_finds_the_tenant_lock_held_is_released_uncharged() {
     assert_eq!(scored.next_phase, Some(Phase::Settle));
 }
 
+/// Zaki review 3, Z3-L3: the pipeline's follow-up of `main`'s revocation
+/// records the tombstone, and invalidates the export items, under the
+/// caller's reason (`revoked`), not a fixed `withdrawn`.
+#[tokio::test]
+async fn a_revocation_follow_up_tombstones_under_its_own_reason() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("revocation-tombstone-{}", uuid::Uuid::new_v4());
+    let (run, _) = complete_indexed_run(&service, &tenant).await;
+    assert!(
+        service
+            .store()
+            .follow_up_revocation(&tenant, run.submission_id, RECEIPT_PRINCIPAL)
+            .await
+            .unwrap(),
+        "the submission has a pipeline run"
+    );
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let reasons: Vec<String> = tx
+        .query(
+            "SELECT reason FROM trace_tombstones WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    tx.commit().await.unwrap();
+    assert_eq!(reasons, vec!["revoked".to_string()]);
+}
+
 /// Zaki review 3, Z3-L1: a compatibility Score reads the index commands of
 /// the tenant's runs waiting for Settle, and one it cannot read fails the
 /// Score closed (`index_unavailable`, uncharged): leaving it out could credit

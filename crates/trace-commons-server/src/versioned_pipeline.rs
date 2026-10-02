@@ -3224,7 +3224,14 @@ impl PgPipelineStore {
                 with_runs.push((*affected_id, submission));
             }
         }
-        withdraw_pipeline_content_on_tx(&tx, tenant_id, &with_runs, actor_principal_ref).await?;
+        withdraw_pipeline_content_on_tx(
+            &tx,
+            tenant_id,
+            &with_runs,
+            actor_principal_ref,
+            PIPELINE_WITHDRAWAL_INVALIDATION_REASON,
+        )
+        .await?;
         let with_runs = with_runs
             .into_iter()
             .map(|(submission_id, _)| submission_id)
@@ -3464,6 +3471,7 @@ impl PgPipelineStore {
                 tenant_id,
                 &[(submission_id, submission)],
                 actor_principal_ref,
+                reason_code,
             )
             .await?;
         }
@@ -5016,12 +5024,15 @@ async fn release_awaiting_review(
 /// manifests and items, and pipeline export snapshots and items
 /// invalidated. Every statement runs once for all of them (Zaki review 1,
 /// round 2, item 5), and every write is idempotent. Nothing at all for no
-/// submission.
+/// submission. `reason` is the caller's (`withdrawn` or `revoked`): the
+/// tombstone's reason and the export items' invalidation reason (Zaki
+/// review 3, Z3-L3).
 async fn withdraw_pipeline_content_on_tx(
     tx: &Transaction<'_>,
     tenant_id: &str,
     submissions: &[(Uuid, &Row)],
     actor_principal_ref: &str,
+    reason: &str,
 ) -> Result<(), DatabaseError> {
     if submissions.is_empty() {
         return Ok(());
@@ -5067,7 +5078,7 @@ async fn withdraw_pipeline_content_on_tx(
             canonical_summary_hash, reason, effective_at, created_by_principal_ref
          )
          SELECT $1, tombstone.tombstone_id, tombstone.submission_id, tombstone.trace_id,
-                tombstone.redaction_hash, tombstone.canonical_summary_hash, 'withdrawn',
+                tombstone.redaction_hash, tombstone.canonical_summary_hash, $8,
                 NOW(), $7
            FROM unnest($2::UUID[], $3::UUID[], $4::UUID[], $5::TEXT[], $6::TEXT[])
                 AS tombstone(
@@ -5083,6 +5094,7 @@ async fn withdraw_pipeline_content_on_tx(
             &redaction_hashes,
             &canonical_summary_hashes,
             &actor_principal_ref,
+            &reason,
         ],
     )
     .await?;
@@ -5126,7 +5138,7 @@ async fn withdraw_pipeline_content_on_tx(
         &[&tenant_id, &submission_ids],
     )
     .await?;
-    invalidate_pipeline_exports_on_tx(tx, tenant_id, &submission_ids, "withdrawn").await?;
+    invalidate_pipeline_exports_on_tx(tx, tenant_id, &submission_ids, reason).await?;
     let trace_id_of = submission_ids
         .iter()
         .copied()
