@@ -48,6 +48,11 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
     /// not appear in `skipped`: they were never selected, and `skipped` is
     /// the account of what the call was asked to act on.
     public let excludedIneligible: UInt64?
+    /// How many pending entries a GROUP selector left out because they are
+    /// held for a person's review (`queue::REASONS_NEEDING_A_PERSON`).
+    /// Present on every group call, absent on a single-entry call, where the
+    /// filter does not run. Not part of `skipped` or `excludedIneligible`.
+    public let excludedHeld: UInt64?
 
     public init(
         approved: UInt64,
@@ -56,7 +61,8 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         skipped: [ApproveSkip],
         holdSecs: UInt64,
         holdUntil: String?,
-        excludedIneligible: UInt64? = nil
+        excludedIneligible: UInt64? = nil,
+        excludedHeld: UInt64? = nil
     ) {
         self.approved = approved
         self.flagged = flagged
@@ -65,6 +71,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         self.holdSecs = holdSecs
         self.holdUntil = holdUntil
         self.excludedIneligible = excludedIneligible
+        self.excludedHeld = excludedHeld
     }
 
     enum CodingKeys: String, CodingKey {
@@ -75,6 +82,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         case holdSecs = "hold_secs"
         case holdUntil = "hold_until"
         case excludedIneligible = "excluded_ineligible"
+        case excludedHeld = "excluded_held"
     }
 
     /// Whether this response is the correction-credential refusal.
