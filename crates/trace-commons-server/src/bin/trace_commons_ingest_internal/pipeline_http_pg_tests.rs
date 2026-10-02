@@ -4586,6 +4586,83 @@ async fn pipeline_review_routes_append_hash_only_audit_rows() {
     );
 }
 
+/// poldsam P-7: the review routes append their audit rows after the claim
+/// or the assessment commits. With the audit log unwritable, each route
+/// still answers the committed result -- the claim's lease token, the
+/// assessment's id -- instead of 500: a retried assessment would get 409 and
+/// the reviewer would never see the decision. No audit row is written; the
+/// failure is logged hash-only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_review_audit_append_answers_the_committed_result() {
+    let Some(mut fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let reviewer = format!("token-review-audit-fail-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    let principal = "principal_sha256:review-audit-fail";
+    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+
+    // A directory where the tenant's audit log file belongs: every append
+    // fails.
+    let audit_log = audit_events_path(&fixture.state.root, &fixture.tenant);
+    if audit_log.is_file() {
+        std::fs::remove_file(&audit_log).unwrap();
+    }
+    std::fs::create_dir_all(&audit_log).unwrap();
+
+    let (status, claim) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/claim", run.run_id),
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert!(claim["lease_token"].is_string(), "{claim}");
+    let (status, assessed) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/assessment", run.run_id),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": claim["lease_token"],
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{assessed}");
+    assert!(assessed["assessment_id"].is_string(), "{assessed}");
+
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pipeline_review_assessments a
+                      WHERE a.tenant_id = $1 AND a.run_id = $2
+                        AND a.assessment_id::text = $4),
+                    (SELECT COUNT(*) FROM trace_audit_events e
+                      WHERE e.tenant_id = $1 AND e.submission_id = $3)",
+            &[
+                &fixture.tenant,
+                &run.run_id,
+                &run.submission_id,
+                &assessed["assessment_id"].as_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        (row.get::<_, i64>(0), row.get::<_, i64>(1)),
+        (1, 0),
+        "the answered assessment is the committed one, and no audit row was written"
+    );
+}
+
 /// Zaki review 1, minor item M-f: `main`'s gate evaluate route
 /// (`POST /v1/workers/gate/evaluate`) refuses a submission that has a
 /// pipeline run with a label-only `409`, before it scores anything, so the

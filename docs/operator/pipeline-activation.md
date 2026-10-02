@@ -287,6 +287,14 @@ An assessment moves the run back to `pending`, due at once, in the same
 transaction. The worker then runs Review with the assessment: an approval
 continues to Score, a rejection ends the run.
 
+The claim and assessment routes append their audit rows after the claim or
+the assessment commits. When that append fails, the route still answers the
+committed result (the lease token, the assessment id), and logs
+`pipeline_review_audit_append_failed` with the tenant's storage reference, a
+hash of the run id and the route (`claim` or `assessment`). The audit trail
+then has no row for that claim or decision; the decision itself is in
+`pipeline_review_assessments`.
+
 Two other events release a parked run to `pending`:
 
 - A claim or an assessment on a run whose submission is no longer operable

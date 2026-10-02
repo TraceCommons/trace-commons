@@ -42649,28 +42649,37 @@ async fn pipeline_review_claim_handler(
     };
     // Zaki review 1, minor item M-a: the audit row `main`'s review lease
     // claim appends, hash-only and label-only.
-    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
-        .await
-        .map_err(internal_error)?;
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::review_lease(
+    //
+    // poldsam P-7: the claim is committed by now. A failed append must not
+    // answer 500 and keep the lease token from the reviewer who holds the
+    // claim: it is logged hash-only and the committed claim is answered, as
+    // `main`'s withdrawal treats its own audit append.
+    let appended: anyhow::Result<()> = async {
+        let submission_id =
+            pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id).await?;
+        append_audit_event_with_db_mirror(
+            state.as_ref(),
             &tenant,
-            submission_id,
-            StorageTraceReviewLeaseAuditAction::Claim,
-            Some(claim.lease_expires_at),
-            None,
-        ),
-        StorageTraceAuditAction::Review,
-        StorageTraceAuditSafeMetadata::ReviewLease {
-            action: StorageTraceReviewLeaseAuditAction::Claim,
-            lease_expires_at: Some(claim.lease_expires_at),
-            review_due_at: None,
-        },
-    )
-    .await
-    .map_err(internal_error)?;
+            TraceCommonsAuditEvent::review_lease(
+                &tenant,
+                submission_id,
+                StorageTraceReviewLeaseAuditAction::Claim,
+                Some(claim.lease_expires_at),
+                None,
+            ),
+            StorageTraceAuditAction::Review,
+            StorageTraceAuditSafeMetadata::ReviewLease {
+                action: StorageTraceReviewLeaseAuditAction::Claim,
+                lease_expires_at: Some(claim.lease_expires_at),
+                review_due_at: None,
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = appended {
+        log_pipeline_review_audit_append_failure(&tenant.tenant_id, run_id, "claim", &error);
+    }
     Ok(Json(PipelineReviewClaimResponse {
         lease_token: claim.lease_token,
         lease_expires_at: claim.lease_expires_at,
@@ -42710,6 +42719,27 @@ async fn pipeline_run_submission_record(
         .ok_or_else(not_found)?
         .map_err(internal_error)?;
     Ok(Some(record))
+}
+
+/// poldsam P-7: a pipeline review route's audit append failed after its
+/// claim or assessment committed. Hash-only: the tenant's storage
+/// reference, a hash of the run id, the route's label and the error's hash.
+/// An operator finds the decision in `pipeline_review_assessments` (or the
+/// claim in `pipeline_review_claims`); the audit trail has no row for it.
+fn log_pipeline_review_audit_append_failure(
+    tenant_id: &str,
+    run_id: Uuid,
+    route: &'static str,
+    error: &anyhow::Error,
+) {
+    tracing::warn!(
+        error_class = "pipeline_review_audit_append_failed",
+        tenant_storage_ref = %tenant_storage_ref(tenant_id),
+        run_ref_hash = %sha256_prefixed(&run_id.to_string()),
+        route,
+        error_hash = %safe_runtime_error_hash(error),
+        "pipeline review audit append failed; the committed result was answered"
+    );
 }
 
 /// The submission a pipeline run belongs to, for the review routes' audit
@@ -42806,6 +42836,10 @@ async fn pipeline_review_assessment_handler(
             "review decision",
         )?;
     }
+    // The audit row's labels, formed before the commit, so nothing that can
+    // fail without an append stands between the commit and the answer.
+    let review_status = storage_corpus_status(resulting_status);
+    let decision_label = serde_storage_string(&review_status).map_err(internal_error)?;
     let assessment = pipeline_service
         .store()
         .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
@@ -42814,28 +42848,37 @@ async fn pipeline_review_assessment_handler(
     // Zaki review 1, minor item M-a: the audit row `main`'s review decision
     // appends: the reason as a hash, and labels only in the metadata. The
     // status is the one the recommendation leads to once Review runs.
-    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
-        .await
-        .map_err(internal_error)?;
-    let review_status = storage_corpus_status(resulting_status);
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::review_decision(
+    //
+    // poldsam P-7: the assessment is committed by now. A failed append must
+    // not answer 500: a retry would get 409 (the run already has its
+    // assessment) and the reviewer would never see the committed result. It
+    // is logged hash-only and the committed assessment is answered, as
+    // `main`'s withdrawal treats its own audit append.
+    let appended: anyhow::Result<()> = async {
+        let submission_id =
+            pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id).await?;
+        append_audit_event_with_db_mirror(
+            state.as_ref(),
             &tenant,
-            submission_id,
-            resulting_status,
-            Some(&trace_free_text_audit_reason(&reason_label)),
-        ),
-        StorageTraceAuditAction::Review,
-        StorageTraceAuditSafeMetadata::ReviewDecision {
-            decision: serde_storage_string(&review_status).map_err(internal_error)?,
-            resulting_status: review_status,
-            reason_code: Some(reason_label),
-        },
-    )
-    .await
-    .map_err(internal_error)?;
+            TraceCommonsAuditEvent::review_decision(
+                &tenant,
+                submission_id,
+                resulting_status,
+                Some(&trace_free_text_audit_reason(&reason_label)),
+            ),
+            StorageTraceAuditAction::Review,
+            StorageTraceAuditSafeMetadata::ReviewDecision {
+                decision: decision_label,
+                resulting_status: review_status,
+                reason_code: Some(reason_label.clone()),
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = appended {
+        log_pipeline_review_audit_append_failure(&tenant.tenant_id, run_id, "assessment", &error);
+    }
     Ok(Json(PipelineReviewAssessmentResponse {
         assessment_id: assessment.assessment_id,
     }))
