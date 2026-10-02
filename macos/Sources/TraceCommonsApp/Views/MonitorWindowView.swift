@@ -48,7 +48,9 @@ struct MonitorWindowView: View {
 
     var body: some View {
         GlassThreePane(showsLeading: showsLeading, showsTrailing: showsInspector) {
-            MonitorLeadingPane(tab: $tab, inferenceDot: inferenceDot, onSettings: { openSettings() }) {
+            MonitorLeadingPane(
+                tab: $tab, inferenceDot: inferenceDot, tracesBadge: tracesBadge, onSettings: { openSettings() }
+            ) {
                 switch tab {
                 case .traces: TracesTreeView(store: traces, selection: $selectedSession)
                 case .home, .inference: Spacer(minLength: 0)
@@ -63,13 +65,19 @@ struct MonitorWindowView: View {
         } trailing: {
             GlassPane {
                 if tab == .traces {
-                    SessionInspectorView(client: traces.client, entry: selectedEntry)
+                    SessionInspectorView(store: traces, entry: selectedEntry)
                 }
             }
         }
         .frame(minWidth: GlassTokens.Size.mapWidth, minHeight: GlassTokens.Size.windowHeight * 0.7)
         .glassWindow()
         .task { traces.start() }
+    }
+
+    /// The Traces badge (R7): decisions owed, a dash when the core did not
+    /// say, nothing at zero. Never queue depth.
+    private var tracesBadge: GlassBadgeValue? {
+        traces.decisionsOwed.map(GlassBadgeValue.count) ?? .unknown
     }
 
     /// The selected session, while it is still in the tree.
@@ -91,6 +99,7 @@ struct MonitorWindowView: View {
 private struct MonitorLeadingPane<Content: View>: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
+    let tracesBadge: GlassBadgeValue?
     let onSettings: () -> Void
     @ViewBuilder let content: () -> Content
     @Environment(\.glassWindowControlsInset) private var controlsInset
@@ -107,7 +116,10 @@ private struct MonitorLeadingPane<Content: View>: View {
                     "Monitor",
                     selection: $tab,
                     segments: MonitorWindowView.Tab.allCases.map { item in
-                        GlassSegment(item.rawValue, value: item, dot: item == .inference ? inferenceDot : nil)
+                        GlassSegment(
+                            item.rawValue, value: item,
+                            badgeValue: item == .traces ? tracesBadge : nil,
+                            dot: item == .inference ? inferenceDot : nil)
                     })
                 content()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

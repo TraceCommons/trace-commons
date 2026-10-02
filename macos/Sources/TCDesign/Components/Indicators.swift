@@ -108,22 +108,22 @@ public struct GlassTag: View {
 /// Decisions owed. On the menu bar and the Traces tab only; never queue
 /// depth or credit. `subtle` is the white count pill inside a tab.
 public struct GlassBadge: View {
-    private let count: Int
+    private let count: Int?
     private let subtle: Bool
     private let label: String?
 
     /// `label` is what VoiceOver reads, from the core's copy; without it the
-    /// count is read alone.
-    public init(count: Int, subtle: Bool = false, label: String? = nil) {
+    /// count is read alone. A nil `count` is unknown and draws a dash, never
+    /// a number.
+    public init(count: Int?, subtle: Bool = false, label: String? = nil) {
         self.count = count
         self.subtle = subtle
         self.label = label
     }
 
     public var body: some View {
-        Text("\(count)")
+        Text(count.map(String.init) ?? "—")
             .glassType(GlassTokens.TypeScale.micro)
-            .monospacedDigit()
             .monospacedDigit()
             .foregroundStyle(subtle ? GlassColor.textPrimary : GlassTokens.Color.textOnStatus.color)
             .padding(.horizontal, 5)
@@ -131,7 +131,7 @@ public struct GlassBadge: View {
             .background(
                 Capsule().fill(subtle ? Color.white.opacity(0.16) : GlassTokens.Color.statusOutside.color)
             )
-            .accessibilityLabel(label ?? "\(count)")
+            .accessibilityLabel(label ?? count.map(String.init) ?? "—")
     }
 }
 

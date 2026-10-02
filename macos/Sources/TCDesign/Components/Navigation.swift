@@ -1,20 +1,32 @@
 import SwiftUI
 
+/// A badge's value: a count, or unknown (a dash).
+public enum GlassBadgeValue: Sendable, Equatable {
+    case count(Int)
+    case unknown
+}
+
 /// One segment of `GlassSegmentedTabs`.
 public struct GlassSegment<Value: Hashable>: Identifiable {
     public let value: Value
     public let title: String
     /// Decisions owed, as a count pill. Never queue depth or credit.
-    public let badge: Int?
+    public let badge: GlassBadgeValue?
     /// A status dot after the title (Inference: Private AI on or off).
     public let dot: GlassStatus?
 
     public var id: Value { value }
 
     public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil) {
+        self.init(title, value: value, badgeValue: badge.map(GlassBadgeValue.count), dot: dot)
+    }
+
+    /// `badgeValue: .unknown` draws a dash: a count the core did not give is
+    /// never shown as a number. Pass nil, or `.count(0)`, for no badge.
+    public init(_ title: String, value: Value, badgeValue: GlassBadgeValue?, dot: GlassStatus? = nil) {
         self.title = title
         self.value = value
-        self.badge = badge
+        self.badge = badgeValue == .count(0) ? nil : badgeValue
         self.dot = dot
     }
 }
@@ -46,8 +58,10 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         if let dot = segment.dot {
                             GlassStatusDot(dot, size: 6)
                         }
-                        if let badge = segment.badge {
-                            GlassBadge(count: badge, subtle: true)
+                        switch segment.badge {
+                        case .count(let count): GlassBadge(count: count, subtle: true)
+                        case .unknown: GlassBadge(count: nil, subtle: true)
+                        case nil: EmptyView()
                         }
                     }
                     .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))

@@ -1,6 +1,7 @@
 #if DEBUG
 import SwiftUI
 import TCDesign
+import TCBridge
 import TCShellCore
 
 /// The Traces tab (R6 of #1173): the tool › folder › session tree.
@@ -155,14 +156,18 @@ struct TracesTreeView: View {
     }
 }
 
-/// The inspector for the selected session (R6): what the core reports
-/// about it, from the `preview` summary.
+/// The inspector for the selected session: what the core reports about it
+/// (R6), and its review (R7): what would leave this Mac, the consent gate in
+/// the core's words, and Contribute, Keep or Dismiss.
 struct SessionInspectorView: View {
-    let client: any DaemonDataClient
+    let store: TracesStore
     let entry: DaemonData.QueueEntry?
 
     @State private var summary: DaemonData.PreviewSummary?
     @State private var failure: DaemonDataError?
+    /// The consent gate, from the Rust core. Without it Contribute stays
+    /// disabled: the shell never words consent itself.
+    private let consent = TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
 
     var body: some View {
         Group {
@@ -176,7 +181,19 @@ struct SessionInspectorView: View {
                         if let failure {
                             GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
                         }
+                        // The opening prompt in full, unless it is no more
+                        // than the title above it (the title is its first line).
+                        if let prompt = summary?.openingPrompt, !prompt.isEmpty, prompt != summary?.title {
+                            GlassCard(quiet: true) {
+                                Text(prompt)
+                                    .glassType(GlassTokens.TypeScale.body)
+                                    .foregroundStyle(GlassColor.textPrimary)
+                                    .lineLimit(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
                         GlassKeyValueList(Self.rows(entry, summary))
+                        if let summary { redactions(summary) }
                         if let reasons = entry.secondLook, !reasons.isEmpty {
                             // The core's fixed reason labels until K4 gives
                             // them words.
@@ -184,21 +201,99 @@ struct SessionInspectorView: View {
                                 ForEach(reasons, id: \.self) { GlassChip($0, status: .ask) }
                             }
                         }
+                        review(entry)
                     }
                 }
                 .scrollIndicators(.never)
                 .task(id: entry.entryId) { await load(entry.entryId) }
+            } else if let kept = store.lastKept {
+                undoKeep(kept)
             } else {
                 Color.clear
             }
         }
     }
 
+    /// What scrubbing removed, and what it found but left in, in the
+    /// core's redaction labels (`RedactionSummary`).
+    @ViewBuilder
+    private func redactions(_ summary: DaemonData.PreviewSummary) -> some View {
+        // A label counted zero times removed nothing: it is not a row.
+        let rows = RedactionSummary.rows(occurrences: (summary.redactions ?? [:]).filter { $0.value > 0 }, distinct: [:])
+        if !rows.removed.isEmpty {
+            GlassCard(quiet: true) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(rows.removed, id: \.family) { row in
+                        Text(row.countLine)
+                            .glassType(GlassTokens.TypeScale.label)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        if !rows.stillPresent.isEmpty {
+            GlassNotice(tone: .outside) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(rows.stillPresent, id: \.family) { row in
+                        Text(row.countLine)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The consent gate and the three actions. Contribute needs the
+    /// summary (what would leave) and the core's consent words in front of
+    /// the contributor.
+    @ViewBuilder
+    private func review(_ entry: DaemonData.QueueEntry) -> some View {
+        let busy = store.acting.contains(entry.entryId)
+        if let consent {
+            Text(consent.gateStatement)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let refused = store.actionError, refused.entryId == entry.entryId {
+            GlassNotice(tone: .outside, title: refused.error.description) { EmptyView() }
+        }
+        HStack(spacing: GlassTokens.Space.s4) {
+            Button(Self.dismissTitle) { act(.dismiss, entry) }
+                .buttonStyle(GlassButtonStyle(.glass))
+            Button(Self.keepTitle) { act(.keep, entry) }
+                .buttonStyle(GlassButtonStyle(.glass))
+            Spacer(minLength: 0)
+            Button(Self.contributeTitle) { act(.contribute, entry) }
+                .buttonStyle(GlassButtonStyle(.primary, small: true))
+                .disabled(summary == nil || consent == nil)
+        }
+        .disabled(busy)
+    }
+
+    private func undoKeep(_ entryId: String) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            Button(Self.undoTitle) { Task { await store.perform(.undoKeep, on: entryId) } }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .disabled(store.acting.contains(entryId))
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func act(_ action: TracesStore.ReviewAction, _ entry: DaemonData.QueueEntry) {
+        Task { await store.perform(action, on: entry.entryId) }
+    }
+
+    static let contributeTitle = "Contribute"
+    static let keepTitle = "Keep"
+    static let dismissTitle = "Dismiss"
+    static let undoTitle = "Undo"
+
     private func load(_ entryId: String) async {
         summary = nil
         failure = nil
         do {
-            summary = try await client.preview(entryId: entryId)
+            summary = try await store.client.preview(entryId: entryId)
         } catch {
             failure = error as? DaemonDataError ?? .undecodable(method: "preview")
         }

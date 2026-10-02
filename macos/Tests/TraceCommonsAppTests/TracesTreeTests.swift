@@ -85,3 +85,47 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertEqual(store.tree.allSessions.count, 3)
     }
 }
+
+/// R7: the badge and the review actions, against C1's sample sets.
+@MainActor
+final class TracesReviewTests: XCTestCase {
+    /// The badge is `decisions_owed`; unknown stays unknown, never a count
+    /// derived from the queue.
+    func test_theBadgeIsDecisionsOwedOrUnknown() async {
+        let normal = TracesStore(client: SampleDaemonClient(.normalDay))
+        await normal.load()
+        XCTAssertEqual(normal.decisionsOwed, normal.status?.decisionsOwed)
+        XCTAssertNotNil(normal.decisionsOwed)
+
+        let unknown = TracesStore(client: SampleDaemonClient(.unknownCounts))
+        await unknown.load()
+        XCTAssertNotNil(unknown.status, "status was read")
+        XCTAssertNil(unknown.decisionsOwed, "decisions_owed absent is unknown")
+        XCTAssertFalse(unknown.tree.allSessions.isEmpty, "and the queue is not where a count comes from")
+
+        let down = TracesStore(client: SampleDaemonClient(.coreDown))
+        await down.load()
+        XCTAssertNil(down.decisionsOwed)
+    }
+
+    /// Keep offers its undo, and the undo withdraws it.
+    func test_keepOffersAnUndo() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let id = try XCTUnwrap(store.tree.allSessions.first?.entryId)
+        await store.perform(.keep, on: id)
+        XCTAssertEqual(store.lastKept, id)
+        await store.perform(.undoKeep, on: id)
+        XCTAssertNil(store.lastKept)
+        XCTAssertTrue(store.acting.isEmpty)
+    }
+
+    /// A refused action is kept against its session; nothing is applied.
+    func test_aRefusedActionIsKept() async {
+        let store = TracesStore(client: SampleDaemonClient(.coreDown))
+        await store.perform(.contribute, on: "e1")
+        XCTAssertEqual(store.actionError?.entryId, "e1")
+        XCTAssertEqual(store.actionError?.error, .unreachable)
+        XCTAssertNil(store.lastKept)
+    }
+}
