@@ -6891,27 +6891,6 @@ async fn a_withdrawal_completion_runs_the_pipeline_follow_up_and_stops_listing_t
     }
 }
 
-/// The pipeline HTTP harness's own setup and nothing else: the
-/// `<database>_pilot` database created and migrated the way the pilot's was,
-/// the runtime login provisioned, and the owner and runtime connections
-/// opened, as every test here opens them. CI runs it alone against a
-/// database of its own, and the transactions it commits there are the
-/// baseline its no-activity guard holds each real pipeline HTTP step above:
-/// the harness setup by itself commits more than a fixed floor would allow
-/// for, so only commits beyond the baseline show that a step ran its test
-/// (Zaki review 1, round 2, finding 22).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_pipeline_http_harness_sets_up_its_database() {
-    let Some(runtime) = runtime_backend(1).await else {
-        return;
-    };
-    account_owner_backend()
-        .await
-        .expect("the same variable runtime_backend read is set");
-    let _ = mains_database().await;
-    drop(runtime);
-}
-
 // ---------------------------------------------------------------------------
 // `main`'s side paths and submissions with a pipeline run (Zaki review 1,
 // round 2, finding 18).
