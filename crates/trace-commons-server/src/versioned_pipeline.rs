@@ -9036,6 +9036,25 @@ impl PipelineService {
                         tx.commit().await?;
                         withheld
                     };
+                    // poldsam P-1: a leg an earlier attempt already
+                    // dispatched (its adapter answered `Unavailable`, so the
+                    // effect may have happened) is not completed as withheld
+                    // with no receipt: it fails as `settlement_unreconciled`,
+                    // as a dispatched leg forfeited by a withdrawal is, for an
+                    // operator to reconcile against the adapter's records by
+                    // `operation_ref_hash`. The retry stays charged, so the
+                    // attempts run out and the run fails with the leg kept.
+                    if withheld.is_some() && settlement.dispatched_at.is_some() {
+                        self.store
+                            .update_settlement(
+                                &run,
+                                instrument_id.as_str(),
+                                failed_settlement_update(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL),
+                            )
+                            .await?;
+                        settlement_blocked = true;
+                        continue;
+                    }
                     if let Some(label) = withheld {
                         self.store
                             .update_settlement(

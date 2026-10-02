@@ -775,7 +775,13 @@ credit checks, in `main`'s order. A check that refuses the credit withholds
 the leg: the leg completes with no ledger event, its `last_error_label` is
 `main`'s reason, and the contributor status reports `withheld` with that
 reason. The Score decision does not change, and a withheld leg is not a
-charged Settle error.
+charged Settle error. The exception is a leg an earlier Settle attempt
+already dispatched (its adapter answered `Unavailable`, so the effect may
+have happened): a check that withholds it later fails it as
+`settlement_unreconciled` instead, with no further adapter call. That retry
+is charged, the run fails when Settle's attempts run out, and the leg waits
+for an operator to reconcile it against the adapter's records by
+`operation_ref_hash`, as for any other `settlement_unreconciled` leg.
 
 | Check | Withheld as |
 |---|---|

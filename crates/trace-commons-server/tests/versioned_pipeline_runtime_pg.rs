@@ -15428,6 +15428,191 @@ async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
     );
 }
 
+/// A compatibility service awarding `CHECKED_DELTA_MICROCREDITS`, as
+/// `checked_compatibility_service` builds one, with `trace_credit` as its
+/// Trace Credit adapter.
+async fn checked_compatibility_service_over_adapter(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    trace_credit: Arc<dyn SettlementAdapter>,
+) -> Arc<PipelineService> {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend.clone(),
+            artifact_store(dir),
+            package,
+            index.clone(),
+            index,
+            registry,
+            caps,
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_authority(authority)
+        .with_privacy(default_privacy_boundary())
+        .with_novelty_utility_checks(issuing_checks())
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// poldsam P-1: a Trace Credit leg an earlier Settle attempt dispatched
+/// (its adapter answered `Unavailable`, so the effect may have happened)
+/// and that `main`'s credit checks withhold on a later attempt is not
+/// completed as withheld with no receipt. It fails as
+/// `settlement_unreconciled`, with no further adapter call and no ledger
+/// row, the retry stays charged, and the run fails at Settle's budget with
+/// the leg kept for an operator to reconcile.
+#[tokio::test]
+async fn a_dispatched_leg_the_credit_checks_withhold_later_stays_unreconciled() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let authority = Arc::new(SwitchableAuthority(std::sync::Mutex::new(
+        SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: Some(SubmissionAllowlists::default()),
+            require_policy: true,
+        },
+    )));
+    let outage = Arc::new(OutageThenRecordingAdapter {
+        inner: RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        ),
+        failures_left: AtomicUsize::new(0),
+    });
+    let trace_credit = CountingSettlementAdapter::new(outage.clone());
+    let service = checked_compatibility_service_over_adapter(
+        &backend,
+        &dir,
+        authority.clone(),
+        trace_credit.clone(),
+    )
+    .await;
+    let tenant = format!("compat-unreconciled-{}", uuid::Uuid::new_v4());
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    outage.fail_next_calls(1);
+    let first = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(first.state, PipelineRunState::Retry);
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        (leg.operation_state.as_str(), leg.dispatched_at.is_some()),
+        ("retry", true),
+        "the outage left the leg dispatched: {leg:?}"
+    );
+    assert_eq!(trace_credit.calls(), 1);
+
+    // The policy is gone by the next attempt: `main`'s checks withhold.
+    *authority.0.lock().unwrap() = SubmissionAuthority {
+        tenant: SubmissionAllowlists::default(),
+        policy: None,
+        require_policy: true,
+    };
+    force_due(&backend, &tenant, created.run_id).await;
+    let second = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs again");
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref(),
+            leg.external_receipt_hash.as_deref(),
+            leg.credit_event_id,
+        ),
+        (
+            "failed",
+            Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL),
+            None,
+            None
+        ),
+        "a dispatched leg is never completed as withheld: {leg:?}"
+    );
+    assert!(leg.dispatched_at.is_some());
+    assert_eq!(
+        (second.state, second.attempt_count),
+        (PipelineRunState::Retry, first.attempt_count + 1),
+        "the retry is charged"
+    );
+
+    let mut last = second;
+    while last.state == PipelineRunState::Retry {
+        force_due(&backend, &tenant, created.run_id).await;
+        last = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs again");
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        )
+    );
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref()
+        ),
+        ("failed", Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)),
+        "the failed run keeps the leg for an operator: {leg:?}"
+    );
+    assert_eq!(
+        trace_credit.calls(),
+        1,
+        "the withheld leg is not dispatched again, not by the failure path either"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        0
+    );
+}
+
 /// Ruling T15-8: a tenant policy's non-empty consent-scope allowlist must
 /// hold one of the submission's consent scopes, as `main`'s policy check
 /// requires (any one of them). A policy that allows model training as a use
