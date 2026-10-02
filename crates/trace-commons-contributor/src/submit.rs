@@ -3263,6 +3263,25 @@ mod tests {
 
     /// The hosted admission gate's refusal shape: a status, an
     /// `{"error": ...}` label, and no receipt.
+    /// An ingest that records the exact byte length of each request body it
+    /// receives, before any parsing.
+    fn stub_ingest_body_lengths(lengths: Arc<Mutex<Vec<usize>>>) -> Router {
+        Router::new().route(
+            "/v1/traces",
+            post(move |body: axum::body::Bytes| {
+                let lengths = lengths.clone();
+                async move {
+                    lengths.lock().unwrap().push(body.len());
+                    Json(serde_json::json!({
+                        "status": "accepted",
+                        "credit_points_pending": 0.0,
+                        "explanation": []
+                    }))
+                }
+            }),
+        )
+    }
+
     fn stub_ingest_refuses(status: u16, label: &'static str) -> Router {
         Router::new().route(
             "/v1/traces",
@@ -4037,15 +4056,14 @@ mod tests {
     }
 
     /// K10: the receipt's `uploaded_bytes` describes the exact bytes the
-    /// server received, not an estimate made some other way. Byte count is
-    /// invariant to a JSON object's key order, so re-serializing the body
-    /// the stub ingest received is a faithful measurement of what this
-    /// submission actually sent, and the two must agree exactly.
+    /// server received, not an estimate made some other way. The stub
+    /// measures the raw request body before parsing it, so the comparison
+    /// does not depend on how a re-serialization would escape the JSON.
     #[tokio::test]
     async fn uploaded_bytes_lands_on_the_written_receipt_and_matches_what_was_sent() {
         let issuer = spawn(stub_issuer()).await;
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let ingest = spawn(stub_ingest(received.clone())).await;
+        let lengths = Arc::new(Mutex::new(Vec::new()));
+        let ingest = spawn(stub_ingest_body_lengths(lengths.clone())).await;
         let (_dir, store) = crate::config::tests_support::temp_store();
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
@@ -4066,9 +4084,9 @@ mod tests {
         assert_eq!(receipts.len(), 1);
         let uploaded_bytes = receipts[0].uploaded_bytes.expect("a size must be recorded");
 
-        let bodies = received.lock().unwrap();
-        assert_eq!(bodies.len(), 1);
-        let sent_bytes = serde_json::to_vec(&bodies[0]).unwrap().len() as u64;
+        let lengths = lengths.lock().unwrap();
+        assert_eq!(lengths.len(), 1);
+        let sent_bytes = lengths[0] as u64;
         assert_eq!(
             uploaded_bytes, sent_bytes,
             "the recorded size must match the bytes the server actually received"

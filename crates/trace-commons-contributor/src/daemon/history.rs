@@ -244,6 +244,14 @@ pub fn join(
         .iter()
         .filter_map(|p| p.revoked_at.map(|at| (p.submission_id, at)))
         .collect();
+    // Rows the cache already held as `revoked`, dated or not. One with no
+    // date was revoked before `revoked_at` existed, on a day this device
+    // cannot know, so it stays undated rather than taking this poll's.
+    let already_revoked: std::collections::BTreeSet<Uuid> = previous
+        .iter()
+        .filter(|p| p.status == STATUS_REVOKED)
+        .map(|p| p.submission_id)
+        .collect();
 
     let mut records: Vec<HistoryRecord> = receipts
         .iter()
@@ -307,13 +315,15 @@ pub fn join(
             // revoked row regardless of this field, so a row that is revoked
             // before this field existed is still counted correctly; it just
             // has no date to show until the next poll re-observes it.
-            if rec.status == STATUS_REVOKED {
-                rec.revoked_at = Some(
-                    revoked
-                        .get(&rec.submission_id)
-                        .copied()
-                        .unwrap_or(refreshed_at),
-                );
+            // Only a web withdrawal: one this device drove already carries
+            // `withdrawn_at`, and its `revoked` read-back is not a second
+            // event to date.
+            if rec.status == STATUS_REVOKED && rec.withdrawn_at.is_none() {
+                rec.revoked_at = match revoked.get(&rec.submission_id) {
+                    Some(at) => Some(*at),
+                    None if already_revoked.contains(&rec.submission_id) => None,
+                    None => Some(refreshed_at),
+                };
             }
             rec
         })
@@ -1270,6 +1280,77 @@ mod tests {
             recs[0].revoked_at,
             Some(seen_at),
             "the first poll to see it revoked must date it"
+        );
+    }
+
+    /// A row that was already `revoked` in the cache before `revoked_at`
+    /// existed was withdrawn on some earlier day this device cannot know.
+    /// Stamping it with the upgrade's first poll would show a false date.
+    #[test]
+    fn join_leaves_a_row_revoked_before_the_field_existed_undated() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let updates = vec![update(id, STATUS_REVOKED, 0.0, None)];
+        let mut cached = join(
+            &receipts,
+            &updates,
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        cached[0].revoked_at = None; // as an older daemon wrote it
+        let after_upgrade = join(
+            &receipts,
+            &updates,
+            &labels(id),
+            &cached,
+            at("2026-09-30T12:00:00Z"),
+        );
+        assert_eq!(after_upgrade[0].status, STATUS_REVOKED);
+        assert_eq!(
+            after_upgrade[0].revoked_at, None,
+            "the upgrade day is not when it was revoked"
+        );
+    }
+
+    /// `revoked_at` dates a withdrawal made on the web. A withdrawal this
+    /// device drove already carries `withdrawn_at`, and the server reading
+    /// it back as `revoked` must not give it a second, later date.
+    #[test]
+    fn join_does_not_date_a_local_withdrawal_as_a_web_one() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let accepted = vec![update(id, "accepted", 0.0, None)];
+        let mut cached = join(
+            &receipts,
+            &accepted,
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        cached[0].withdrawn_at = Some(at("2026-08-08T13:00:00Z"));
+        let revoked = vec![update(id, STATUS_REVOKED, 0.0, None)];
+        let recs = join(
+            &receipts,
+            &revoked,
+            &labels(id),
+            &cached,
+            at("2026-08-08T14:00:00Z"),
+        );
+        assert_eq!(recs[0].withdrawn_at, Some(at("2026-08-08T13:00:00Z")));
+        assert_eq!(
+            recs[0].revoked_at, None,
+            "a local withdrawal is not a web one"
         );
     }
 

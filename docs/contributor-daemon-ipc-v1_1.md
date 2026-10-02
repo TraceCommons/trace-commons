@@ -3959,7 +3959,11 @@ field:
   `would_send_bytes` reports, mirrored onto the entry at the moment a
   preview pins it (`QueueEntry::previewed_envelope_digest`'s own sibling
   field) so a queue list can say it without opening the stored envelope for
-  every row -- the same reason `attested_inference` is mirrored there.
+  every row -- the same reason `attested_inference` is mirrored there. It
+  is cleared wherever the pin is (keep, Undo, a released preview, a revoked
+  approval). For a local preview it is measured before the upload stamps
+  the grant's scopes onto the envelope, so it can be a few bytes short of
+  `uploaded_bytes`; treat it as the size to expect, not a promise.
 
 Both `uploaded_bytes` and `would_send_bytes` are `Option<u64>`,
 `#[serde(default)]` on the wire, so a cached row or a queue line written
@@ -3997,6 +4001,11 @@ timestamp, so a `revoked` row had no date to show at all.
   `last_refreshed_at`, and carried forward on every later refresh exactly
   the way a local `withdrawn_at` already is -- a later poll that merely
   re-confirms the same `revoked` status must not push the date forward.
+  Two cases stay `null` on purpose: a row the cache already held as
+  `revoked` before this field existed (it was withdrawn on a day this
+  device cannot know, and the upgrade's first poll is not that day), and a
+  withdrawal this device drove itself, which already carries `withdrawn_at`
+  and whose `revoked` read-back is not a web withdrawal.
 
 `#[serde(default)]` on the wire, like every other field on this row, so a
 cached row written before this field existed still loads, reading `null`

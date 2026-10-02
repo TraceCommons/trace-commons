@@ -1160,6 +1160,7 @@ impl Queue {
         e.approved_unattended = false;
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         Ok(())
     }
 
@@ -1214,6 +1215,7 @@ impl Queue {
         e.approved_unattended = false;
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         Ok(())
     }
 
@@ -1735,6 +1737,7 @@ impl Queue {
         }
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         true
     }
 
@@ -1901,6 +1904,7 @@ impl Queue {
         // would be sent, so the re-offer must be previewed afresh.
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         true
     }
 
@@ -2268,6 +2272,7 @@ impl Queue {
         // envelope.
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         Ok(())
     }
 
@@ -3820,6 +3825,43 @@ mod tests {
         ));
         assert!(q.record_previewed_envelope(id, "sha256:local", None, None));
         assert_eq!(q.get(id).unwrap().attested_inference, None);
+    }
+
+    /// K10: `would_send_bytes` measures the pinned envelope, so it goes
+    /// wherever the pin goes. A size left behind would tell a queue list
+    /// "this is what would be sent" with nothing pinned behind it.
+    #[test]
+    fn the_would_send_size_lives_and_dies_with_the_pin() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        let pin = |q: &mut Queue| {
+            assert!(q.record_previewed_envelope(id, "sha256:local", None, Some(1234)));
+            assert_eq!(q.get(id).unwrap().would_send_bytes, Some(1234));
+        };
+
+        pin(&mut q);
+        assert!(q.release_preview_pin(id));
+        assert_eq!(
+            q.get(id).unwrap().would_send_bytes,
+            None,
+            "release_preview_pin"
+        );
+
+        pin(&mut q);
+        assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
+        q.cancel(id).unwrap();
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "cancel");
+
+        pin(&mut q);
+        assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
+        assert!(q.revoke_approval(id, "approval-inputs-changed"));
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "revoke_approval");
+
+        pin(&mut q);
+        q.keep(id).unwrap();
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "keep");
     }
 
     #[test]
