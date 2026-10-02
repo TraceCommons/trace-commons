@@ -312,6 +312,14 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
     Some(backend)
 }
 
+/// The routing store a booted ingest builds over the connection its
+/// pipeline runtime uses (`AppState::pipeline_activation`), for a test state
+/// that injects a `PipelineService`: with a service and no store, a new upload
+/// is refused as `pipeline_routing_unavailable`.
+fn routing_store(backend: &Arc<PgBackend>) -> Option<Arc<PipelineActivationStore>> {
+    Some(Arc::new(PipelineActivationStore::new(backend.clone())))
+}
+
 async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
     let mut client = backend
         .raw_pool_for_tests_and_diagnostics()
@@ -6112,6 +6120,11 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_service: None,
         pipeline_product: None,
         pipeline_store: None,
+        pipeline_activation: None,
+        // The test assemblers build their services with this flag set
+        // (`unqualified_routing_allowed`); a test of production routing
+        // builds its state and its service with it off.
+        pipeline_unqualified_routing: true,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
@@ -10086,6 +10099,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -10484,9 +10498,16 @@ fn minimal_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     Ok(Arc::new(
-        minimal_pipeline_service_builder(backend, artifact_store, object_store_name)?.build()?,
+        minimal_pipeline_service_builder(
+            backend,
+            artifact_store,
+            object_store_name,
+            unqualified_routing,
+        )?
+        .build()?,
     ))
 }
 
@@ -10496,6 +10517,7 @@ fn minimal_pipeline_service_builder(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<trace_commons_server::versioned_pipeline::PipelineServiceBuilder> {
     use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
     use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
@@ -10530,7 +10552,7 @@ fn minimal_pipeline_service_builder(
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
-    .with_unqualified_routing(true);
+    .with_unqualified_routing(unqualified_routing);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -10554,6 +10576,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
                 context.backend,
                 context.artifact_store,
                 self.pass_the_name.then_some(context.object_store_name),
+                context.unqualified_routing_allowed,
             )
         }
     }
@@ -10574,6 +10597,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         Some(&configured_store),
         false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
         false,
         false,
         None,
@@ -10599,6 +10623,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -10611,6 +10636,87 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         service.object_store_name(),
         TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
     );
+}
+
+/// P5-D5: ingest hands the process's unqualified-routing setting to the
+/// assembly, and the service it returns must hold the same value, because the
+/// service's receipt transaction checks the routing again. An assembler that
+/// ignores `context.unqualified_routing_allowed` (its service keeps the
+/// default, off) is refused when the setting is on, and one that always turns
+/// it on is refused when the setting is off; one that follows the context
+/// starts either way.
+#[tokio::test]
+async fn the_assembly_refuses_a_service_with_another_unqualified_routing_flag() {
+    struct FlagAssembler {
+        /// `None` follows the context; `Some(flag)` ignores it.
+        fixed: Option<bool>,
+    }
+    impl IngestPipelineRuntimeAssembler for FlagAssembler {
+        fn assemble(
+            &self,
+            context: pipeline_runtime::IngestPipelineRuntimeContext,
+        ) -> anyhow::Result<Arc<PipelineService>> {
+            minimal_pipeline_service(
+                context.backend,
+                context.artifact_store,
+                Some(context.object_store_name),
+                self.fixed.unwrap_or(context.unqualified_routing_allowed),
+            )
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let configured_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(dir.path()));
+    let assemble = |assembler: &FlagAssembler, unqualified_routing_allowed: bool| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+            false,
+            false,
+            unqualified_routing_allowed,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+    };
+
+    for (assembler, allowed, case) in [
+        (
+            FlagAssembler { fixed: Some(false) },
+            true,
+            "a service that ignores the setting while it is on",
+        ),
+        (
+            FlagAssembler { fixed: Some(true) },
+            false,
+            "a service that turns the setting on while it is off",
+        ),
+    ] {
+        let refused = assemble(&assembler, allowed)
+            .err()
+            .unwrap_or_else(|| panic!("{case} is refused"));
+        assert_eq!(
+            refused.to_string(),
+            "pipeline_runtime_unqualified_routing_mismatch",
+            "{case}"
+        );
+    }
+    for allowed in [true, false] {
+        let service = assemble(&FlagAssembler { fixed: None }, allowed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(service.unqualified_routing(), allowed);
+    }
 }
 
 /// Wraps `ReferencePerplexityScorer` and overrides `production_qualified` to
@@ -10916,6 +11022,7 @@ fn qualified_pipeline_service(
     )>,
     extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
     extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     qualified_pipeline_service_with_privacy(
         backend,
@@ -10931,6 +11038,7 @@ fn qualified_pipeline_service(
         payout,
         extra_scorer,
         extra_settlement_adapter,
+        unqualified_routing,
     )
 }
 
@@ -10950,6 +11058,7 @@ fn qualified_pipeline_service_with_privacy(
     )>,
     extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
     extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -10998,7 +11107,7 @@ fn qualified_pipeline_service_with_privacy(
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
-    .with_unqualified_routing(true);
+    .with_unqualified_routing(unqualified_routing);
     if let Some(extra_scorer) = extra_scorer {
         builder = builder.with_scorer(extra_scorer);
     }
@@ -11027,6 +11136,7 @@ fn pipeline_service_with_unqualified_named_scorer(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -11073,7 +11183,7 @@ fn pipeline_service_with_unqualified_named_scorer(
     .with_embedder(embedder)
     .with_authority(Arc::new(QualifiedTestAuthority))
     .with_privacy(Arc::new(QualifiedTestPrivacy))
-    .with_unqualified_routing(true);
+    .with_unqualified_routing(unqualified_routing);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -11089,6 +11199,7 @@ fn qualified_compatibility_pipeline_service(
     config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
     object_store_name: Option<String>,
     checks: PipelineNoveltyUtilityChecks,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -11127,7 +11238,7 @@ fn qualified_compatibility_pipeline_service(
     .with_authority(Arc::new(QualifiedTestAuthority))
     .with_privacy(Arc::new(QualifiedTestPrivacy))
     .with_novelty_utility_checks(checks)
-    .with_unqualified_routing(true);
+    .with_unqualified_routing(unqualified_routing);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -11153,6 +11264,7 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
             config,
             None,
             PipelineNoveltyUtilityChecks::default(),
+            true,
         )
         .expect("build a qualified compatibility service")
     };
@@ -11220,6 +11332,7 @@ impl IngestPipelineRuntimeAssembler for CompatibilityAssembler {
             &config,
             Some(context.object_store_name),
             context.novelty_utility_checks,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11242,6 +11355,7 @@ async fn pipeline_runtime_compatibility_holds_mains_gate_configuration() {
             Some(&configured_store),
             false,
             PipelineLeaseConfig::default(),
+            false,
             false,
             false,
             None,
@@ -11330,6 +11444,7 @@ async fn pipeline_runtime_refuses_a_compatibility_bundle_without_the_credit_issu
             PipelineLeaseConfig::default(),
             tenants_processed,
             false,
+            false,
             None,
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
@@ -11383,6 +11498,7 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         None,
         None,
+        true,
     )
     .unwrap();
     assert!(pipeline_runtime_is_production_qualified(
@@ -11403,6 +11519,7 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         None,
         None,
+        true,
     )
     .unwrap();
     assert!(validate_pipeline_privacy_filter_requirement(true, &without_a_boundary).is_err());
@@ -11422,6 +11539,7 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         None,
         None,
+        true,
     )
     .unwrap();
     assert_eq!(
@@ -11449,6 +11567,7 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         None,
         None,
+        true,
     )
     .unwrap();
     validate_pipeline_privacy_filter_requirement(true, &classifier)
@@ -11471,6 +11590,7 @@ impl IngestPipelineRuntimeAssembler for UnqualifiedAssembler {
             context.backend,
             context.artifact_store,
             Some(context.object_store_name),
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11493,6 +11613,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
             None,
             None,
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11518,6 +11639,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutAuthority {
             None,
             None,
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11541,6 +11663,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutPrivacy {
             None,
             None,
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11568,6 +11691,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithAnUnnamedUnqualifi
                 trace_commons_gate_api::ReferencePerplexityScorer::new(),
             ))),
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11602,6 +11726,7 @@ impl IngestPipelineRuntimeAssembler
                     "none",
                 ),
             ),
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11621,6 +11746,7 @@ impl IngestPipelineRuntimeAssembler for AssemblerWithAnUnqualifiedNamedScorer {
             context.backend,
             context.artifact_store,
             Some(context.object_store_name),
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11640,6 +11766,7 @@ async fn an_unqualified_scorer_the_default_bundle_does_not_name_does_not_block_s
         false,
         PipelineLeaseConfig::default(),
         true,
+        false,
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -11667,6 +11794,7 @@ async fn an_unqualified_adapter_for_an_instrument_the_bundle_does_not_pin_does_n
         PipelineLeaseConfig::default(),
         true,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11693,6 +11821,7 @@ async fn an_unqualified_scorer_the_default_bundle_names_blocks_startup() {
         false,
         PipelineLeaseConfig::default(),
         true,
+        false,
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -11743,6 +11872,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         PipelineLeaseConfig::default(),
         true,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11778,6 +11908,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_onl
             false,
             PipelineLeaseConfig::default(),
             tenants_processed,
+            false,
             false,
             None,
             TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -11821,6 +11952,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         PipelineLeaseConfig::default(),
         true,
         true,
+        true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11847,6 +11979,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         true,
         PipelineLeaseConfig::default(),
         false,
+        true,
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -11878,6 +12011,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         PipelineLeaseConfig::default(),
         true,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11908,6 +12042,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_auth
         PipelineLeaseConfig::default(),
         true,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11936,6 +12071,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         false,
         PipelineLeaseConfig::default(),
         true,
+        false,
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12089,6 +12225,7 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
             )),
             None,
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -12108,6 +12245,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             false,
             PipelineLeaseConfig::default(),
             true,
+            false,
             false,
             configured,
             TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12167,6 +12305,7 @@ impl IngestPipelineRuntimeAssembler for NoveltyUtilityChecksAssembler {
             context.backend,
             context.artifact_store,
             Some(context.object_store_name),
+            context.unqualified_routing_allowed,
         )?;
         if self.forward {
             builder = builder.with_novelty_utility_checks(context.novelty_utility_checks);
@@ -12206,6 +12345,7 @@ async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_che
             PipelineLeaseConfig::default(),
             false,
             false,
+            false,
             None,
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
@@ -12242,6 +12382,7 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
             false,
             PipelineLeaseConfig::default(),
             true,
+            false,
             false,
             Some(TEST_PAYOUT_NEAR_CONTRACT),
             TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12295,6 +12436,7 @@ async fn pipeline_runtime_payout_follows_mains_near_payout_controls() {
             false,
             PipelineLeaseConfig::default(),
             true,
+            false,
             false,
             Some(TEST_PAYOUT_NEAR_CONTRACT),
             TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12365,6 +12507,7 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
             enabled.then(|| (adapter, payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT)))),
             None,
             None,
+            true,
         )
         .expect("build the pipeline service")
     };
@@ -12403,6 +12546,7 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         PipelineLeaseConfig::default(),
         false,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -12422,6 +12566,7 @@ async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
         pg_backend_without_a_database().await,
         test_artifact_store(dir.path()),
         None,
+        true,
     )
     .unwrap()
 }
@@ -28543,6 +28688,11 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_service: None,
         pipeline_product: None,
         pipeline_store: None,
+        pipeline_activation: None,
+        // The test assemblers build their services with this flag set
+        // (`unqualified_routing_allowed`); a test of production routing
+        // builds its state and its service with it off.
+        pipeline_unqualified_routing: true,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),

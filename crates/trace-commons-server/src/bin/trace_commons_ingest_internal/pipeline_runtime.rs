@@ -54,6 +54,14 @@ pub struct IngestPipelineRuntimeContext {
     pub near_confirmation_interval: StdDuration,
     pub near_payout_controls: PipelineNearPayoutControls,
     pub novelty_utility_checks: PipelineNoveltyUtilityChecks,
+    /// Whether a tenant with no routing row on the receipts list is routed to
+    /// the pipeline (`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`): only
+    /// a process started for tests routes one. An assembly passes it to
+    /// `PipelineServiceBuilder::with_unqualified_routing`, because the
+    /// service's receipt transaction checks the tenant's routing again, and
+    /// `assemble_ingest_pipeline_runtime` refuses a service that does not
+    /// hold it.
+    pub unqualified_routing_allowed: bool,
     /// `main`'s gate configuration and `NoveltyUtility` delta, as ingest
     /// parsed them (multi-lens review L5-4, Zaki review 3, Z3-3; the
     /// index-insert threshold since Zaki review 1, round 2, finding 14). An
@@ -108,6 +116,10 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// `near_payout_controls` its NEAR settlement mode and adapter-auth
 /// requirement, and `novelty_utility_checks` the configuration of `main`'s
 /// `NoveltyUtility` credit checks, all handed to the assembly in its context.
+/// `unqualified_routing_allowed` (`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`
+/// in a real boot, where it is the same value as `allow_test_dependencies`) is
+/// handed to the assembly too, and the service must hold it
+/// (`pipeline_runtime_unqualified_routing_mismatch`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
@@ -117,6 +129,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     lease_config: PipelineLeaseConfig,
     tenants_processed: bool,
     allow_test_dependencies: bool,
+    unqualified_routing_allowed: bool,
     near_contract_id: Option<&str>,
     near_confirmation_interval: StdDuration,
     near_payout_controls: PipelineNearPayoutControls,
@@ -149,6 +162,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         near_confirmation_interval,
         near_payout_controls,
         novelty_utility_checks: novelty_utility_checks.clone(),
+        unqualified_routing_allowed,
         main_gate,
     })?;
     // M11: every object ref the pipeline commits names the store it was
@@ -163,6 +177,13 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     anyhow::ensure!(
         service.lease_config() == lease_config,
         "pipeline_runtime_lease_config_mismatch"
+    );
+    // P5-D5: only a process started for tests routes a tenant that has no
+    // routing row, and its service must agree, because the receipt
+    // transaction checks the routing again.
+    anyhow::ensure!(
+        service.unqualified_routing() == unqualified_routing_allowed,
+        "pipeline_runtime_unqualified_routing_mismatch"
     );
     // Ruling T10-4: an enabled payout pays through the NEAR credit contract
     // `main` is configured with, never one the assembly picked itself, and

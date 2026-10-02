@@ -552,7 +552,7 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
         .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary))
-        .with_unqualified_routing(true)
+        .with_unqualified_routing(context.unqualified_routing_allowed)
         .build()?;
         Ok(Arc::new(service))
     }
@@ -586,6 +586,7 @@ fn assemble_corpus_service(
         Some(&ConfiguredTraceArtifactStore::legacy(artifacts)),
         false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
         true,
         true,
         None,
@@ -1385,6 +1386,7 @@ async fn pipeline_corpus_run() {
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,

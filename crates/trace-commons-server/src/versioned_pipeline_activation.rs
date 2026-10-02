@@ -490,6 +490,11 @@ impl PipelineActivationStore {
     /// owner keeps it: the claim neither changes the row nor fails, so a
     /// retry of a legacy receipt claims it again, and a receipt the pipeline
     /// owns comes back as `Pipeline`.
+    ///
+    /// A pipeline run that was created before the ownership table existed
+    /// has no ownership row, and the pipeline owns its submission id all the
+    /// same: the claim finds the run, answers `Pipeline`, and writes no
+    /// legacy row, so the legacy path never takes such an id.
     pub async fn claim_legacy_receipt(
         &self,
         tenant_id: &str,
@@ -497,6 +502,17 @@ impl PipelineActivationStore {
     ) -> Result<ReceiptOwner, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        if tx
+            .query_opt(
+                "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await?
+            .is_some()
+        {
+            tx.commit().await?;
+            return Ok(ReceiptOwner::Pipeline);
+        }
         // The ownership row references the tenant. The legacy path has not
         // written for a tenant's first receipt yet, so the claim makes sure
         // the tenant exists, as `write_routing_in` does.

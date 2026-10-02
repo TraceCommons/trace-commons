@@ -686,6 +686,7 @@ fn restore_app_state(
     state_dir: &Path,
     mains: &Arc<dyn Database>,
     artifacts: &Arc<LocalEncryptedTraceArtifactStore>,
+    runtime: &Arc<PgBackend>,
     service: Arc<PipelineService>,
 ) -> Arc<AppState> {
     let mut state = test_state_with_options(
@@ -699,6 +700,7 @@ fn restore_app_state(
     );
     let state_mut = Arc::make_mut(&mut state);
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(runtime);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[RESTORE_TENANT, SECOND_TENANT],
@@ -1039,7 +1041,7 @@ async fn pipeline_restore_seed() {
     let adapters = RecordingAdapters::new();
     let start = |crash_point: Option<PipelineCrashPoint>| {
         let service = compatibility_service(&runtime, &artifacts, &index, &adapters, crash_point);
-        restore_app_state(state_dir.path(), &mains, &artifacts, service)
+        restore_app_state(state_dir.path(), &mains, &artifacts, &runtime, service)
     };
     let client = reqwest::Client::new();
 
@@ -1380,7 +1382,13 @@ async fn pipeline_restore_resume() {
 
     // The app on the restored state resumes the pending run by itself.
     let package = service.default_package().clone();
-    let state = restore_app_state(state_dir.path(), &mains, &artifacts, service.clone());
+    let state = restore_app_state(
+        state_dir.path(),
+        &mains,
+        &artifacts,
+        &runtime,
+        service.clone(),
+    );
     let (base, stop, server) = serve_pipeline_app(state).await;
     let client = reqwest::Client::new();
     wait_for_pipeline_ready(&client, &base).await;

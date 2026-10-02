@@ -2847,6 +2847,7 @@ async fn qualification_fails_closed_for_a_substituted_or_missing_dependency() {
     .with_embedder(embedder.clone())
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
     .build()
     .expect("build pipeline service");
 
@@ -2996,7 +2997,8 @@ async fn qualification_reports_payout_only_when_it_applies() {
         .with_scorer(scorer.clone())
         .with_embedder(embedder.clone())
         .with_authority(allow_all_authority())
-        .with_privacy(default_privacy_boundary());
+        .with_privacy(default_privacy_boundary())
+        .with_unqualified_routing(true);
         let builder = if enabled {
             builder.with_payout(near_adapter, payout_config(settlement_mode))
         } else {
@@ -23221,6 +23223,7 @@ async fn payout_calls_name_the_configured_near_contract() {
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
+    .with_unqualified_routing(true)
     .with_payout(
         near,
         PipelinePayoutConfig {
@@ -26002,6 +26005,7 @@ async fn startup_qualifies_every_bundle_a_tenant_may_run() {
         .with_authority(Arc::new(QualifiedProductionAuthority))
         .with_privacy(Arc::new(QualifiedProductionPrivacy))
         .with_novelty_utility_checks(issuing_checks())
+        .with_unqualified_routing(true)
         .build()
         .expect("build the pipeline service")
     };
@@ -27600,6 +27604,7 @@ async fn qualified_production_service(
     .with_embedder(embedder)
     .with_authority(Arc::new(QualifiedProductionAuthority))
     .with_privacy(Arc::new(QualifiedProductionPrivacy))
+    .with_unqualified_routing(true)
     .build()
     .expect("build a fully qualified pipeline service");
     (Arc::new(service), package)
@@ -33016,4 +33021,187 @@ async fn a_receipt_waits_for_a_routing_change_in_progress() {
         }
     );
     assert_eq!(count_files_under(dir.path()), 0);
+}
+
+/// The legacy path's claim of a submission id never takes one that a
+/// pipeline run owns, whether or not the run has an ownership row. (a) A
+/// receipt through the service writes the run and its `pipeline` ownership
+/// row: the claim answers `Pipeline` and the row is unchanged. (b) A run
+/// from before ownership rows (a submission and a run, no ownership row)
+/// is the pipeline's all the same: the claim answers `Pipeline` and writes
+/// no legacy row. A claim of an id that no run holds still writes its row.
+#[tokio::test]
+async fn a_legacy_claim_never_takes_a_submission_that_a_run_owns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let activation = PipelineActivationStore::new(backend.clone());
+
+    // (a) The run and its ownership row come from one receipt.
+    let tenant = routing_tenant("claim-owned-receipt");
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    let owned = Some(ReceiptOwnership {
+        owner: ReceiptOwner::Pipeline,
+        submission_id: env.submission_id,
+        run_id: Some(created.run_id),
+    });
+    assert_eq!(
+        activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        owned
+    );
+    assert_eq!(
+        activation
+            .claim_legacy_receipt(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        ReceiptOwner::Pipeline
+    );
+    assert_eq!(
+        activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        owned,
+        "the ownership row is unchanged"
+    );
+    assert_eq!(receipt_rows(&tenant).await.ownership, 1);
+
+    // (b) A run from before ownership rows has no ownership row.
+    let tenant = routing_tenant("claim-run-before-ownership");
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    assert_eq!(receipt_rows(&tenant).await.ownership, 0);
+    assert_eq!(
+        activation
+            .claim_legacy_receipt(&tenant, seeded.submission_id)
+            .await
+            .unwrap(),
+        ReceiptOwner::Pipeline,
+        "a run owns its submission id without an ownership row"
+    );
+    assert_eq!(
+        activation
+            .ownership(&tenant, seeded.submission_id)
+            .await
+            .unwrap(),
+        None,
+        "no legacy row is written for it"
+    );
+    assert_eq!(receipt_rows(&tenant).await.ownership, 0);
+
+    // An id that no run holds is claimed for the legacy path as before.
+    let free = uuid::Uuid::new_v4();
+    assert_eq!(
+        activation
+            .claim_legacy_receipt(&tenant, free)
+            .await
+            .unwrap(),
+        ReceiptOwner::Legacy
+    );
+    assert_eq!(
+        activation
+            .ownership(&tenant, free)
+            .await
+            .unwrap()
+            .map(|row| row.owner),
+        Some(ReceiptOwner::Legacy)
+    );
+    assert_eq!(receipt_rows(&tenant).await.ownership, 1);
+}
+
+/// A tenant with a pipeline receipt (a run and its `pipeline` ownership
+/// row), a legacy claim, a routing row, and routing history can be deleted:
+/// the tenant row's cascade removes the ownership, routing, history, and run
+/// rows, and the append-only triggers let the cascade through.
+#[tokio::test]
+async fn a_tenant_with_a_pipeline_receipt_can_be_deleted() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let activation = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("delete-tenant");
+
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    assert_eq!(
+        activation
+            .claim_legacy_receipt(&tenant, uuid::Uuid::new_v4())
+            .await
+            .unwrap(),
+        ReceiptOwner::Legacy
+    );
+    activation
+        .contain(&tenant, &routing_actor(), "contain_first_rollout")
+        .await
+        .expect("a routing row and its event");
+    let tables = [
+        "pipeline_receipt_ownership",
+        "pipeline_tenant_routing",
+        "pipeline_activation_events",
+        "pipeline_runs",
+        "trace_submissions",
+    ];
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_receipt_ownership").await,
+        2,
+        "the pipeline receipt's row and the legacy claim"
+    );
+    assert_eq!(count_tenant_rows(&tenant, "pipeline_runs").await, 1);
+    assert_eq!(created.run_id, {
+        let ownership = activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap()
+            .expect("the pipeline receipt's ownership row");
+        ownership.run_id.expect("it carries the run")
+    });
+
+    let deleted = owner_client()
+        .await
+        .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+        .await
+        .expect("a tenant with a pipeline receipt can be deleted");
+    assert_eq!(deleted, 1);
+    for table in tables {
+        assert_eq!(
+            count_tenant_rows(&tenant, table).await,
+            0,
+            "no {table} row of the tenant remains"
+        );
+    }
 }

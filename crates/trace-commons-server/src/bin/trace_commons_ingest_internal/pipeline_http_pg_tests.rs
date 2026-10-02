@@ -44,6 +44,7 @@ use trace_commons_server::versioned_pipeline::{
     PipelineCaps, PipelineCrashPoint, PipelinePayoutConfig, PipelineRunState,
     PipelineServiceBuilder,
 };
+use trace_commons_server::versioned_pipeline_activation::ReceiptOwner;
 use trace_commons_server::versioned_pipeline_authority::{
     PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
 };
@@ -278,7 +279,7 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
         .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary))
-        .with_unqualified_routing(true);
+        .with_unqualified_routing(context.unqualified_routing_allowed);
         if let Some(crash_point) = self.crash_point {
             builder = builder.with_crash_point(crash_point);
         }
@@ -378,6 +379,32 @@ fn assemble_test_pipeline_service_with_writer(
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     crash_point: Option<PipelineCrashPoint>,
 ) -> Arc<PipelineService> {
+    assemble_test_pipeline_service_configured(
+        backend,
+        artifacts,
+        index,
+        writer,
+        adapters,
+        crash_point,
+        true,
+    )
+}
+
+/// `assemble_test_pipeline_service_with_writer`, with the process's
+/// unqualified-routing setting (`unqualified_routing_allowed`) given: the
+/// suite's services start with it on, so that a tenant with no routing row
+/// on the receipts list is routed to the pipeline; a test of production
+/// routing (the setting off) builds its service, and sets its state, with
+/// `false`.
+fn assemble_test_pipeline_service_configured(
+    backend: Arc<PgBackend>,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    index: Arc<IsolatedPipelineIndex>,
+    writer: Option<Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+    unqualified_routing_allowed: bool,
+) -> Arc<PipelineService> {
     let assembler = TestAssembler {
         index,
         writer,
@@ -397,6 +424,7 @@ fn assemble_test_pipeline_service_with_writer(
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         true,
         true,
+        unqualified_routing_allowed,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -707,6 +735,7 @@ async fn startup_registers_the_default_bundle_for_rollout_tenants() {
     );
     let state_mut = Arc::make_mut(&mut state);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -801,6 +830,7 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
         );
         let state_mut = Arc::make_mut(&mut state);
         state_mut.pipeline_service = Some(service);
+        state_mut.pipeline_activation = routing_store(&backend);
         state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
             TraceTenantRolloutFeature::PipelineReceipts,
             &["tenant-a"],
@@ -1328,6 +1358,7 @@ async fn real_http_pipeline_receipt_replays_on_retry() {
     state_mut.require_db_mirror_writes = true;
     state_mut.accept_medium_risk_submissions = true;
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -1493,6 +1524,7 @@ async fn a_drain_tenant_retry_replays_its_pipeline_receipt() {
     state_mut.require_db_mirror_writes = true;
     state_mut.accept_medium_risk_submissions = true;
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -1625,6 +1657,7 @@ async fn real_http_pipeline_receipt_refuses_a_different_devices_retry() {
     state_mut.require_db_mirror_writes = true;
     state_mut.accept_medium_risk_submissions = true;
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -1754,6 +1787,7 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
     );
     let state_mut = Arc::make_mut(&mut state);
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &["tenant-a"],
@@ -1935,6 +1969,7 @@ async fn real_http_pipeline_receipt_falls_back_to_legacy_record_without_a_run() 
     state_mut.require_db_mirror_writes = true;
     state_mut.accept_medium_risk_submissions = true;
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -2183,6 +2218,7 @@ async fn withdrawal_fixture_with(
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     Some(WithdrawalFixture {
         state,
         service,
@@ -5621,7 +5657,7 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
         .with_privacy(self.privacy.clone())
-        .with_unqualified_routing(true);
+        .with_unqualified_routing(context.unqualified_routing_allowed);
         if let Some(crash_point) = self.crash_point {
             builder = builder.with_crash_point(crash_point);
         }
@@ -5830,6 +5866,7 @@ pub(super) fn assemble_compatibility_pipeline_service_with(
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         true,
         true,
+        true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -5926,6 +5963,7 @@ async fn compatibility_credit_rows_stay_readable_by_mains_database_reads() {
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
     let principal = static_token_principal_ref(&token);
     let first = completed_run_of(
@@ -6108,6 +6146,7 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
         let state_mut = Arc::make_mut(&mut state);
         state_mut.tokens = Arc::new(tokens.clone());
         state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_activation = routing_store(&runtime);
         state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
         state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
         let (status, documents) = route_request(
@@ -6276,6 +6315,7 @@ async fn a_status_request_for_several_compatibility_runs_matches_one_request_per
         let state_mut = Arc::make_mut(&mut state);
         state_mut.tokens = Arc::new(tokens.clone());
         state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_activation = routing_store(&runtime);
         state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
         state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
         let ask = |submission_ids: Vec<Uuid>| {
@@ -6372,6 +6412,7 @@ async fn the_status_route_reads_the_pipeline_only_for_a_routed_or_drained_tenant
         let state_mut = Arc::make_mut(&mut state);
         state_mut.tokens = Arc::new(tokens.clone());
         state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_activation = routing_store(&runtime);
         state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
         if receipts {
             state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
@@ -6668,6 +6709,7 @@ async fn compatibility_bundle_through_http_with_review_privacy_withdrawal_and_ex
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
@@ -7256,6 +7298,7 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
     ));
     state_mut.novelty_utility_credit_points_delta = LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA;
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
@@ -8569,6 +8612,7 @@ async fn a_pipeline_credit_event_carries_its_witness_label_and_mains_audit_event
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     let principal = static_token_principal_ref(&token);
     let run = completed_run_of(
         &service,
@@ -8806,4 +8850,999 @@ async fn a_runtime_less_build_queues_the_pipeline_follow_up_through_the_database
         deletions >= 2,
         "a payload deletion per live object ({deletions})"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Upload routing (PR 5): a new upload goes where its tenant's committed
+// routing row sends it -- the pipeline, the legacy path with a legacy
+// ownership claim, or a 503 refusal -- and each submission id keeps the owner
+// that first took it. The receipts list is the scope of a process; the row
+// decides inside it. These tests run through the real router (and, where the
+// worker matters, `run_pipeline_app`) with static-token credentials.
+// ---------------------------------------------------------------------------
+
+/// Writes `tenant_id`'s routing row as an operator, through an owner
+/// connection, with the statement of `write_routing_in` and no event: these
+/// tests need a routing state, not the history of how a tenant came to it. A
+/// copy of the runtime suite's helper of the same name
+/// (`tests/versioned_pipeline_runtime_pg.rs`), which a binary's test module
+/// cannot import. `state` is `legacy`, `pipeline`, or `contained`.
+pub(super) async fn write_routing_as_operator(tenant_id: &str, state: &str) {
+    let url = pipeline_http_database_url()
+        .await
+        .expect("the suite's database variable is set");
+    let (mut owner, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the database owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let tx = owner.transaction().await.expect("open the owner tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for the owner tx");
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+         ON CONFLICT (tenant_id) DO NOTHING",
+        &[&tenant_id],
+    )
+    .await
+    .expect("seed the tenant for a routing row");
+    tx.execute(
+        "INSERT INTO pipeline_tenant_routing (
+            tenant_id, routing_state, activation_record_id,
+            actor_principal_ref, reason_code, evidence_hash, recorded_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
+         ON CONFLICT (tenant_id) DO UPDATE
+         SET routing_state = EXCLUDED.routing_state,
+             activation_record_id = EXCLUDED.activation_record_id,
+             actor_principal_ref = EXCLUDED.actor_principal_ref,
+             reason_code = EXCLUDED.reason_code,
+             evidence_hash = EXCLUDED.evidence_hash,
+             recorded_at = EXCLUDED.recorded_at",
+        &[
+            &tenant_id,
+            &state,
+            &Uuid::new_v4(),
+            &format!("principal_sha256:{}", "ab".repeat(32)),
+            &"test_routing_state",
+            &sha256_prefixed("test-routing-state"),
+        ],
+    )
+    .await
+    .expect("write the routing row as the operator");
+    tx.commit().await.expect("commit the routing row");
+}
+
+/// Two tenants with a contributor token each, over one database, one
+/// artifact store, and one in-memory index: `tenant` is the one the tests
+/// route, `control_tenant` a bystander. `replica` builds one process's
+/// `AppState` over them, as often as a test needs one (two replicas share
+/// everything but their connections and their service).
+struct RoutingFixture {
+    runtime: Arc<PgBackend>,
+    tenant: String,
+    token: String,
+    control_tenant: String,
+    control_token: String,
+    dir: tempfile::TempDir,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    index: Arc<IsolatedPipelineIndex>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+}
+
+impl RoutingFixture {
+    async fn new() -> Option<Self> {
+        let runtime = runtime_backend(6).await?;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let artifacts = local_artifacts(&dir);
+        let adapters: Vec<Arc<dyn SettlementAdapter>> = vec![
+            RecordingSettlementAdapter::new(
+                InstrumentId::new("storage_rebate").unwrap(),
+                "recording_storage_rebate_routing_test_only",
+                "none",
+            ) as Arc<dyn SettlementAdapter>,
+            RecordingSettlementAdapter::new(
+                InstrumentId::trace_credit(),
+                "recording_trace_credit_routing_test_only",
+                "none",
+            ) as Arc<dyn SettlementAdapter>,
+        ];
+        Some(Self {
+            runtime,
+            tenant: format!("tenant-routing-{suffix}"),
+            token: format!("token-routing-{suffix}"),
+            control_tenant: format!("tenant-routing-control-{suffix}"),
+            control_token: format!("token-routing-control-{suffix}"),
+            dir,
+            artifacts,
+            index: IsolatedPipelineIndex::new(),
+            adapters,
+        })
+    }
+
+    /// One replica: a pipeline service assembled as a boot assembles one
+    /// (with `unqualified_routing` as the process's setting, in the service
+    /// and in the state), the routing store over the replica's own database
+    /// connection, `main`'s database mirror on the runtime login, and
+    /// `tenant` on the receipts list when `listed`. The default bundle is
+    /// registered, as startup registers it for a listed tenant, so a plain
+    /// router can take a receipt before any worker runs.
+    async fn replica(&self, listed: bool, unqualified_routing: bool) -> Arc<AppState> {
+        let connection = runtime_backend(6)
+            .await
+            .expect("the suite's database variable is set");
+        let service = assemble_test_pipeline_service_configured(
+            connection.clone(),
+            self.artifacts.clone(),
+            self.index.clone(),
+            None,
+            self.adapters.clone(),
+            None,
+            unqualified_routing,
+        );
+        service
+            .register_default_bundle(&self.tenant)
+            .await
+            .expect("register the default bundle");
+        let mut tokens = BTreeMap::new();
+        insert_token(
+            &mut tokens,
+            &self.tenant,
+            &self.token,
+            TokenRole::Contributor,
+        );
+        insert_token(
+            &mut tokens,
+            &self.control_tenant,
+            &self.control_token,
+            TokenRole::Contributor,
+        );
+        let mut state = test_state_with_options(
+            self.dir.path().to_path_buf(),
+            Some(mains_database().await),
+            Some(self.artifacts.clone()),
+            false,
+            false,
+            false,
+            false,
+        );
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.tokens = Arc::new(tokens);
+        state_mut.require_db_mirror_writes = true;
+        state_mut.pipeline_service = Some(service);
+        state_mut.pipeline_activation = routing_store(&connection);
+        state_mut.pipeline_unqualified_routing = unqualified_routing;
+        if listed {
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+                TraceTenantRolloutFeature::PipelineReceipts,
+                &[self.tenant.as_str()],
+            );
+        }
+        state
+    }
+
+    /// The owner of `submission_id` in `tenant`, read through the routing
+    /// store.
+    async fn owner(&self, tenant: &str, submission_id: Uuid) -> Option<ReceiptOwner> {
+        routing_store(&self.runtime)
+            .expect("a routing store")
+            .ownership(tenant, submission_id)
+            .await
+            .expect("read the ownership row")
+            .map(|row| row.owner)
+    }
+
+    /// How many `table` rows `submission_id` has in `tenant` (`table` is one
+    /// of this file's own literals, never input).
+    async fn rows(&self, table: &str, tenant: &str, submission_id: Uuid) -> i64 {
+        let mut client = self.runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, tenant).await;
+        let count = tx
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE tenant_id = $1 AND submission_id = $2"
+                ),
+                &[&tenant, &submission_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    }
+
+    /// The pipeline runs of `submission_id`.
+    async fn runs(&self, tenant: &str, submission_id: Uuid) -> i64 {
+        self.rows("pipeline_runs", tenant, submission_id).await
+    }
+
+    /// Whether the legacy path wrote anything for `submission_id`: its file
+    /// record or its `trace_submissions` row. A pipeline receipt writes the
+    /// row too, so a caller asks this only about an id that no run holds.
+    async fn legacy_record_exists(&self, tenant: &str, submission_id: Uuid) -> bool {
+        read_submission_record(self.dir.path(), tenant, submission_id)
+            .expect("read the legacy file record")
+            .is_some()
+            || self.rows("trace_submissions", tenant, submission_id).await > 0
+    }
+}
+
+/// A metadata-only, Low-risk envelope under a fresh submission id and a
+/// distinguishing tool name, so several of them in one tenant do not compete
+/// with each other as copies.
+async fn routing_envelope(tool_name: &str) -> TraceContributionEnvelope {
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    envelope.trace_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    set_metadata_only_tool_name(&mut envelope, tool_name);
+    envelope
+}
+
+/// `POST /v1/traces` of the exact bytes `body` through a plain router over
+/// `state` (no worker, no listener), returning the status and the parsed
+/// body.
+async fn route_trace(
+    state: &Arc<AppState>,
+    token: &str,
+    body: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_vec()))
+        .unwrap();
+    request.headers_mut().extend(auth_headers(token));
+    let response = app(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)),
+    )
+}
+
+/// Review Focus 1: a retry goes to the first owner of its submission id,
+/// whatever the routing row says now. The tenant is switched from the legacy
+/// path to the pipeline and back; every retry returns what the first attempt
+/// returned, the legacy receipts never get a run, and the pipeline receipt
+/// keeps its one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_receipts_replay_to_their_first_owner_across_every_switch() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let (base, stop, server) = serve_pipeline_app(fixture.replica(true, true).await).await;
+    let client = reqwest::Client::new();
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+    let l1 = routing_envelope("mixed_l1").await;
+    let p1 = routing_envelope("mixed_p1").await;
+    let l2 = routing_envelope("mixed_l2").await;
+
+    // (1) The row says `legacy`: L1 takes the legacy path.
+    write_routing_as_operator(tenant, "legacy").await;
+    let (status, l1_receipt) = post_trace(&client, &base, &fixture.token, &body_of(&l1)).await;
+    assert_eq!(status, StatusCode::OK, "{l1_receipt}");
+    assert_ne!(l1_receipt["status"], "processing", "L1 is a legacy receipt");
+    assert_eq!(fixture.runs(tenant, l1.submission_id).await, 0);
+    assert_eq!(
+        fixture.owner(tenant, l1.submission_id).await,
+        Some(ReceiptOwner::Legacy)
+    );
+
+    // (2) The row says `pipeline`: P1 takes the pipeline.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, p1_receipt) = post_trace(&client, &base, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{p1_receipt}");
+    assert_eq!(p1_receipt["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p1.submission_id).await, 1);
+    assert_eq!(
+        fixture.owner(tenant, p1.submission_id).await,
+        Some(ReceiptOwner::Pipeline)
+    );
+
+    // (3) L1 retried: the legacy receipt of (1), and still no run.
+    let (status, again) = post_trace(&client, &base, &fixture.token, &body_of(&l1)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again, l1_receipt, "the retry returns the first receipt");
+    assert_eq!(fixture.runs(tenant, l1.submission_id).await, 0);
+
+    // (4) P1 retried: `processing`, still one run; another body under the
+    // same id is a content conflict.
+    let (status, again) = post_trace(&client, &base, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p1.submission_id).await, 1);
+    let mut changed = p1.clone();
+    changed.privacy.warnings.push("changed-content".to_string());
+    let (status, conflict) = post_trace(&client, &base, &fixture.token, &body_of(&changed)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(
+        conflict["error"],
+        "receipt id reused with different content"
+    );
+
+    // (5) Back to `legacy`: the pipeline still answers its own receipt, and
+    // L2 takes the legacy path.
+    write_routing_as_operator(tenant, "legacy").await;
+    let (status, again) = post_trace(&client, &base, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p1.submission_id).await, 1);
+    let (status, l2_receipt) = post_trace(&client, &base, &fixture.token, &body_of(&l2)).await;
+    assert_eq!(status, StatusCode::OK, "{l2_receipt}");
+    assert_ne!(l2_receipt["status"], "processing", "L2 is a legacy receipt");
+    assert_eq!(fixture.runs(tenant, l2.submission_id).await, 0);
+
+    // (6) Forward to `pipeline`: L2 is still the legacy receipt.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, again) = post_trace(&client, &base, &fixture.token, &body_of(&l2)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again, l2_receipt, "the retry returns the first receipt");
+    assert_eq!(fixture.runs(tenant, l2.submission_id).await, 0);
+
+    // (7) Two legacy owners and one pipeline owner; the legacy receipts have
+    // no pipeline ledger row.
+    let mut client_db = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client_db, tenant).await;
+    let owners: Vec<(String, i64)> = tx
+        .query(
+            "SELECT owner, COUNT(*) FROM pipeline_receipt_ownership
+              WHERE tenant_id = $1 GROUP BY owner ORDER BY owner",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        owners,
+        vec![("legacy".to_string(), 2), ("pipeline".to_string(), 1)]
+    );
+    let legacy_ids = vec![l1.submission_id, l2.submission_id];
+    let pipeline_ledger_rows: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND submission_id = ANY($2)
+                AND pipeline_run_id IS NOT NULL",
+            &[&tenant, &legacy_ids],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(pipeline_ledger_rows, 0);
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "mixed receipts test server").await;
+}
+
+/// Review Focus 1: a remediation rewrites a legacy record the handler has in
+/// hand, so the legacy path owns it whatever the routing row says: after the
+/// tenant is switched to the pipeline, the same principal's changed body
+/// under the same id is `main`'s remediation answer, no run is created, and
+/// the legacy record holds the new body's redaction hash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remediation_of_a_legacy_quarantine_stays_on_the_legacy_path() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(true, true).await;
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+
+    // The legacy fixture of `main`'s quarantine tests: the consent flags
+    // declare text and payloads, and the risk is Medium, so the first landing
+    // is quarantined. Unlike `routing_envelope`, it keeps its message text,
+    // so the corrected (metadata-only) body has another redaction hash.
+    let mut first = sample_envelope().await;
+    first.submission_id = Uuid::new_v4();
+    first.trace_id = Uuid::new_v4();
+    set_metadata_only_tool_name(&mut first, "remediation");
+    first.consent.message_text_included = true;
+    first.consent.tool_payloads_included = true;
+    first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    write_routing_as_operator(tenant, "legacy").await;
+    let (status, receipt) = post_trace(
+        &client,
+        &base,
+        &fixture.token,
+        &serde_json::to_vec(&first).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "quarantined");
+
+    // The tenant is switched; the corrected body is the same id, low risk.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let mut corrected = first.clone();
+    make_metadata_only_low_risk(&mut corrected);
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let (status, remediated) = post_trace(
+        &client,
+        &base,
+        &fixture.token,
+        &serde_json::to_vec(&corrected).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{remediated}");
+    assert_eq!(
+        remediated["status"], "accepted",
+        "`main`'s remediation answer, not `processing`"
+    );
+    assert_eq!(fixture.runs(tenant, first.submission_id).await, 0);
+    assert_eq!(
+        fixture.owner(tenant, first.submission_id).await,
+        Some(ReceiptOwner::Legacy)
+    );
+
+    // The server's own scrub is what the legacy record stores: the new
+    // body's hash, not the first body's.
+    let scrubbed_hash = |envelope: &TraceContributionEnvelope| {
+        let mut scrubbed = envelope.clone();
+        rescrub_trace_envelope(&mut scrubbed).expect("rescrub");
+        scrubbed.privacy.redaction_hash
+    };
+    let (first_hash, corrected_hash) = (scrubbed_hash(&first), scrubbed_hash(&corrected));
+    assert_ne!(first_hash, corrected_hash, "the fixture changes the hash");
+    let mut client_db = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client_db, tenant).await;
+    let stored: String = tx
+        .query_one(
+            "SELECT redaction_hash FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &first.submission_id],
+        )
+        .await
+        .expect("the legacy submission row")
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(stored, corrected_hash);
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "remediation test server").await;
+}
+
+/// The remediation guard on its own: a legacy quarantine record that
+/// predates ownership rows has only its file record -- no ownership row and
+/// no `trace_submissions` row -- so nothing in the receipt transaction would
+/// tell the pipeline that the legacy path owns the id. With the row `pipeline`
+/// and the tenant on the list, the same principal's corrected body is still
+/// `main`'s remediation answer, no run is created, and the remediation claims
+/// the id for the legacy path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remediation_of_a_record_with_no_ownership_row_never_reaches_the_pipeline() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let mut state = fixture.replica(true, true).await;
+    // The seeded record has no mirror row to remediate in the database.
+    Arc::make_mut(&mut state).require_db_mirror_writes = false;
+
+    let mut quarantined = routing_envelope("pre_ownership_quarantine").await;
+    quarantined.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let id = quarantined.submission_id;
+    let record: TraceCommonsSubmissionRecord = serde_json::from_value(serde_json::json!({
+        "tenant_id": tenant,
+        "tenant_storage_ref": tenant_storage_ref(tenant),
+        "auth_principal_ref": static_token_principal_ref(&fixture.token),
+        "submission_id": id,
+        "trace_id": quarantined.trace_id,
+        "status": "quarantined",
+        "privacy_risk": "medium",
+        "submission_score": 0.0,
+        "credit_points_pending": 0.0,
+        "consent_scopes": [],
+        "received_at": chrono::Utc::now().to_rfc3339(),
+        "object_key": "obj/pre-ownership-quarantine-fixture",
+    }))
+    .expect("legacy quarantine record fixture deserialises");
+    write_submission_record(fixture.dir.path(), &record).expect("write the legacy record");
+    assert_eq!(fixture.owner(tenant, id).await, None);
+    assert_eq!(fixture.rows("trace_submissions", tenant, id).await, 0);
+
+    write_routing_as_operator(tenant, "pipeline").await;
+    let mut corrected = quarantined.clone();
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let (status, remediated) = route_trace(
+        &state,
+        &fixture.token,
+        &serde_json::to_vec(&corrected).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{remediated}");
+    assert_eq!(
+        remediated["status"], "accepted",
+        "`main`'s remediation answer, not `processing`"
+    );
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert_eq!(fixture.owner(tenant, id).await, Some(ReceiptOwner::Legacy));
+    let record = read_submission_record(fixture.dir.path(), tenant, id)
+        .expect("read the record")
+        .expect("the legacy record");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+}
+
+/// Review Focus 2 (it emits the check `pipeline_activation_containment`):
+/// containment refuses new receipts and keeps pending work. Two replicas
+/// serve the tenant. A receipt taken before containment stays answerable on
+/// both and is completed by the worker while the row is `contained`; a new
+/// upload through either replica is a 503 that writes no legacy record, no
+/// submission row, no ownership row, and no run, and is accepted when the row
+/// says `pipeline` again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn containment_refuses_new_receipts_and_keeps_pending_work() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let replica_1 = fixture.replica(true, true).await;
+    let replica_2 = fixture.replica(true, true).await;
+    let store = routing_store(&fixture.runtime).expect("a routing store");
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+    let p1 = routing_envelope("containment_p1").await;
+    let p2 = routing_envelope("containment_p2").await;
+    let p3 = routing_envelope("containment_p3").await;
+
+    // (1) P1 through replica 1: `processing`, and its run waits (no worker).
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, receipt) = route_trace(&replica_1, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+    let run_state = |submission_id: Uuid| {
+        let runtime = fixture.runtime.clone();
+        async move {
+            let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, tenant).await;
+            let state: Option<String> = tx
+                .query_opt(
+                    "SELECT state FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+                    &[&tenant, &submission_id],
+                )
+                .await
+                .unwrap()
+                .map(|row| row.get(0));
+            tx.commit().await.unwrap();
+            state
+        }
+    };
+    assert_eq!(
+        run_state(p1.submission_id).await.as_deref(),
+        Some("pending")
+    );
+
+    // (2) Containment.
+    store
+        .contain(
+            tenant,
+            &format!("principal_sha256:{}", "ab".repeat(32)),
+            "contain_for_test",
+        )
+        .await
+        .expect("contain the tenant");
+
+    // (3) New uploads are refused on both replicas, and nothing is written.
+    for (replica, envelope, case) in [
+        (&replica_1, &p2, "P2 through replica 1"),
+        (&replica_2, &p3, "P3 through replica 2"),
+    ] {
+        let (status, refused) = route_trace(replica, &fixture.token, &body_of(envelope)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}: {refused}");
+        assert_eq!(
+            refused["error"], "pipeline_receipt_intake_contained",
+            "{case}"
+        );
+        let id = envelope.submission_id;
+        assert_eq!(fixture.runs(tenant, id).await, 0, "{case}: no run");
+        assert!(
+            !fixture.legacy_record_exists(tenant, id).await,
+            "{case}: no legacy record and no submission row"
+        );
+        assert_eq!(fixture.owner(tenant, id).await, None, "{case}: no owner");
+    }
+
+    // (4) P1 retried through replica 2: still its pipeline receipt.
+    let (status, replayed) = route_trace(&replica_2, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p1.submission_id).await, 1);
+
+    // (5) The worker (replica 1's state, with the row still `contained`)
+    // completes the pending run.
+    let (base, stop, server) = serve_pipeline_app(replica_1).await;
+    wait_for_run_complete(&fixture.runtime, tenant, p1.submission_id).await;
+    assert_eq!(
+        store
+            .routing(tenant)
+            .await
+            .unwrap()
+            .expect("the routing row")
+            .routing_state,
+        trace_commons_server::versioned_pipeline_activation::RoutingState::Contained,
+        "the run completed while the tenant was contained"
+    );
+
+    // (6) The row says `pipeline` again: P2, refused above, is accepted. The
+    // admission attempt of a refused upload, where there is one, ends as
+    // failed through the handler's own `attempt.finish`, so the retry can
+    // reserve again.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let client = reqwest::Client::new();
+    let (status, accepted) = post_trace(&client, &base, &fixture.token, &body_of(&p2)).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p2.submission_id).await, 1);
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "containment test server").await;
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_activation_containment",
+        None,
+        serde_json::json!({
+            "refused_new_receipts": 2,
+            "replayed": 1,
+            "completed_while_contained": 1,
+            "legacy_records_for_refused": 0,
+        }),
+    );
+}
+
+/// A tenant whose routing row says `pipeline` but that is not on the
+/// receipts list of this process is refused, never sent to the legacy path:
+/// the list is the scope of the process and the row cannot widen it. A
+/// tenant that is neither in scope nor has a row is untouched (it takes the
+/// legacy path and claims nothing); one that has a row but is not in scope
+/// is claimed for the legacy path when its row says `legacy`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_activated_tenant_off_the_receipts_list_is_refused_not_sent_to_legacy() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(false, true).await;
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+
+    write_routing_as_operator(tenant, "pipeline").await;
+    let refused_envelope = routing_envelope("not_served").await;
+    let (status, refused) = route_trace(&state, &fixture.token, &body_of(&refused_envelope)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_tenant_not_served");
+    let id = refused_envelope.submission_id;
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert!(!fixture.legacy_record_exists(tenant, id).await);
+    assert_eq!(fixture.owner(tenant, id).await, None);
+
+    // The bystander: no row, not in scope. Legacy path, no claim.
+    let control = routing_envelope("not_served_control").await;
+    let (status, receipt) = route_trace(&state, &fixture.control_token, &body_of(&control)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing");
+    assert!(
+        fixture
+            .legacy_record_exists(&fixture.control_tenant, control.submission_id)
+            .await
+    );
+    assert_eq!(
+        fixture
+            .owner(&fixture.control_tenant, control.submission_id)
+            .await,
+        None,
+        "a tenant out of scope with no row claims nothing"
+    );
+
+    // The bystander with a `legacy` row: out of scope, but a row exists, so
+    // the legacy path claims the id before it writes.
+    write_routing_as_operator(&fixture.control_tenant, "legacy").await;
+    let claimed = routing_envelope("not_served_control_claimed").await;
+    let (status, receipt) = route_trace(&state, &fixture.control_token, &body_of(&claimed)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing");
+    assert_eq!(
+        fixture
+            .owner(&fixture.control_tenant, claimed.submission_id)
+            .await,
+        Some(ReceiptOwner::Legacy)
+    );
+}
+
+/// "Production routing stays off": a process without the test setting
+/// routes a tenant with no routing row to the legacy path even when the
+/// tenant is on the receipts list, and the legacy path claims the id. And a
+/// process with no pipeline runtime (the stock binary) makes no routing read
+/// and no claim at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_with_no_row_stays_on_the_legacy_path_without_the_test_flag() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+
+    // The setting off, the tenant on the list, no row.
+    let production = fixture.replica(true, false).await;
+    assert!(!production.pipeline_unqualified_routing);
+    assert!(
+        !production
+            .pipeline_service
+            .as_ref()
+            .unwrap()
+            .unqualified_routing()
+    );
+    let (base, stop, server) = serve_pipeline_app(production).await;
+    let client = reqwest::Client::new();
+    let envelope = routing_envelope("no_row").await;
+    let (status, receipt) = post_trace(&client, &base, &fixture.token, &body_of(&envelope)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    assert_eq!(fixture.runs(tenant, envelope.submission_id).await, 0);
+    assert!(
+        fixture
+            .legacy_record_exists(tenant, envelope.submission_id)
+            .await
+    );
+    assert_eq!(
+        fixture.owner(tenant, envelope.submission_id).await,
+        Some(ReceiptOwner::Legacy),
+        "a tenant in scope is claimed for the legacy path"
+    );
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "production routing test server").await;
+
+    // No runtime, as the stock binary runs: the routing store exists (the
+    // database does) and is never touched.
+    let mut stock = fixture.replica(true, false).await;
+    Arc::make_mut(&mut stock).pipeline_service = None;
+    assert!(stock.pipeline_activation.is_some());
+    let stock_envelope = routing_envelope("no_runtime").await;
+    let (status, receipt) = route_trace(&stock, &fixture.token, &body_of(&stock_envelope)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing");
+    assert!(
+        fixture
+            .legacy_record_exists(tenant, stock_envelope.submission_id)
+            .await
+    );
+    assert_eq!(
+        fixture.owner(tenant, stock_envelope.submission_id).await,
+        None,
+        "with no runtime nothing is claimed"
+    );
+}
+
+/// A routing row that cannot be read is a refusal, never the legacy path: a
+/// store whose database is down, and a runtime with no routing store at all,
+/// answer `503 pipeline_routing_unavailable` and write nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_routing_read_refuses_the_upload_and_never_reaches_the_legacy_path() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "legacy").await;
+    let mut down = fixture.replica(true, true).await;
+    Arc::make_mut(&mut down).pipeline_activation =
+        routing_store(&pg_backend_without_a_database().await);
+    let mut missing = fixture.replica(true, true).await;
+    Arc::make_mut(&mut missing).pipeline_activation = None;
+
+    for (state, case) in [
+        (down, "the routing store's database is down"),
+        (missing, "no routing store"),
+    ] {
+        let envelope = routing_envelope("routing_read").await;
+        let (status, refused) = route_trace(
+            &state,
+            &fixture.token,
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}: {refused}");
+        assert_eq!(refused["error"], "pipeline_routing_unavailable", "{case}");
+        let id = envelope.submission_id;
+        assert_eq!(fixture.runs(tenant, id).await, 0, "{case}");
+        assert!(!fixture.legacy_record_exists(tenant, id).await, "{case}");
+    }
+}
+
+/// The legacy claim of an id that a pipeline run owns is answered as a retry
+/// of that receipt is. Here no run is found under the key when the handler
+/// first looks (an ownership row names the pipeline, as it does in the
+/// instant between a concurrent receipt's ownership insert and its run), so
+/// the claim is what finds the owner: the upload is `409
+/// submission_owned_by_pipeline_run`, and the legacy path writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_that_finds_a_pipeline_owner_is_refused_as_a_pipeline_owned_id() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(true, true).await;
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+
+    // A real pipeline receipt gives the ownership row a run to name.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let owned = routing_envelope("claim_owner_run").await;
+    let (status, receipt) = route_trace(&state, &fixture.token, &body_of(&owned)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let run_id = routing_store(&fixture.runtime)
+        .unwrap()
+        .ownership(tenant, owned.submission_id)
+        .await
+        .unwrap()
+        .and_then(|row| row.run_id)
+        .expect("the pipeline receipt's ownership row names its run");
+
+    // A second id, owned by the pipeline in the ownership table only.
+    let contested = routing_envelope("claim_owner_contested").await;
+    let url = pipeline_http_database_url().await.unwrap();
+    let (owner, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the database owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    owner
+        .execute(
+            "INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner, run_id)
+             VALUES ($1, $2, 'pipeline', $3)",
+            &[&tenant, &contested.submission_id, &run_id],
+        )
+        .await
+        .expect("seed the pipeline ownership row");
+    write_routing_as_operator(tenant, "legacy").await;
+    let (status, refused) = route_trace(&state, &fixture.token, &body_of(&contested)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"], "submission_owned_by_pipeline_run");
+    assert!(
+        !fixture
+            .legacy_record_exists(tenant, contested.submission_id)
+            .await
+    );
+    assert_eq!(fixture.runs(tenant, contested.submission_id).await, 0);
+}
+
+/// An id the legacy path claimed stays the legacy path's, even when its
+/// first attempt failed before it wrote anything: with the row switched to
+/// `pipeline`, the retry gets a legacy receipt (the receipt transaction
+/// answers `LegacyOwned`, and the handler goes on to the legacy path) and no
+/// run is created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_id_the_legacy_path_claimed_stays_legacy_after_a_failed_first_attempt() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(true, true).await;
+    let envelope = routing_envelope("claimed_then_failed").await;
+    let id = envelope.submission_id;
+
+    // The claim of a legacy attempt that died before its first write.
+    assert_eq!(
+        routing_store(&fixture.runtime)
+            .unwrap()
+            .claim_legacy_receipt(tenant, id)
+            .await
+            .unwrap(),
+        ReceiptOwner::Legacy
+    );
+    assert!(!fixture.legacy_record_exists(tenant, id).await);
+
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, receipt) = route_trace(
+        &state,
+        &fixture.token,
+        &serde_json::to_vec(&envelope).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert!(fixture.legacy_record_exists(tenant, id).await);
+    assert_eq!(fixture.owner(tenant, id).await, Some(ReceiptOwner::Legacy));
+}
+
+/// The receipt transaction checks the routing again, and its answer is the
+/// one that holds. A state whose setting differs from its service's (the
+/// assembly refuses that pair at boot; here it stands for a row that changed
+/// between the handler's read and the receipt) sends a tenant with no row to
+/// the service, which answers `NotRouted(Legacy)`: the handler claims the id
+/// for the legacy path and the upload takes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_receipt_transactions_routing_answer_wins_over_the_handlers_read() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let mut state = fixture.replica(true, false).await;
+    Arc::make_mut(&mut state).pipeline_unqualified_routing = true;
+    let envelope = routing_envelope("routing_changed").await;
+    let (status, receipt) = route_trace(
+        &state,
+        &fixture.token,
+        &serde_json::to_vec(&envelope).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    let id = envelope.submission_id;
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert!(fixture.legacy_record_exists(tenant, id).await);
+    assert_eq!(fixture.owner(tenant, id).await, Some(ReceiptOwner::Legacy));
+}
+
+/// A withdrawal of a pipeline submission does not depend on the tenant's
+/// routing: with a completed run and the row `pipeline`, `contained`, or
+/// `legacy`, the pipeline withdrawal route answers as it does without a row
+/// (`pipeline_withdrawal_route_withdraws_through_the_account_session`) and
+/// queues the index invalidation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawal_of_a_pipeline_submission_works_in_every_routing_state() {
+    use tower::ServiceExt;
+
+    for routing in ["pipeline", "contained", "legacy"] {
+        let Some(fixture) = withdrawal_fixture().await else {
+            return;
+        };
+        let tenant = fixture.tenant.as_str();
+        let principal = static_token_principal_ref(&fixture.token);
+        let session = account_session_headers(&fixture.state, &fixture.token).await;
+        let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+        write_routing_as_operator(tenant, routing).await;
+
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/v1/contributors/me/pipeline-submissions/{}/withdraw",
+                run.submission_id
+            ))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.headers_mut().extend(session);
+        let response = app(fixture.state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "routing {routing}");
+        let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["submission_id"],
+            run.submission_id.to_string(),
+            "{routing}"
+        );
+        assert_eq!(body["prior_status"], "accepted", "{routing}");
+        assert_eq!(
+            body["distribution_reach"], "commons_not_distributed",
+            "{routing}"
+        );
+        assert_eq!(body["credit_retained"], true, "{routing}");
+        assert_eq!(body["index_invalidation"], "pending", "{routing}");
+        assert_eq!(body["revocation_propagation"], "pending", "{routing}");
+        assert_eq!(
+            queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
+            (1, "pending".to_string()),
+            "routing {routing}: the index invalidation is queued"
+        );
+        assert_eq!(
+            routing_store(&fixture.runtime)
+                .unwrap()
+                .ownership(tenant, run.submission_id)
+                .await
+                .unwrap()
+                .map(|row| row.owner),
+            Some(ReceiptOwner::Pipeline),
+            "routing {routing}: the owner of the receipt is unchanged"
+        );
+    }
 }
