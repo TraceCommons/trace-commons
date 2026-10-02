@@ -9501,6 +9501,67 @@ async fn containment_refuses_new_receipts_and_keeps_pending_work() {
     );
 }
 
+/// STA-002: an upload under a suspended Admission policy is refused with its
+/// safe label, not as an internal error. The receipt stores nothing (no run,
+/// no legacy record, no submission row, no ownership row), the answer is a 503
+/// that names `bundle_policy_not_runnable` as the containment refusal names
+/// its label, and after `resume` the same upload is accepted with one run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_under_a_suspended_admission_policy_is_refused_with_its_label() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(true, true).await;
+    let service = state
+        .pipeline_service
+        .clone()
+        .expect("the replica serves a pipeline service");
+    let bundle_id = service.bundle_id().to_string();
+    let actor = format!("operator_sha256:{}", "ab".repeat(32));
+    let envelope = routing_envelope("suspended_admission").await;
+    let body = serde_json::to_vec(&envelope).unwrap();
+    let id = envelope.submission_id;
+
+    write_routing_as_operator(tenant, "pipeline").await;
+    service
+        .intervene_policy(
+            tenant,
+            &bundle_id,
+            Phase::Admission,
+            "suspend",
+            &actor,
+            "hold_intake",
+        )
+        .await
+        .expect("suspend the Admission policy");
+    let (status, refused) = route_trace(&state, &fixture.token, &body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "bundle_policy_not_runnable");
+    assert_eq!(fixture.runs(tenant, id).await, 0, "no run");
+    assert!(
+        !fixture.legacy_record_exists(tenant, id).await,
+        "no legacy record and no submission row"
+    );
+    assert_eq!(fixture.owner(tenant, id).await, None, "no owner");
+
+    service
+        .intervene_policy(
+            tenant,
+            &bundle_id,
+            Phase::Admission,
+            "resume",
+            &actor,
+            "release_intake",
+        )
+        .await
+        .expect("resume the Admission policy");
+    let (status, accepted) = route_trace(&state, &fixture.token, &body).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs(tenant, id).await, 1, "one run");
+}
+
 /// A tenant whose routing row says `pipeline` but that is not on the
 /// receipts list of this process is refused, never sent to the legacy path:
 /// the list is the scope of the process and the row cannot widen it. A

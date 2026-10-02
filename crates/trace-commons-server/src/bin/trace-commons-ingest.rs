@@ -260,13 +260,14 @@ use trace_commons_server::trace_score_attestation::{
     sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
-    PgPipelineStore, PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport,
-    PipelineLeaseConfig, PipelineNearPayoutControls, PipelineNearSettlementMode,
-    PipelineNoveltyUtilityChecks, PipelineQuotaScope, PipelineReceiptRequest,
-    PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction, PipelineReviewClaim,
-    PipelineReviewClaimOutcome, PipelineService, PipelineWithdrawalFollowUpState,
-    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
+    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+    PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore, PipelineAdmissionLimits,
+    PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig, PipelineNearPayoutControls,
+    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
+    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
+    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
+    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
+    is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_activation::{
     NewReceiptRoute, PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL, PIPELINE_ROUTING_UNAVAILABLE_LABEL,
@@ -14502,7 +14503,22 @@ async fn route_pipeline_receipt(
             },
         })
         .await
-        .map_err(internal_error)?;
+        .map_err(|error| {
+            // An operator suspended the Admission policy of the tenant's
+            // bundle (`intervene_policy`): the receipt stored nothing and is
+            // refused with its label, as the containment refusal is, so a
+            // contributor's client sees a blocked reason to retry later
+            // rather than an internal error (STA-002). The text is compared
+            // whole: only the label itself, never an error that carries it.
+            if error.to_string() == PIPELINE_POLICY_NOT_RUNNABLE_LABEL {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+                )
+            } else {
+                internal_error(error)
+            }
+        })?;
     match result {
         PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)

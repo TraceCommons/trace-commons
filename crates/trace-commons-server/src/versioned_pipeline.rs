@@ -1094,10 +1094,18 @@ pub struct PipelineCreditAuditItem {
 /// account, found under the account lock, rolled the credit transaction
 /// back -- the caller then records the row as `held` and no ledger row is
 /// written -- or the submission stopped being operable under that same
-/// lock, which also rolls the transaction back with nothing written.
+/// lock, which also rolls the transaction back with nothing written -- or
+/// the Settle policy was no longer runnable under its status row's lock, which
+/// rolls the transaction back with nothing written as well.
 enum InternalCreditResult {
     Complete,
     Held,
+    /// The Settle policy of the run's bundle was suspended (GRD-004), found
+    /// under `lock_runnable_policy` inside this same transaction, after the
+    /// run, account, and submission locks and before the first write. The
+    /// transaction rolled back with nothing written -- no ledger row, no
+    /// batch. The leg's adapter call, if it was made, is not retracted.
+    PolicyNotRunnable,
     /// The submission-operability re-check taken under the
     /// submission row's own lock, inside this same transaction, found the
     /// submission no longer operable (withdrawn, revoked, purged, expired,
@@ -1581,25 +1589,50 @@ impl PgPipelineStore {
     /// An operator suspends or resumes one policy of a bound bundle (port
     /// `ef97a459` lines 678 to 829, with `terminate` refused). The status row
     /// is the only row it locks (`FOR UPDATE`), so it takes no lock a phase
-    /// commit takes before the policy row, and it waits for every commit that
-    /// holds the row `FOR SHARE` (`lock_runnable_policy`): a commit that
-    /// passed its guard lands before the suspension returns, and one that
+    /// commit takes before the policy row, and it waits for every transaction
+    /// that holds the row `FOR SHARE` (`lock_runnable_policy`): a transaction
+    /// that passed its guard lands before the suspension returns, and one that
     /// starts after it is refused.
     ///
+    /// What a suspension stops, once it has returned: each phase's commit
+    /// (Admission at the receipt, Review, Score, Settle); in Settle, a new
+    /// selection, the index write, each leg's external call, and the credit
+    /// event with its batch; and a payout dispatch (a submit to the NEAR
+    /// adapter, never a confirmation lookup). A run bound to the policy waits
+    /// in `retry`, uncharged, under the same bundle, and continues from what it
+    /// has stored after the resume.
+    ///
+    /// What it does not stop: an external call that is already in flight (a
+    /// guard does not claim to retract an accepted operation: an index write
+    /// that holds the policy row finishes first, a leg's adapter call that was
+    /// accepted stays accepted, and a NEAR submit already made stays made); a
+    /// payout confirmation; and the failure and withdrawal paths, which write
+    /// no outcome and run in every policy state. A `resume` does not wake the
+    /// released runs at once: each waits for its retry backoff (the age of its
+    /// phase, at most one hour).
+    ///
+    /// How long a `suspend` can wait: for the commit transactions, a moment;
+    /// for the credit transaction of a Settle leg, its own few statements; and
+    /// for a Settle index dispatch, which holds the run row, the submission
+    /// row, and the policy row through every upsert to the commit of
+    /// `index_write_state`, at most the earlier of the Settle lease's end and
+    /// `PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS` (30 seconds): past that the
+    /// dispatch stops writing and rolls back.
+    ///
     /// Only `suspend` of a runnable policy and `resume` of a suspended one
-    /// are transitions. `terminate` is `policy_intervention_not_supported`,
-    /// any other action, and an actor or reason that fails `validate_actor`,
-    /// is `policy_intervention_invalid`, and a transition that does not
-    /// exist is `policy_intervention_no_transition`; each refusal, and a
+    /// are transitions. `terminate` is `policy_intervention_not_supported`;
+    /// any other action, a `bundle_id` that is not `sha256:` and 64 lowercase
+    /// hex digits, and an actor or reason that fails `validate_actor`, are
+    /// `policy_intervention_invalid` (no text of the caller is in the error);
+    /// and a transition that does not exist is
+    /// `policy_intervention_no_transition`. Each refusal, and a well-formed
     /// bundle the tenant has no policy row for (`NotFound`), writes nothing.
     ///
     /// A suspension keeps `runnable` and `operational_status` equal (V111's
     /// check) and puts the reason in `error_label`, which a resume clears.
-    /// It changes no run and no bundle: a run bound to the policy waits in
-    /// `retry`, uncharged, and continues under the same bundle after the
-    /// resume. The record's `recorded_at` is the database clock at the write,
-    /// not the transaction's start, so a resume that waited for a suspension
-    /// is never listed before it.
+    /// It changes no run and no bundle. The record's `recorded_at` is the
+    /// database clock at the write, not the transaction's start, so a resume
+    /// that waited for a suspension is never listed before it.
     pub async fn intervene_policy(
         &self,
         tenant_id: &str,
@@ -1614,6 +1647,15 @@ impl PgPipelineStore {
             reason_code,
             PIPELINE_POLICY_INTERVENTION_INVALID_LABEL,
         )?;
+        // The shape the table checks, refused before the id can reach a
+        // query or an error string (`NotFound` names the bundle).
+        if !bundle_id.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        }) {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_INTERVENTION_INVALID_LABEL.to_string(),
+            ));
+        }
         let resulting = match action {
             "suspend" => PolicyOperationalStatus::Suspended,
             "resume" => PolicyOperationalStatus::Runnable,
@@ -4721,7 +4763,9 @@ impl PgPipelineStore {
     /// (`pending`) or to confirm (`submitted`), least recently updated
     /// first. A leg without a batch -- a compatibility run's
     /// `NoveltyUtility` event, which `main` never pays -- is never listed
-    /// (Ruling S8), nor is a `disabled`, `confirmed`, or `failed` payout.
+    /// (Ruling S8), nor is a `disabled`, `confirmed`, or `failed` payout, nor
+    /// a `pending` one whose bundle's Settle policy is not runnable
+    /// (`list_payout_work_on`).
     pub async fn list_runs_with_pending_payout(
         &self,
         tenant_id: &str,
@@ -4746,6 +4790,18 @@ impl PgPipelineStore {
     /// label -- an account hold (`none_enrolled`, `ambiguous_no_designation`)
     /// -- which waits out the same interval before the account is resolved
     /// again (Zaki review 1, round 2, item 2).
+    ///
+    /// A leg that would only be dispatched -- a `pending` one -- is listed
+    /// only while the Settle policy of its run's bundle is runnable (GRD-004;
+    /// no status row is not runnable). A dispatch that the policy holds back
+    /// changes nothing, so the leg keeps its place in the order, and listed
+    /// anyway the held legs would fill the list: with `limit` of them the
+    /// pass would list only those and process nothing, and the legs of other
+    /// bundles, and every confirmation behind them, would never be reached.
+    /// A `submitted` leg is listed whatever the policy says, since a
+    /// confirmation is not a dispatch. The dispatch guard
+    /// (`settle_policy_allows_dispatch`) stays the authority: a suspension
+    /// that lands after the listing is still held back there.
     async fn list_payout_work_on(
         client: &mut deadpool_postgres::Client,
         tenant_id: &str,
@@ -4771,6 +4827,17 @@ impl PgPipelineStore {
                             AND (
                                 s.last_error_label IS NULL
                                 OR s.updated_at <= NOW() - make_interval(secs => $3)
+                            )
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM pipeline_runs r
+                                  JOIN pipeline_bundle_policy_status ps
+                                    ON ps.tenant_id = r.tenant_id
+                                   AND ps.bundle_id = r.bundle_id
+                                   AND ps.phase = 'settle'
+                                 WHERE r.tenant_id = s.tenant_id
+                                   AND r.run_id = s.run_id
+                                   AND ps.runnable
                             )
                         )
                         OR (
@@ -8125,10 +8192,14 @@ impl PipelineService {
     ///    (under the routing lock, shared, so a containment that committed
     ///    during the write is seen and one that is waiting waits for this
     ///    transaction), and the tombstones, requires the attempt's row to be
-    ///    still `staged` and not yet due, and commits the records, the
-    ///    pipeline's ownership row among them, and the row's move to
-    ///    `committed` together. On a refusal there, the attempt deletes its
-    ///    own object and row (`discard_receipt_attempt`).
+    ///    still `staged` and not yet due, takes the Admission policy's status
+    ///    row of the bound bundle `FOR SHARE` as its last lock and refuses with
+    ///    `bundle_policy_not_runnable` when the policy was suspended while the
+    ///    object was written (an operator's suspension waits for this
+    ///    transaction), and commits the records, the pipeline's ownership row
+    ///    among them, and the row's move to `committed` together. On a refusal
+    ///    there, the attempt deletes its own object and row
+    ///    (`discard_receipt_attempt`).
     ///
     /// Each attempt writes its own object, so two concurrent receipts for
     /// one key never overwrite each other's object: the one that commits
@@ -10954,6 +11025,18 @@ impl PipelineService {
                 };
                 let stored = StoredPhaseResult::from_result(Phase::Settle, &result)?;
                 let selection_hash = sha256_prefixed(&serde_json::to_vec(&stored)?);
+                // GRD-004: a run that reaches this point under a suspended
+                // Settle policy stores no new selection. A selection that is
+                // already stored is not read here, and is reused after the
+                // resume. The read takes its own pooled connection, and this
+                // attempt holds none.
+                if !self
+                    .store
+                    .policy_is_runnable(&run.tenant_id, &run.bundle_id, Phase::Settle)
+                    .await?
+                {
+                    return Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL));
+                }
                 run = self
                     .store
                     .persist_settle_selection(&run, &stored, &selection_hash, membership)
@@ -11012,6 +11095,14 @@ impl PipelineService {
                     );
                 }
                 IndexDispatchOutcome::Complete(updated) => run = updated,
+                // GRD-004: the Settle policy was suspended before the dispatch
+                // transaction took its row. No upsert started and nothing was
+                // written (`pending` stays), so the run is released uncharged,
+                // bare, as `process_claimed_run` classifies it, and the retry
+                // after the resume dispatches from the stored selection.
+                IndexDispatchOutcome::PolicyNotRunnable => {
+                    return Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL));
+                }
                 IndexDispatchOutcome::WriteFailed(
                     IndexWriteError::Uncertain | IndexWriteError::Failed,
                 ) => {
@@ -11279,6 +11370,21 @@ impl PipelineService {
                 // still holds, the same check Step 5 runs before the index
                 // write.
                 self.ensure_live_lease(&run).await?;
+                // GRD-004: the policy guard of the external call, beside the
+                // lease fence and before the leg is marked leased: no call
+                // is dispatched under a Settle policy that is not runnable.
+                // The read takes its own pooled connection, as the lease
+                // fence does, and this attempt holds none here. A leg whose
+                // call is already in flight is not retracted; this leg stays
+                // as it is and the run is released uncharged
+                // (`process_claimed_run`), to continue after the resume.
+                if !self
+                    .store
+                    .policy_is_runnable(&run.tenant_id, &run.bundle_id, Phase::Settle)
+                    .await?
+                {
+                    return Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL));
+                }
                 // The leg is `leased` under this attempt's lease
                 // while its adapter call is in flight, and `dispatched_at`
                 // records that it was dispatched -- a failed run reconciles
@@ -11377,6 +11483,18 @@ impl PipelineService {
                                 .await?;
                             held = true;
                             continue;
+                        }
+                        // GRD-004: the Settle policy was suspended while this
+                        // leg's adapter call was in flight. The call is not
+                        // retracted and the leg stays as it is (`leased`, as
+                        // after a crash between the call and this
+                        // transaction), the ledger transaction wrote nothing,
+                        // and the run is released uncharged, bare, as
+                        // `process_claimed_run` classifies it. After the
+                        // resume the retry repeats the idempotent call and
+                        // this transaction.
+                        Ok(InternalCreditResult::PolicyNotRunnable) => {
+                            return Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL));
                         }
                         // The ledger transaction's own
                         // submission re-check found the submission
@@ -11798,13 +11916,19 @@ impl PipelineService {
     ///    is only a snapshot; a withdrawal can land in the gap between that
     ///    read and this transaction, and must forfeit the pending award
     ///    rather than let it be paid);
-    /// 5. inserts the ledger row idempotently (the event id is derived from
+    /// 5. locks the Settle policy's status row `FOR SHARE` as the last lock
+    ///    (`lock_runnable_policy`, GRD-004) and, when the policy is no longer
+    ///    runnable, returns `PolicyNotRunnable` and rolls the transaction back
+    ///    with nothing written: a suspension that returned to the operator
+    ///    stops the credit event and its batch, and one that is waiting for
+    ///    this transaction waits for it to end;
+    /// 6. inserts the ledger row idempotently (the event id is derived from
     ///    the run and its Score outcome);
-    /// 6. if that event is already final, reuses the one finalized batch that
+    /// 7. if that event is already final, reuses the one finalized batch that
     ///    carries it; otherwise composes the batch from the account's pending
     ///    events, writes it finalized, sets its `instrument_id`, and marks
     ///    those events final;
-    /// 7. completes the settlement row with the receipt's result reference
+    /// 8. completes the settlement row with the receipt's result reference
     ///    and external receipt hash, the event, and the batch. A receipt hash
     ///    another leg already recorded is refused here, and the whole
     ///    transaction rolls back.
@@ -11960,6 +12084,18 @@ impl PipelineService {
         if !submission_operable {
             // Dropping the transaction rolls it back: nothing was written.
             return Ok(InternalCreditResult::Inoperable);
+        }
+        // GRD-004: the Settle policy of the run's bundle must still be
+        // runnable, and stays so until this transaction ends. The load-time
+        // check and the leg's own dispatch check are snapshots, and a
+        // suspension can land after both; this one is under the policy row's
+        // lock, the last lock taken (run row, account lock, submission row,
+        // policy row) and before the first write, so a suspension that
+        // returned to the operator before this point writes no credit event
+        // and no batch, and one that has not yet returned waits for this
+        // transaction. Dropping the transaction rolls it back.
+        if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Settle).await? {
+            return Ok(InternalCreditResult::PolicyNotRunnable);
         }
         // Rulings T15-6 and T15-12: `main` appends a `NoveltyUtility` event
         // only when its credit checks pass. A compatibility leg one of them
@@ -12351,7 +12487,8 @@ impl PipelineService {
     /// after Settle, outside any run lease, and never writes a phase
     /// outcome.
     ///
-    /// The work list (`PgPipelineStore::list_payout_work_on`) is split in
+    /// The work list (`PgPipelineStore::list_payout_work_on`, which leaves out
+    /// a `pending` leg whose bundle's Settle policy is not runnable) is split in
     /// two:
     ///
     /// - A `submitted` leg only needs its confirmation looked up, which can
@@ -13462,11 +13599,17 @@ enum IndexDispatchOutcome {
     Cancelled(PipelineRunRecord),
     Complete(PipelineRunRecord),
     WriteFailed(IndexWriteError),
+    /// The Settle policy of the run's bundle was not runnable under its
+    /// status row's lock (GRD-004): no upsert started, the transaction wrote
+    /// nothing, and `pending` stays.
+    PolicyNotRunnable,
 }
 
 /// Settle's index dispatch (Step 5), run in a task of its own (multi-lens
-/// review L4-3). One transaction locks the run row (`ensure_current_lease`)
-/// and then the submission row (the guard), and holds both through every
+/// review L4-3). One transaction locks the run row (`ensure_current_lease`),
+/// then the submission row (the guard), then the Settle policy's status row
+/// `FOR SHARE` (GRD-004: a policy that is not runnable starts no upsert, and a
+/// suspension waits for this transaction), and holds all three through every
 /// upsert to the commit of the `index_write_state` it records. A withdrawal
 /// locks the submission row `FOR UPDATE`, so it either commits before the
 /// guard read (the dispatch then sees it, cancels, and queues an
@@ -13500,7 +13643,7 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
     let mut client = backend.trace_pool().get().await?;
     let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
     // Lock order: the run row (`ensure_current_lease`), then the submission
-    // row (the guard).
+    // row (the guard), then the Settle policy row (below).
     ensure_current_lease(&tx, &run, required_lease_token(&run)?).await?;
     let guard = PgPipelineStore::submission_guard_on_tx(&tx, &run).await?;
     if !guard.operable {
@@ -13519,6 +13662,18 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
         let run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "cancelled").await?;
         tx.commit().await?;
         return Ok(IndexDispatchOutcome::Cancelled(run));
+    }
+    // GRD-004: the Settle policy's status row, `FOR SHARE`, after the run row
+    // and the submission row, held through every upsert to the commit of the
+    // `index_write_state` -- the same span as those two rows, so a suspension
+    // waits for a dispatch in flight (at most the earlier of the lease's end
+    // and the dispatch budget) and a dispatch that starts after one starts
+    // no upsert. An inoperable submission cancels above whatever the policy
+    // says: that path ends the write and queues its invalidation, and must run
+    // in every policy state.
+    if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Settle).await? {
+        tx.commit().await?;
+        return Ok(IndexDispatchOutcome::PolicyNotRunnable);
     }
     let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
     // Multi-lens review L4-1: the rows are held no longer than the earlier

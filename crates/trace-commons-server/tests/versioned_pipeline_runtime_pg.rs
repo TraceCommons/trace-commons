@@ -33309,6 +33309,7 @@ async fn wait_for_held_write(reached: std::sync::mpsc::Receiver<()>) {
 /// after the selection is stored and before `commit_settle`.
 struct GatedSettlementAdapter {
     inner: Arc<RecordingSettlementAdapter>,
+    calls: AtomicUsize,
     reached: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
@@ -33331,6 +33332,7 @@ impl SettlementAdapter for GatedSettlementAdapter {
         &self,
         request: &SettlementRequest,
     ) -> Result<SettlementReceipt, SettlementError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let release = self.release.lock().unwrap().take();
         if let Some(release) = release {
             if let Some(reached) = self.reached.lock().unwrap().take() {
@@ -33838,6 +33840,7 @@ async fn a_policy_suspended_during_a_phase_cannot_commit_it() {
                 "recording_trace_credit_test_only",
                 "none",
             ),
+            calls: AtomicUsize::new(0),
             reached: std::sync::Mutex::new(Some(reached_tx)),
             release: std::sync::Mutex::new(Some(release_rx)),
         });
@@ -33911,6 +33914,11 @@ async fn a_policy_suspended_during_a_phase_cannot_commit_it() {
             outcome_phases(&service, &tenant, created.run_id).await,
             vec![Phase::Admission, Phase::Review, Phase::Score],
             "no Settle outcome exists while the policy is suspended"
+        );
+        assert_eq!(
+            count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+            0,
+            "no credit event was written while the policy was suspended"
         );
         // The load-time guard holds the run too, still uncharged.
         force_due(&backend, &tenant, created.run_id).await;
@@ -34341,6 +34349,45 @@ async fn terminate_is_refused_and_an_unknown_action_is_refused() {
             ),
             "policy_intervention_invalid",
             "actor {bad_actor:?} with reason {bad_reason:?}"
+        );
+    }
+    // A bundle id that is not `sha256:` and 64 lowercase hex digits is
+    // refused as invalid before it reaches a query, and its text is in no
+    // error string.
+    let wrong_case = format!("sha256:{}", "A".repeat(64));
+    let too_short = format!("sha256:{}", "a".repeat(63));
+    let too_long = format!("sha256:{}", "a".repeat(65));
+    let unprefixed = "a".repeat(64);
+    for malformed in [
+        "",
+        "sha256:",
+        "caller-chosen-bundle-name",
+        wrong_case.as_str(),
+        too_short.as_str(),
+        too_long.as_str(),
+        unprefixed.as_str(),
+    ] {
+        let result = store
+            .intervene_policy(
+                &tenant,
+                malformed,
+                Phase::Score,
+                "suspend",
+                &actor,
+                "suspend_policy",
+            )
+            .await;
+        let error = result.expect_err("a malformed bundle id is refused");
+        assert!(
+            matches!(
+                &error,
+                DatabaseError::Constraint(label) if label == "policy_intervention_invalid"
+            ),
+            "bundle id {malformed:?}: {error:?}"
+        );
+        assert!(
+            malformed.is_empty() || !error.to_string().contains(malformed),
+            "the refusal repeats no text of the caller"
         );
     }
     assert!(
@@ -34886,4 +34933,814 @@ async fn a_failed_payout_is_not_resubmitted_while_the_settle_policy_is_suspended
     let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
     assert_eq!(settlement.payout_state, "submitted");
     assert_eq!(settlement.last_error_label, None);
+}
+
+// Settle's external effects under a suspended policy, and the payout listing
+// (delivery PR 5, Task 5, fix round 1).
+
+/// A store that holds one `read_json_by_object_key` until the test lets it go,
+/// the read of a stored index command: Settle makes it once before it stores
+/// its selection and once more before its index dispatch, so a test that
+/// holds the first or the second read suspends the policy at exactly that
+/// point. `arm(n)` counts reads from zero and holds the `n`th; every other
+/// call goes straight to the store underneath.
+struct ReadPausingStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    reads: AtomicUsize,
+    pause_on: AtomicUsize,
+    reached: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl ReadPausingStore {
+    fn new(inner: Arc<dyn TraceArtifactStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            reads: AtomicUsize::new(0),
+            pause_on: AtomicUsize::new(0),
+            reached: std::sync::Mutex::new(None),
+            release: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Holds the `nth` (1-based) read from now on. Returns the channel that
+    /// says the read began and the channel that lets it go.
+    fn arm(&self, nth: usize) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *self.reached.lock().unwrap() = Some(reached_tx);
+        *self.release.lock().unwrap() = Some(release_rx);
+        self.reads.store(0, Ordering::SeqCst);
+        self.pause_on.store(nth, Ordering::SeqCst);
+        (reached_rx, release_tx)
+    }
+}
+
+impl TraceArtifactStore for ReadPausingStore {
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let nth = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if nth == self.pause_on.load(Ordering::SeqCst) {
+            let release = self.release.lock().unwrap().take();
+            if let Some(release) = release {
+                if let Some(reached) = self.reached.lock().unwrap().take() {
+                    let _ = reached.send(());
+                }
+                release
+                    .recv_timeout(std::time::Duration::from_secs(20))
+                    .expect("the test released the held read within the bound");
+            }
+        }
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// A `GatedSettlementAdapter` over a recording adapter of `instrument` on
+/// payout rail `none`, with the gate armed: the first `settle` call tells the
+/// test it began (`reached`) and waits for `release`.
+fn armed_gated_adapter(
+    instrument: InstrumentId,
+    identity: &'static str,
+) -> (
+    Arc<GatedSettlementAdapter>,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let gated = Arc::new(GatedSettlementAdapter {
+        inner: RecordingSettlementAdapter::new(instrument, identity, "none"),
+        calls: AtomicUsize::new(0),
+        reached: std::sync::Mutex::new(Some(reached_tx)),
+        release: std::sync::Mutex::new(Some(release_rx)),
+    });
+    (gated, reached_rx, release_tx)
+}
+
+/// GRD-004: the credit event is written in a transaction that locks the
+/// Settle policy's status row, so a suspension that returned while the leg's
+/// adapter call was in flight writes no ledger row and finalizes no batch. The
+/// call itself is not retracted. The run waits in `retry`, uncharged, under
+/// its bundle; after `resume` it completes with one credit event, one batch,
+/// and one Settle outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_suspended_settle_policy_writes_no_credit_event() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (gated, reached, release) = armed_gated_adapter(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+    );
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![gated.clone() as Arc<dyn SettlementAdapter>],
+    )
+    .await;
+    let tenant = policy_tenant("no-credit");
+    let created = policy_test_run(&service, &tenant).await;
+    let bundle_id = created.bundle_id.clone();
+    for _ in 0..2 {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review and Score run");
+    }
+    let scored = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    let attempt = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        async move { service.process_run(&tenant, created.run_id).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), reached)
+        .await
+        .expect("the credit leg's adapter call began")
+        .unwrap();
+    let actor = policy_actor();
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Settle,
+            "suspend",
+            &actor,
+            "suspend_before_credit",
+        )
+        .await
+        .expect("a suspension does not wait for a call that holds no row");
+    release.send(()).unwrap();
+    let held = attempt
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the Settle attempt returns the run");
+    assert_eq!(
+        (
+            held.state,
+            held.next_phase,
+            held.last_error_label.as_deref(),
+            held.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(Phase::Settle),
+            Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+            scored.attempt_count
+        ),
+        "released uncharged"
+    );
+    assert_eq!(held.bundle_id, bundle_id);
+    assert_eq!(gated.calls.load(Ordering::SeqCst), 1, "the call was made");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        0,
+        "no credit event while the policy is suspended"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_credit_settlement_batches").await,
+        0,
+        "no settlement batch was finalized"
+    );
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        (leg.credit_event_id, leg.settlement_batch_id),
+        (None, None),
+        "the leg carries no event and no batch"
+    );
+    assert_ne!(leg.operation_state, "complete");
+    assert_eq!(
+        outcome_phases(&service, &tenant, created.run_id).await,
+        vec![Phase::Admission, Phase::Review, Phase::Score]
+    );
+
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Settle,
+            "resume",
+            &actor,
+            "resume_credit",
+        )
+        .await
+        .unwrap();
+    force_due(&backend, &tenant, created.run_id).await;
+    let done = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs after the resume");
+    assert_eq!(done.state, PipelineRunState::Complete);
+    assert_eq!(done.bundle_id, bundle_id);
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        1,
+        "one credit event after the resume"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_credit_settlement_batches").await,
+        1,
+        "one finalized batch"
+    );
+    assert_eq!(
+        outcome_phases(&service, &tenant, created.run_id).await,
+        vec![Phase::Admission, Phase::Review, Phase::Score, Phase::Settle],
+        "one outcome for each phase"
+    );
+}
+
+/// GRD-004: a run that reaches Settle under a suspended policy stores no new
+/// selection and starts no index write, and the index dispatch takes the
+/// policy row for the span of its writes. Three attempts of one run: a
+/// suspension while the first attempt reads the command it will select with
+/// stores no selection; a suspension before the second attempt's dispatch
+/// starts no upsert (the selection stays stored, the write `pending`); after
+/// `resume` the third attempt writes exactly the entries a control run writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_suspended_settle_policy_starts_no_index_write() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let reads = ReadPausingStore::new(artifact_store(&dir));
+    let index = IsolatedPipelineIndex::new();
+    let service = test_service_with_adapters_and_index(
+        backend.clone(),
+        reads.clone() as Arc<dyn TraceArtifactStore>,
+        minimal_config(true),
+        Vec::new(),
+        index.clone(),
+        None,
+    )
+    .await;
+
+    // A control run, never suspended: how many entries a run writes.
+    let control = policy_tenant("index-control");
+    let control_run = policy_test_run(&service, &control).await;
+    for _ in 0..3 {
+        service
+            .process_run(&control, control_run.run_id)
+            .await
+            .unwrap()
+            .expect("the control run advances");
+    }
+    let control_entries =
+        index.entry_count(&pipeline_tenant_storage_ref(&control), MINIMAL_INDEX_ID);
+    assert!(control_entries > 0, "a run writes at least one entry");
+    let writer_calls_after_control = index.writer_calls();
+
+    let tenant = policy_tenant("no-index");
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let created = policy_test_run(&service, &tenant).await;
+    let bundle_id = created.bundle_id.clone();
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    let scored = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert_eq!(scored.settle_selection_hash, None);
+    let actor = policy_actor();
+    let suspend = |reason: &'static str| {
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let bundle_id = bundle_id.clone();
+        let actor = actor.clone();
+        async move {
+            service
+                .intervene_policy(
+                    &tenant,
+                    &bundle_id,
+                    Phase::Settle,
+                    "suspend",
+                    &actor,
+                    reason,
+                )
+                .await
+                .expect("suspend the Settle policy")
+        }
+    };
+    let resume = |reason: &'static str| {
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let bundle_id = bundle_id.clone();
+        let actor = actor.clone();
+        async move {
+            service
+                .intervene_policy(&tenant, &bundle_id, Phase::Settle, "resume", &actor, reason)
+                .await
+                .expect("resume the Settle policy")
+        }
+    };
+    let attempt = |service: Arc<PipelineService>, tenant: String| {
+        tokio::spawn(async move { service.process_run(&tenant, created.run_id).await })
+    };
+
+    // Attempt 1: held at the read that comes before the selection is stored.
+    let (reached, release) = reads.arm(1);
+    let first = attempt(service.clone(), tenant.clone());
+    wait_for_held_write(reached).await;
+    suspend("suspend_before_selection").await;
+    release.send(()).unwrap();
+    let held = first.await.unwrap().unwrap().expect("the run is returned");
+    assert_eq!(
+        (
+            held.state,
+            held.last_error_label.as_deref(),
+            held.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+            scored.attempt_count
+        ),
+        "released uncharged"
+    );
+    assert_eq!(held.settle_selection_hash, None, "no selection was stored");
+    assert_eq!(held.index_write_state, "none");
+    assert_eq!(index.writer_calls(), writer_calls_after_control);
+
+    // Attempt 2: the selection is stored; held at the read before the dispatch.
+    resume("resume_for_selection").await;
+    force_due(&backend, &tenant, created.run_id).await;
+    let (reached, release) = reads.arm(2);
+    let second = attempt(service.clone(), tenant.clone());
+    wait_for_held_write(reached).await;
+    suspend("suspend_before_index_write").await;
+    release.send(()).unwrap();
+    let held = second.await.unwrap().unwrap().expect("the run is returned");
+    assert_eq!(
+        (
+            held.state,
+            held.last_error_label.as_deref(),
+            held.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+            scored.attempt_count
+        ),
+        "released uncharged"
+    );
+    assert!(
+        held.settle_selection_hash.is_some(),
+        "the stored selection is kept"
+    );
+    assert_eq!(held.index_write_state, "pending", "the write stays pending");
+    assert_eq!(
+        index.writer_calls(),
+        writer_calls_after_control,
+        "the writer saw no upsert while the policy was suspended"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+    assert_eq!(
+        outcome_phases(&service, &tenant, created.run_id).await,
+        vec![Phase::Admission, Phase::Review, Phase::Score]
+    );
+
+    // Attempt 3: after the resume the run completes from its stored selection.
+    resume("resume_for_index_write").await;
+    force_due(&backend, &tenant, created.run_id).await;
+    let done = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs after the resume");
+    assert_eq!(done.state, PipelineRunState::Complete);
+    assert_eq!(done.index_write_state, "complete");
+    assert_eq!(done.bundle_id, bundle_id);
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        control_entries,
+        "one logical write: the entries a control run writes"
+    );
+    assert_eq!(
+        outcome_phases(&service, &tenant, created.run_id).await,
+        vec![Phase::Admission, Phase::Review, Phase::Score, Phase::Settle]
+    );
+}
+
+/// GRD-004: an instrument leg's external call is guarded beside the lease
+/// fence, before the leg is marked leased. Two legs: the first leg's call is
+/// in flight when the policy is suspended and is not retracted; the second
+/// leg's adapter sees no call while the policy is suspended, and exactly one
+/// after `resume`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_suspended_settle_policy_dispatches_no_leg() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (first_leg, reached, release) = armed_gated_adapter(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+    );
+    let second_leg = CountingSettlementAdapter::new(RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    ));
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            first_leg.clone() as Arc<dyn SettlementAdapter>,
+            second_leg.clone() as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+    let tenant = policy_tenant("no-leg");
+    let created = policy_test_run(&service, &tenant).await;
+    let bundle_id = created.bundle_id.clone();
+    for _ in 0..2 {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review and Score run");
+    }
+    let scored = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    let attempt = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        async move { service.process_run(&tenant, created.run_id).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), reached)
+        .await
+        .expect("the first leg's adapter call began")
+        .unwrap();
+    let actor = policy_actor();
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Settle,
+            "suspend",
+            &actor,
+            "suspend_between_legs",
+        )
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let held = attempt
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the Settle attempt returns the run");
+    assert_eq!(
+        (
+            held.state,
+            held.next_phase,
+            held.last_error_label.as_deref(),
+            held.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(Phase::Settle),
+            Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+            scored.attempt_count
+        ),
+        "released uncharged"
+    );
+    assert_eq!(
+        first_leg.calls.load(Ordering::SeqCst),
+        1,
+        "the call in flight was not retracted"
+    );
+    assert_eq!(
+        second_leg.calls(),
+        0,
+        "the second leg's adapter saw no call while the policy was suspended"
+    );
+    let legs = service
+        .store()
+        .list_settlements(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let state_of = |instrument: &str| {
+        legs.iter()
+            .find(|leg| leg.instrument_id == instrument)
+            .map(|leg| leg.operation_state.clone())
+            .expect("the run has the leg")
+    };
+    assert_eq!(state_of("storage_rebate"), "complete");
+    assert_eq!(
+        state_of(InstrumentId::trace_credit().as_str()),
+        "pending",
+        "the undispatched leg is as Score seeded it"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        0
+    );
+
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Settle,
+            "resume",
+            &actor,
+            "resume_legs",
+        )
+        .await
+        .unwrap();
+    force_due(&backend, &tenant, created.run_id).await;
+    let done = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs after the resume");
+    assert_eq!(done.state, PipelineRunState::Complete);
+    assert_eq!(second_leg.calls(), 1, "one call after the resume");
+    assert_eq!(
+        first_leg.calls.load(Ordering::SeqCst),
+        1,
+        "the completed leg is not called again"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        1
+    );
+    assert_eq!(
+        outcome_phases(&service, &tenant, created.run_id).await,
+        vec![Phase::Admission, Phase::Review, Phase::Score, Phase::Settle]
+    );
+}
+
+/// Resolution 7: legs the Settle policy holds back do not block the tenant's
+/// other payouts. Two pending legs of bundle A are held; a pass with a limit of
+/// one still dispatches bundle B's leg and confirms the payout submitted
+/// earlier, never submits a leg of bundle A, and after `resume` submits each
+/// of A's legs once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn held_payouts_do_not_block_other_payouts_or_confirmations() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("held-listing");
+
+    // An earlier payout, submitted before anything is held.
+    let earlier = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, earlier.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    // Two legs of the same bundle that complete after it and stay pending.
+    let held_a = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let held_b = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    // A leg of another bundle, active for new runs.
+    let other_package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+                atomic_units: AtomicUnits::from_raw(2_000_000),
+                descriptor: trace_credit_descriptor(),
+            }],
+            include_index: false,
+            variant: None,
+        },
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+    .expect("build the second bundle");
+    service
+        .store()
+        .register_bundle(&tenant, &other_package)
+        .await
+        .unwrap();
+    activate_bundle_as_operator(&tenant, &other_package.bundle_id).await;
+    let other = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(other.bundle_id, other_package.bundle_id);
+    assert_ne!(other.bundle_id, held_a.bundle_id);
+    assert_eq!(held_a.bundle_id, held_b.bundle_id);
+
+    let actor = policy_actor();
+    service
+        .intervene_policy(
+            &tenant,
+            &held_a.bundle_id,
+            Phase::Settle,
+            "suspend",
+            &actor,
+            "hold_payouts",
+        )
+        .await
+        .unwrap();
+
+    // Limit one, called repeatedly. The earlier payout is polled first (it is
+    // the oldest listed leg); that poll moves it behind the held legs in the
+    // old order, which is how a held leg at the head used to starve the rest.
+    assert_eq!(
+        service.process_payouts(&tenant, 1).await.unwrap(),
+        1,
+        "the submitted payout is polled"
+    );
+    assert_eq!(
+        service.process_payouts(&tenant, 1).await.unwrap(),
+        1,
+        "the other bundle's pending leg is dispatched, not a held one"
+    );
+    assert_eq!(near.submits(), 2);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, other.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    confirm_every_near_request(&recording);
+    assert_eq!(service.process_payouts(&tenant, 1).await.unwrap(), 1);
+    assert_eq!(service.process_payouts(&tenant, 1).await.unwrap(), 1);
+    for run in [&earlier, &other] {
+        assert_eq!(
+            trace_credit_settlement(&service, &tenant, run.run_id)
+                .await
+                .payout_state,
+            "confirmed",
+            "every confirmation was reached"
+        );
+    }
+    assert_eq!(
+        service.process_payouts(&tenant, 1).await.unwrap(),
+        0,
+        "only the held legs are left, and none is listed"
+    );
+    assert_eq!(near.submits(), 2, "no leg of the held bundle was submitted");
+    for run in [&held_a, &held_b] {
+        assert_eq!(
+            trace_credit_settlement(&service, &tenant, run.run_id)
+                .await
+                .payout_state,
+            "pending"
+        );
+    }
+    assert_eq!(near_outbox_rows(&backend, &tenant).await.len(), 2);
+
+    service
+        .intervene_policy(
+            &tenant,
+            &held_a.bundle_id,
+            Phase::Settle,
+            "resume",
+            &actor,
+            "release_payouts",
+        )
+        .await
+        .unwrap();
+    assert_eq!(service.process_payouts(&tenant, 1).await.unwrap(), 1);
+    assert_eq!(service.process_payouts(&tenant, 1).await.unwrap(), 1);
+    assert_eq!(
+        near.submits(),
+        4,
+        "each of the held bundle's legs is submitted once"
+    );
+    for run in [&held_a, &held_b] {
+        assert_eq!(
+            trace_credit_settlement(&service, &tenant, run.run_id)
+                .await
+                .payout_state,
+            "submitted"
+        );
+    }
+    assert_eq!(near_outbox_rows(&backend, &tenant).await.len(), 4);
 }
