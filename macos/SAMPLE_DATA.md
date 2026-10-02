@@ -21,13 +21,20 @@ in the same file, re-records every sample set in memory on every run and
 fails, naming the method, the sample set and the first differing field path,
 the moment a committed file stops matching what the daemon now sends.
 
-Three recorded files are hand-adjusted after the real capture, each marked
-with its own `"_sample"` reason and listed in `HAND_WRITTEN_OVERRIDES`
-(excluded from the drift test, since a fresh real capture can never equal a
-value deliberately edited away from): `unknownCounts/status.json` has
+Some recorded files are hand-adjusted after the real capture, each marked
+with its own `"_sample"` reason and listed in `HAND_WRITTEN_OVERRIDES`. The
+drift test still compares every field an override leaves alone
+(`override_touched_keys`); only a file replaced whole is skipped.
+`unknownCounts/status.json` has
 `decisions_owed` removed by hand, because the badge draws "—" for an older
 or unreachable daemon and the real daemon always sends a concrete count;
 `normalDay/inference_calls.json` and `busyQueue/inference_calls.json` are a
 hand-written `readable: true` page, shaped exactly like the real reply
 `calls_page` builds in `daemon/inference_map.rs`, because `readable` needs a
-live IronWire proxy answering and no temp store runs one.
+live IronWire proxy answering and no temp store runs one. For the same
+reason, `normalDay` and `busyQueue` override `status.json`'s
+`private_inference_state` (running on 8463), `routing` (`rows_seen`) and
+`daily_budget` (4 uploads today), and `harness_list.json`'s Claude Code row
+(connected, `answering`), `activity`, `spend` (known) and
+`destination_port`; `empty/harness_list.json` overrides `spend` to a known
+zero.

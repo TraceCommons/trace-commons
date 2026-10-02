@@ -43,11 +43,13 @@
 //! yet"`. `coreDown` stays hand-written too: it answers `nil` for every
 //! method by construction, nothing to record.
 //!
-//! Three more recordings cannot be the raw real capture either, because the
-//! screen each feeds needs a state a temp store cannot exhibit --
+//! Some recordings cannot be the raw real capture either, because the
+//! screen each feeds needs a state a temp store cannot exhibit (a live
+//! IronWire, a day of uploads, an older daemon) --
 //! `HAND_WRITTEN_OVERRIDES` and `apply_hand_written_overrides` below. Each is
-//! marked `"_sample"` and excluded from the drift test, with the reason why
-//! next to it.
+//! marked `"_sample"` with the reason why. The drift test compares the
+//! fields an override leaves alone (`override_touched_keys`), and skips only
+//! the files an override replaces whole.
 //!
 //! # Re-recording
 //!
@@ -993,14 +995,18 @@ fn file_for(key: &str) -> PathBuf {
     samples_dir().join(format!("{key}.json"))
 }
 
-/// Three recordings a temp store cannot produce for real, each marked
-/// `_sample` (ignored by every decoder, like Zaki's provisional methods) and
-/// excluded from the drift test below -- see that test for why each is
-/// excluded rather than compared.
+/// Recordings a temp store cannot produce for real, each marked `_sample`
+/// (ignored by every decoder, like Zaki's provisional methods). The drift
+/// test compares what an override leaves alone; see `override_touched_keys`.
 const HAND_WRITTEN_OVERRIDES: &[&str] = &[
     "unknownCounts/status",
     "normalDay/inference_calls",
     "busyQueue/inference_calls",
+    "normalDay/status",
+    "busyQueue/status",
+    "normalDay/harness_list",
+    "busyQueue/harness_list",
+    "empty/harness_list",
 ];
 
 /// For an override that edits a real recording rather than replacing it,
@@ -1009,14 +1015,29 @@ const HAND_WRITTEN_OVERRIDES: &[&str] = &[
 fn override_touched_keys(key: &str) -> Option<&'static [&'static str]> {
     match key {
         "unknownCounts/status" => Some(&["decisions_owed", "_sample"]),
+        "normalDay/status" | "busyQueue/status" => Some(&[
+            "private_inference_state",
+            "routing",
+            "daily_budget",
+            "_sample",
+        ]),
+        "normalDay/harness_list" | "busyQueue/harness_list" => Some(&[
+            "harnesses",
+            "activity",
+            "spend",
+            "destination_port",
+            "destination_credentialed",
+            "_sample",
+        ]),
+        "empty/harness_list" => Some(&["spend", "_sample"]),
         _ => None,
     }
 }
 
 /// Applied to a fresh `record_all()` map before it is written to disk, never
 /// before it is compared in the drift test -- so the drift test's own
-/// "fresh" values stay the honest real capture, and these three committed
-/// files are the ones that can never match it (by design, not by drift).
+/// "fresh" values stay the honest real capture, and the overridden fields
+/// are the ones that can never match it (by design, not by drift).
 fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
     // Ron's badge draws "—" for `decisions_owed` when the daemon is too old
     // to send it or unreachable -- never a fact a temp store's real daemon
@@ -1040,6 +1061,82 @@ fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
     // `cost.{known,priced_micros}`, `proof`.
     for key in ["normalDay/inference_calls", "busyQueue/inference_calls"] {
         all.insert(key.to_string(), hand_written_inference_calls());
+    }
+
+    // The screens for a connected tool, Private AI running, routed rows
+    // and a day's uploads. Each needs a live IronWire on a real port and a
+    // day of real uploads, so a temp store's real daemon always reports
+    // them off, empty and unknown. C1's hand-written sets had them; these
+    // keep the Swift previews of those screens. Every other field of these
+    // files is still the real capture, held to the daemon by the drift
+    // test (`override_touched_keys`).
+    for set in ["normalDay", "busyQueue"] {
+        if let Some(Value::Object(status)) = all.get_mut(&format!("{set}/status")) {
+            status.insert(
+                "private_inference_state".into(),
+                json!({"state": "running", "port": 8463}),
+            );
+            status.insert(
+                "routing".into(),
+                json!({"state": "rows_seen", "derived": true,
+                       "last_refresh_at": VOLATILE_TIMESTAMP_PLACEHOLDER, "unreadable_rows": 0}),
+            );
+            if let Some(Value::Object(budget)) = status.get_mut("daily_budget") {
+                let max_bytes = budget
+                    .get("max_bytes_per_day")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let max_uploads = budget
+                    .get("max_uploads_per_day")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                budget.insert("bytes_today".into(), json!(1_048_576));
+                budget.insert(
+                    "bytes_remaining".into(),
+                    json!(max_bytes.saturating_sub(1_048_576)),
+                );
+                budget.insert("uploads_today".into(), json!(4));
+                budget.insert(
+                    "uploads_remaining".into(),
+                    json!(max_uploads.saturating_sub(4)),
+                );
+            }
+            status.insert(
+                "_sample".into(),
+                json!("private AI, routing and budget need a live IronWire"),
+            );
+        }
+        if let Some(Value::Object(list)) = all.get_mut(&format!("{set}/harness_list")) {
+            if let Some(Value::Array(rows)) = list.get_mut("harnesses") {
+                for row in rows.iter_mut().filter(|r| r["id"] == "claude") {
+                    row["connected"] = json!(true);
+                    row["state"] = json!("answering");
+                    row["last_call_at"] = json!("2026-09-30T09:04:11+00:00");
+                    row["can_connect"] = json!(false);
+                    row["can_disconnect"] = json!(true);
+                }
+            }
+            list.insert(
+                "activity".into(),
+                json!({"readable": true, "window_hours": 24, "last_call_at": "2026-09-30T09:04:11+00:00",
+                       "families": [{"family": "anthropic", "last_call_at": "2026-09-30T09:04:11+00:00", "calls": 12}]}),
+            );
+            list.insert("spend".into(), json!({"known": true, "micros": 1_230_000}));
+            list.insert("destination_port".into(), json!(8463));
+            list.insert("destination_credentialed".into(), json!(true));
+            list.insert(
+                "_sample".into(),
+                json!("a connected tool needs a live IronWire"),
+            );
+        }
+    }
+    // Known zero, distinct from the unknown every other set reports.
+    if let Some(Value::Object(list)) = all.get_mut("empty/harness_list") {
+        list.insert("spend".into(), json!({"known": true, "micros": 0}));
+        list.insert(
+            "_sample".into(),
+            json!("known zero spend needs a live IronWire"),
+        );
     }
 }
 
@@ -1139,10 +1236,10 @@ async fn drift_sample_data_matches_the_real_daemon() {
     let fresh = record_all().await;
     let mut failures = Vec::new();
     for (key, actual) in &fresh {
-        // `HAND_WRITTEN_OVERRIDES`: these three committed files are never
-        // the raw real capture by design (see `apply_hand_written_overrides`),
-        // so comparing them against `fresh`'s honest capture would fail on
-        // every run for a reason that is not drift.
+        // `HAND_WRITTEN_OVERRIDES` are not the raw real capture by design
+        // (see `apply_hand_written_overrides`). An override that edits a
+        // recording is compared without the keys it touched; one that
+        // replaces the whole file is skipped.
         let touched = override_touched_keys(key);
         if HAND_WRITTEN_OVERRIDES.contains(&key.as_str()) && touched.is_none() {
             continue;

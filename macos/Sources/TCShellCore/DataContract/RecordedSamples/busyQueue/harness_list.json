@@ -5,15 +5,15 @@
       "id": "claude",
       "name": "Claude Code",
       "installed": true,
-      "connected": false,
+      "connected": true,
       "config_path": "/Users/sample/.claude/settings.json",
       "connect_command": "ironwire connect claude",
       "family": "anthropic",
       "answers_at": "Anthropic",
-      "state": "not_connected",
-      "last_call_at": null,
-      "can_connect": true,
-      "can_disconnect": false
+      "state": "answering",
+      "last_call_at": "2026-09-30T09:04:11+00:00",
+      "can_connect": false,
+      "can_disconnect": true
     },
     {
       "id": "codex",
@@ -31,15 +31,22 @@
     }
   ],
   "activity": {
-    "readable": false,
+    "readable": true,
     "window_hours": 24,
-    "last_call_at": null,
-    "families": []
+    "last_call_at": "2026-09-30T09:04:11+00:00",
+    "families": [
+      {
+        "family": "anthropic",
+        "last_call_at": "2026-09-30T09:04:11+00:00",
+        "calls": 12
+      }
+    ]
   },
   "spend": {
-    "known": false,
-    "micros": null
+    "known": true,
+    "micros": 1230000
   },
-  "destination_port": null,
-  "destination_credentialed": true
+  "destination_port": 8463,
+  "destination_credentialed": true,
+  "_sample": "a connected tool needs a live IronWire"
 }

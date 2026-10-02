@@ -37,9 +37,10 @@
     "families": []
   },
   "spend": {
-    "known": false,
-    "micros": null
+    "known": true,
+    "micros": 0
   },
   "destination_port": null,
-  "destination_credentialed": true
+  "destination_credentialed": true,
+  "_sample": "known zero spend needs a live IronWire"
 }
