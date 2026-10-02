@@ -1,4 +1,5 @@
 import SwiftUI
+import TCBridge
 import TCShellCore
 
 /// One folder in the queue's root list.
@@ -39,6 +40,17 @@ struct QueueFolderRow: View {
     let onIgnoreProject: () -> Void
 
     @State private var confirmingIgnore = false
+
+    /// The ignore control's words, from the core for this project and the
+    /// count the confirmation names (`tc_project_ignore_copy_json`). Nil
+    /// offers no ignore at all: the confirmation is not shown without the
+    /// words that say what it removes.
+    private var ignoreCopy: ProjectIgnoreCopy? {
+        ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(
+            project: group.label,
+            pending: group.count
+        ))
+    }
 
     /// Display only, and empty against a daemon that predates the field --
     /// in which case the row shows its label alone rather than a blank line.
@@ -141,8 +153,10 @@ struct QueueFolderRow: View {
                 // Never `.tcPrimaryAction()`: it sits beside a control that
                 // uploads the very traces this removes, and two adjacent
                 // actions that do opposite things must not look alike.
-                Button(ProjectIgnoreCopy.buttonLabel) { confirmingIgnore = true }
-                    .help(ProjectIgnoreCopy.tooltip)
+                if let ignoreCopy {
+                    Button(ignoreCopy.button) { confirmingIgnore = true }
+                        .help(ignoreCopy.tooltip)
+                }
                 // The row's primary action, in the card's position (trailing,
                 // default action last). It carries the accent that `Submit
                 // all` used to: looking is what this product recommends,
@@ -167,17 +181,18 @@ struct QueueFolderRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .tcCard()
         .confirmationDialog(
-            ProjectIgnoreCopy.confirmationTitle(project: group.label),
-            isPresented: $confirmingIgnore,
-            titleVisibility: .visible
-        ) {
-            Button(ProjectIgnoreCopy.buttonLabel, role: .destructive, action: onIgnoreProject)
+            ignoreCopy?.title ?? "",
+            isPresented: Binding(
+                get: { confirmingIgnore && ignoreCopy != nil },
+                set: { confirmingIgnore = $0 }
+            ),
+            titleVisibility: .visible,
+            presenting: ignoreCopy
+        ) { copy in
+            Button(copy.button, role: .destructive, action: onIgnoreProject)
             Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(ProjectIgnoreCopy.confirmationBody(
-                project: group.label,
-                pendingCount: group.count
-            ))
+        } message: { copy in
+            Text(copy.body)
         }
     }
 }

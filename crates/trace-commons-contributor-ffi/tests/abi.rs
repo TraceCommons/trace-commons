@@ -5034,3 +5034,227 @@ fn no_legacy_migration_notice_is_null_not_a_guess() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// K3 (#1173): the copy commands that reached only Tauri cross the ABI as
+// the core assembles them.
+// ---------------------------------------------------------------------------
+
+fn json_owned(out: *mut c_char) -> serde_json::Value {
+    serde_json::from_str(&take_owned(out)).expect("the export returns JSON")
+}
+
+#[test]
+fn the_residual_secret_line_crosses_the_abi_with_its_sites() {
+    use trace_commons_contributor::preview_copy::residual_secret_line;
+    use trace_commons_contributor_ffi::tc_residual_secret_line_text;
+    let sites = cstr_str(r#"["events.3.correction","events.9.tool_result"]"#);
+    assert_eq!(
+        take_owned(unsafe { tc_residual_secret_line_text(2, sites.as_ptr()) }),
+        residual_secret_line(
+            2,
+            &[
+                "events.3.correction".to_owned(),
+                "events.9.tool_result".to_owned()
+            ]
+        )
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_residual_secret_line_text(1, std::ptr::null()) }),
+        "A secret found here is still in what would be sent"
+    );
+    let not_a_list = cstr_str(r#"{"a":1}"#);
+    assert_eq!(
+        take_owned(unsafe { tc_residual_secret_line_text(3, not_a_list.as_ptr()) }),
+        residual_secret_line(3, &[])
+    );
+}
+
+#[test]
+fn the_redaction_summary_crosses_the_abi_with_both_lists() {
+    use trace_commons_contributor::preview_copy::{
+        REDACTION_CATEGORY_RESIDUAL, REDACTION_CATEGORY_UNKNOWN,
+    };
+    use trace_commons_contributor_ffi::tc_redaction_summary_json;
+    let redactions = cstr_str(
+        r#"{"local_path":5,"secret:aws_key":2,"secret:github":1,"residual_secret_at:events.3.tool_result":1,"future_family":4}"#,
+    );
+    let distinct = cstr_str(r#"{"local_path":2}"#);
+    let value =
+        json_owned(unsafe { tc_redaction_summary_json(redactions.as_ptr(), distinct.as_ptr()) });
+    let removed = value["removed"].as_array().unwrap();
+    let families: Vec<&str> = removed
+        .iter()
+        .map(|row| row["family"].as_str().unwrap())
+        .collect();
+    assert_eq!(families, ["local_path", "future_family", "secret"]);
+    assert_eq!(removed[0]["distinct"], 2);
+    assert_eq!(removed[1]["description"], REDACTION_CATEGORY_UNKNOWN);
+    assert_eq!(removed[2]["occurrences"], 3);
+    assert_eq!(
+        removed[2]["detail"],
+        serde_json::json!(["aws key", "github"])
+    );
+    let still = value["still_present"].as_array().unwrap();
+    assert_eq!(still.len(), 1);
+    assert_eq!(still[0]["description"], REDACTION_CATEGORY_RESIDUAL);
+    assert_eq!(
+        still[0]["detail"],
+        serde_json::json!(["events.3.tool_result"])
+    );
+
+    // No distinct map is "not measured", not a failure; no counts at all is.
+    let no_distinct =
+        json_owned(unsafe { tc_redaction_summary_json(redactions.as_ptr(), std::ptr::null()) });
+    assert_eq!(no_distinct["removed"][0]["distinct"], 0);
+    assert!(unsafe { tc_redaction_summary_json(std::ptr::null(), distinct.as_ptr()) }.is_null());
+    let garbage = cstr_str("not json");
+    assert!(unsafe { tc_redaction_summary_json(garbage.as_ptr(), std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_project_ignore_copy_and_its_reconciliation_cross_the_abi() {
+    use trace_commons_contributor::project_copy::{ignore_project_copy, ignore_project_reconciled};
+    use trace_commons_contributor_ffi::{
+        tc_project_ignore_copy_json, tc_project_ignore_reconciled_text,
+    };
+    let label = cstr_str("api");
+    assert_eq!(
+        json_owned(unsafe { tc_project_ignore_copy_json(label.as_ptr(), 3) }),
+        serde_json::to_value(ignore_project_copy("api", 3)).unwrap()
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_project_ignore_copy_json(label.as_ptr(), -4) }),
+        serde_json::to_value(ignore_project_copy("api", 0)).unwrap()
+    );
+    assert!(unsafe { tc_project_ignore_copy_json(std::ptr::null(), 1) }.is_null());
+
+    assert_eq!(
+        take_owned(unsafe { tc_project_ignore_reconciled_text(label.as_ptr(), 3, 3) }),
+        ""
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_project_ignore_reconciled_text(label.as_ptr(), 3, 5) }),
+        ignore_project_reconciled("api", 3, 5).unwrap()
+    );
+    assert!(unsafe { tc_project_ignore_reconciled_text(std::ptr::null(), 1, 2) }.is_null());
+}
+
+#[test]
+fn the_arming_offer_copy_crosses_the_abi() {
+    use trace_commons_contributor::project_copy::{ARMING_BODY, arming_offer_copy};
+    use trace_commons_contributor_ffi::tc_arming_offer_copy_json;
+    let label = cstr_str("api");
+    let value = json_owned(unsafe { tc_arming_offer_copy_json(label.as_ptr(), 4) });
+    assert_eq!(
+        value,
+        serde_json::to_value(arming_offer_copy("api", 4)).unwrap()
+    );
+    assert_eq!(value["body"], ARMING_BODY);
+    assert_eq!(value["question"], "Contribute from api automatically?");
+    assert!(unsafe { tc_arming_offer_copy_json(std::ptr::null(), 1) }.is_null());
+}
+
+#[test]
+fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
+    use trace_commons_contributor::consent_copy::{
+        legacy_migration_offer, legacy_migration_refusal_line,
+    };
+    use trace_commons_contributor_ffi::{
+        tc_legacy_migration_offer_json, tc_legacy_migration_refusal_text,
+    };
+    assert_eq!(
+        json_owned(tc_legacy_migration_offer_json()),
+        serde_json::to_value(legacy_migration_offer()).unwrap()
+    );
+    for label in [
+        "legacy_migration_tenant_pooled",
+        "legacy_migration_invite_needed",
+        "no-such-label",
+    ] {
+        let c = cstr_str(label);
+        assert_eq!(
+            take_owned(unsafe { tc_legacy_migration_refusal_text(c.as_ptr()) }),
+            legacy_migration_refusal_line(label)
+        );
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_legacy_migration_refusal_text(std::ptr::null()) }),
+        legacy_migration_refusal_line("")
+    );
+}
+
+#[test]
+fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
+    use trace_commons_contributor::consent_copy::inference_connection_copy;
+    use trace_commons_contributor::privacy_scan_copy::{DISCLOSURE, privacy_scan_copy};
+    use trace_commons_contributor_ffi::{
+        tc_inference_connection_copy_json, tc_privacy_scan_copy_json,
+    };
+    assert_eq!(
+        json_owned(tc_inference_connection_copy_json()),
+        serde_json::to_value(inference_connection_copy()).unwrap()
+    );
+    let scan = json_owned(tc_privacy_scan_copy_json());
+    assert_eq!(scan, serde_json::to_value(privacy_scan_copy()).unwrap());
+    assert_eq!(scan["disclosure"], DISCLOSURE);
+}
+
+#[test]
+fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
+    use trace_commons_contributor::consent_copy::automatic_contribution_copy;
+    use trace_commons_contributor_ffi::tc_automatic_contribution_copy_json;
+    let dir = tempfile::tempdir().unwrap();
+    let value =
+        json_owned(unsafe { tc_automatic_contribution_copy_json(cstr(dir.path()).as_ptr()) });
+    assert_eq!(
+        value,
+        serde_json::to_value(automatic_contribution_copy(None)).unwrap()
+    );
+    assert_eq!(value["disclosure"], "patterns_only");
+    assert!(value["model_scrubbed"].is_null());
+    assert!(unsafe { tc_automatic_contribution_copy_json(std::ptr::null()) }.is_null());
+
+    // A configuration that cannot be read is not answered with a guess.
+    std::fs::write(dir.path().join("contributor.json"), "not json").unwrap();
+    assert!(unsafe { tc_automatic_contribution_copy_json(cstr(dir.path()).as_ptr()) }.is_null());
+}
+
+#[test]
+fn the_quit_prompt_is_chosen_from_the_handle() {
+    use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
+    use trace_commons_contributor_ffi::tc_quit_prompt_json;
+    assert_eq!(
+        json_owned(unsafe { tc_quit_prompt_json(std::ptr::null()) }),
+        serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let hosting = json_owned(unsafe { tc_quit_prompt_json(h) });
+    assert_eq!(
+        hosting,
+        serde_json::to_value(quit_prompt(QuitRole::Hosting)).unwrap()
+    );
+    assert_eq!(hosting["role"], "hosting");
+    unsafe { tc_daemon_stop(h) };
+    assert_eq!(
+        json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
+        "unavailable"
+    );
+    unsafe { tc_handle_free(h) };
+    // A freed handle is refused, not dereferenced, and has no watcher.
+    assert_eq!(
+        json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
+        "unavailable"
+    );
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+#[test]
+fn the_withdrawal_confirmation_prompt_crosses_the_abi() {
+    use trace_commons_contributor::withdraw::confirmation_prompt_unknown;
+    use trace_commons_contributor_ffi::tc_withdrawal_confirmation_prompt_text;
+    let prompt = take_owned(tc_withdrawal_confirmation_prompt_text());
+    assert_eq!(prompt, confirmation_prompt_unknown());
+    assert!(prompt.contains("cannot be recalled"));
+}
