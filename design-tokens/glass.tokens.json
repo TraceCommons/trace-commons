@@ -196,6 +196,8 @@
     "glyph": 16,
     "toolTile": 22,
     "toolTileLarge": 30,
+    "toolLogo": 15,
+    "toolLogoLarge": 20,
     "listRow": 40,
     "paneLeftWidth": 400,
     "mapWidth": 600,
