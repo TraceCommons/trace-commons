@@ -185,14 +185,13 @@ impl ActivityPolicy {
             Some(DailyRule::Fixed { mission_id }) if !ids.contains(mission_id) => {
                 return Err(InvalidActivityPolicy);
             }
-            Some(DailyRule::Rotation { mission_ids }) => {
+            Some(DailyRule::Rotation { mission_ids })
                 if mission_ids.is_empty()
                     || mission_ids.len() > 128
                     || mission_ids.iter().any(|id| !ids.contains(id))
-                    || mission_ids.iter().collect::<BTreeSet<_>>().len() != mission_ids.len()
-                {
-                    return Err(InvalidActivityPolicy);
-                }
+                    || mission_ids.iter().collect::<BTreeSet<_>>().len() != mission_ids.len() =>
+            {
+                return Err(InvalidActivityPolicy);
             }
             _ => (),
         }
