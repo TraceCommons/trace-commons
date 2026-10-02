@@ -228,6 +228,17 @@ public struct GlassGallery: View {
                 GlassStatusDot(.on, ring: true)
                 GlassStatusDot(.shared, halo: true)
             }
+            // Large tiles, then the tools with no artwork yet, which fall
+            // back to their initials.
+            HStack(spacing: 8) {
+                GlassToolTile(.tool(.claudeCode), large: true)
+                GlassToolTile(.tool(.codex), large: true)
+                GlassToolTile(.tool(.antigravity), large: true)
+                GlassToolTile(.tool(.openCode), large: true)
+                GlassToolTile(.tool(.theia), large: true)
+                GlassToolTile(.tool(.geminiCLI), large: true)
+                GlassToolTile(.tool(.cline), large: true)
+            }
             HStack(spacing: 6) {
                 GlassLegendCell("shared", value: "5", status: .shared)
                 GlassLegendCell("kept", value: "7", status: .kept)
