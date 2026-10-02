@@ -5394,7 +5394,9 @@ validated as an RFC3339 UTC timestamp no later than the daemon observation time;
 provider usage cost in nanoUSD (the official [usage source](https://github.com/nearai/cloud-api/blob/88989203c8172fd19c46c2b0082c71b024925f49/crates/api/src/routes/usage.rs#L1624) specifies scale 9). `billed_micros` is a compatibility amount rounded
 to the nearest microUSD, half upward; `rounding` makes that conversion explicit.
 Counts and native costs must be nonnegative signed 64-bit integers. Model labels
-use the existing content-free label sanitizer. Provider display prose, organization
+use the existing content-free label sanitizer. Display model labels are not
+guaranteed unique after sanitization: consumers must retain every row and use
+row position as identity when needed, rather than grouping by the display label. Provider display prose, organization
 identifiers, access tokens, inference credentials, and refresh tokens are omitted.
 
 The scope is the connected NEAR AI organization's usage across its callers. It is
