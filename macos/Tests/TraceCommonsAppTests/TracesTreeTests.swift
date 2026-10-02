@@ -1,6 +1,6 @@
 import TCBridge
 import TCDesign
-import TCShellCore
+@testable import TCShellCore
 import XCTest
 
 @testable import TraceCommonsApp
@@ -296,9 +296,17 @@ final class TracesFolderModeTests: XCTestCase {
         XCTAssertEqual(store.phase, .loaded)
         XCTAssertTrue(store.writing.isEmpty)
 
-        // A watch with no folder is not an answer; the refusal is kept.
+        // A watch with no folder is not an answer. The refusal is kept beside
+        // the tool's row, not drawn as the core being down, and a reload
+        // does not clear it.
         await store.setSource(.codex, .watch(path: ""))
-        guard case .failed = store.phase else { return XCTFail("\(store.phase)") }
+        XCTAssertEqual(store.phase, .loaded)
+        XCTAssertNotNil(store.writeErrors[SourceKind.codex.rawValue])
+        await store.load()
+        XCTAssertNotNil(store.writeErrors[SourceKind.codex.rawValue])
+        // The next write to that row starts clean.
+        await store.setSource(.codex, .off)
+        XCTAssertNil(store.writeErrors[SourceKind.codex.rawValue])
     }
 
     /// A refused write keeps its error and leaves the tree as the core has it.
@@ -310,4 +318,215 @@ final class TracesFolderModeTests: XCTestCase {
         XCTAssertTrue(store.writing.isEmpty)
     }
 
+}
+
+/// The #1183 review's row findings: what a row says, beyond its colour.
+@MainActor
+final class TracesRowWordsTests: XCTestCase {
+    /// A sample entry, held for a second look or carrying `extra` fields.
+    private func entry(_ extra: String = "", held: Bool = false) throws -> DaemonData.QueueEntry {
+        var json = SampleDaemonData.entry(
+            1, SampleDaemonData.api, state: held ? "held" : "pending",
+            reason: held ? DaemonData.ReasonLabel.secondLookReviewRequired : nil)
+        if !extra.isEmpty {
+            json = json.replacingOccurrences(of: #""attestation":"unknown""#, with: #""attestation":"unknown","# + extra)
+        }
+        return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: Data(json.utf8))
+    }
+
+    /// The unresolvable bucket is drawn under its shared name, never the
+    /// `unknown-project` slug, is never offered automatic, and says why.
+    func test_theBucketIsNamedAndExplained() throws {
+        let bucket = ProjectRow(
+            projectId: "bucket", projectLabel: "unknown-project", projectPath: "", mode: .ask, isUnresolvedBucket: true)
+        let tree = TracesTree.build(entries: [], projects: [bucket], settings: nil, scansWhenUnset: [])
+        let folder = try XCTUnwrap(tree.unplaced.first)
+        XCTAssertEqual(folder.label, ProjectCopy.unresolvedBucketLabel)
+        XCTAssertTrue(folder.isBucket)
+        XCTAssertFalse(folder.offerableModes.contains(.autoUpload))
+        let view = TracesTreeView(store: TracesStore(client: SampleDaemonClient(.empty)), selection: .constant(""))
+        XCTAssertEqual(view.folderNotes(folder), [ProjectCopy.unresolvedBucketNote])
+    }
+
+    /// An armed folder says the core's words for the disclosure the daemon
+    /// chose for it; a folder that is not armed says none.
+    func test_anArmedFolderSaysWhatAppliesToIt() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.armedFolder))
+        await store.load()
+        let folders = store.tree.tools.flatMap(\.folders) + store.tree.unplaced
+        let armed = try XCTUnwrap(folders.first { $0.mode == .autoUpload })
+        XCTAssertEqual(armed.disclosure, "patterns_only")
+        let words = try XCTUnwrap(AutomaticGrantCopy.decode(
+            fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: "patterns_only")))
+        XCTAssertEqual(store.disclosureLines(armed.disclosure), words.lines)
+        let view = TracesTreeView(store: store, selection: .constant(""))
+        XCTAssertEqual(view.folderNotes(armed), words.lines)
+        for folder in folders where folder.mode != .autoUpload {
+            XCTAssertNil(folder.disclosure, folder.label)
+            XCTAssertTrue(view.folderNotes(folder).isEmpty, folder.label)
+        }
+        XCTAssertTrue(store.disclosureLines("scrubbed").isEmpty)
+    }
+
+    /// A held session says the core's word for it, so the amber flag is
+    /// never the only signal.
+    func test_aHeldSessionSaysSoInWords() throws {
+        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        let held = try entry(held: true)
+        XCTAssertEqual(TracesTreeView.flag(held), .ask)
+        XCTAssertEqual(TracesTreeView.sub(held, held: words.held, ineligible: nil)?.hasPrefix(words.held), true)
+        let plain = try entry()
+        XCTAssertNil(TracesTreeView.flag(plain))
+        XCTAssertEqual(TracesTreeView.sub(plain, held: words.held, ineligible: nil), TracesTreeView.measures(plain))
+    }
+
+    /// A session that cannot be contributed as it stands says the core's
+    /// sentence on its row and is flagged; an eligible one, or one with no
+    /// eligibility question, says nothing extra.
+    func test_anIneligibleSessionLooksDifferent() throws {
+        let store = TracesStore(client: SampleDaemonClient(.empty))
+        let ineligible = try entry(#""eligibility":"ineligible_configuration","eligibility_reason":"capture_off""#)
+        let line = try XCTUnwrap(store.ineligibleLine(ineligible))
+        XCTAssertFalse(line.isEmpty)
+        XCTAssertEqual(TracesTreeView.flag(ineligible, ineligible: true), .ask)
+        XCTAssertNotNil(store.eligibilityValue(ineligible))
+
+        let eligible = try entry(#""eligibility":"eligible""#)
+        XCTAssertNil(store.ineligibleLine(eligible))
+        XCTAssertNil(store.ineligibleLine(try entry()))
+        XCTAssertNil(store.eligibilityValue(try entry()))
+    }
+
+    /// The inspector carries eligibility and attestation in the core's
+    /// sentences, under the core's labels.
+    func test_theInspectorSaysEligibilityAndAttestation() throws {
+        let store = TracesStore(client: SampleDaemonClient(.empty))
+        let words = try XCTUnwrap(store.words)
+        let ineligible = try entry(#""eligibility":"ineligible_permanent""#)
+        let rows = SessionInspectorView.rows(
+            ineligible, nil, words: words,
+            eligibility: store.eligibilityValue(ineligible), attestation: store.attestationValue(ineligible))
+        XCTAssertTrue(rows.contains { $0.label == words.eligibility })
+        XCTAssertTrue(rows.contains { $0.label == words.attestation })
+        let bare = SessionInspectorView.rows(ineligible, nil, words: words)
+        XCTAssertFalse(bare.contains { $0.label == words.eligibility })
+    }
+
+    /// The debug window's sample set: unset is the default, a set's name is
+    /// that set, and anything else falls back and says it did.
+    func test_aMisspelledSampleIsNeverSilent() {
+        XCTAssertEqual(MonitorWindowView.sampleChoice(nil).set, .normalDay)
+        XCTAssertFalse(MonitorWindowView.sampleChoice(nil).unknown)
+        XCTAssertFalse(MonitorWindowView.sampleChoice("").unknown)
+        XCTAssertEqual(MonitorWindowView.sampleChoice("busyQueue").set, .busyQueue)
+        XCTAssertFalse(MonitorWindowView.sampleChoice("busyQueue").unknown)
+        XCTAssertEqual(MonitorWindowView.sampleChoice("busyqueue").set, .normalDay)
+        XCTAssertTrue(MonitorWindowView.sampleChoice("busyqueue").unknown)
+    }
+}
+
+/// The #1184 review's open findings: a count kept after the core went
+/// away, the queue's safeguards, and the badge's second-look pairing.
+@MainActor
+final class TracesQueueStateTests: XCTestCase {
+    /// Answers every call as a daemon that has gone away.
+    private final class GoneTransport: DaemonTransport {
+        func call(_ method: String, params paramsJSON: String) -> String {
+            #"{"error":{"code":"unavailable","message":"daemon-disconnected"}}"#
+        }
+    }
+
+    /// A disconnect finishes every open stream, so nothing keeps waiting on
+    /// a daemon that is not there.
+    func test_aDisconnectEndsTheEventStreams() async {
+        let live = LiveDaemonClient(transport: GoneTransport())
+        let stream = live.events()
+        let ended = Task { for await _ in stream {}; return true }
+        live.disconnected()
+        let finished = await ended.value
+        XCTAssertTrue(finished)
+    }
+
+    /// The badge reads unknown once the core has gone, never its last count.
+    func test_aLostCoreLeavesNoCount() async {
+        let store = TracesStore(client: SampleDaemonClient(.armedFolder))
+        await store.load()
+        XCTAssertEqual(store.decisionsOwed, 1)
+        store.lost()
+        XCTAssertNil(store.decisionsOwed)
+        XCTAssertEqual(store.phase, .failed(.unreachable))
+    }
+
+    /// Following a live client, the stream ending is a lost core.
+    func test_theStreamEndingIsALostCore() async {
+        let live = LiveDaemonClient(transport: GoneTransport())
+        let store = TracesStore(client: live)
+        let running = Task { await store.run() }
+        // Let `run` load and open its stream before the daemon goes.
+        while store.phase == .loading { await Task.yield() }
+        for _ in 0..<50 { await Task.yield() }
+        live.disconnected()
+        await running.value
+        XCTAssertNil(store.status)
+        XCTAssertEqual(store.phase, .failed(.unreachable))
+    }
+
+    /// The sample day's status, with `edit` applied to its JSON object.
+    private func status(_ edit: (inout [String: Any]) -> Void = { _ in }) async throws -> DaemonData.Status {
+        let read = try await SampleDaemonClient(.normalDay).status()
+        let wire = try XCTUnwrap(TracesStore.wire(read))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(wire.utf8)) as? [String: Any])
+        edit(&object)
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: data)
+    }
+
+    private static func spend(_ object: inout [String: Any]) {
+        var budget = object["daily_budget"] as? [String: Any] ?? [:]
+        budget["blocked"] = true
+        budget["blocked_entries"] = 2
+        object["daily_budget"] = budget
+    }
+
+    /// A spent budget says so, in the words the main window uses for it; a
+    /// healthy queue says nothing.
+    func test_aSpentBudgetIsSaid() async throws {
+        let healthy = try await status()
+        XCTAssertTrue(TracesStore.safeguards(healthy).isEmpty)
+        let spent = try await status(Self.spend)
+        XCTAssertEqual(TracesStore.safeguards(spent).map(\.title), [DailyBudgetCopy.title])
+        XCTAssertTrue(TracesStore.safeguards(nil).isEmpty)
+    }
+
+    /// The health label is said when nothing more specific already says it,
+    /// and not twice when the budget does.
+    func test_theHealthLabelIsNotSaidTwice() async throws {
+        let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
+        XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.forLabel("queue-full").title])
+        let capped = try await status {
+            $0["health"] = ["last_error_label": "daily-cap-reached"]
+            Self.spend(&$0)
+        }
+        XCTAssertEqual(TracesStore.safeguards(capped).map(\.title), [DailyBudgetCopy.title])
+    }
+
+    /// The badge pairs with the queue shield: something waiting that is
+    /// worth a second look adds the core's words to its text equivalent.
+    func test_theBadgeSaysWhenSomethingIsWorthASecondLook() throws {
+        let decode = { (json: String) in
+            try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: Data(json.utf8))
+        }
+        let plain = try decode(SampleDaemonData.entry(1, SampleDaemonData.api))
+        let flagged = try decode(SampleDaemonData.entry(2, SampleDaemonData.api, secondLook: ["nothing-matched"]))
+        XCTAssertEqual(TracesStore.shield([]), .clear)
+        XCTAssertEqual(TracesStore.shield([plain]), .waiting)
+        XCTAssertEqual(TracesStore.shield([plain, flagged]), .attention)
+
+        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        let said = try XCTUnwrap(MonitorWindowView.tracesDescription(2, shield: .attention, secondLook: words.secondLookWaiting))
+        XCTAssertTrue(said.hasSuffix(words.secondLookWaiting), said)
+        XCTAssertEqual(
+            MonitorWindowView.tracesDescription(2, shield: .waiting, secondLook: words.secondLookWaiting),
+            TCCoreCopy.decisionsOwedText(2))
+    }
 }

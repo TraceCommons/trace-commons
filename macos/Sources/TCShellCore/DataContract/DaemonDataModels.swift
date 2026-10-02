@@ -149,6 +149,10 @@ extension DaemonData {
         public let submissionId: String?
         public let subagentCount: Int?
         public let subagentsDropped: Int?
+        /// The session's title, worked out when it was queued from its
+        /// opening prompt after the deterministic redaction pass (K9).
+        /// Absent for an entry queued before the daemon recorded one.
+        public let title: String?
 
         // when the session ran and how many prompts it had. All nil for
         // an entry queued before the daemon recorded them.
@@ -198,6 +202,7 @@ extension DaemonData {
             case attempts
             case retryAfter = "retry_after"
             case submissionId = "submission_id"
+            case title
             case subagentCount = "subagent_count"
             case subagentsDropped = "subagents_dropped"
             case startedAt = "started_at"
