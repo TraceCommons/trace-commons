@@ -348,9 +348,12 @@ enum SampleDaemonData {
 
     // MARK: - preview, preview_unsure_spans
 
-    /// A `preview` summary for one sample entry: the entry itself, plus a
-    /// title and counts that agree with the entry's scrub fields.
-    static func previewSummary(for entry: DaemonData.QueueEntry) -> String {
+    /// The daemon's preview card (`preview_card_value`) for one sample
+    /// entry: a title and counts that agree with the entry's scrub fields.
+    /// A card is a scrub, not a build, so it has no `envelope_digest`, no
+    /// `redactions_distinct` and no `subagent_count`. `preview` adds the
+    /// entry; a scheduled card does not.
+    static func previewCard(for entry: DaemonData.QueueEntry, withEntry: Bool) -> String {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let entryJSON = (try? String(decoding: encoder.encode(entry), as: UTF8.self)) ?? "null"
@@ -365,7 +368,8 @@ enum SampleDaemonData {
             "Settings validation refactor",
         ]
         let title = titles[entry.entryId.unicodeScalars.reduce(0) { $0 + Int($1.value) } % titles.count]
-        return #"{"entry":\#(entryJSON),"title":"\#(title)","would_send_bytes":\#((entry.sizeBytes ?? 40000) + 2545),"raw_session_bytes":\#(entry.sizeBytes ?? 40000),"event_count":\#((entry.userTurns ?? 3) * 6),"opening_prompt":"\#(title)","redactions":{"local_path":\#(marks - content),"email":\#(content)},"redactions_distinct":{"local_path":\#(min(1, marks - content)),"email":\#(min(1, content))},"pii_labels_present":["email"],"consent_scopes":["debugging_evaluation"],"residual_risk":"pattern-based","envelope_digest":"sha256:sample-envelope","input_fingerprint":"sha256:sample-input","enrolled":true,"subagent_count":\#(entry.subagentCount ?? 0),"subagents_dropped":\#(entry.subagentsDropped ?? 0),"scrub":"scrubbed","marks":\#(marks),"content_marks":\#(content),"unsure_spans":\#(unsure),"second_look":[\#(reasons)]}"#
+        let entryField = withEntry ? #""entry":\#(entryJSON),"# : ""
+        return #"{\#(entryField)"title":"\#(title)","would_send_bytes":\#((entry.sizeBytes ?? 40000) + 2545),"raw_session_bytes":\#(entry.sizeBytes ?? 40000),"event_count":\#((entry.userTurns ?? 3) * 6),"opening_prompt":"\#(title)","redactions":{"local_path":\#(marks - content),"email":\#(content)},"pii_labels_present":["email"],"consent_scopes":["debugging_evaluation"],"residual_risk":"pattern-based","input_fingerprint":"sha256:sample-input","enrolled":true,"subagents_dropped":\#(entry.subagentsDropped ?? 0),"scrub":"scrubbed","marks":\#(marks),"content_marks":\#(content),"unsure_spans":\#(unsure),"second_look":[\#(reasons)]}"#
     }
 
     static func unsureSpans(entryId: String, bodyDigest: String) -> String {

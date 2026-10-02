@@ -122,8 +122,20 @@ final class DaemonDataContractWireTests: XCTestCase {
         let entry = try XCTUnwrap(pending.first)
         let outcome = try await client.requestPreview(entryId: entry.entryId)
         XCTAssertEqual(outcome.state, .ready)
-        let sheet = try await client.preview(entryId: entry.entryId)
-        XCTAssertEqual(outcome.summary, sheet)
+        let card = try XCTUnwrap(outcome.summary)
+        // The daemon's card (`preview_card_value`) is a scrub, never a
+        // build: no envelope, so no `envelope_digest`, and no distinct
+        // counts. A scheduled card carries no `entry` either; `preview`
+        // adds a freshly read one.
+        XCTAssertNil(card.envelopeDigest)
+        XCTAssertNil(card.redactionsDistinct)
+        XCTAssertNil(card.subagentCount)
+        XCTAssertNil(card.entry)
+        let blocking = try await client.preview(entryId: entry.entryId)
+        XCTAssertNil(blocking.envelopeDigest)
+        XCTAssertNil(blocking.redactionsDistinct)
+        XCTAssertEqual(blocking.entry?.entryId, entry.entryId)
+        XCTAssertEqual(blocking.title, card.title)
         let cancelled = try await client.cancelPreview(entryId: entry.entryId)
         XCTAssertFalse(cancelled.dropped)
     }
@@ -218,10 +230,21 @@ final class DaemonDataContractWireTests: XCTestCase {
         XCTAssertEqual(response.holdUntil, "2026-10-02T09:00:30Z")
     }
 
-    func testSampleApproveSkipsAnEntryItDoesNotHold() async throws {
+    func testSampleApproveRefusesAnIdItNeverHeldAndSkipsAKeptOne() async throws {
         let client = SampleDaemonClient(.normalDay)
+        // The daemon refuses an id it never held up front (`ipc.rs`,
+        // `ERR_UNKNOWN_ENTRY_ID`), rather than reporting a skip.
         do {
             _ = try await client.approve(entryId: "not-in-this-set")
+            XCTFail("an unknown id was drawn as success")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "unknown-entry-id"))
+        }
+        // An entry it holds but cannot approve is the labelled skip.
+        let keptList = try await client.listKept()
+        let kept = try XCTUnwrap(keptList.first, "normalDay has a kept entry")
+        do {
+            _ = try await client.approve(entryId: kept.entryId)
             XCTFail("a skip was drawn as success")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .notApproved(reasonLabel: "not-pending"))
@@ -342,11 +365,40 @@ final class DaemonDataContractWireTests: XCTestCase {
         let project = try XCTUnwrap(pending.first { $0.heldForSecondLook }?.projectId)
         let response = try await client.approveFolder(projectId: project)
         XCTAssertGreaterThan(try XCTUnwrap(response.excludedHeld), 0)
+        // Every folder, held exactly as the daemon's `held_for_review` holds.
+        for folder in Set(pending.map(\.projectId)) {
+            let inFolder = pending.filter { $0.projectId == folder }
+            let held = inFolder.filter(\.heldForReview).count
+            let answer = try await client.approveFolder(projectId: folder)
+            XCTAssertEqual(answer.excludedHeld, UInt64(held), folder)
+            XCTAssertEqual(answer.approved, UInt64(inFolder.count - held), folder)
+        }
         do {
             _ = try await client.approveFolder(projectId: "proj_does_not_exist")
             XCTFail("an unknown project answered")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "project-id-unrecognized"))
+        }
+    }
+
+    /// `queue.rs` `REASONS_NEEDING_A_PERSON`, which the daemon's folder
+    /// approve leaves out. Manual Scrub check is not on it: the daemon
+    /// approves those sessions when a person approves their folder.
+    func testHeldForReviewMirrorsTheDaemonsList() throws {
+        func entry(_ reason: String) throws -> DaemonData.QueueEntry {
+            let json = #"{"entry_id":"e","source":"codex","project_id":"p","project_label":"p","state":"pending","reason_label":"\#(reason)"}"#
+            return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: Data(json.utf8))
+        }
+        for reason in [
+            "token-distribution-review-required",
+            "witness-risk-review-required",
+            "privacy-filter-transient-exhausted",
+            "second-look-review-required",
+        ] {
+            XCTAssertTrue(try entry(reason).heldForReview, reason)
+        }
+        for reason in ["scrub-check-manual", "returned-from-keep", "kept-on-this-mac", "scopes-changed"] {
+            XCTAssertFalse(try entry(reason).heldForReview, reason)
         }
     }
 

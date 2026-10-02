@@ -23,7 +23,10 @@ final class DaemonDataContractTests: XCTestCase {
                 for entry in pending {
                     let outcome = try await client.requestPreview(entryId: entry.entryId)
                     XCTAssertEqual(outcome.state, .ready)
-                    XCTAssertEqual(outcome.summary?.entry?.entryId, entry.entryId)
+                    // A scheduled card (`PreviewOutcome::to_value`) carries
+                    // no entry: it outlives the entry state it was built beside.
+                    XCTAssertNotNil(outcome.summary?.title)
+                    XCTAssertNil(outcome.summary?.entry)
                     _ = try await client.approve(entryId: entry.entryId)
                 }
                 _ = try await client.setVisiblePreviews(entryIds: pending.map(\.entryId))
@@ -297,14 +300,18 @@ final class DaemonDataContractTests: XCTestCase {
         let client = LiveDaemonClient(transport: FakeTransport(response: "{}"))
         let stream = client.events()
         client.deliver(eventJSON: #"{"event":"status_changed","data":{}}"#)
-        client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"at":"2026-09-30T09:00:00Z","tool":"codex","family":"openai","model":"m","route":"routed","proof":"pending"}}"#)
+        // The daemon's frame (`inference_map::call_added`): a pulse with four
+        // fields, not an `inference_calls` row. No `at`, `family`, `route`
+        // or `cost`.
+        client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"tool":"codex","model":"m","proof":"pending"}}"#)
         var iterator = stream.makeAsyncIterator()
         let first = await iterator.next()
         XCTAssertEqual(first, .statusChanged)
         guard case .inferenceCallAdded(let call)? = await iterator.next() else {
             return XCTFail("no inference call event")
         }
-        XCTAssertEqual(call.id, 7)
+        XCTAssertEqual(call, DaemonData.InferenceCallAdded(id: 7, tool: "codex", model: "m", proof: "pending"))
+        XCTAssertEqual(call.proofLabel, .pending)
     }
 }
 

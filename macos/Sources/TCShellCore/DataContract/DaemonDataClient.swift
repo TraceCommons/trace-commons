@@ -209,8 +209,8 @@ public enum DaemonDataEvent: Equatable, Sendable {
     /// Fell behind: refetch `status` and `listPending`.
     case resyncRequired
     /// `inference_call_added`, so the map pulses per real call.
-    // PROVISIONAL: event not on main yet; shape follows `inference_calls` rows.
-    case inferenceCallAdded(DaemonData.InferenceCall)
+    // PROVISIONAL: event not on main yet; shape follows #1203's `call_added`.
+    case inferenceCallAdded(DaemonData.InferenceCallAdded)
     case unknown(String)
 }
 
@@ -250,7 +250,7 @@ public enum DaemonDataEventParser {
             return .previewReady(outcome)
         case "resync_required", "lagged": return .resyncRequired
         case "inference_call_added":
-            guard let call = try? decoder.decode(DaemonData.InferenceCall.self, from: payloadData) else {
+            guard let call = try? decoder.decode(DaemonData.InferenceCallAdded.self, from: payloadData) else {
                 return .unknown(name)
             }
             return .inferenceCallAdded(call)
