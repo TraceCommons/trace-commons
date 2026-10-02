@@ -38,6 +38,8 @@ public enum GlassTokens {
         public static let sceneWarm: GlassRGBA = GlassRGBA(0x1D2430, alpha: 1)
         /// The neutral dark a pane's glass sits on where there is no native material.
         public static let paneBase: GlassRGBA = GlassRGBA(0x161A22, alpha: 0.96)
+        /// A pane under Reduce Transparency: solid, no material (spec).
+        public static let paneOpaque: GlassRGBA = GlassRGBA(0x1C1E24, alpha: 1)
         /// Over native glass, the thin dark veil kept for text contrast.
         public static let glassVeil: GlassRGBA = GlassRGBA(0x0C0E14, alpha: 0.28)
         public static let wellFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.22)
@@ -96,6 +98,7 @@ public enum GlassTokens {
             "sceneBase": sceneBase,
             "sceneWarm": sceneWarm,
             "paneBase": paneBase,
+            "paneOpaque": paneOpaque,
             "glassVeil": glassVeil,
             "wellFill": wellFill,
             "controlHover": controlHover,
@@ -332,7 +335,7 @@ public enum GlassTokens {
 
     public enum TypeScale {
         public static let micro: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .bold, lineHeight: 13, tracking: 0, design: .default, uppercase: false, tabular: false)
-        public static let eyebrow: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .bold, lineHeight: 14, tracking: 0.8, design: .default, uppercase: true, tabular: false)
+        public static let eyebrow: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .semibold, lineHeight: 14, tracking: 0.8, design: .default, uppercase: true, tabular: false)
         public static let caption: GlassTypeStyle = GlassTypeStyle(textStyle: .subheadline, size: 11, weight: .regular, lineHeight: 16, tracking: 0, design: .default, uppercase: false, tabular: false)
         public static let label: GlassTypeStyle = GlassTypeStyle(textStyle: .callout, size: 12, weight: .medium, lineHeight: 16, tracking: 0, design: .default, uppercase: false, tabular: false)
         public static let body: GlassTypeStyle = GlassTypeStyle(textStyle: .body, size: 13, weight: .regular, lineHeight: 18, tracking: 0, design: .default, uppercase: false, tabular: false)

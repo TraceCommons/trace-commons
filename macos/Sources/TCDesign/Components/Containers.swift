@@ -123,7 +123,7 @@ public struct GlassLegendCell: View {
         }
         .glassType(GlassTokens.TypeScale.label.weight(.regular))
         .padding(.horizontal, 10)
-        .frame(height: GlassTokens.Size.controlLarge)
+        .frame(minHeight: GlassTokens.Size.controlLarge)
         .glassTier(.well)
         .accessibilityElement(children: .combine)
     }

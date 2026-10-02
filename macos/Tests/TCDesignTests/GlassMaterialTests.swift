@@ -21,10 +21,20 @@ final class GlassMaterialTests: XCTestCase {
         XCTAssertEqual(GlassMaterial.current(reduceTransparency: false), expected)
     }
 
-    /// The opaque base is the pane base at full opacity: text contrast on it
-    /// is what the token's contrast notes were measured against.
-    func test_theOpaqueBaseIsThePaneBase() {
-        XCTAssertEqual(GlassTokens.Color.paneBase.rgb, 0x161A22)
+    /// Liquid Glass draws its own rim; a pane on it must not draw a second.
+    /// Every other tier, and every pane on the fallbacks, keeps its edge.
+    func test_onlyAPaneOnLiquidGlassSkipsItsOwnEdge() {
+        XCTAssertFalse(GlassTier.pane.drawsOwnEdge(on: .liquidGlass))
+        XCTAssertTrue(GlassTier.pane.drawsOwnEdge(on: .vibrancy))
+        XCTAssertTrue(GlassTier.pane.drawsOwnEdge(on: .opaque))
+        for tier in [GlassTier.card, .cardQuiet, .well, .control, .controlSelected, .popover, .menu, .nodeCard] {
+            XCTAssertTrue(tier.drawsOwnEdge(on: .liquidGlass), "\(tier)")
+        }
+    }
+
+    /// The Reduce Transparency base is solid.
+    func test_theOpaqueBaseIsSolid() {
+        XCTAssertEqual(GlassTokens.Color.paneOpaque.alpha, 1)
     }
 
     @MainActor
