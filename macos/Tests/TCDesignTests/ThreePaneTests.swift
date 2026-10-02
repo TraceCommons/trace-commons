@@ -58,4 +58,34 @@ final class ThreePaneTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(GlassTokens.Space.windowControlsWidth, 78)
         XCTAssertEqual(EnvironmentValues().glassWindowControlsInset, 0)
     }
+
+    /// A window's first layout seeds the preferences from its width, as
+    /// #1146 decides at launch: the map from 1100pt, the inspector from 900.
+    func test_theFirstLaunchSeedsPanesFromTheWidth() {
+        XCTAssertTrue(GlassPaneLayout.firstLaunch(windowWidth: 1320) == (true, true))
+        XCTAssertTrue(GlassPaneLayout.firstLaunch(windowWidth: 1100) == (true, true))
+        XCTAssertTrue(GlassPaneLayout.firstLaunch(windowWidth: 1099) == (false, true))
+        XCTAssertTrue(GlassPaneLayout.firstLaunch(windowWidth: 900) == (false, true))
+        XCTAssertTrue(GlassPaneLayout.firstLaunch(windowWidth: 899) == (false, false))
+    }
+
+    /// The map toggle knows when the window, not the person, hid the map.
+    func test_theMapIsCompactedOnlyWhenWantedAndTooNarrow() {
+        XCTAssertTrue(GlassPaneLayout.compactsMap(windowWidth: 1099, showsMap: true))
+        XCTAssertFalse(GlassPaneLayout.compactsMap(windowWidth: 1100, showsMap: true))
+        XCTAssertFalse(GlassPaneLayout.compactsMap(windowWidth: 900, showsMap: false))
+        XCTAssertFalse(EnvironmentValues().glassMapCompacted)
+    }
+
+    /// Panes animate when one shows or hides, not on every width of a live
+    /// resize: the animation keys on visibility, which a resize inside one
+    /// composition leaves alone.
+    func test_resizingWithinACompositionKeepsTheVisibility() {
+        let narrow = GlassPaneLayout(windowWidth: 1200, showsMap: true, showsInspector: true)
+        let wide = GlassPaneLayout(windowWidth: 1500, showsMap: true, showsInspector: true)
+        XCTAssertNotEqual(narrow, wide)
+        XCTAssertEqual(narrow.visibility, wide.visibility)
+        let compact = GlassPaneLayout(windowWidth: 1000, showsMap: true, showsInspector: true)
+        XCTAssertNotEqual(compact.visibility, wide.visibility)
+    }
 }

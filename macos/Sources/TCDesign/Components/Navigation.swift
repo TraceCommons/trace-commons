@@ -79,9 +79,10 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                             }
                         }
                     }
+                    .glassPressedFill()
                     .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GlassPressStyle())
                 .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
             }
         }
@@ -132,8 +133,9 @@ public struct GlassBreadcrumb: View {
                     Text(crumb.title).foregroundStyle(GlassColor.textPrimary)
                         .accessibilityAddTraits(.isHeader)
                 } else {
-                    Button(crumb.title) { crumb.action?() }
-                        .buttonStyle(.plain)
+                    // A text link: no fill, so the text takes the press.
+                    Button { crumb.action?() } label: { Text(crumb.title).glassPressedFill() }
+                        .buttonStyle(GlassPressStyle())
                         .foregroundStyle(GlassColor.textSecondary)
                 }
             }
@@ -145,12 +147,35 @@ public struct GlassBreadcrumb: View {
 /// Sequential glass nodes joined by lines, for the first run. Not a tab
 /// control: the steps are not chosen, they are reached.
 public struct GlassStepProgress: View {
+    /// What VoiceOver says for a step that is behind, at or ahead of the
+    /// current one, from the core's copy.
+    public struct StateValues: Sendable, Equatable {
+        public let done: String
+        public let current: String
+        public let pending: String
+
+        public init(done: String, current: String, pending: String) {
+            self.done = done
+            self.current = current
+            self.pending = pending
+        }
+    }
+
     private let labels: [String]
     private let current: Int
+    private let stateValues: StateValues?
 
-    public init(labels: [String], current: Int) {
+    /// With no `stateValues` a step speaks only its label, and the current
+    /// step is marked selected; the component authors no state words.
+    public init(labels: [String], current: Int, stateValues: StateValues? = nil) {
         self.labels = labels
         self.current = current
+        self.stateValues = stateValues
+    }
+
+    private func value(at index: Int) -> String {
+        guard let stateValues else { return "" }
+        return index < current ? stateValues.done : index == current ? stateValues.current : stateValues.pending
     }
 
     public var body: some View {
@@ -179,7 +204,7 @@ public struct GlassStepProgress: View {
                 }
                 .fixedSize()
                 .accessibilityElement(children: .combine)
-                .accessibilityValue(index < current ? "done" : index == current ? "current" : "pending")
+                .accessibilityValue(value(at: index))
                 .accessibilityAddTraits(index == current ? .isSelected : [])
             }
         }
