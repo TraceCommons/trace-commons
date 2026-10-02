@@ -194,8 +194,8 @@ public struct GlassToolTile: View {
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(Color.white.opacity(0.1)))
             case .folder:
-                Text("dir")
-                    .glassGlyph(large ? 11 : 9, weight: .bold)
+                Image(systemName: "folder.fill")
+                    .glassGlyph(large ? 12 : 10, weight: .semibold)
                     .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
