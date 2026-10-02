@@ -55,7 +55,8 @@ enum SampleDaemonData {
 
     /// A folder approve: a group call always carries `excluded_held`.
     static func approvedGroup(approved: Int, excludedHeld: Int) -> String {
-        #"{"approved":\#(approved),"hold_secs":10,"hold_until":\#(approved > 0 ? "\"2026-09-30T09:20:10Z\"" : "null"),"flagged":0,"redactions":{},"skipped":[],"excluded_held":\#(excludedHeld)}"#
+        let holdUntil = approved > 0 ? #""2026-09-30T09:20:10Z""# : "null"
+        return #"{"approved":\#(approved),"hold_secs":10,"hold_until":\#(holdUntil),"flagged":0,"redactions":{},"skipped":[],"excluded_held":\#(excludedHeld)}"#
     }
 
     /// The daemon's OK-but-skipped answer for a single entry it did not act on.
