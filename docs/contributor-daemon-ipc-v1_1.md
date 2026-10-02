@@ -544,8 +544,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 | `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
 | `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
-| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
-| `inference_connection_install` | `connection_id`, `config_digest` (both **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
+| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version`, `confirmed: true` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
+| `inference_connection_install` | `connection_id`, `config_digest`, `confirmed: true` (all **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
 | `inference_connection_disconnect` | `connection_id` (**required**) | `disconnected`, `connection_id`, `state_version` (or `null`), `local_witness_removed`, `server_disconnect` (`revoked` / `not-found` / `pending`), `server_refusal` (label or `null`) | removes the local witness first, with or without an account session; see "Connecting inference" below |
 
 ### `status`
@@ -4688,7 +4688,12 @@ The flow a shell drives:
 2. The shell shows one offer and the disclosure its `disclosure_version`
    names, and on the contributor's choice calls `inference_connection_select`
    with **exactly** that offer's `offer_id`, `provider_id`, `revision`,
-   `config_digest` and `disclosure_version`. The daemon sends those values
+   `config_digest` and `disclosure_version`, plus `confirmed: true` --
+   refused (`bad_params` / `inference-connection-confirmation-required`)
+   without it, even with an otherwise well-formed offer. (Before this
+   existed, the only place this was ever checked was the Tauri shell's own
+   command layer, which refused locally and never forwarded the choice; a
+   raw caller had no such floor.) The daemon sends those values
    unchanged (`provider_id` is not sent; it is bound into the digest check
    below) and fills in nothing. Pass `expected_current_version` as the `state_version` from
    `inference_connection_current` when replacing an existing selection
@@ -4708,8 +4713,10 @@ The flow a shell drives:
 3. **Selecting installs nothing.** The witness material the server returns is
    held on this device only. The shell then asks the contributor, separately,
    whether to use this witness on this device, and on confirmation calls
-   `inference_connection_install` with the `connection_id` and
-   `config_digest` from the select result. The daemon re-checks the held
+   `inference_connection_install` with the `connection_id`, `config_digest`
+   from the select result, and `confirmed: true` -- refused
+   (`inference-connection-confirmation-required`) without it, same as
+   `inference_connection_select` above. The daemon re-checks the held
    material against its digest (`inference-connection-digest-mismatch`), then
    re-reads the account's selection; if it was disconnected or replaced since,
    the answer is `inference-connection-not-current`, and if its revision was
