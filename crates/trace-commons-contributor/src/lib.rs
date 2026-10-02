@@ -15,6 +15,7 @@ pub mod consent;
 pub mod consent_copy;
 pub mod daemon;
 pub mod disclosure;
+pub mod disclosure_copy;
 pub mod envelope;
 pub mod harness_state;
 pub mod history_copy;

@@ -383,6 +383,57 @@ pub fn state_tone(label: &str) -> PrivateInferenceTone {
     }
 }
 
+/// Every runtime state label a daemon reports in
+/// `private_inference_state.state`, in the order a shell lists them.
+///
+/// Each one has its own sentence in [`state_line`]; the empty label
+/// (unreported) and a label this build does not know are not in the list,
+/// and are answered by [`STATE_UNREPORTED`] and [`STATE_UNKNOWN`].
+pub const STATE_LABELS: [&str; 10] = [
+    LABEL_OFF,
+    LABEL_STOPPING,
+    LABEL_RUNNING,
+    LABEL_RUNNING_NO_BACKENDS,
+    LABEL_RUNNING_ANSWERED_ELSEWHERE,
+    LABEL_RUNNING_DESTINATION_UNKNOWN,
+    LABEL_RUNNING_ELSEWHERE,
+    LABEL_PORT_IN_USE,
+    LABEL_START_FAILED,
+    LABEL_CRASHED,
+];
+
+/// One state label's sentence, and whether an indicator may paint that
+/// state as working: [`state_line`] and [`state_tone`]'s
+/// [`PrivateInferenceTone::reads_as_working`], carried together so a shell
+/// that renders a table looks the label up and never compares sentences.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct StateCopy {
+    pub line: &'static str,
+    pub working: bool,
+}
+
+/// [`StateCopy`] for every label in [`STATE_LABELS`], keyed by label.
+///
+/// A shell that holds this table answers a label it does not find with
+/// [`STATE_UNKNOWN`], not working, and an empty one with
+/// [`STATE_UNREPORTED`], not working -- what [`state_line`] and
+/// [`state_tone`] answer for both.
+#[must_use]
+pub fn state_copies() -> std::collections::BTreeMap<&'static str, StateCopy> {
+    STATE_LABELS
+        .into_iter()
+        .map(|label| {
+            (
+                label,
+                StateCopy {
+                    line: state_line(label),
+                    working: state_tone(label).reads_as_working(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// Whether a shell should put the offer in front of the contributor.
 ///
 /// Two inputs and one rule, crossing the ABI for the reason the tone table
@@ -4839,5 +4890,64 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod state_table_tests {
+    use super::*;
+
+    /// Every label a daemon can report is in the table, once, with its own
+    /// sentence: none falls through to the unknown or unreported line.
+    #[test]
+    fn the_state_table_names_every_reported_label_with_its_own_line() {
+        let table = state_copies();
+        assert_eq!(table.len(), STATE_LABELS.len());
+        assert_eq!(table.len(), 10);
+        for label in STATE_LABELS {
+            let copy = table[label];
+            assert_eq!(copy.line, state_line(label), "{label}");
+            assert_ne!(copy.line, STATE_UNKNOWN, "{label}");
+            assert_ne!(copy.line, STATE_UNREPORTED, "{label}");
+        }
+        // The states the daemon's own state machine reports are all here.
+        use crate::daemon::private_inference::PrivateInferenceState as State;
+        let running = State::Running { port: 1 };
+        let mut reported: Vec<&str> = [
+            State::Off,
+            State::Stopping { port: None },
+            State::RunningWithoutBackends { port: 1 },
+            State::RunningElsewhere { port: 1 },
+        ]
+        .iter()
+        .map(State::label)
+        .collect();
+        for authenticated in [Some(true), Some(false), None] {
+            reported.push(running.label_for(authenticated));
+        }
+        reported.extend([LABEL_PORT_IN_USE, LABEL_START_FAILED, LABEL_CRASHED]);
+        reported.sort_unstable();
+        let mut listed = STATE_LABELS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(reported, listed);
+    }
+
+    /// Only `running` may be painted as working; the table says so for each
+    /// label rather than leaving a shell to infer it.
+    #[test]
+    fn only_running_is_working_in_the_state_table() {
+        for (label, copy) in state_copies() {
+            assert_eq!(copy.working, label == LABEL_RUNNING, "{label}");
+            assert_eq!(
+                copy.working,
+                state_tone(label).reads_as_working(),
+                "{label}"
+            );
+        }
+        let wire = serde_json::to_value(state_copies()[LABEL_RUNNING]).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"line": STATE_RUNNING, "working": true})
+        );
     }
 }
