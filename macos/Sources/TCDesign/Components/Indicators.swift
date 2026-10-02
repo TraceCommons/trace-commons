@@ -316,7 +316,7 @@ public struct GlassNodeCard: View {
         .padding(.vertical, 12)
         .padding(.horizontal, 14)
         .frame(width: GlassTokens.Size.nodeCardWidth, alignment: .leading)
-        .glassTier(.nodeCard)
+        .glassSurface(.nodeCard, floating: true)
         .accessibilityElement(children: .combine)
     }
 }

@@ -190,3 +190,91 @@ public extension View {
             .contentShape(shape)
     }
 }
+
+// MARK: - Floating layer (R4)
+
+/// Where a surface sits. Inside a pane everything is painted (never glass
+/// on glass). Over content, such as the map, controls and cards float on
+/// their own glass: Liquid Glass on macOS 26, the painted tier before it.
+public enum GlassLayer: Sendable, Equatable {
+    case content
+    case floating
+}
+
+public extension EnvironmentValues {
+    @Entry var glassLayer: GlassLayer = .content
+}
+
+private struct GlassSurfaceModifier: ViewModifier {
+    let tier: GlassTier
+    let radius: CGFloat?
+    let floating: Bool?
+    @Environment(\.glassLayer) private var layer
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
+        let native = (floating ?? (layer == .floating)) && !reduceTransparency
+        if native {
+            if #available(macOS 26.0, *) {
+                content
+                    .clipShape(shape)
+                    .glassEffect(tier.floatingGlass, in: shape)
+                    .contentShape(shape)
+            } else {
+                content.glassTier(tier, radius: radius)
+            }
+        } else {
+            content.glassTier(tier, radius: radius)
+        }
+    }
+}
+
+extension GlassTier {
+    /// The Liquid Glass a floating surface of this tier gets. Controls react
+    /// to the pointer; cards and menus carry the dark veil as a tint so
+    /// their text keeps its contrast over a bright map.
+    @available(macOS 26.0, *)
+    var floatingGlass: Glass {
+        switch self {
+        case .control, .controlSelected, .well:
+            .regular.interactive()
+        case .pane, .card, .cardQuiet, .popover, .menu, .nodeCard:
+            .regular.tint(GlassTokens.Color.glassVeil.color)
+        }
+    }
+}
+
+public extension View {
+    /// Put this view on a tier that may float. `floating: nil` follows the
+    /// surrounding `glassLayer`; `true` or `false` fixes it (a menu always
+    /// floats; a well never does).
+    func glassSurface(_ tier: GlassTier, radius: CGFloat? = nil, floating: Bool? = nil) -> some View {
+        modifier(GlassSurfaceModifier(tier: tier, radius: radius, floating: floating))
+    }
+}
+
+/// Controls and cards that float over content together: the map's tabs,
+/// its toolbar and its node cards. Everything inside is on the floating
+/// layer, and on macOS 26 the glass shapes share one container, so they
+/// blend and morph as one surface instead of stacking.
+public struct GlassFloatingGroup<Content: View>: View {
+    private let spacing: CGFloat
+    private let content: Content
+
+    public init(spacing: CGFloat = GlassTokens.Space.s4, @ViewBuilder content: () -> Content) {
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    public var body: some View {
+        Group {
+            if #available(macOS 26.0, *) {
+                GlassEffectContainer(spacing: spacing) { content }
+            } else {
+                content
+            }
+        }
+        .environment(\.glassLayer, .floating)
+    }
+}

@@ -73,7 +73,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
         }
         .padding(2)
         .frame(height: floating ? nil : GlassTokens.Size.segmentedTrack)
-        .glassTier(floating ? .control : .well)
+        .glassSurface(floating ? .control : .well, floating: floating)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
     }

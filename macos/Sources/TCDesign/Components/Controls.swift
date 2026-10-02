@@ -68,14 +68,14 @@ private struct GlassButtonBody: View {
                 .foregroundStyle(GlassColor.textPrimary)
                 .padding(.horizontal, 12)
                 .frame(height: GlassTokens.Size.controlLarge)
-                .glassTier(.control)
+                .glassSurface(.control)
         case let .submit(done):
             configuration.label
                 .glassType(GlassTokens.TypeScale.caption.weight(.bold))
                 .foregroundStyle(done ? GlassTokens.Color.statusOn.color : GlassColor.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(height: GlassTokens.Size.submitPill)
-                .glassTier(.control)
+                .glassSurface(.control)
         case .link:
             configuration.label
                 .glassType(GlassTokens.TypeScale.label.weight(.semibold))
@@ -105,7 +105,7 @@ public struct GlassRoundButton: View {
                 .glassGlyph(small ? 11 : 13, weight: .medium)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: side, height: side)
-                .glassTier(.control, radius: side / 2)
+                .glassSurface(.control, radius: side / 2)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
@@ -131,7 +131,7 @@ public struct GlassPillIconButton: View {
                 .glassGlyph(11, weight: .semibold)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: 30, height: GlassTokens.Size.control)
-                .glassTier(.control)
+                .glassSurface(.control)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
@@ -180,7 +180,7 @@ public struct GlassToolbarGroup<Content: View>: View {
     public var body: some View {
         HStack(spacing: 2) { content }
             .padding(2)
-            .glassTier(.control)
+            .glassSurface(.control)
     }
 }
 
@@ -327,7 +327,7 @@ public struct GlassPicker<Value: Hashable>: View {
             .padding(.leading, 10)
             .padding(.trailing, 8)
             .frame(height: GlassTokens.Size.controlLarge)
-            .glassTier(.control)
+            .glassSurface(.control)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)

@@ -32,7 +32,7 @@ public struct GlassPopover<Content: View>: View {
     public var body: some View {
         content
             .padding(GlassTokens.Space.s5)
-            .glassTier(.popover)
+            .glassSurface(.popover, floating: true)
     }
 }
 
@@ -76,7 +76,7 @@ public struct GlassMenu<Content: View>: View {
         VStack(alignment: .leading, spacing: 0) { content }
             .padding(5)
             .frame(minWidth: 220, alignment: .leading)
-            .glassTier(.menu)
+            .glassSurface(.menu, floating: true)
             .accessibilityElement(children: .contain)
     }
 }

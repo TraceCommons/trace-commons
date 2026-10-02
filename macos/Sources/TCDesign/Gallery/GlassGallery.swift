@@ -52,6 +52,7 @@ public struct GlassGallery: View {
             section("Navigation") { navigation }
             section("Indicators") { indicators }
             section("Patterns") { patterns }
+            section("Floating") { floatingLayer }
         }
         .padding(28)
     }
@@ -274,6 +275,49 @@ public struct GlassGallery: View {
             }
             .frame(width: 360)
         }
+    }
+
+    /// The floating layer over a stand-in map field: Liquid Glass on macOS
+    /// 26, the painted tiers before it.
+    private var floatingLayer: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: GlassTokens.Radius.pane, style: .continuous)
+                .fill(RadialGradient(
+                    colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
+                    center: .center, startRadius: 10, endRadius: 420))
+            ForEach(0..<14, id: \.self) { index in
+                Circle()
+                    .fill(index % 3 == 0 ? GlassTokens.Color.purpleSoft.color : GlassTokens.Color.blue.color)
+                    .frame(width: 18, height: 18)
+                    .offset(x: CGFloat(60 + (index * 97) % 620), y: CGFloat(70 + (index * 53) % 230))
+            }
+            GlassFloatingGroup {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        GlassSegmentedTabs(
+                            "map",
+                            selection: $mapTab,
+                            segments: [
+                                GlassSegment("Traces", value: "traces"),
+                                GlassSegment("AI", value: "ai", dot: .on),
+                            ],
+                            floating: true
+                        )
+                        Spacer()
+                        GlassToolbarGroup {
+                            GlassToolbarButton("graph", systemImage: "chart.bar", pressed: true) {}
+                            GlassToolbarButton("map", systemImage: "map") {}
+                        }
+                        GlassRoundButton("Settings", systemImage: "gearshape") {}
+                    }
+                    Spacer()
+                    GlassNodeCard("nodeCard", detail: "detail", hint: "hint")
+                        .frame(width: GlassTokens.Size.nodeCardWidth)
+                }
+                .padding(14)
+            }
+        }
+        .frame(width: 720, height: 340)
     }
 }
 
