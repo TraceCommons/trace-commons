@@ -1076,7 +1076,14 @@ impl DaemonSettings {
             .is_none_or(serde_json::Value::is_null);
         settings.absorb_legacy_roots();
         settings.validate_digest_schedule();
-        settings.clamp_numeric_ranges();
+        for field in settings.clamp_numeric_ranges() {
+            // Label-only, like `validate_digest_schedule`: the field name,
+            // never the value or anything from the file.
+            tracing::warn!(
+                field,
+                "daemon setting out of range in the saved file; clamped into range"
+            );
+        }
         Ok(settings)
     }
 
@@ -1094,11 +1101,36 @@ impl DaemonSettings {
     /// reading back a choice that was already made, by this build or an
     /// older one, and the honest repair is to bring it inside the range this
     /// build enforces, not to make the whole settings file unreadable.
-    fn clamp_numeric_ranges(&mut self) {
+    ///
+    /// Returns the name of each field it moved, so `load` says so rather
+    /// than clamping silently -- the next unrelated `set_settings` saves
+    /// the whole file and makes the clamped value permanent.
+    fn clamp_numeric_ranges(&mut self) -> Vec<&'static str> {
         let ranges = settings_ranges();
-        self.quiescence_secs = ranges.quiescence_secs.clamp(self.quiescence_secs);
-        self.approval_hold_secs = ranges.approval_hold_secs.clamp(self.approval_hold_secs);
-        self.digest_interval_secs = ranges.digest_interval_secs.clamp(self.digest_interval_secs);
+        let mut moved = Vec::new();
+        let mut clamp = |name: &'static str, range: &SettingRange, value: &mut u64| {
+            let clamped = range.clamp(*value);
+            if clamped != *value {
+                *value = clamped;
+                moved.push(name);
+            }
+        };
+        clamp(
+            "quiescence_secs",
+            &ranges.quiescence_secs,
+            &mut self.quiescence_secs,
+        );
+        clamp(
+            "approval_hold_secs",
+            &ranges.approval_hold_secs,
+            &mut self.approval_hold_secs,
+        );
+        clamp(
+            "digest_interval_secs",
+            &ranges.digest_interval_secs,
+            &mut self.digest_interval_secs,
+        );
+        moved
     }
 
     /// Refuse an evening `hour` outside 0..=23 read from the file (a hand
@@ -2978,6 +3010,26 @@ mod tests {
         assert_eq!(loaded.quiescence_secs, ranges.quiescence_secs.max);
         assert_eq!(loaded.approval_hold_secs, ranges.approval_hold_secs.max);
         assert_eq!(loaded.digest_interval_secs, ranges.digest_interval_secs.min);
+    }
+
+    /// The load-time clamp says which fields it moved, so `load` can log
+    /// them -- the same "never clamp silently" rule `validate_digest_schedule`
+    /// keeps -- and leaves an in-range file untouched and unreported.
+    #[test]
+    fn the_load_clamp_names_each_field_it_moved() {
+        let ranges = settings_ranges();
+        let mut s = DaemonSettings::default();
+        assert!(s.clamp_numeric_ranges().is_empty(), "defaults are in range");
+        s.quiescence_secs = ranges.quiescence_secs.max + 1;
+        s.digest_interval_secs = ranges.digest_interval_secs.min - 1;
+        assert_eq!(
+            s.clamp_numeric_ranges(),
+            vec!["quiescence_secs", "digest_interval_secs"]
+        );
+        assert!(
+            s.clamp_numeric_ranges().is_empty(),
+            "a second pass moves nothing"
+        );
     }
 
     /// Clamping a saved value on load must not make `set_settings` quietly

@@ -2968,12 +2968,18 @@ without guessing or hard-coding a second copy: the C ABI's
 draw its controls' bounds from the same numbers this method enforces.
 
 `ironwire`'s `{"mode":"watch","port":P,"token_dir":D}` now validates `P` and
-`D` the same way `probe_routing` already did: `port` must be non-zero (`0` is
+`D` with the same floor `probe_routing` holds: `port` must be non-zero (`0` is
 the ask-the-kernel sentinel, never a port a proxy actually listens on,
 `bad_params` / `settings-invalid-value` -- more precisely
 `routing-port-invalid`), and `token_dir`, when present and non-empty, must be
 an absolute path (`routing-token-dir-must-be-absolute`); an empty `token_dir`
-is treated as absent. Before this, only the Tauri shell's own command layer
+is treated as absent. The two differ in two labelled ways a shell should
+know: `probe_routing` refuses port `0` as `port-invalid` (not
+`routing-port-invalid`), and refuses an empty `token_dir` as
+`token-dir-invalid` rather than treating it as absent, because a probe that
+fell through to the environment would answer about a path the caller did
+not ask about. A relative `token_dir` is refused by both, with
+`routing-token-dir-must-be-absolute`. Before this, only the Tauri shell's own command layer
 refused these two shapes -- a raw `set_settings` caller (another shell, or a
 future one) had no such floor and could persist a declaration nothing would
 ever actually route through.
