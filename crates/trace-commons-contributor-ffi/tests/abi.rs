@@ -5256,6 +5256,49 @@ fn the_keychain_status_crosses_the_abi_with_no_secret_material() {
 }
 
 #[test]
+fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
+    use trace_commons_contributor::deep_link::{DEEP_LINK_INVALID, REVIEW_DEEP_LINK};
+    use trace_commons_contributor_ffi::tc_parse_deep_link_json;
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let review = cstr_str(REVIEW_DEEP_LINK);
+    let value = json_owned(unsafe { tc_parse_deep_link_json(review.as_ptr(), &mut err) });
+    assert_eq!(
+        value,
+        serde_json::json!({"kind": "navigate", "path": "/waiting"})
+    );
+    assert!(err.is_null());
+
+    let enroll =
+        cstr_str("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE");
+    let value = json_owned(unsafe { tc_parse_deep_link_json(enroll.as_ptr(), &mut err) });
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "kind": "enroll",
+            "invite": "https://issuer.example/onboard#CODE",
+        })
+    );
+
+    // Unknown, malformed, NULL, and a `javascript:` scheme are all refused
+    // identically, with the one stable label -- never NULL with no `*err`,
+    // and never a different label per failure shape.
+    for garbage in [
+        cstr_str("not-a-deep-link"),
+        cstr_str("javascript:alert(1)"),
+        cstr_str("tracecommons://review@evil.example"),
+    ] {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        assert!(unsafe { tc_parse_deep_link_json(garbage.as_ptr(), &mut err) }.is_null());
+        assert_eq!(take_owned(err), DEEP_LINK_INVALID);
+    }
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert!(unsafe { tc_parse_deep_link_json(std::ptr::null(), &mut err) }.is_null());
+    assert_eq!(take_owned(err), DEEP_LINK_INVALID);
+    assert_last_error_contains(DEEP_LINK_INVALID);
+}
+
+#[test]
 fn the_quit_prompt_is_chosen_from_the_handle() {
     use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
     use trace_commons_contributor_ffi::tc_quit_prompt_json;

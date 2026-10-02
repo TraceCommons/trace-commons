@@ -2390,6 +2390,14 @@ char*       tc_privacy_scan_copy_json(void);
  */
 char*       tc_private_ai_keychain_status_json(const char* config_dir);
 
+/* Parse one deep link or launch argument (deep_link::parse_deep_link): a
+ * JSON object naming exactly one action -- enroll, public_run, credential,
+ * or navigate. PARSING ONLY: never opens anything, never stores anything.
+ * NULL and *err = "deep-link-invalid" for anything this build does not
+ * recognise, including a malformed link and a NULL or non-UTF-8 url.
+ */
+char*       tc_parse_deep_link_json(const char* url, char** err);
+
 /*
  * Can this process reach the Cloud credential store?
  *

@@ -5589,6 +5589,41 @@ pub unsafe extern "C" fn tc_private_ai_keychain_status_json(
     })
 }
 
+/// Parse one deep link or launch argument
+/// (`deep_link::parse_deep_link`): a JSON object naming exactly one action --
+/// `{"kind":"enroll","invite":...}`, `{"kind":"public_run","slug":...,
+/// "url":...}`, `{"kind":"credential","provider":...}`, or
+/// `{"kind":"navigate","path":"/waiting"}`. This is PARSING ONLY: it never
+/// opens a browser, never stores a pending link, and never acts -- the
+/// caller decides what the action means.
+///
+/// Returns NULL and sets `*err` (owned; free with [`tc_string_free`]) to
+/// `deep-link-invalid` for a link this build does not recognise, including
+/// a malformed one and a NULL or non-UTF-8 `url`. Unknown and malformed are
+/// refused identically, so a caller cannot branch on "why".
+///
+/// # Safety
+/// `url`, if non-null, must point to a valid, NUL-terminated C string.
+/// `err`, if non-null, must point to writable `*mut c_char` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_parse_deep_link_json(
+    url: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    guarded_string(err, || {
+        let Some(url) = (unsafe { borrow_optional_str(url) }) else {
+            return Ok(witness_fail(
+                trace_commons_contributor::deep_link::DEEP_LINK_INVALID,
+                err,
+            ));
+        };
+        match trace_commons_contributor::deep_link::parse_deep_link(url) {
+            Ok(action) => Ok(to_owned_cstring(&serde_json::to_string(&action)?)),
+            Err(label) => Ok(witness_fail(label, err)),
+        }
+    })
+}
+
 /// Can this process reach the Cloud credential store?
 ///
 /// Exists so a release pipeline can ask a *signed bundle* the question, which

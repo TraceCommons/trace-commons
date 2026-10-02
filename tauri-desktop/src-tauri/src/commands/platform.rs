@@ -4,7 +4,6 @@ use std::{
     process::Command,
 };
 
-use serde_json::json;
 use tauri::{AppHandle, Runtime, State};
 
 use trace_commons_contributor::quit_copy::{self, QuitRole};
@@ -267,155 +266,21 @@ fn wallet_url_is_valid(url: &str) -> bool {
         && https_origin(url).is_some()
 }
 
-pub(crate) fn is_tracecommons_deep_link(url: &str) -> bool {
-    url.get(..15)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tracecommons://"))
-}
+// Parsing lives in the contributor core (K7, #1173): `is_tracecommons_deep_link`
+// and `REVIEW_DEEP_LINK` are used elsewhere in this crate as `platform::`, so
+// they are re-exported here rather than changed at each call site.
+pub(crate) use trace_commons_contributor::deep_link::{
+    REVIEW_DEEP_LINK, is_tracecommons_deep_link,
+};
 
-fn invite_link_is_valid(value: &str) -> bool {
-    if value.len() > 2048
-        || !value.is_ascii()
-        || value
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-    {
-        return false;
-    }
-    let Some(rest) = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))
-    else {
-        return false;
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    if authority.is_empty() || authority.contains('@') || !authority.is_ascii() {
-        return false;
-    }
-    let host = match authority.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && !port.is_empty() => {
-            if port.parse::<u16>().is_err() {
-                return false;
-            }
-            host
-        }
-        Some(_) => return false,
-        None => authority,
-    };
-    if host.is_empty()
-        || !host
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-    {
-        return false;
-    }
-    let fragment_code = value
-        .split_once('#')
-        .is_some_and(|(_, code)| !code.is_empty());
-    let query_code = value
-        .split_once('?')
-        .and_then(|(_, query)| query.split('#').next())
-        .into_iter()
-        .flat_map(|query| query.split('&'))
-        .any(|pair| {
-            let Some((name, code)) = pair.split_once('=') else {
-                return false;
-            };
-            name == "code" && !code.is_empty()
-        });
-    fragment_code || query_code
-}
-
-fn deep_link_invite(url: &str) -> Option<String> {
-    let invite = trace_commons_contributor::commands::invite_from_deep_link(url)?;
-    invite_link_is_valid(&invite).then_some(invite)
-}
-
-fn deep_link_parts(url: &str) -> Option<(&str, &str)> {
-    if !is_tracecommons_deep_link(url) {
-        return None;
-    }
-    let rest = &url[15..];
-    if rest
-        .chars()
-        .any(|character| character.is_control() || character.is_whitespace())
-    {
-        return None;
-    }
-    let boundary = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..boundary];
-    if authority.is_empty()
-        || authority.contains('@')
-        || !authority
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        return None;
-    }
-    Some((authority, &rest[boundary..]))
-}
-
-fn public_run_deep_link(url: &str) -> Option<String> {
-    let (authority, rest) = deep_link_parts(url)?;
-    if !authority.eq_ignore_ascii_case("run") || !rest.starts_with('/') {
-        return None;
-    }
-    let slug = &rest[1..];
-    if slug.is_empty()
-        || slug.len() > 63
-        || !slug
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        || !slug
-            .as_bytes()
-            .last()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        || slug.contains('/')
-        || slug.contains('?')
-        || slug.contains('#')
-        || !slug
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
-        return None;
-    }
-    Some(slug.to_owned())
-}
-
-fn credential_deep_link(url: &str) -> Option<String> {
-    let (authority, rest) = deep_link_parts(url)?;
-    if !authority.eq_ignore_ascii_case("credential") {
-        return None;
-    }
-    if rest.contains('?') || rest.contains('#') {
-        return None;
-    }
-    let provider = rest.strip_prefix('/').unwrap_or_default();
-    if provider.contains('/')
-        || (!provider.is_empty()
-            && !provider
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
-    {
-        return None;
-    }
-    Some(if provider.is_empty() {
-        "near_ai".to_owned()
-    } else {
-        provider.to_owned()
-    })
-}
-
-/// The link that opens the review queue. A digest notification's click
-/// is routed to it in-process (see `native::configure_notifications`).
-pub(crate) const REVIEW_DEEP_LINK: &str = "tracecommons://review";
-
-fn review_deep_link(url: &str) -> bool {
-    deep_link_parts(url).is_some_and(|(authority, rest)| {
-        authority.eq_ignore_ascii_case("review") && rest.is_empty()
-    })
-}
-
+/// Parse a pending or just-delivered deep link into the action the frontend
+/// should take. Parsing itself -- scheme, host, path, and which action each
+/// shape names -- is `deep_link::parse_deep_link`, a pure function the core
+/// also exports through the C ABI so macOS parses identically; this command
+/// only supplies the pending link Tauri itself stored (see
+/// `AppState::take_pending_deep_link` and `app::remember_deep_link`) and
+/// turns the parser's typed action into the JSON the frontend has always
+/// read.
 #[tauri::command]
 pub(crate) fn consume_deep_link(
     state: State<'_, AppState>,
@@ -425,29 +290,9 @@ pub(crate) fn consume_deep_link(
     let Some(candidate) = candidate else {
         return Ok(None);
     };
-    if let Some(invite) = deep_link_invite(&candidate) {
-        return Ok(Some(json!({ "kind": "enroll", "invite": invite })));
-    }
-    if let Some(slug) = public_run_deep_link(&candidate) {
-        return Ok(Some(json!({
-            "kind": "public_run",
-            "slug": slug,
-            "url": format!("https://tracecommons.ai/runs/{slug}"),
-        })));
-    }
-    if let Some(provider) = credential_deep_link(&candidate) {
-        return Ok(Some(json!({
-            "kind": "credential",
-            "provider": provider,
-        })));
-    }
-    if review_deep_link(&candidate) {
-        return Ok(Some(json!({
-            "kind": "navigate",
-            "path": "/waiting",
-        })));
-    }
-    Err("deep-link-invalid".to_owned())
+    trace_commons_contributor::deep_link::parse_deep_link(&candidate)
+        .map(|action| Some(serde_json::to_value(action).expect("DeepLinkAction always serializes")))
+        .map_err(str::to_owned)
 }
 
 fn tracecommons_run_url_is_allowed(url: &str) -> bool {
@@ -569,10 +414,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        REVIEW_DEEP_LINK, credential_deep_link, deep_link_invite, existing_directory,
-        external_url_is_allowed, git_repository, installed_by_homebrew,
-        near_credits_url_is_allowed, public_run_deep_link, quit_prompt_value, review_deep_link,
-        tracecommons_fixture_url_is_allowed, tracecommons_run_url_is_allowed, wallet_url_is_valid,
+        REVIEW_DEEP_LINK, existing_directory, external_url_is_allowed, git_repository,
+        installed_by_homebrew, is_tracecommons_deep_link, near_credits_url_is_allowed,
+        quit_prompt_value, tracecommons_fixture_url_is_allowed, tracecommons_run_url_is_allowed,
+        wallet_url_is_valid,
     };
     use trace_commons_contributor::quit_copy::{self, QuitRole};
 
@@ -667,72 +512,35 @@ mod tests {
         );
     }
 
+    // Deep-link parsing itself moved to the contributor core (K7, #1173:
+    // `trace_commons_contributor::deep_link`), which has its own exhaustive
+    // test module, including the negative cases (lookalike authorities,
+    // non-`tracecommons` schemes, control characters, over-long garbage).
+    // This is only the wiring check: `platform::is_tracecommons_deep_link`
+    // and `platform::REVIEW_DEEP_LINK` are re-exports, and `consume_deep_link`
+    // hands its candidate straight to `deep_link::parse_deep_link` and
+    // reports the typed action or its refusal label unchanged.
     #[test]
-    fn deep_links_only_release_nonempty_valid_invites() {
+    fn deep_link_parsing_is_the_cores_reached_through_the_re_exports() {
+        use trace_commons_contributor::deep_link::{DeepLinkAction, parse_deep_link};
+
+        assert!(is_tracecommons_deep_link(REVIEW_DEEP_LINK));
+        assert!(is_tracecommons_deep_link("TraceCommons://REVIEW"));
+        assert!(!is_tracecommons_deep_link("https://example.com/"));
+
         assert_eq!(
-            deep_link_invite(
+            parse_deep_link(REVIEW_DEEP_LINK),
+            Ok(DeepLinkAction::Navigate { path: "/waiting" })
+        );
+        assert_eq!(
+            parse_deep_link(
                 "tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE"
-            )
-            .as_deref(),
-            Some("https://issuer.example/onboard#CODE")
-        );
-        assert_eq!(
-            deep_link_invite("tracecommons://enroll?invite=").as_deref(),
-            None
-        );
-        assert_eq!(
-            deep_link_invite(
-                "TraceCommons://ENROLL/?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE"
-            )
-            .as_deref(),
-            Some("https://issuer.example/onboard#CODE")
-        );
-        assert_eq!(
-            deep_link_invite(
-                "tracecommons://other?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE"
             ),
-            None
+            Ok(DeepLinkAction::Enroll {
+                invite: "https://issuer.example/onboard#CODE".to_owned()
+            })
         );
-        assert_eq!(
-            deep_link_invite("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard"),
-            None
-        );
-        assert_eq!(
-            public_run_deep_link("tracecommons://run/repair-a-stalled-upload").as_deref(),
-            Some("repair-a-stalled-upload")
-        );
-        assert_eq!(
-            public_run_deep_link("TraceCommons://run/repair-a-stalled-upload").as_deref(),
-            Some("repair-a-stalled-upload")
-        );
-        assert_eq!(
-            public_run_deep_link("tracecommons://run/-repair-a-stalled-upload"),
-            None
-        );
-        assert_eq!(
-            public_run_deep_link("tracecommons://run/Repair-a-stalled-upload"),
-            None
-        );
-        assert_eq!(
-            public_run_deep_link("tracecommons://run/repair-a-stalled-upload?next=evil"),
-            None
-        );
-        assert_eq!(
-            credential_deep_link("tracecommons://credential/near_ai").as_deref(),
-            Some("near_ai")
-        );
-        assert_eq!(
-            credential_deep_link("tracecommons://credential/near_ai?token=secret"),
-            None
-        );
-        assert_eq!(
-            credential_deep_link("tracecommons://credential?token=secret"),
-            None
-        );
-        assert!(review_deep_link(REVIEW_DEEP_LINK));
-        assert!(review_deep_link("tracecommons://review"));
-        assert!(review_deep_link("TraceCommons://REVIEW"));
-        assert!(!review_deep_link("tracecommons://review?next=/settings"));
+        assert!(parse_deep_link("not-a-deep-link").is_err());
     }
 
     #[test]

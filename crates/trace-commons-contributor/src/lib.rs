@@ -14,6 +14,7 @@ pub mod config;
 pub mod consent;
 pub mod consent_copy;
 pub mod daemon;
+pub mod deep_link;
 pub mod disclosure;
 pub mod envelope;
 pub mod harness_state;
