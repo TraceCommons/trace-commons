@@ -5199,6 +5199,22 @@ fn the_monitor_traces_copy_crosses_the_abi() {
 }
 
 #[test]
+fn a_named_automatic_disclosure_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::automatic_grant_copy_named;
+    use trace_commons_contributor_ffi::tc_automatic_grant_copy_json;
+    for name in ["patterns_only", "model_scrubbed"] {
+        let c = std::ffi::CString::new(name).unwrap();
+        assert_eq!(
+            json_owned(unsafe { tc_automatic_grant_copy_json(c.as_ptr()) }),
+            serde_json::to_value(automatic_grant_copy_named(name).unwrap()).unwrap()
+        );
+    }
+    let unknown = std::ffi::CString::new("scrubbed").unwrap();
+    assert!(unsafe { tc_automatic_grant_copy_json(unknown.as_ptr()) }.is_null());
+    assert!(unsafe { tc_automatic_grant_copy_json(std::ptr::null()) }.is_null());
+}
+
+#[test]
 fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
     use trace_commons_contributor::consent_copy::inference_connection_copy;
     use trace_commons_contributor::privacy_scan_copy::{DISCLOSURE, privacy_scan_copy};

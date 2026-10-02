@@ -21,6 +21,11 @@ final class TracesStore {
     private(set) var tree = TracesTree(tools: [], unplaced: [])
     /// The `set_project_mode` write in flight, by folder id.
     private(set) var writing: Set<String> = []
+    /// The last write the core refused, by folder id (or tool id for a
+    /// source declaration). It stays beside that row until the next write to
+    /// it: a reload does not clear it, and it never stands in for the core
+    /// being down.
+    private(set) var writeErrors: [String: DaemonDataError] = [:]
 
     let client: any DaemonDataClient
     /// The last folder change whose result differed from what the
@@ -36,8 +41,96 @@ final class TracesStore {
     /// rather than writing one here.
     let words: MonitorTracesCopy? = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())
 
-    init(client: any DaemonDataClient) {
+    /// The sample set drawn, in a debug build over sample data; nil over
+    /// the daemon. `sampleUnknown` is a `TRACE_COMMONS_SAMPLE` that named no
+    /// set, so the fallback is never silent.
+    let sample: String?
+    let sampleUnknown: Bool
+
+    init(client: any DaemonDataClient, sample: String? = nil, sampleUnknown: Bool = false) {
         self.client = client
+        self.sample = sample
+        self.sampleUnknown = sampleUnknown
+    }
+
+    // MARK: The core's words for a row
+
+    /// The core's words for an armed folder's disclosure, by the name the
+    /// daemon chose (`automatic_disclosure`). Empty for a folder that is not
+    /// armed, or a name the core does not know: nothing is said rather than
+    /// a guess at which wording is true.
+    func disclosureLines(_ disclosure: String?) -> [String] {
+        guard let disclosure else { return [] }
+        if let known = disclosureWords[disclosure] { return known }
+        let lines = AutomaticGrantCopy.decode(
+            fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: disclosure))?.lines ?? []
+        disclosureWords[disclosure] = lines
+        return lines
+    }
+
+    @ObservationIgnored private var disclosureWords: [String: [String]] = [:]
+
+    /// The eligibility and attestation sentences' fallbacks, from the core.
+    let inferenceCopy: PrivateInferenceCopy? = PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? "")
+
+    /// The shared eligibility table, as `AppModel` wires it.
+    static let eligibilityCalls = EligibilityCalls(
+        stateLine: { TCContributionEligibility.stateLine(state: $0) },
+        stateTone: { TCContributionEligibility.stateTone(state: $0) },
+        control: { TCContributionEligibility.control(state: $0) },
+        reasonLine: { TCContributionEligibility.reasonLine(reason: $0) },
+        withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) },
+        groupControl: { TCContributionEligibility.groupControl(pending: $0, contributable: $1) }
+    )
+
+    /// The shared attestation table, as `AppModel` wires it.
+    static let attestationCalls = AttestationCalls(
+        markLine: { TCAttestation.markLine(mark: $0) },
+        markTone: { TCAttestation.markTone(mark: $0) },
+        reasonLine: { TCAttestation.reasonLine(reason: $0) }
+    )
+
+    /// A queue entry's eligibility, as the shared table reads it; nil when
+    /// the daemon sent none (eligibility does not apply).
+    static func eligibility(_ entry: DaemonData.QueueEntry) -> ContributionEligibility? {
+        entry.eligibility.map { ContributionEligibility(state: $0, reason: entry.eligibilityReason) }
+    }
+
+    /// The core's sentence for a session that cannot be contributed as it
+    /// stands, with its reason; nil when it can, or eligibility does not
+    /// apply. A row says this so an ineligible session never looks like one
+    /// that can go.
+    func ineligibleLine(_ entry: DaemonData.QueueEntry) -> String? {
+        let eligibility = Self.eligibility(entry)
+        guard eligibility != nil, !EligibilitySurface.offersContribute(eligibility, calls: Self.eligibilityCalls),
+              let copy = inferenceCopy
+        else { return nil }
+        return EligibilitySurface.stateLine(eligibility, copy: copy, calls: Self.eligibilityCalls)
+    }
+
+    /// The inspector's eligibility value: the core's state sentence and its
+    /// reason. Nil when eligibility does not apply, so no row is drawn.
+    func eligibilityValue(_ entry: DaemonData.QueueEntry) -> String? {
+        let eligibility = Self.eligibility(entry)
+        guard let copy = inferenceCopy,
+              let state = EligibilitySurface.stateLine(eligibility, copy: copy, calls: Self.eligibilityCalls)
+        else { return nil }
+        return [state, EligibilitySurface.reasonLine(eligibility, calls: Self.eligibilityCalls)]
+            .compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// The inspector's attestation value: the core's sentence for the mark
+    /// and its reason. Every entry carries a mark, so this is nil only when
+    /// the copy would not decode.
+    func attestationValue(_ entry: DaemonData.QueueEntry) -> String? {
+        guard let copy = inferenceCopy else { return nil }
+        let mark = AttestationMark(
+            mark: entry.attestation ?? "",
+            reason: (entry.attestationReason?.isEmpty ?? true) ? nil : entry.attestationReason)
+        return [
+            AttestationSurface.markLine(mark, copy: copy, calls: Self.attestationCalls),
+            AttestationSurface.reasonLine(mark, calls: Self.attestationCalls),
+        ].compactMap { $0 }.joined(separator: " ")
     }
 
     /// The tools the core reads from their usual folder while unset, from
@@ -87,10 +180,10 @@ final class TracesStore {
             guard mine == generation else { return }
             tree = built
             phase = .loaded
-        } catch let error as DaemonDataError {
-            phase = .failed(error)
         } catch {
-            phase = .failed(.undecodable(method: "list_pending"))
+            // An older failure never overwrites a newer read either.
+            guard mine == generation else { return }
+            phase = .failed(error as? DaemonDataError ?? .undecodable(method: "list_pending"))
         }
     }
 
@@ -101,10 +194,11 @@ final class TracesStore {
         guard !writing.contains(kind.rawValue) else { return }
         writing.insert(kind.rawValue)
         defer { writing.remove(kind.rawValue) }
+        writeErrors[kind.rawValue] = nil
         do {
             _ = try await client.setSource(kind, choice)
         } catch {
-            phase = .failed(error as? DaemonDataError ?? .undecodable(method: "set_settings"))
+            refused(kind.rawValue, error, method: "set_settings")
             return
         }
         await load()
@@ -119,6 +213,7 @@ final class TracesStore {
         writing.insert(folder.id)
         defer { writing.remove(folder.id) }
         folderNotice = nil
+        writeErrors[folder.id] = nil
         do {
             let result = try await client.setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
             if mode == .ignore {
@@ -127,10 +222,21 @@ final class TracesStore {
             }
         } catch {
             // The picker redraws from the core's answer, so a refused write
-            // shows the folder as it still is; the error is kept.
-            phase = .failed(error as? DaemonDataError ?? .undecodable(method: "set_project_mode"))
+            // shows the folder as it still is; the error is kept beside it.
+            refused(folder.id, error, method: "set_project_mode")
             return
         }
         await load()
+    }
+
+    /// A refused write is said beside its row. A core that did not answer
+    /// at all is the whole tab's state, as a failed load is.
+    private func refused(_ id: String, _ error: any Error, method: String) {
+        let error = error as? DaemonDataError ?? .undecodable(method: method)
+        if case .unreachable = error {
+            phase = .failed(error)
+        } else {
+            writeErrors[id] = error
+        }
     }
 }

@@ -124,6 +124,14 @@ public enum TCCoreCopy {
         take(tc_monitor_traces_copy_json())
     }
 
+    /// `tc_automatic_grant_copy_json`: the words for the disclosure an armed
+    /// folder's `list_projects` row names (`automatic_disclosure`). Decoded
+    /// by `TCShellCore.AutomaticGrantCopy`. Nil for a name the core does
+    /// not know.
+    public static func automaticGrantCopyJSON(disclosure: String) -> String? {
+        take(disclosure.withCString { tc_automatic_grant_copy_json($0) })
+    }
+
     /// `tc_decisions_owed_text`: the Traces badge's text equivalent. Nil
     /// `decisionsOwed` is an unknown count, which the core never words as
     /// zero; the empty string is zero (no badge).

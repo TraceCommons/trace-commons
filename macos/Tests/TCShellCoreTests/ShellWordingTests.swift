@@ -90,6 +90,7 @@ final class ShellWordingTests: XCTestCase {
         "TCBridge/TCConsentCopy.swift",
         // K3 (#1173): the copy tables that used to be written here.
         "TCBridge/TCCoreCopy.swift",
+        "TCShellCore/AutomaticGrantCopy.swift",
         "TCShellCore/PrivacyScanCopy.swift",
         "TCShellCore/ProjectArmingCopy.swift",
         "TCShellCore/ProjectIgnoreCopy.swift",
