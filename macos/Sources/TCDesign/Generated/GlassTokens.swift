@@ -54,6 +54,21 @@ public enum GlassTokens {
         public static let popoverFill: GlassRGBA = GlassRGBA(0x22242A, alpha: 0.78)
         public static let menuFill: GlassRGBA = GlassRGBA(0x22242A, alpha: 0.72)
         public static let menuHover: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 0.85)
+        /// Menu-bar mode circle: ask me.
+        public static let menuModeAsk: GlassRGBA = GlassRGBA(0xF0A030, alpha: 1)
+        /// Menu-bar mode circle and Private AI on option: contribute automatically.
+        public static let menuModeArmed: GlassRGBA = GlassRGBA(0x34C759, alpha: 1)
+        /// Menu-bar mode circle: never; also the menu-bar badge.
+        public static let menuModeNever: GlassRGBA = GlassRGBA(0xFF453A, alpha: 1)
+        /// Menu-bar pill circle when paused or off.
+        public static let menuPillOff: GlassRGBA = GlassRGBA(0x5A5A5F, alpha: 1)
+        /// Graph and strip bars while watching is paused.
+        public static let menuBarsPaused: GlassRGBA = GlassRGBA(0x555555, alpha: 1)
+        /// The badge's cut-out edge against the menu bar.
+        public static let menuBadgeEdge: GlassRGBA = GlassRGBA(0x1E3222, alpha: 0.9)
+        public static let menuChipShared: GlassRGBA = GlassRGBA(0xC86BFA, alpha: 0.35)
+        public static let menuChipKept: GlassRGBA = GlassRGBA(0x3AA0FF, alpha: 0.35)
+        public static let menuNoProof: GlassRGBA = GlassRGBA(0xFF8A8A, alpha: 1)
         public static let menuSeparator: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.14)
         public static let nodeCardFill: GlassRGBA = GlassRGBA(0x14161C, alpha: 0.72)
         public static let scrim: GlassRGBA = GlassRGBA(0x000000, alpha: 0.4)
@@ -116,6 +131,15 @@ public enum GlassTokens {
             "popoverFill": popoverFill,
             "menuFill": menuFill,
             "menuHover": menuHover,
+            "menuModeAsk": menuModeAsk,
+            "menuModeArmed": menuModeArmed,
+            "menuModeNever": menuModeNever,
+            "menuPillOff": menuPillOff,
+            "menuBarsPaused": menuBarsPaused,
+            "menuBadgeEdge": menuBadgeEdge,
+            "menuChipShared": menuChipShared,
+            "menuChipKept": menuChipKept,
+            "menuNoProof": menuNoProof,
             "menuSeparator": menuSeparator,
             "nodeCardFill": nodeCardFill,
             "scrim": scrim,
@@ -212,6 +236,8 @@ public enum GlassTokens {
         public static let tile: CGFloat = 6
         public static let checkbox: CGFloat = 5
         public static let pill: CGFloat = 999
+        public static let menuPanel: CGFloat = 18
+        public static let menuStatePill: CGFloat = 22
 
         /// Every radius token by its JSON name.
         public static let all: [String: CGFloat] = [
@@ -222,6 +248,8 @@ public enum GlassTokens {
             "tile": tile,
             "checkbox": checkbox,
             "pill": pill,
+            "menuPanel": menuPanel,
+            "menuStatePill": menuStatePill,
         ]
     }
 
@@ -354,6 +382,8 @@ public enum GlassTokens {
         public static let fast: Double = 0.15
         public static let standard: Double = 0.22
         public static let slow: Double = 0.3
+        public static let reveal: Double = 0.18
+        public static let slide: Double = 0.25
         public static let easeX1: Double = 0.2
         public static let easeY1: Double = 0.8
         public static let easeX2: Double = 0.2
@@ -364,6 +394,8 @@ public enum GlassTokens {
             "fast": fast,
             "standard": standard,
             "slow": slow,
+            "reveal": reveal,
+            "slide": slide,
             "easeX1": easeX1,
             "easeY1": easeY1,
             "easeX2": easeX2,

@@ -172,13 +172,14 @@ private struct GlassMenuRowBody: View {
     var body: some View {
         configuration.label
             .glassType(GlassTokens.TypeScale.body)
-            .foregroundStyle(isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary)
+            .foregroundStyle(hovering && isEnabled ? Color.white : (isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, GlassTokens.Space.s5)
+            .padding(.horizontal, GlassTokens.Space.s4)
             .padding(.vertical, GlassTokens.Space.s2)
+            // The macOS menu selection: blue, with white text.
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(hovering && isEnabled ? GlassTokens.Color.menuHover.color : .clear)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering && isEnabled ? GlassTokens.Color.blue.color : .clear)
                     .glassPressedFill()
             )
             .environment(\.glassPressed, configuration.isPressed && isEnabled)
