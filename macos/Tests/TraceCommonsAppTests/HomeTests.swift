@@ -92,4 +92,23 @@ final class HomeTests: XCTestCase {
             }
         }
     }
+
+    /// The stack-wide rule on Home: a core that does not answer reads as
+    /// core down, never as watching, and a status with no paused field reads
+    /// as unknown.
+    func test_aCoreThatIsDownIsNeverDrawnAsWatching() async {
+        let down = await store(.coreDown)
+        let state = ScreenState.resolve(
+            failure: down.failures["status"], loaded: down.status != nil || down.failures["status"] != nil,
+            paused: down.status?.paused, known: down.status != nil)
+        XCTAssertEqual(state, .coreDown)
+        XCTAssertFalse(state.isHealthy)
+    }
+
+    /// Home's words come from the core's table, not from Swift.
+    func test_homeWordsComeFromTheCore() {
+        XCTAssertNotNil(MonitorWords.table)
+        XCTAssertEqual(MonitorWords.history, MonitorWords.table?.history)
+        XCTAssertFalse(MonitorWords.unrecorded.isEmpty)
+    }
 }

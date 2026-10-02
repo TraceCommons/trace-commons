@@ -28,7 +28,7 @@ struct MissionsPage: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     if let failure = store.failures["mission_catalogue"] {
-                        GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
+                        GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                     }
                     if let catalogue = store.missions {
                         if let condition = MissionFormat.condition(catalogue) {
@@ -120,7 +120,8 @@ enum MissionFormat {
     }
 }
 
+/// Missions' word, from the core's table (`MonitorWords.table`).
 extension MonitorWords {
-    static let missions = "Missions"
+    static var missions: String { table?.missions ?? "" }
 }
 #endif

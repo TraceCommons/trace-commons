@@ -5272,3 +5272,13 @@ fn the_withdrawal_confirmation_prompt_crosses_the_abi() {
     assert_eq!(prompt, confirmation_prompt_unknown());
     assert!(prompt.contains("cannot be recalled"));
 }
+
+#[test]
+fn the_monitor_screens_copy_crosses_the_abi() {
+    use trace_commons_contributor::preview_copy::monitor_screens_copy;
+    use trace_commons_contributor_ffi::tc_monitor_screens_copy_json;
+    assert_eq!(
+        json_owned(tc_monitor_screens_copy_json()),
+        serde_json::to_value(monitor_screens_copy()).unwrap()
+    );
+}
