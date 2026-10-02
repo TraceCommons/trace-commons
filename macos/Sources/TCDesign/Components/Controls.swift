@@ -263,7 +263,7 @@ public struct GlassExpander: View {
 
     public var body: some View {
         Button {
-            withAnimation(.easeOut(duration: GlassTokens.Motion.fast)) { isOpen.toggle() }
+            withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { isOpen.toggle() }
         } label: {
             HStack(spacing: GlassTokens.Space.s4) {
                 Text("›")
@@ -382,7 +382,7 @@ public struct GlassToggleStyle: ToggleStyle {
         return HStack(spacing: GlassTokens.Space.s6) {
             configuration.label
             Button {
-                withAnimation(.easeOut(duration: GlassTokens.Motion.fast)) { configuration.isOn.toggle() }
+                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { configuration.isOn.toggle() }
             } label: {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
                     Capsule()

@@ -136,6 +136,13 @@ private struct GlassWindowConfigurator: NSViewRepresentable {
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
         window.appearance = NSAppearance(named: .darkAqua)
+        // An empty unified toolbar makes the title bar taller and brings the
+        // real traffic lights in from the window's corner, so with the 10pt
+        // window padding they sit inside the main pane, not on its rim.
+        if window.toolbar == nil {
+            window.toolbar = NSToolbar(identifier: "glass-window")
+        }
+        window.toolbarStyle = .unified
     }
 
     private final class WindowProbe: NSView {
