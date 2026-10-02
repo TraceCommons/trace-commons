@@ -224,6 +224,8 @@ public enum GlassTokens {
         public static let s9: CGFloat = 20
         public static let s10: CGFloat = 24
         public static let paneGap: CGFloat = 10
+        public static let windowControlsInset: CGFloat = 30
+        public static let windowControlsWidth: CGFloat = 76
         public static let panePadding: CGFloat = 12
         public static let cardPaddingVertical: CGFloat = 12
         public static let cardPaddingHorizontal: CGFloat = 14
@@ -243,6 +245,8 @@ public enum GlassTokens {
             "s9": s9,
             "s10": s10,
             "paneGap": paneGap,
+            "windowControlsInset": windowControlsInset,
+            "windowControlsWidth": windowControlsWidth,
             "panePadding": panePadding,
             "cardPaddingVertical": cardPaddingVertical,
             "cardPaddingHorizontal": cardPaddingHorizontal,

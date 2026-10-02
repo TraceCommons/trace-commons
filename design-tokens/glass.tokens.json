@@ -172,6 +172,8 @@
     "s9": 20,
     "s10": 24,
     "paneGap": 10,
+    "windowControlsInset": 30,
+    "windowControlsWidth": 76,
     "panePadding": 12,
     "cardPaddingVertical": 12,
     "cardPaddingHorizontal": 14,
