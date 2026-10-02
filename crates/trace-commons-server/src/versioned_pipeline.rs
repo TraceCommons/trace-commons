@@ -2210,21 +2210,22 @@ impl PgPipelineStore {
     /// Review ends it under `submission_inoperable`, as `claim_review` and
     /// `record_review_assessment` would (Zaki review 1, round 2, finding 9).
     /// Locks only the run rows it releases, skipping any another session
-    /// holds. Returns how many it released.
+    /// holds, at most `limit` of them. Returns how many it released.
     pub async fn release_inoperable_parked_runs(
         &self,
         tenant_id: &str,
+        limit: usize,
     ) -> Result<u64, DatabaseError> {
+        let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // At most `limit` per call, in run id order (Zaki review 3, Z3-L4), as
+        // a materialized CTE: an `IN (SELECT ... LIMIT ...)` subquery may be
+        // evaluated more than once.
         let released = tx
             .execute(
                 concat!(
-                    "UPDATE pipeline_runs
-                    SET state = 'pending', next_attempt_at = NOW(), last_error_label = NULL,
-                        updated_at = NOW()
-                  WHERE tenant_id = $1
-                    AND run_id IN (
+                    "WITH parked AS MATERIALIZED (
                         SELECT p.run_id FROM pipeline_runs p
                          WHERE p.tenant_id = $1 AND p.state = 'awaiting_review'
                            AND NOT EXISTS (
@@ -2236,11 +2237,17 @@ impl PgPipelineStore {
                     "
                            )
                          ORDER BY p.run_id
+                         LIMIT $2
                          FOR UPDATE OF p SKIP LOCKED
                     )
-                    AND state = 'awaiting_review'"
+                    UPDATE pipeline_runs r
+                       SET state = 'pending', next_attempt_at = NOW(), last_error_label = NULL,
+                           updated_at = NOW()
+                      FROM parked
+                     WHERE r.tenant_id = $1 AND r.run_id = parked.run_id
+                       AND r.state = 'awaiting_review'"
                 ),
-                &[&tenant_id],
+                &[&tenant_id, &limit],
             )
             .await?;
         tx.commit().await?;
@@ -6387,8 +6394,15 @@ impl PipelineService {
     /// Releases `tenant_id`'s parked runs whose submission is no longer
     /// operable (`PgPipelineStore::release_inoperable_parked_runs`); the
     /// worker runs it on its invalidation step.
-    pub async fn release_inoperable_parked_runs(&self, tenant_id: &str) -> anyhow::Result<u64> {
-        Ok(self.store.release_inoperable_parked_runs(tenant_id).await?)
+    pub async fn release_inoperable_parked_runs(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        Ok(self
+            .store
+            .release_inoperable_parked_runs(tenant_id, limit)
+            .await?)
     }
 
     /// Processes up to `limit` of `tenant_id`'s due index invalidations and

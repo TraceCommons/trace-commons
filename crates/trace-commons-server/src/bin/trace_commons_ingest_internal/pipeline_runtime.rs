@@ -360,6 +360,10 @@ const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
 /// its runs. A step that used the whole limit runs again on the next pass
 /// (`PipelineFollowUpCadence::run_again`).
 const PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT: usize = 32;
+/// The most parked runs of inoperable submissions one invalidation step
+/// releases for a tenant (Zaki review 3, Z3-L4); the next step takes the
+/// rest.
+const PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT: usize = 32;
 
 /// How many of one tenant's complete runs the worker pays out each time it
 /// runs the tenant's payout step (`PipelineService::process_payouts`), after
@@ -621,7 +625,13 @@ pub(crate) async fn drain_pipeline_tenant(
         // A run parked for review whose submission expired, was purged, or
         // was revoked or withdrawn without the pipeline's follow-up is
         // reached by nothing else (Zaki review 1, round 2, finding 9).
-        if let Err(error) = service.release_inoperable_parked_runs(&tenant_id).await {
+        if let Err(error) = service
+            .release_inoperable_parked_runs(
+                &tenant_id,
+                PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT,
+            )
+            .await
+        {
             tracing::warn!(
                 error_class = "pipeline_worker_parked_run_release_failed",
                 tenant_storage_ref = %tenant_storage_ref(&tenant_id),

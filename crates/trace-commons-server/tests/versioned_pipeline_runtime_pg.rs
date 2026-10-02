@@ -22387,6 +22387,60 @@ async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
     );
 }
 
+/// Zaki review 3, Z3-L4: one release of parked runs of inoperable
+/// submissions takes at most its limit, in run id order; the next takes the
+/// rest.
+#[tokio::test]
+async fn releasing_parked_runs_is_bounded_per_call() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-parked-bounded-{}", uuid::Uuid::new_v4());
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    for _ in 0..3 {
+        let parked = quarantined_and_parked(&service, &tenant).await;
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &parked.submission_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    drop(client);
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 2)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 2)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 2)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 /// Finding 9: a run parked in `awaiting_review` whose submission stops being
 /// operable while nobody claims or assesses it -- it expires, `main`'s
 /// retention purges it, `main` revokes it, or a withdrawal lands without
@@ -22442,7 +22496,7 @@ async fn the_worker_ends_a_parked_run_whose_submission_stopped_being_operable() 
 
         assert_eq!(
             service
-                .release_inoperable_parked_runs(&tenant)
+                .release_inoperable_parked_runs(&tenant, 32)
                 .await
                 .unwrap(),
             1,
