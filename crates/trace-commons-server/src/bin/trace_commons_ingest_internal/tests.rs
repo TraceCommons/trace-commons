@@ -270,6 +270,23 @@ fn test_state(root: PathBuf) -> Arc<AppState> {
     test_state_with_options(root, None, None, false, false, false, false)
 }
 
+/// `postgres_backend_for_ingest_test`, for a test that must not pass by
+/// skipping (poldsam P-11): with no database URL set it skips, as every
+/// database test does, and once one is set a database that cannot be
+/// reached or migrated fails the test instead.
+async fn required_postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
+    let configured = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .is_ok();
+    let backend = postgres_backend_for_ingest_test().await;
+    assert!(
+        backend.is_some() || !configured,
+        "a test database URL is set, but the database is unavailable or its \
+         migrations failed: this test must not skip"
+    );
+    backend
+}
+
 async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -84694,7 +84711,7 @@ async fn near_outbox_row_text(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn near_credit_outbox_workers_never_touch_a_pipeline_payout_row() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
+    let Some(backend) = required_postgres_backend_for_ingest_test().await else {
         return;
     };
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
