@@ -22,16 +22,64 @@ public protocol DaemonDataClient: Sendable {
 
     /// `status`.
     func status() async throws -> DaemonData.Status
-    /// `list_pending`, optionally narrowed to one project (the past-session picker).
+    /// `list_pending`, optionally narrowed to one project (the past-session
+    /// picker). An id the daemon does not know is refused with
+    /// `.daemon(code: "bad_params", message: "project-id-unrecognized")`,
+    /// never answered with `[]`, so a stale id cannot read as "nothing
+    /// waiting".
     func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry]
     /// `list_kept`.
     func listKept() async throws -> [DaemonData.QueueEntry]
-    /// `preview`: the summary only, with `title` and `unsure_spans`.
+
+    // MARK: Previews
+    //
+    // THE RULE: a list of cards gets its previews from the scheduler, never
+    // from `preview`. Each `preview` call runs a full read-parse-redact pass
+    // on the caller's time with nothing bounding how many run at once, so a
+    // 40-card queue calling it per card starts 40 passes. The scheduler
+    // (`preview_request` / `preview_visible` / `preview_cancel`) bounds the
+    // work, builds what is on screen first, and answers each card through
+    // the `previewReady` event.
+    //
+    // - Queue and folder cards: `requestPreview` once per card, then wait
+    //   for `previewReady`; `setVisiblePreviews` when a scroll settles;
+    //   `cancelPreview` for a card that leaves the queue.
+    // - The review sheet, for the ONE session the contributor opened:
+    //   `preview`.
+
+    /// `preview_request`: asks the scheduler for one card's preview and
+    /// returns at once. A `ready`, `too_large` or `failed` answer came from
+    /// cache and no event follows; `queued` or `running` means a
+    /// `previewReady` event will carry the outcome.
+    func requestPreview(entryId: String) async throws -> DaemonData.PreviewRequestOutcome
+    /// `preview_visible`: replaces the set of entries on screen, which
+    /// decides build ORDER, never membership. Returns how many ids the
+    /// daemon now holds as visible.
+    func setVisiblePreviews(entryIds: [String]) async throws -> Int
+    /// `preview_cancel`: drops a scheduled preview. `dropped == false` is a
+    /// defined no-op, not an error.
+    func cancelPreview(entryId: String) async throws -> DaemonData.PreviewCancelResult
+    /// `preview`: the summary for the review sheet's one opened session,
+    /// with `title` and `unsure_spans`. Blocking and unbounded on the
+    /// daemon: NEVER call it per card (see the rule above).
     func preview(entryId: String) async throws -> DaemonData.PreviewSummary
-    /// `preview_unsure_spans` for the body `preview_body` returned.
+    /// `preview_unsure_spans` for the body `preview_body` returned. Served
+    /// by `tc_call` like every other method here: `tc_call` answers through
+    /// the async dispatcher (`ipc::handle_local`), which serves it.
     func previewUnsureSpans(entryId: String, bodyDigest: String) async throws -> DaemonData.UnsureSpans
+
+    // MARK: Queue actions
+
     /// `approve` for one entry.
-    func approve(entryId: String) async throws -> DaemonData.ApproveResult
+    ///
+    /// Returns the daemon's whole reply (`ApproveResponse`: `approved`,
+    /// `flagged`, `redactions`, `skipped`, the hold) when the entry was
+    /// approved, so the screen can say "scrubbing removed N, M flagged".
+    /// When the daemon answers OK but approved nothing -- the entry is
+    /// `not-pending`, `not-enrolled`, too large, `witness-review-stale`, ...
+    /// -- this THROWS `DaemonDataError.notApproved(reasonLabel:)` with the
+    /// `skipped` row's label, so a skip can never be drawn as success.
+    func approve(entryId: String) async throws -> ApproveResponse
     /// `keep`: Keep on this Mac.
     func keep(entryId: String) async throws -> DaemonData.KeepResult
     /// `undo_keep`.
@@ -112,9 +160,13 @@ public enum DaemonDataEvent: Equatable, Sendable {
     case snapshot(pending: [DaemonData.QueueEntry], status: DaemonData.Status?)
     case queueChanged
     case statusChanged
-    case digestDue(pending: Int?, text: String?)
-    /// A scheduled preview finished; refetch it with `preview(entryId:)`.
-    case previewReady(entryId: String)
+    /// `digest_due`, with the contribution counts a notification is built
+    /// from.
+    case digestDue(DaemonData.DigestDue)
+    /// A scheduled preview reached a terminal state. Read `state`: only
+    /// `.ready` carries a summary; `.tooLarge` and `.failed` are answers
+    /// too, and must be drawn as what they are, never as ready.
+    case previewReady(DaemonData.PreviewRequestOutcome)
     /// Fell behind: refetch `status` and `listPending`.
     case resyncRequired
     /// `inference_call_added`, so the map pulses per real call.
@@ -135,21 +187,28 @@ public enum DaemonDataEventParser {
         let decoder = DaemonDataDecoding.decoder()
         switch name {
         case "snapshot":
-            struct Snapshot: Decodable {
-                let pending: [DaemonData.QueueEntry]
-                let status: DaemonData.Status?
+            // Decoded in two halves, as `DaemonEventParser` does. A queue
+            // this build cannot read is `.queueChanged` (refetch the list),
+            // never `.resyncRequired`: a resubscribe would get the same
+            // snapshot back and loop. A status it cannot read is unknown.
+            struct Pending: Decodable { let pending: [DaemonData.QueueEntry] }
+            struct StatusHalf: Decodable { let status: DaemonData.Status? }
+            guard let pending = try? decoder.decode(Pending.self, from: payloadData) else {
+                return .queueChanged
             }
-            guard let snap = try? decoder.decode(Snapshot.self, from: payloadData) else {
-                return .resyncRequired
-            }
-            return .snapshot(pending: snap.pending, status: snap.status)
+            let status = (try? decoder.decode(StatusHalf.self, from: payloadData))?.status
+            return .snapshot(pending: pending.pending, status: status)
         case "queue_changed": return .queueChanged
         case "status_changed": return .statusChanged
         case "digest_due":
-            return .digestDue(pending: payload["pending"] as? Int, text: payload["text"] as? String)
+            guard let digest = try? decoder.decode(DaemonData.DigestDue.self, from: payloadData) else {
+                return .unknown(name)
+            }
+            return .digestDue(digest)
         case "preview_ready":
-            guard let id = payload["entry_id"] as? String else { return .unknown(name) }
-            return .previewReady(entryId: id)
+            guard let outcome = try? decoder.decode(DaemonData.PreviewRequestOutcome.self, from: payloadData)
+            else { return .unknown(name) }
+            return .previewReady(outcome)
         case "resync_required", "lagged": return .resyncRequired
         case "inference_call_added":
             guard let call = try? decoder.decode(DaemonData.InferenceCall.self, from: payloadData) else {

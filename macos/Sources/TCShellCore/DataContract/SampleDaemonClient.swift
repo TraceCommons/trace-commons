@@ -53,11 +53,29 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     private func serve<T: Decodable>(_ method: String, as type: T.Type) throws -> T {
         guard let json = json(for: method) else { throw DaemonDataError.unreachable }
+        return try decode(json, method: method, as: T.self)
+    }
+
+    private func decode<T: Decodable>(_ json: String, method: String, as type: T.Type) throws -> T {
         do {
             return try DaemonDataDecoding.decoder().decode(T.self, from: Data(json.utf8))
         } catch {
-            throw DaemonDataError.undecodable(method: method)
+            throw DaemonDataError.undecodable(method: method, from: error)
         }
+    }
+
+    /// Every pending and kept entry in this set.
+    private func allEntries() throws -> [DaemonData.QueueEntry] {
+        try serve("list_pending", as: DaemonData.PendingList.self).pending
+            + serve("list_kept", as: DaemonData.KeptList.self).kept
+    }
+
+    /// `preview` and a ready `preview_request` share this summary.
+    private func summary(for entryId: String, method: String) throws -> DaemonData.PreviewSummary {
+        guard let entry = try allEntries().first(where: { $0.entryId == entryId }) else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "unknown-entry-id")
+        }
+        return try decode(SampleDaemonData.previewSummary(for: entry), method: method, as: DaemonData.PreviewSummary.self)
     }
 
     // MARK: Status and the queue
@@ -69,6 +87,13 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     public func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry] {
         let all = try serve("list_pending", as: DaemonData.PendingList.self).pending
         guard let projectId else { return all }
+        // The daemon knows a project from its policy (the `list_projects`
+        // rows) and from the queue; anything else it refuses, as here.
+        let known = Set(try serve("list_projects", as: DaemonData.ProjectList.self).projects.map(\.projectId))
+            .union(try allEntries().map(\.projectId))
+        guard known.contains(projectId) else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "project-id-unrecognized")
+        }
         return all.filter { $0.projectId == projectId }
     }
 
@@ -76,28 +101,47 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("list_kept", as: DaemonData.KeptList.self).kept
     }
 
+    // MARK: Previews
+
+    /// Every sample preview is already built: `ready`, from cache, so no
+    /// `previewReady` event follows (as the daemon does for a cached one).
+    public func requestPreview(entryId: String) async throws -> DaemonData.PreviewRequestOutcome {
+        PreviewRequestResult(entryID: entryId, state: .ready, summary: try summary(for: entryId, method: "preview_request"))
+    }
+
+    public func setVisiblePreviews(entryIds: [String]) async throws -> Int {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        return entryIds.count
+    }
+
+    /// Nothing is ever scheduled, so there is never anything to drop.
+    public func cancelPreview(entryId: String) async throws -> DaemonData.PreviewCancelResult {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        return DaemonData.PreviewCancelResult(entryId: entryId, dropped: false)
+    }
+
     public func preview(entryId: String) async throws -> DaemonData.PreviewSummary {
-        let pending = try serve("list_pending", as: DaemonData.PendingList.self).pending
-            + serve("list_kept", as: DaemonData.KeptList.self).kept
-        guard let entry = pending.first(where: { $0.entryId == entryId }) else {
-            throw DaemonDataError.daemon(code: "bad_params", message: "unknown-entry-id")
-        }
-        let json = SampleDaemonData.previewSummary(for: entry)
-        do {
-            return try DaemonDataDecoding.decoder().decode(DaemonData.PreviewSummary.self, from: Data(json.utf8))
-        } catch {
-            throw DaemonDataError.undecodable(method: "preview")
-        }
+        try summary(for: entryId, method: "preview")
     }
 
     public func previewUnsureSpans(entryId: String, bodyDigest: String) async throws -> DaemonData.UnsureSpans {
         guard set != .coreDown else { throw DaemonDataError.unreachable }
         let json = SampleDaemonData.unsureSpans(entryId: entryId, bodyDigest: bodyDigest)
-        return try DaemonDataDecoding.decoder().decode(DaemonData.UnsureSpans.self, from: Data(json.utf8))
+        return try decode(json, method: "preview_unsure_spans", as: DaemonData.UnsureSpans.self)
     }
 
-    public func approve(entryId: String) async throws -> DaemonData.ApproveResult {
-        try serve("approve", as: DaemonData.ApproveResult.self)
+    // MARK: Queue actions
+
+    /// Approves a pending entry of this set. Any other id answers the way
+    /// the daemon answers an entry it cannot act on: OK, `approved: 0`, and
+    /// a `not-pending` skip, which `approve(entryId:)` throws as
+    /// `notApproved`.
+    public func approve(entryId: String) async throws -> ApproveResponse {
+        let pending = try serve("list_pending", as: DaemonData.PendingList.self).pending
+        let json = pending.contains(where: { $0.entryId == entryId })
+            ? SampleDaemonData.approved
+            : SampleDaemonData.approveSkipped(entryId: entryId, reason: "not-pending")
+        return try decode(json, method: "approve", as: ApproveResponse.self).requireApproved(entryId: entryId)
     }
 
     public func keep(entryId: String) async throws -> DaemonData.KeepResult {
