@@ -46,14 +46,12 @@ public enum GlassStatus: Sendable, Equatable {
 
 private struct GlassTypeModifier: ViewModifier {
     let style: GlassTypeStyle
-    /// Read so the modifier re-runs when the system text size changes:
-    /// leading and tracking are resolved against the drawn size, which
-    /// AppKit has already scaled, so the value itself is not applied again.
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    // Leading and tracking are resolved against the size AppKit draws the
+    // text style at. SwiftUI's `dynamicTypeSize` does not scale macOS text
+    // styles, so it is not read here.
     func body(content: Content) -> some View {
-        _ = dynamicTypeSize
-        return content
+        content
             .font(style.font)
             .tracking(style.resolvedTracking)
             .lineSpacing(style.lineSpacing)
@@ -254,24 +252,48 @@ private struct GlassSurfaceModifier: ViewModifier {
         let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
         // Reduce Transparency is the system's to apply: Liquid Glass frosts
         // and the HUD blur turns opaque by themselves (R14).
-        let native = floating ?? (layer == .floating)
-        if native {
+        switch GlassSurfaceBacking.choose(floating: floating ?? (layer == .floating)) {
+        case .liquidGlass:
             if #available(macOS 26.0, *) {
+                // The interactive glass gives the press its own response, so
+                // no tier fill is drawn to darken here.
                 content
                     .clipShape(shape)
                     .glassEffect(tier.floatingGlass, in: shape)
                     .contentShape(shape)
             } else {
-                // Before 26: the painted tier over a real blur of what it
-                // floats on, so a popover or node card reads as glass and
-                // not as a flat translucent fill.
-                content
-                    .glassTier(tier, radius: radius)
-                    .background { GlassFloatingBlur(cornerRadius: radius ?? tier.radius) }
+                content.glassTier(tier, radius: radius)
             }
-        } else {
+        case .blur:
+            // Before 26: the painted tier over a real blur of what it
+            // floats on, so a popover or node card reads as glass and
+            // not as a flat translucent fill.
+            content
+                .glassTier(tier, radius: radius)
+                .background { GlassFloatingBlur(cornerRadius: radius ?? tier.radius) }
+        case .painted:
             content.glassTier(tier, radius: radius)
         }
+    }
+}
+
+/// What a surface is drawn over.
+enum GlassSurfaceBacking: Equatable {
+    /// Liquid Glass (macOS 26, floating).
+    case liquidGlass
+    /// The painted tier over a within-window blur (before 26, floating).
+    case blur
+    /// The painted tier alone, inside a pane that is its backing.
+    case painted
+
+    /// What a surface floats on. Reduce Transparency does not change it:
+    /// under it Liquid Glass turns frostier and `NSVisualEffectView` draws
+    /// opaque by itself, so floating text never shows the map through
+    /// (Apple's Liquid Glass guidance; R14).
+    static func choose(floating: Bool) -> GlassSurfaceBacking {
+        guard floating else { return .painted }
+        if #available(macOS 26.0, *) { return .liquidGlass }
+        return .blur
     }
 }
 

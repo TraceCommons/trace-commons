@@ -164,15 +164,24 @@ public struct GlassToolbarButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .glassGlyph(13)
-                .foregroundStyle(pressed == false ? GlassColor.textTertiary : GlassColor.textPrimary)
-                .glassPressedFill()
+                .foregroundStyle(Self.glyph(pressed: pressed).color)
                 .frame(width: 28, height: 24)
+                // A glyph has no fill: the press darkens a wash behind it,
+                // never the glyph, which keeps its contrast.
+                .glassPressedWash(Capsule())
                 .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
         .accessibilityLabel(label)
         .accessibilityAddTraits(pressed == true ? .isSelected : [])
         .help(label)
+    }
+
+    /// The glyph's ink. Dimmed (its panel hidden) is `statusOff`, a glyph
+    /// colour that clears 3:1 on the control fill; the literal grey it
+    /// replaced was about 2.8:1.
+    static func glyph(pressed: Bool?) -> GlassRGBA {
+        pressed == false ? GlassTokens.Color.statusOff : GlassTokens.Color.textPrimary
     }
 }
 
@@ -431,20 +440,16 @@ public struct GlassToggleStyle: ToggleStyle {
 
 /// The 15pt rounded checkbox: purple gradient and a white check when on, a
 /// dark well when off. Use as a `ToggleStyle`.
+///
+/// A group checkbox is a native `Toggle(sources:isOn:)`: the style reads its
+/// mixed state from `configuration.isMixed`, so callers pass no flag and no
+/// wording, and VoiceOver says the system's own "mixed".
 public struct GlassCheckboxStyle: ToggleStyle {
-    /// A group checkbox whose children differ.
-    private let mixed: Bool
-    /// What VoiceOver says for the mixed state, from the core's copy. A
-    /// native toggle has no mixed value of its own.
-    private let mixedValue: String?
-
-    public init(mixed: Bool = false, mixedValue: String? = nil) {
-        self.mixed = mixed
-        self.mixedValue = mixedValue
-    }
+    public init() {}
 
     public func makeBody(configuration: Configuration) -> some View {
-        Button {
+        let mixed = configuration.isMixed
+        return Button {
             configuration.isOn.toggle()
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
@@ -458,9 +463,21 @@ public struct GlassCheckboxStyle: ToggleStyle {
         }
         .buttonStyle(GlassPressStyle())
         .accessibilityRepresentation {
-            Toggle(isOn: configuration.$isOn) { configuration.label }
-                .accessibilityValue(mixed ? (mixedValue ?? "") : "")
+            // A native toggle, so the system states the value -- checked,
+            // unchecked or mixed -- in the person's language. A mixed box is
+            // represented by two sources that disagree; both write through to
+            // the caller's binding, which sets every child.
+            Toggle(sources: Self.sources(configuration.$isOn, mixed: mixed), isOn: \.self) {
+                configuration.label
+            }
         }
+    }
+
+    /// The representation's sources: the caller's binding alone, or with its
+    /// negation beside it when the group is mixed.
+    static func sources(_ isOn: Binding<Bool>, mixed: Bool) -> [Binding<Bool>] {
+        guard mixed else { return [isOn] }
+        return [isOn, Binding(get: { !isOn.wrappedValue }, set: { isOn.wrappedValue = $0 })]
     }
 }
 

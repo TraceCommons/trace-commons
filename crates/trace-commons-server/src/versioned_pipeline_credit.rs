@@ -15,8 +15,35 @@ use trace_commons_gate_api::{
 };
 use uuid::Uuid;
 
+use crate::near_credit::{
+    NearCreditReceipt, NearCreditReceiptCall, trace_credit_settlement_attestation_hash,
+    trace_credit_settlement_issuer_signature_hash,
+};
+use crate::trace_corpus_storage::TraceCreditSettlementNearStatus;
+
 pub const PIPELINE_SETTLEMENT_POLICY_VERSION: &str = "pipeline-internal-v1";
 pub const PIPELINE_CREDIT_REASON: &str = "pipeline_score";
+/// The ledger `actor_role` of a minimal-family (`PipelineScore`) Trace
+/// Credit event, whose event type is `accepted`.
+pub const PIPELINE_CREDIT_ACTOR_ROLE: &str = "pipeline_worker";
+/// Ruling T15-1: the ledger `actor_role` of a compatibility `NoveltyUtility`
+/// event -- the role `main`'s gate path records for the same event, its
+/// caller's (`vector_worker`). `main`'s database credit readers parse the
+/// role of every event type they map to a legacy event and refuse the whole
+/// read on one that is not a token role, so `pipeline_worker` on this event
+/// type would fail every credit, status, and withdrawal read of the tenant.
+pub const PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE: &str = "vector_worker";
+
+/// Ruling T15-2: the ledger `reason` of a compatibility `NoveltyUtility`
+/// event, in `main`'s shape `novelty_utility:<version>`, with the
+/// compatibility Score rule as the version where `main` has its gate policy
+/// version.
+pub fn pipeline_novelty_utility_reason() -> String {
+    format!(
+        "novelty_utility:{}",
+        crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_RULE
+    )
+}
 pub const PIPELINE_TEST_CREDIT_CAP_MICROCREDITS: u64 = 10_000_000;
 
 #[derive(Default)]
@@ -156,6 +183,200 @@ impl SettlementAdapter for RecordingSettlementAdapter {
     }
 }
 
+/// One logical NEAR request a `RecordingNearAdapter` received: a repeated
+/// idempotency key is the same request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearLogicalRequest {
+    pub idempotency_key: String,
+    pub method_name: String,
+}
+
+/// A test NEAR adapter with no network effect. It records each idempotency
+/// key once, answers a repeated key with the same result, and refuses a
+/// repeated key with a different method. A confirmation exists only once a
+/// test records one (`record_confirmation`). `fail_next` makes the next
+/// submit fail. It presents no credential unless built `authenticated`.
+#[derive(Debug, Default)]
+pub struct RecordingNearAdapter {
+    requests: Mutex<Vec<NearLogicalRequest>>,
+    confirmations: Mutex<BTreeMap<String, NearConfirmationEvidence>>,
+    fail_next: AtomicBool,
+    authenticated: bool,
+}
+
+/// Hash-only evidence that a submitted NEAR call was confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearConfirmationEvidence {
+    pub transaction_hash_hash: String,
+    pub receipt_hash: String,
+}
+
+/// The NEAR payout rail for settled Trace Credit (P3-D11). Not a gate
+/// contract (Ruling T10-1): it stays in the server crate, as `main`'s other
+/// NEAR traits do, and the pipeline holds it only as
+/// `Arc<dyn NearPayoutAdapter>`.
+///
+/// `submit` must be idempotent on `call.idempotency_key`: a repeated call
+/// with the same key is the same logical request, never a second
+/// transaction. The payout records a submit in the outbox after `submit`
+/// returns, so a crash between the two repeats the call on the next pass.
+///
+/// `authenticated` says whether its calls present a credential to the NEAR
+/// submitter and confirmer, as `main`'s HTTP adapters do with a bearer
+/// token. Under `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, an enabled
+/// payout on an adapter that does not is refused at build, as `main` refuses
+/// to start its own adapters without their tokens (Zaki review 1, round 2,
+/// finding 2).
+#[async_trait]
+pub trait NearPayoutAdapter: Send + Sync {
+    /// The one answer to whether this adapter may pay out for a routed or
+    /// drained tenant: `false` by default, and readiness fails closed on it.
+    fn production_qualified(&self) -> bool {
+        false
+    }
+    fn authenticated(&self) -> bool {
+        false
+    }
+    async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String>;
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence>;
+}
+
+/// The payout adapter `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=dry_run` pays
+/// through in place of the injected one, as `main`'s outbox worker does in
+/// that mode with its in-process submitter and confirmer: the full outbox
+/// state machine runs with no network and no funds. `submit` validates the
+/// call and answers a synthetic transaction hash derived from its
+/// idempotency key alone, so a repeated key gets the same hash; every
+/// submitted call is confirmed, with hash-only evidence derived from the
+/// same key (Zaki review 1, round 2, finding 2).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DryRunNearPayoutAdapter;
+
+impl DryRunNearPayoutAdapter {
+    /// The synthetic NEAR transaction hash for `idempotency_key`: base58 of
+    /// its SHA-256, the shape `main`'s dry-run submitter answers.
+    pub fn transaction_hash(idempotency_key: &str) -> String {
+        bs58::encode(Sha256::digest(idempotency_key.as_bytes())).into_string()
+    }
+}
+
+#[async_trait]
+impl NearPayoutAdapter for DryRunNearPayoutAdapter {
+    async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String> {
+        call.validate()?;
+        Ok(Self::transaction_hash(&call.idempotency_key))
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        let transaction_hash = Self::transaction_hash(idempotency_key);
+        Some(NearConfirmationEvidence {
+            transaction_hash_hash: format!(
+                "sha256:{:x}",
+                Sha256::digest(transaction_hash.as_bytes())
+            ),
+            receipt_hash: format!(
+                "sha256:{:x}",
+                Sha256::digest(format!("near_dry_run_receipt:v1:{idempotency_key}").as_bytes())
+            ),
+        })
+    }
+}
+
+impl RecordingNearAdapter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A recording adapter whose calls present a credential
+    /// (`NearPayoutAdapter::authenticated`).
+    pub fn authenticated() -> Self {
+        Self {
+            authenticated: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn fail_next(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
+    }
+
+    pub fn requests(&self) -> Vec<NearLogicalRequest> {
+        self.requests.lock().expect("near adapter mutex").clone()
+    }
+
+    pub fn record_confirmation(
+        &self,
+        idempotency_key: &str,
+        transaction_hash_hash: impl Into<String>,
+        receipt_hash: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.requests
+                .lock()
+                .expect("near adapter mutex")
+                .iter()
+                .any(|request| request.idempotency_key == idempotency_key),
+            "cannot confirm an unsubmitted NEAR request"
+        );
+        let evidence = NearConfirmationEvidence {
+            transaction_hash_hash: transaction_hash_hash.into(),
+            receipt_hash: receipt_hash.into(),
+        };
+        anyhow::ensure!(
+            evidence.transaction_hash_hash.starts_with("sha256:")
+                && evidence.receipt_hash.starts_with("sha256:"),
+            "NEAR confirmation evidence must be hash-only"
+        );
+        self.confirmations
+            .lock()
+            .expect("near confirmation mutex")
+            .insert(idempotency_key.to_string(), evidence);
+        Ok(())
+    }
+
+    pub fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        self.confirmations
+            .lock()
+            .expect("near confirmation mutex")
+            .get(idempotency_key)
+            .cloned()
+    }
+}
+
+#[async_trait]
+impl NearPayoutAdapter for RecordingNearAdapter {
+    fn authenticated(&self) -> bool {
+        self.authenticated
+    }
+
+    async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String> {
+        call.validate()?;
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("near_adapter_unavailable");
+        }
+        let mut requests = self.requests.lock().expect("near adapter mutex");
+        if let Some(existing) = requests
+            .iter()
+            .find(|request| request.idempotency_key == call.idempotency_key)
+        {
+            anyhow::ensure!(
+                existing.method_name == call.method_name,
+                "NEAR idempotency key reused with a different method"
+            );
+            return Ok(call.idempotency_key.clone());
+        }
+        requests.push(NearLogicalRequest {
+            idempotency_key: call.idempotency_key.clone(),
+            method_name: call.method_name.clone(),
+        });
+        Ok(call.idempotency_key.clone())
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        Self::confirmation(self, idempotency_key)
+    }
+}
+
 pub fn pipeline_credit_event_id(tenant_id: &str, run_id: Uuid, score_outcome_id: Uuid) -> Uuid {
     Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
@@ -179,6 +400,20 @@ pub fn pipeline_settlement_batch_id(tenant_id: &str, source_list_hash: &str) -> 
     )
 }
 
+pub fn pipeline_near_outbox_line_id(
+    tenant_id: &str,
+    settlement_batch_id: Uuid,
+    credit_account_hash: &str,
+) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "tracecommons:pipeline-near:{tenant_id}:{settlement_batch_id}:{credit_account_hash}"
+        )
+        .as_bytes(),
+    )
+}
+
 pub fn credit_account_hash(principal_ref: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(principal_ref.as_bytes()))
 }
@@ -194,15 +429,50 @@ pub fn source_list_hash(event_ids: &[Uuid]) -> String {
     format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
-pub fn issuer_approval_hash(source_list_hash: &str) -> String {
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(format!("pipeline-issuer:{source_list_hash}").as_bytes())
+pub fn microcredits_to_settled_i64(amount: Microcredits) -> anyhow::Result<i64> {
+    i64::try_from(amount.get()).map_err(|_| anyhow::anyhow!("credit_amount_overflow"))
+}
+
+/// The NEAR `settle_credit_receipt` call that pays one batch line out, on
+/// `near_contract_id` -- the contract `main`'s legacy NEAR path is
+/// configured with (Ruling T10-4). The contract is part of the call's
+/// idempotency key. (The port's name is kept.) The attestation and
+/// signature hashes are `main`'s for a settlement that named no issuer
+/// approval evidence (Zaki review 1, item 2): a pipeline batch has none, and
+/// a payout is refused while `main` requires one.
+pub fn disabled_near_call(
+    near_contract_id: &str,
+    settlement_batch_id: Uuid,
+    credit_account_hash: &str,
+    source_list_hash: &str,
+    amount_micros: i64,
+) -> anyhow::Result<NearCreditReceiptCall> {
+    NearCreditReceiptCall::settle(
+        near_contract_id,
+        NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: credit_account_hash.to_string(),
+            policy_version: PIPELINE_SETTLEMENT_POLICY_VERSION.to_string(),
+            source_list_hash: source_list_hash.to_string(),
+            attestation_hash: trace_credit_settlement_attestation_hash(source_list_hash, None),
+            amount_micros,
+            issuer_signature_hash: trace_credit_settlement_issuer_signature_hash(
+                settlement_batch_id,
+                source_list_hash,
+                None,
+            ),
+        },
     )
 }
 
-pub fn microcredits_to_settled_i64(amount: Microcredits) -> anyhow::Result<i64> {
-    i64::try_from(amount.get()).map_err(|_| anyhow::anyhow!("credit_amount_overflow"))
+pub fn payout_state_label(status: TraceCreditSettlementNearStatus) -> &'static str {
+    match status {
+        TraceCreditSettlementNearStatus::Disabled => "disabled",
+        TraceCreditSettlementNearStatus::Pending => "pending",
+        TraceCreditSettlementNearStatus::Submitted => "submitted",
+        TraceCreditSettlementNearStatus::Confirmed => "confirmed",
+        TraceCreditSettlementNearStatus::Failed => "failed",
+    }
 }
 
 #[cfg(test)]
@@ -312,5 +582,61 @@ mod tests {
             Err(SettlementError::Rejected)
         );
         assert!(adapter.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recording_near_adapter_collapses_a_repeated_key_and_confirms_only_a_submitted_one() {
+        let adapter = RecordingNearAdapter::new();
+        let call = disabled_near_call(
+            "trace-credits.testnet",
+            Uuid::from_u128(1),
+            &format!("sha256:{}", "1".repeat(64)),
+            &format!("sha256:{}", "2".repeat(64)),
+            5,
+        )
+        .unwrap();
+        let tx_hash = format!("sha256:{}", "a".repeat(64));
+        let receipt_hash = format!("sha256:{}", "b".repeat(64));
+        assert!(
+            adapter
+                .record_confirmation(&call.idempotency_key, &tx_hash, &receipt_hash)
+                .is_err(),
+            "an unsubmitted request cannot be confirmed"
+        );
+
+        adapter.fail_next();
+        assert!(NearPayoutAdapter::submit(&adapter, &call).await.is_err());
+        assert!(adapter.requests().is_empty());
+        let first = NearPayoutAdapter::submit(&adapter, &call).await.unwrap();
+        assert_eq!(
+            NearPayoutAdapter::submit(&adapter, &call).await.unwrap(),
+            first
+        );
+        assert_eq!(
+            adapter.requests().len(),
+            1,
+            "a repeated key is one logical request"
+        );
+
+        assert!(
+            adapter
+                .record_confirmation(&call.idempotency_key, "tx-plain", &receipt_hash)
+                .is_err(),
+            "confirmation evidence is hash-only"
+        );
+        assert_eq!(
+            NearPayoutAdapter::confirmation(&adapter, &call.idempotency_key).await,
+            None
+        );
+        adapter
+            .record_confirmation(&call.idempotency_key, &tx_hash, &receipt_hash)
+            .unwrap();
+        assert_eq!(
+            NearPayoutAdapter::confirmation(&adapter, &call.idempotency_key).await,
+            Some(NearConfirmationEvidence {
+                transaction_hash_hash: tx_hash,
+                receipt_hash,
+            })
+        );
     }
 }

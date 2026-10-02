@@ -29,18 +29,21 @@ final class FloatingLayerTests: XCTestCase {
         }
     }
 
+    /// A floating surface is native glass (Liquid Glass on 26, the HUD blur
+    /// before it) whatever Reduce Transparency says, and a surface in a pane
+    /// is the painted tier. Under Reduce Transparency the system makes both
+    /// native backings opaque by itself (Liquid Glass frosts,
+    /// `NSVisualEffectView` draws solid), so floating text never shows the
+    /// map through; Apple's guidance is to let it (R14).
+    func test_floatingSurfacesStayNativeAndTheSystemHandlesReduceTransparency() {
+        let native: GlassSurfaceBacking
+        if #available(macOS 26.0, *) { native = .liquidGlass } else { native = .blur }
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: true), native)
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: false), .painted)
+    }
+
     private static func sources() throws -> [(String, String)] {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/TCDesign")
-        let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
-            .compactMap { $0 as? URL }
-            .filter { $0.pathExtension == "swift" }
-        XCTAssertGreaterThanOrEqual(files.count, 8)
-        return try files.map { ($0.lastPathComponent, try String(contentsOf: $0, encoding: .utf8)) }
-            .sorted { $0.0 < $1.0 }
+        try DesignSources.all()
     }
 }
 

@@ -434,6 +434,42 @@ mod tests {
         }
     }
 
+    /// The grant screens' copy makes the same choice: whatever the
+    /// configuration, it is the patterns-only table, with no model-scrub
+    /// sentence anywhere in it.
+    #[test]
+    fn the_grant_screen_copy_is_patterns_only_for_every_configuration() {
+        use crate::consent_copy::{
+            AUTO_PATTERNS_ONLY_SCOPE, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE,
+            automatic_contribution_copy, automatic_grant_copy,
+        };
+        let configs = [
+            None,
+            Some(cfg("tenant-1", &["debugging_evaluation"], false, None)),
+            Some(cfg(
+                "tenant-1",
+                &["debugging_evaluation"],
+                true,
+                Some("near-ai"),
+            )),
+        ];
+        for config in &configs {
+            let copy = automatic_contribution_copy(config.as_ref());
+            assert_eq!(copy, automatic_grant_copy(Disclosure::PatternsOnly));
+            assert_eq!(copy.disclosure, "patterns_only");
+            assert!(copy.model_scrubbed.is_none());
+            assert_eq!(
+                copy.patterns_only.as_ref().map(|c| c.scope),
+                Some(AUTO_PATTERNS_ONLY_SCOPE)
+            );
+            let wire = serde_json::to_string(&copy).unwrap();
+            for sentence in [AUTO_SCRUB_SCOPE, AUTO_SCRUB_LIMIT] {
+                let escaped = serde_json::to_string(sentence).unwrap();
+                assert!(!wire.contains(escaped.trim_matches('"')));
+            }
+        }
+    }
+
     fn pinned_witness(signing_address: &str) -> WitnessSettings {
         serde_json::from_value(serde_json::json!({
             "url": "https://witness.example",

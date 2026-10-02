@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -61,12 +62,22 @@ struct MonitorWindowView: View {
     var body: some View {
         GlassThreePane(showsMap: showsMap, showsInspector: showsInspector, onFirstLayout: seedPanes) {
             MonitorMainPane(
-                tab: $tab, inferenceDot: inferenceDot, tracesBadge: tracesBadge,
+                tab: $tab,
+                inferenceDot: Self.inferenceDot(model.daemonSettings?.privateInferenceState?.surfaceState,
+                                                calls: model.privateInferenceCalls),
+                inferenceDescription: Self.inferenceDotDescription(
+                    model.daemonSettings?.privateInferenceState?.surfaceState,
+                    calls: model.privateInferenceCalls),
+                tracesBadge: tracesBadge,
+                tracesDescription: Self.tracesDescription(traces.decisionsOwed),
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() }
             ) {
                 switch tab {
-                case .traces: TracesTreeView(store: traces, selection: $selectedSession)
+                case .traces:
+                    TracesTreeView(store: traces, selection: $selectedSession) { entryId in
+                        Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
+                    }
                 case .inference: InferenceTabView(store: inference)
                 case .home:
                     HomeTabView(
@@ -108,9 +119,24 @@ struct MonitorWindowView: View {
         traces.decisionsOwed.map(GlassBadgeValue.count) ?? .unknown
     }
 
+    /// The Traces badge's text equivalent, from the core: "unavailable" for
+    /// an unknown count, never zero; nil at zero, where there is no badge.
+    static func tracesDescription(_ decisionsOwed: Int?) -> String? {
+        guard let text = TCCoreCopy.decisionsOwedText(decisionsOwed), !text.isEmpty else { return nil }
+        return text
+    }
+
     /// The selected session, while it is still in the tree.
     private var selectedEntry: DaemonData.QueueEntry? {
         traces.tree.allSessions.first { $0.entryId == selectedSession }
+    }
+
+    /// A session's Review: select it and show the inspector, where its
+    /// review is. With the inspector hidden, selecting alone did nothing a
+    /// person could see.
+    static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
+        selection = entryId
+        showsInspector = true
     }
 
     /// The first time this window lays out, open the panes its width suits.
@@ -122,11 +148,25 @@ struct MonitorWindowView: View {
         panesSeeded = true
     }
 
-    /// Inference's dot: Private AI on or off, and none while the daemon has
-    /// not said. Unknown is never drawn as off.
-    private var inferenceDot: GlassStatus? {
-        guard let settings = model.daemonSettings else { return nil }
-        return settings.privateInferenceOn ? .on : .off
+    /// Inference's dot: what the listener is doing, from the daemon's own
+    /// report, never the switch. The switch says what was asked for; a
+    /// switch that is on over a listener that refused to start, or is held,
+    /// is drawn as needing attention, not as on. Only the core's "clear"
+    /// tone is on. No report, or an unreported state, is no dot: unknown is
+    /// neither on nor off.
+    static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
+        guard let state, !state.label.isEmpty else { return nil }
+        switch PrivateInferenceSurface.tone(state, calls: calls) {
+        case .clear: return .on
+        case .held, .attention, .refused: return .ask
+        case .neutral: return .off
+        }
+    }
+
+    /// The dot's text equivalent: the core's sentence for the same state.
+    static func inferenceDotDescription(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> String? {
+        guard let state, !state.label.isEmpty else { return nil }
+        return calls.stateLine(state.label)
     }
 }
 
@@ -137,7 +177,9 @@ struct MonitorWindowView: View {
 private struct MonitorMainPane<Content: View>: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
+    let inferenceDescription: String?
     let tracesBadge: GlassBadgeValue?
+    let tracesDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
     let onSettings: () -> Void
@@ -171,6 +213,11 @@ private struct MonitorMainPane<Content: View>: View {
                 // title bar centres 26pt below the window's top edge.
                 .padding(.top, Self.lightsCentre - GlassTokens.Space.windowPadding - GlassTokens.Space.panePadding
                     - GlassTokens.Size.controlLarge / 2)
+                // The same notices the main window puts above everything,
+                // here in the pane that is always shown, so a void or a gate
+                // hold during monitor use is told whatever the map and the
+                // inspector are doing.
+                ShellNotices()
                 GlassSegmentedTabs(
                     "Monitor",
                     selection: $tab,
@@ -178,7 +225,9 @@ private struct MonitorMainPane<Content: View>: View {
                         GlassSegment(
                             item.rawValue, value: item,
                             badgeValue: item == .traces ? tracesBadge : nil,
-                            dot: item == .inference ? inferenceDot : nil)
+                            dot: item == .inference ? inferenceDot : nil,
+                            accessibilityValue: item == .inference
+                                ? inferenceDescription : item == .traces ? tracesDescription : nil)
                     })
                 content()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
