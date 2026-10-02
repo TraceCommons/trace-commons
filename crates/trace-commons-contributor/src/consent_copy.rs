@@ -690,6 +690,25 @@ pub fn automatic_grant_copy(
     }
 }
 
+/// The sentences a contributor reads on the Flow 1 grant screens, with the
+/// choice between them made here: `automatic_gate::disclosure` picks the
+/// disclosure (R1) and [`automatic_grant_copy`] carries only the scrub
+/// wording that answer allows.
+///
+/// `disclosure(config)` reads configuration only, so it answers
+/// `PatternsOnly`, and that is the right answer for a screen shown before
+/// the grant. Configuration is not evidence that a model ran: the model-scrub
+/// wording is earned only by `automatic_gate::folder_disclosure`, over the
+/// certificates of sessions the witness has already redacted, and before the
+/// grant there are none. So a shell never reads the `auto_scrub_*` fields to
+/// choose, and the model-scrub sentences never reach this screen.
+#[must_use]
+pub fn automatic_contribution_copy(
+    config: Option<&crate::config::ContributorConfig>,
+) -> AutomaticGrantCopy {
+    automatic_grant_copy(crate::daemon::automatic_gate::disclosure(config))
+}
+
 /// The title of the notice a shell shows while approved sessions wait on a
 /// busy witness (`status.witness_capacity`, health label
 /// `witness-saturated`).

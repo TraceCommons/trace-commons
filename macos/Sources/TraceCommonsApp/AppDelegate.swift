@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TCBridge
 import TCShellCore
 
 /// The pieces of app behaviour that SwiftUI does not own.
@@ -82,6 +83,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let confirmed =
             quitCoordinator.isStopping
             || QuitConfirmation.granted(
+                prompt: model?.quitPrompt
+                    ?? QuitPrompt.decode(fromJSON: TCCoreCopy.quitPromptWithoutWatcherJSON()),
                 computeDetail: compute?.copy?.quitDetail,
                 privateInferenceDetail: model?.privateInferenceQuitDetail
             )
@@ -164,32 +167,31 @@ final class PendingInvite: ObservableObject {
 enum QuitConfirmation {
     /// Shows the alert and answers whether to proceed.
     ///
-    /// The copy is unchanged from when it lived in the menu-bar item: it was
-    /// written specifically because the watcher stops with the app, and
-    /// nothing about gaining a Dock icon makes that less true.
+    /// The heading, the body and both buttons are the core's
+    /// (`quit_copy::quit_prompt`), chosen for whether this process hosts the
+    /// watcher or is attached to one: the hosting sentence this alert used to
+    /// hard-code is false for an attached app, whose watcher keeps sending.
+    /// Without a prompt the quit is not confirmed, because it is not
+    /// confirmable before the true sentence for this process is shown.
     @MainActor
     static func granted(
+        prompt: QuitPrompt?,
         computeDetail: String? = nil,
         privateInferenceDetail: String? = nil
     ) -> Bool {
+        guard let prompt else { return false }
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Quit Trace Commons?"
-        alert.informativeText = """
-        The watcher runs inside this app, so quitting stops it. Nothing will be \
-        noticed or sent while it is closed.
-
-        Sessions already waiting stay on this machine and will be here when you \
-        come back. Nothing is sent while nobody's approving.
-        """
+        alert.messageText = prompt.title
+        alert.informativeText = prompt.body
         if let computeDetail { alert.informativeText += "\n\n" + computeDetail }
         // Appended only when the switch is on. A contributor who never
         // turned it on should not be warned about losing it.
         if let privateInferenceDetail {
             alert.informativeText += "\n\n" + privateInferenceDetail
         }
-        alert.addButton(withTitle: "Quit")
-        alert.addButton(withTitle: "Keep running")
+        alert.addButton(withTitle: prompt.confirm)
+        alert.addButton(withTitle: prompt.cancel)
         return alert.runModal() == .alertFirstButtonReturn
     }
 }

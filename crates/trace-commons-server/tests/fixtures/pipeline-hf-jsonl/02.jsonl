@@ -1,0 +1,2 @@
+{"type":"message","id":"fixture-02-user","timestamp":"2026-01-01T00:01:00Z","message":{"role":"user","content":"Review the synthetic worker retry and explain its idempotency requirement."}}
+{"type":"message","id":"fixture-02-assistant","timestamp":"2026-01-01T00:01:01Z","message":{"role":"assistant","content":"The worker must reuse the sealed operation identity and must not duplicate settlement."}}

@@ -278,6 +278,11 @@ fn sample_history_records() -> Vec<HistoryRecord> {
         withdrawn_at: withdrawn.then(|| now - chrono::Duration::days(age_days - 1)),
         approved_unattended: unattended,
         approved_verdict: verdict.map(str::to_string),
+        // K10: a plausible measured size per row, so the History graph's
+        // byte weighting has something to draw.
+        uploaded_bytes: Some(12_000 + (n as u64) * 2_048),
+        // K12: no row here was withdrawn on the web.
+        revoked_at: None,
     };
     vec![
         row(

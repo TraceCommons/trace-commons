@@ -16,8 +16,10 @@
       "explanations": [],
       "last_refreshed_at": "2026-09-30T08:00:00Z",
       "withdrawn_at": null,
+      "revoked_at": null,
       "approved_unattended": false,
-      "approved_verdict": "worked"
+      "approved_verdict": "worked",
+      "uploaded_bytes": 14048
     },
     {
       "submission_id": "644587ac-f321-57d9-9b27-2c280db3de77",
@@ -35,8 +37,10 @@
       "explanations": [],
       "last_refreshed_at": "2026-09-30T08:00:00Z",
       "withdrawn_at": null,
+      "revoked_at": null,
       "approved_unattended": true,
-      "approved_verdict": null
+      "approved_verdict": null,
+      "uploaded_bytes": 16096
     },
     {
       "submission_id": "434b44db-62f5-55be-ace0-3d1b3f3bc171",
@@ -54,8 +58,10 @@
       "explanations": [],
       "last_refreshed_at": "2026-09-30T08:00:00Z",
       "withdrawn_at": null,
+      "revoked_at": null,
       "approved_unattended": false,
-      "approved_verdict": "partly"
+      "approved_verdict": "partly",
+      "uploaded_bytes": 18144
     },
     {
       "submission_id": "ba2ab01a-f1b1-5a1d-aa95-4eb8339646fc",
@@ -73,8 +79,10 @@
       "explanations": [],
       "last_refreshed_at": "2026-09-30T08:00:00Z",
       "withdrawn_at": "2026-09-25T09:00:00Z",
+      "revoked_at": null,
       "approved_unattended": false,
-      "approved_verdict": "failed"
+      "approved_verdict": "failed",
+      "uploaded_bytes": 20192
     },
     {
       "submission_id": "0cfe272d-d0b1-5ac8-804e-fc37baea6cf1",
@@ -92,8 +100,10 @@
       "explanations": [],
       "last_refreshed_at": "2026-09-30T08:00:00Z",
       "withdrawn_at": null,
+      "revoked_at": null,
       "approved_unattended": null,
-      "approved_verdict": null
+      "approved_verdict": null,
+      "uploaded_bytes": 22240
     }
   ]
 }
