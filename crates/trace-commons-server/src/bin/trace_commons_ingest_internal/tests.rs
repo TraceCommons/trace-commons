@@ -5,6 +5,8 @@ use super::*;
 
 #[path = "tests/account_binding_gate_tests.rs"]
 mod account_binding_gate_tests;
+#[path = "tests/activity_missions_tests.rs"]
+mod activity_missions_tests;
 #[path = "tests/legacy_invite_link_tests.rs"]
 mod legacy_invite_link_tests;
 #[path = "tests/mission_catalog_tests.rs"]
@@ -6088,6 +6090,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         inference_connection_catalog: Arc::new(Vec::new()),
+        activity_missions_policy: None,
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -26718,6 +26721,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     );
     let state = Arc::new(AppState {
         inference_connection_catalog: Arc::new(Vec::new()),
+        activity_missions_policy: None,
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,

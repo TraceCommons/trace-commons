@@ -2730,6 +2730,21 @@ pub trait TraceCorpusStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
 
+    /// Read-only activity projection under one statement snapshot. Tenant and
+    /// principals MUST come from account authentication, never a request body.
+    async fn account_activity_days(
+        &self,
+        _tenant_id: &str,
+        _principal_refs: &[String],
+        _starts_at: DateTime<Utc>,
+        _observed_at: DateTime<Utc>,
+        _qualification: trace_commons_protocol::activity_missions::Qualification,
+    ) -> Result<Vec<trace_commons_protocol::activity_missions::ActivityDay>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "activity_missions_source_unavailable".into(),
+        ))
+    }
+
     async fn upsert_trace_tenant_policy(
         &self,
         policy: TraceTenantPolicyWrite,

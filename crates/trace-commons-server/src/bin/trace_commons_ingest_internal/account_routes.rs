@@ -64,6 +64,7 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
     &[
         // The app's state machine and the one way forward.
         ("GET", "/v1/account/binding", Allowed),
+        ("GET", "/v1/account/activity-missions/status", Refused),
         // Z2 S3: connect near.ai. The handlers refuse any account that is not
         // `unbound` (`account_already_bound`), so a bound or closed account
         // that reaches them gets nothing.
