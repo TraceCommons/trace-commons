@@ -831,8 +831,9 @@ final class AppModel: ObservableObject {
     /// read through `DaemonDataClient`. Created with the daemon and fed by
     /// the same `tc_subscribe` callback as `handle(event:)`, so there is
     /// one subscription and both sides see the same frames. `nil` while no
-    /// daemon is running.
-    private var liveData: LiveDaemonClient?
+    /// daemon is running. Published, so a screen holding `daemonData` sees
+    /// a daemon restart replace the client rather than keep a finished one.
+    @Published private(set) var liveData: LiveDaemonClient?
     var daemonData: (any DaemonDataClient)? { liveData }
     private var undoTask: Task<Void, Never>?
 

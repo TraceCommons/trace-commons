@@ -320,15 +320,12 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     private func open(subscriber id: UUID) {
         let opening: DaemonDataEvent?
         do {
-            let status: DaemonData.Status?
-            do {
-                status = try Self.decode(transport.call("status", params: "{}"), method: "status",
-                                         as: DaemonData.Status.self)
-            } catch DaemonDataError.undecodable {
-                // A status this build cannot read is unknown, not a reason
-                // to withhold the queue.
-                status = nil
-            }
+            // A reply that is not a frame, or a refusal, throws: the stream
+            // opens with `.resyncRequired`. Only a well-formed `status` body
+            // this build cannot read is unknown, which is not a reason to
+            // withhold the queue.
+            let statusBody = try DaemonFrame.result(of: transport.call("status", params: "{}"), method: "status")
+            let status = try? DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: statusBody)
             let pending = try Self.decode(transport.call("list_pending", params: "{}"), method: "list_pending",
                                           as: DaemonData.PendingList.self).pending
             opening = .snapshot(pending: pending, status: status)

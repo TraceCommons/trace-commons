@@ -297,6 +297,19 @@ final class LiveDaemonClientTests: XCTestCase {
         XCTAssertNil(status)
     }
 
+    /// A reply that is not a frame at all is a broken stream, not a status
+    /// that is unknown: the stream opens with `.resyncRequired`, never with
+    /// a snapshot that draws "unknown" over it.
+    func testAStatusReplyThatIsNotAFrameIsAResyncNotAnUnknownStatus() async {
+        let sample = ScriptedTransport.sample(.normalDay)
+        let transport = ScriptedTransport { method, params in
+            method == "status" ? "not a frame" : sample.call(method, params: params)
+        }
+        var iterator = LiveDaemonClient(transport: transport).events().makeAsyncIterator()
+        let first = await iterator.next()
+        XCTAssertEqual(first, .resyncRequired)
+    }
+
     func testFinishEventsEndsOpenStreamsAndRefusesNewOnes() async {
         let client = LiveDaemonClient(transport: ScriptedTransport.sample(.normalDay))
         let stream = client.events()
