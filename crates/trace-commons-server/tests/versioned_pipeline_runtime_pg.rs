@@ -25891,6 +25891,16 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
 /// dependencies (`pipeline_runtime_dependencies_not_production_qualified`)
 /// although its configuration is qualifiable, and passes with them. A tenant
 /// on the service's fully qualified default bundle passes either way.
+///
+/// Merge review M3, the configuration term on its own: a tenant bundle
+/// whose every dependency is qualified but whose configuration is not
+/// qualifiable (all three floors zero, as the local reference's), checked
+/// against the gate configuration it holds itself, is refused under the
+/// same label. A production-compatible configuration with zero floors never
+/// gets that far: the bundle does not construct
+/// (`compatibility_zero_floor`), so startup refuses it as
+/// `pipeline_tenant_bundle_not_runnable`; the case that reaches the term is
+/// a runnable configuration marked not qualifiable.
 #[tokio::test]
 async fn startup_qualifies_every_bundle_a_tenant_may_run() {
     let Some(backend) = runtime_backend(4).await else {
@@ -25943,6 +25953,72 @@ async fn startup_qualifies_every_bundle_a_tenant_may_run() {
         .check_tenant_bundles(&qualified_tenant, &gate, true)
         .await
         .expect("the qualified default bundle passes without test dependencies");
+    service
+        .check_tenant_bundles(&qualified_tenant, &gate, false)
+        .await
+        .expect("the qualified default bundle passes with test dependencies");
+
+    let runs = PgPipelineStore::new(backend.clone());
+    let activate = |tenant: String, package: BundlePackage| {
+        let service = &service;
+        let runs = &runs;
+        async move {
+            service.register_bundle(&tenant, &package).await.unwrap();
+            runs.activate_bundle_if_none(&tenant, &package.bundle_id)
+                .await
+                .unwrap();
+        }
+    };
+
+    let mut zero_floors = config.clone();
+    zero_floors.qualification =
+        trace_commons_server::versioned_pipeline_compat::CompatibilityQualification::LocalSyntheticNonQualifiable;
+    zero_floors.perplexity_floor_micros = 0;
+    zero_floors.tail_fraction_floor_micros = 0;
+    zero_floors.novelty_floor_micros = 0;
+    assert!(zero_floors.validate().is_ok() && !zero_floors.is_qualifiable());
+    let unqualifiable = MinimalPolicyBundle::compatibility_package(
+        &zero_floors,
+        qualified_scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("the zero-floor bundle package builds");
+    assert_eq!(
+        service
+            .bundle_qualification(&unqualifiable)
+            .expect("the zero-floor package resolves")
+            .blockers(),
+        vec![PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL],
+        "every dependency is qualified; only the configuration is not"
+    );
+    let unqualifiable_tenant = format!("startup-zero-floor-bundle-{}", uuid::Uuid::new_v4());
+    activate(unqualifiable_tenant.clone(), unqualifiable).await;
+    assert_eq!(
+        label(
+            service
+                .check_tenant_bundles(&unqualifiable_tenant, &main_gate_of(&zero_floors), true)
+                .await
+        ),
+        "pipeline_runtime_dependencies_not_production_qualified",
+        "a tenant bundle whose configuration is not qualifiable is refused"
+    );
+
+    let zero = zero_floor_production_package(service.default_package());
+    let zero_gate = main_gate_of(
+        &trace_commons_server::versioned_pipeline_bundle::package_compatibility_config(&zero)
+            .expect("the zero-floor package holds a compatibility configuration"),
+    );
+    let zero_tenant = format!("startup-zero-floor-production-{}", uuid::Uuid::new_v4());
+    activate(zero_tenant.clone(), zero).await;
+    assert_eq!(
+        label(
+            service
+                .check_tenant_bundles(&zero_tenant, &zero_gate, true)
+                .await
+        ),
+        "pipeline_tenant_bundle_not_runnable",
+        "a production-compatible configuration with zero floors does not construct"
+    );
 
     let tenant = format!("startup-unqualified-bundle-{}", uuid::Uuid::new_v4());
     other.register_default_bundle(&tenant).await.unwrap();
