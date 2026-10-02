@@ -35,11 +35,64 @@ the credit-to-inference bridge remains unspecified.
 | Z14 | Existing Sparkle release path retained; current 0.12.6 build 4301 enclosure signature verified against the installed signed app key. No installation/update or new release performed |
 | Z15 | Review consent boundaries in affected core/adapter work; every future screen PR still needs its own consent review |
 
-- [ ] Land the C3 docs-only commit and notify implementers of exact interfaces.
-- [ ] Implement network, identity, Swift adapter, catalogue and release support in isolated branches; preserve existing licensing and no-new-dependency rule.
-- [ ] Merge focused implementation commits with tests for unknown/error/empty states, invalid/replayed inputs, authority changes and consent separation.
-- [ ] Run contributor/FFI checks with warnings denied, contract tests, relevant clippy, format, license boundary and Swift tests against freshly built FFI. Release script tests validate profile/domain/update gates without claiming signing or deployment.
-- [ ] Review the integrated diff and report implemented, pre-existing and unresolved/external work separately.
+- [x] Commit C3 documentation before behavior and provide implementers the exact interfaces.
+- [x] Implement network, identity, Swift adapter, catalogue and release support in isolated branches; preserve existing licensing and no-new-dependency rule.
+- [x] Integrate focused commits with tests for unknown/error/empty states, invalid/replayed inputs, authority changes and consent separation.
+- [x] Run contributor/FFI checks with warnings denied, contract tests, relevant clippy, format, license boundary and Swift tests against freshly built FFI. Release script tests validate profile/domain/update gates without claiming signing or deployment.
+- [x] Review the integrated diff and report implemented, pre-existing and unresolved/external work separately.
+
+## Integration verification, 2026-10-02
+
+Core implementation checkpoint: `2ef56c9cf`, incorporating main `4339c53cb`.
+The separate C1 follow-up is `3f142ad53`, based on Kristi's open #1175 head
+`9a49e658c`; it changes adapters and contract fixtures, not screens. Combined
+verification checkpoint `e0f4fc8b7` includes both branches. These are local
+commits, not merged or deployed changes.
+
+- Contributor library: 3,063 passed, 11 ignored with normal macOS access.
+- Protocol: 379 passed. Release pipeline: 53 passed. License boundary: 4 passed;
+  new AGPL file headers verified, dependency manifests unchanged.
+- Missions: three HTTP tests and one restricted-role PostgreSQL test passed
+  against an isolated real database after the main merge; no self-skips.
+- FFI: 207 passed across the complete serial suite. A parallel run had one
+  `tc_unsubscribe_refuses_a_freed_handle` failure; its isolated rerun passed.
+  Existing FFI docs explicitly describe same-address allocation reuse as a
+  limitation of the pointer registry. That is consistent with the failure,
+  but reuse was not instrumented. No FFI implementation or ABI tests were changed.
+- Combined Swift: 1,155 XCTest cases, one skipped, zero failures, plus eight
+  Swift Testing cases passed against freshly built FFI with normal macOS access.
+  The earlier sandbox UI failures did not occur in this run.
+- Server default, `near-ai-scorer`, and `local-gpu-models` compile checks passed;
+  server test targets compiled. Server and client Clippy used the repository
+  allowlist and denied warnings. One imported main Boolean predicate was
+  simplified equivalently to satisfy Clippy; no admission behavior changed.
+- Native entitlement fixtures passed, including system Bash 3.2; 8 metadata
+  and 14 anonymizer tests passed. Signed Sparkle enclosure verification passed,
+  including a corrupted-signature negative check, without installation.
+- Independent reviews covered identity, missions server and IPC, billing,
+  network, Swift, C1, release tooling, and the integrated method/auth boundaries.
+  The final registry contains 116 methods with no advertisement/dispatch gaps.
+
+## Remaining operational and screen gates
+
+The user-supplied renewed profile includes Associated Domains and is integrated.
+This does not qualify a signed Apple create/login ceremony: AASA checks have
+not passed, and observed native `clientDataJSON.origin` still needs signed
+staging verification against the server allowlist. No deployment, notarization,
+installation, new release, or economic activation occurred.
+
+Successful approved invite, current summary, HTTP credit/settlement, and mission
+publication recordings remain unavailable; committed refusal projections and
+synthetic samples are explicitly labeled. Mission policies still require operator
+configuration, and rewards remain off regardless of configuration.
+
+Z15 covers the available PR heads, not future screens. At #1182 head
+`aa64a1cc6`, the monitor still maps a missing/null Private AI setting to off.
+That screen-owner correction remains required. The C1 follow-up resolves the
+provisional mission/invite contract and sample issues within its scope; future
+Missions screens must consume Rust disclosure and preserve unknowns and consent
+gates. K4's existing withdrawal-copy exception and future M4 screen checks remain
+separate work. macOS 14/26 design qualification remains Ron's release gate.
 
 All credit remains conditional/pending, proof means only verified model proof,
 registry prices never mean billed spend, unknown never means zero/off, and
