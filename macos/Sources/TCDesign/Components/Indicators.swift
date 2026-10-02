@@ -135,7 +135,8 @@ public struct GlassBadge: View {
     }
 }
 
-/// The tools the shell knows. A tool without artwork shows its initials.
+/// The tools the shell knows. A tool with artwork shows its logo; one
+/// without (Gemini CLI, Cline, any other) shows its initials.
 /// Display names are not here: the caller shows the core's name for a tool.
 public enum GlassTool: Sendable, Equatable {
     case claudeCode, codex, antigravity, geminiCLI, cline, openCode, theia
@@ -154,6 +155,19 @@ public enum GlassTool: Sendable, Equatable {
         }
     }
 
+    /// The logo artwork, if the tool has any. Gemini CLI and Cline have
+    /// none yet, in either shell.
+    public var logo: GlassToolLogoID? {
+        switch self {
+        case .claudeCode: .claude
+        case .codex: .codex
+        case .antigravity: .antigravity
+        case .openCode: .openCode
+        case .theia: .theia
+        case .geminiCLI, .cline, .other: nil
+        }
+    }
+
     var initials: String {
         switch self {
         case .claudeCode: "CC"
@@ -169,7 +183,8 @@ public enum GlassTool: Sendable, Equatable {
 }
 
 /// The 22pt tile in a tree row: a tool's mark, a folder or a session.
-/// C2 draws a tool as its tinted initials; R4 swaps in the logo artwork.
+/// A tool is drawn as its logo in its tint, or as its tinted initials when
+/// it has no logo.
 public struct GlassToolTile: View {
     public enum Kind: Sendable, Equatable {
         case tool(GlassTool), folder, session
@@ -188,9 +203,18 @@ public struct GlassToolTile: View {
         Group {
             switch kind {
             case let .tool(tool):
-                Text(tool.initials)
-                    .glassGlyph(large ? 11 : 9, weight: .bold)
-                    .foregroundStyle(tool.tint.color)
+                Group {
+                    if let logo = tool.logo {
+                        let mark = large ? GlassTokens.Size.toolLogoLarge : GlassTokens.Size.toolLogo
+                        GlassToolLogoShape(logo)
+                            .fill(tool.tint.color)
+                            .frame(width: mark, height: mark)
+                    } else {
+                        Text(tool.initials)
+                            .glassGlyph(large ? 11 : 9, weight: .bold)
+                            .foregroundStyle(tool.tint.color)
+                    }
+                }
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(Color.white.opacity(0.1)))
             case .folder:
