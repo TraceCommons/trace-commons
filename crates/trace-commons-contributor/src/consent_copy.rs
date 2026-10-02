@@ -709,6 +709,20 @@ pub fn automatic_contribution_copy(
     automatic_grant_copy(crate::daemon::automatic_gate::disclosure(config))
 }
 
+/// The grant screens' words for a disclosure the daemon already chose and
+/// reported by name (`list_projects`' `automatic_disclosure`). `None` for a
+/// name this build does not know, so a shell shows nothing rather than
+/// guessing which wording is true.
+#[must_use]
+pub fn automatic_grant_copy_named(disclosure: &str) -> Option<AutomaticGrantCopy> {
+    use crate::daemon::automatic_gate::Disclosure;
+    match disclosure {
+        "patterns_only" => Some(automatic_grant_copy(Disclosure::PatternsOnly)),
+        "model_scrubbed" => Some(automatic_grant_copy(Disclosure::ModelScrubbed)),
+        _ => None,
+    }
+}
+
 /// The title of the notice a shell shows while approved sessions wait on a
 /// busy witness (`status.witness_capacity`, health label
 /// `witness-saturated`).
@@ -2563,6 +2577,23 @@ mod tests {
         assert!(!copy.heading.is_empty());
         assert!(!copy.measurement_label.is_empty());
         assert!(!copy.signer_label.is_empty());
+    }
+
+    /// A name the daemon reported reads as exactly that disclosure's words;
+    /// an unknown name reads as nothing.
+    #[test]
+    fn a_named_disclosure_reads_as_the_one_the_daemon_chose() {
+        use crate::daemon::automatic_gate::Disclosure;
+        assert_eq!(
+            automatic_grant_copy_named("patterns_only"),
+            Some(automatic_grant_copy(Disclosure::PatternsOnly))
+        );
+        assert_eq!(
+            automatic_grant_copy_named("model_scrubbed"),
+            Some(automatic_grant_copy(Disclosure::ModelScrubbed))
+        );
+        assert_eq!(automatic_grant_copy_named("scrubbed"), None);
+        assert_eq!(automatic_grant_copy_named(""), None);
     }
 
     /// "Trust relaxes what may be sent, never what may be said": the

@@ -135,6 +135,45 @@ impl SessionShape {
     }
 }
 
+/// The session's title, built at the same moment [`SessionShape::of`] is:
+/// when the watcher queues the session, from the raw transcript rather than
+/// a built envelope.
+///
+/// K1's `preview::title_of` is the first non-empty line of the *redacted*
+/// opening prompt, cut and truncated the same way; this calls that same
+/// function so the two can never drift. The only difference is where the
+/// redaction comes from. A preview builds a whole envelope -- optionally
+/// through a configured prose privacy filter, which calls out over the
+/// network -- and the watcher's poll loop is synchronous and runs on every
+/// discovered session, so it cannot pay for that here. It runs the
+/// deterministic pass alone (`envelope::build_deterministic_preview_redactor`
+/// together with `redact_text`: secret-leak patterns, known and generic
+/// local paths, private emails, PEM blocks), which is the same floor every
+/// preview's redaction starts from and an unenrolled preview's title never
+/// goes past.
+/// So a queued title is never LESS redacted than an equivalent preview's;
+/// an enrolled contributor's preview may additionally scrub prose PII that
+/// only a configured filter catches, which this cannot.
+///
+/// `None` when the opening prompt is empty, is only harness-injected setup,
+/// or the task names no description -- the same cases `preview::title_of`
+/// already returns `None` for.
+pub fn title_of(transcript: &crate::source::SessionTranscript) -> Option<String> {
+    let opening = transcript
+        .events
+        .iter()
+        .take_while(|e| !is_delegated_boundary(e))
+        .filter(|e| e.kind == crate::source::SessionEventKind::User)
+        .find_map(|e| {
+            e.content
+                .as_deref()
+                .and_then(crate::daemon::preview::task_prompt)
+        })?;
+    let redactor = crate::envelope::build_deterministic_preview_redactor(transcript.cwd.as_deref());
+    let (redacted, _report) = redactor.redact_text(opening);
+    crate::daemon::preview::title_of(&redacted)
+}
+
 /// One session offered to the contributor.
 ///
 /// `Default` supports focused test fixtures, which spell
@@ -411,6 +450,20 @@ pub struct QueueEntry {
     /// word of what was said. `None` on an entry written before this existed.
     #[serde(default)]
     pub shape: Option<SessionShape>,
+    /// The session's title (K9): the first non-empty line of the redacted
+    /// opening prompt, cut and truncated exactly as the K1 preview title is.
+    /// See [`title_of`] for what "redacted" means on this path.
+    ///
+    /// `None` when the task named no description, and on every entry
+    /// written before this field existed -- it is not backfilled, exactly
+    /// like `shape`: an older entry gets a title the next time its session
+    /// is loaded (it grows, or is re-offered).
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade.
+    #[serde(default)]
+    pub title: Option<String>,
     /// The `modified_at` of the observation this entry was built from --
     /// the group mtime for a claude-code session, the file's own mtime for
     /// every single-file source. Pairs with `size_bytes`, which is the
@@ -3211,6 +3264,62 @@ mod tests {
         let loaded = Queue::load(&store).unwrap();
         assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
         assert_eq!(loaded.all()[0].shape, None);
+    }
+
+    /// K9: a line queued before `title` existed still loads, with no title.
+    /// Not backfilled, for the same reason `shape` is not: the entry gets a
+    /// title the next time its session is loaded.
+    #[test]
+    fn a_queue_line_written_before_the_title_existed_still_loads() {
+        let (_d, store) = temp_store();
+        let mut value = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("title");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].title, None);
+    }
+
+    /// K9: the queued title is built from the same source as the K1 preview
+    /// title, and must survive the same redaction requirement -- a
+    /// redactable first line (an email address, a local path) must never
+    /// reach it.
+    #[test]
+    fn a_redactable_first_line_does_not_survive_into_the_queued_title() {
+        use crate::source::SessionEventKind::User;
+        let transcript = crate::source::SessionTranscript {
+            cwd: Some("/Users/testuser/code/myproj".to_string()),
+            events: vec![event(
+                User,
+                Some("2026-09-12T10:00:00Z"),
+                Some("mail alice.smith@example.org about /Users/testuser/code/myproj/secret.txt"),
+            )],
+            ..Default::default()
+        };
+        let title = title_of(&transcript).expect("the prompt names a task");
+        assert!(!title.contains("alice.smith@example.org"), "{title}");
+        assert!(!title.contains("/Users/testuser"), "{title}");
+        assert!(title.starts_with("mail "), "{title}");
+    }
+
+    /// K9: the title stops at the delegated-transcript boundary, exactly
+    /// like `SessionShape::of`'s turn count -- a subagent's own opening
+    /// prompt is not the person's task.
+    #[test]
+    fn the_queued_title_never_crosses_into_delegated_work() {
+        use crate::source::SessionEventKind::User;
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                marker("subagent_group"),
+                marker("subagent_transcript"),
+                event(User, Some("2026-09-12T11:10:00Z"), Some("do the subtask")),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(title_of(&transcript), None);
     }
 
     #[test]

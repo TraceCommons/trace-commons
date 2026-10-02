@@ -256,6 +256,19 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         for continuation in targets { continuation.yield(event) }
     }
 
+    /// The daemon went away: its subscription ended, or a call answered
+    /// that it is not there. Finishes every open `events()` stream, so a
+    /// screen following one reads its counts as unknown instead of keeping
+    /// the last ones. K1's `tc_subscribe` wiring calls this when the
+    /// subscription ends.
+    public func disconnected() {
+        lock.lock()
+        let targets = Array(continuations.values)
+        continuations.removeAll()
+        lock.unlock()
+        for continuation in targets { continuation.finish() }
+    }
+
     // MARK: Plumbing
 
     private func call<T: Decodable & Sendable>(
