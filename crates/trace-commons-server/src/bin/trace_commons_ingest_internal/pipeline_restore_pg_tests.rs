@@ -122,6 +122,25 @@ const RLS_POLICY_SET_SQL: &str = r"
     )
     SELECT COALESCE(string_agg(entry, E'\n' ORDER BY entry), ''), COUNT(*) FROM entries";
 
+/// Every table in the `public` schema, one line each, sorted: its name and
+/// its two row-level security flags (`relrowsecurity`,
+/// `relforcerowsecurity`). The per-table checks read only the pipeline
+/// tables and `TRACE_COMMONS_RLS_TABLES`, and the policy set lives in
+/// `pg_policy`, which holds neither flag; this covers every other table
+/// (Zaki's re-review of #1166, Medium), a table that appears or goes, and a
+/// table dropped from `TRACE_COMMONS_RLS_TABLES` whose flags change.
+const RLS_FLAG_SET_SQL: &str = r"
+    WITH entries AS (
+        SELECT concat_ws('|',
+                   c.relname::TEXT,
+                   c.relrowsecurity::TEXT,
+                   c.relforcerowsecurity::TEXT) AS entry
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+    )
+    SELECT COALESCE(string_agg(entry, E'\n' ORDER BY entry), ''), COUNT(*) FROM entries";
+
 /// Every privilege the current login holds in the `public` schema, one line
 /// each, sorted: each privilege type on each table, view, and foreign table;
 /// each column privilege no table-level grant already gives; each sequence
@@ -297,6 +316,10 @@ struct RestoreFingerprint {
     rls_table_count: usize,
     rls_policy_set_hash: String,
     rls_policy_count: usize,
+    /// Every `public` table's two RLS flags (`RLS_FLAG_SET_SQL`), hashed,
+    /// and how many tables.
+    rls_flag_set_hash: String,
+    rls_flag_table_count: usize,
     runtime_privilege_set_hash: String,
     runtime_privilege_count: usize,
     tenant_fingerprint: String,
@@ -317,6 +340,7 @@ impl RestoreFingerprint {
             &fingerprint.runtime_privilege_set_hash,
             &fingerprint.tenant_fingerprint,
             &fingerprint.rls_policy_set_hash,
+            &fingerprint.rls_flag_set_hash,
         ];
         if fingerprint.schema != RESTORE_FINGERPRINT_SCHEMA
             || !hashes.into_iter().all(|hash| is_sha256_label(hash))
@@ -324,6 +348,7 @@ impl RestoreFingerprint {
             || fingerprint.completed_credit_event_count == 0
             || fingerprint.rls_table_count == 0
             || fingerprint.rls_policy_count == 0
+            || fingerprint.rls_flag_table_count == 0
             || fingerprint.runtime_privilege_count == 0
             || fingerprint.tenant_count < 2
             || fingerprint.audit_event_count == 0
@@ -765,6 +790,13 @@ async fn rls_policy_set(runtime: &Arc<PgBackend>) -> (String, usize) {
     hashed_catalog_lines(runtime, RLS_POLICY_SET_SQL, "restore_rls_policy_set").await
 }
 
+/// Every `public` table's RLS flags (`RLS_FLAG_SET_SQL`), hashed, and how
+/// many tables. The catalog is readable by any login; the runtime login
+/// reads it.
+async fn rls_flag_set(runtime: &Arc<PgBackend>) -> (String, usize) {
+    hashed_catalog_lines(runtime, RLS_FLAG_SET_SQL, "restore_rls_flags").await
+}
+
 /// Runs `sql` (one text of sorted lines and their count) on `backend` and
 /// returns the text's hash and the count; failures panic with
 /// `<label>_connection_failed` or `<label>_query_failed`.
@@ -1145,6 +1177,7 @@ async fn pipeline_restore_seed() {
     // audit event.
     let rls_table_count = require_trace_tables_isolated(&runtime, "restore_seed").await;
     let (rls_policy_set_hash, rls_policy_count) = rls_policy_set(&runtime).await;
+    let (rls_flag_set_hash, rls_flag_table_count) = rls_flag_set(&runtime).await;
     let (runtime_privilege_set_hash, runtime_privilege_count) = runtime_privileges(&runtime).await;
     let tenants = tenant_fingerprint(&owner).await;
     assert!(
@@ -1174,6 +1207,8 @@ async fn pipeline_restore_seed() {
         rls_table_count,
         rls_policy_set_hash,
         rls_policy_count,
+        rls_flag_set_hash,
+        rls_flag_table_count,
         runtime_privilege_set_hash,
         runtime_privilege_count,
         tenant_fingerprint: tenants.hash,
@@ -1235,6 +1270,15 @@ async fn pipeline_restore_resume() {
         rls_policy_set_hash == seed.rls_policy_set_hash
             && rls_policy_count == seed.rls_policy_count,
         "restore_rls_policy_set_changed"
+    );
+    // Every table's two RLS flags, not only the tables checked above (Zaki's
+    // re-review of #1166, Medium): a table outside the pipeline set and
+    // `TRACE_COMMONS_RLS_TABLES` whose RLS a restore disabled or un-forced.
+    let (rls_flag_set_hash, rls_flag_table_count) = rls_flag_set(&runtime).await;
+    assert!(
+        rls_flag_set_hash == seed.rls_flag_set_hash
+            && rls_flag_table_count == seed.rls_flag_table_count,
+        "restore_rls_flags_changed"
     );
     // Every privilege of every type, not only SELECT.
     let (runtime_privilege_set_hash, runtime_privilege_count) = runtime_privileges(&runtime).await;
@@ -1439,6 +1483,8 @@ async fn pipeline_restore_resume() {
             "rls_tables_checked": rls_tables_checked,
             "rls_policy_set_hash": rls_policy_set_hash,
             "rls_policy_count": rls_policy_count,
+            "rls_flag_set_hash": rls_flag_set_hash,
+            "rls_flag_table_count": rls_flag_table_count,
             "runtime_privilege_set_hash": runtime_privilege_set_hash,
             "tenant_fingerprint": tenants.hash,
             "tenant_count": tenants.tenants.len(),
@@ -1533,6 +1579,8 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         rls_table_count: TRACE_COMMONS_RLS_TABLES.len(),
         rls_policy_set_hash: hash("policies"),
         rls_policy_count: 1,
+        rls_flag_set_hash: hash("flags"),
+        rls_flag_table_count: 1,
         runtime_privilege_set_hash: hash("privileges"),
         runtime_privilege_count: 1,
         tenant_fingerprint: hash("tenants"),
@@ -1576,6 +1624,7 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
     for count in [
         "rls_table_count",
         "rls_policy_count",
+        "rls_flag_table_count",
         "runtime_privilege_count",
         "audit_event_count",
     ] {
@@ -1588,6 +1637,7 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         "runtime_privilege_set_hash",
         "tenant_fingerprint",
         "rls_policy_set_hash",
+        "rls_flag_set_hash",
     ] {
         assert_eq!(
             edited(&|value| value[hash_field] = "not-a-hash".into()),

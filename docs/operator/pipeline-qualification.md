@@ -114,18 +114,20 @@ resume's protected log:
 | Every table in `TRACE_COMMONS_RLS_TABLES` has its `trace_corpus_tenant_isolation` policy, and the policy's `USING` and `WITH CHECK` expressions are the tenant predicate on `trace_current_tenant_id()` (the diagnostic `trace_corpus_pg_rls.rs` reads) | `restore_rls_policy_predicate_mismatch` |
 | Every one of those tables enables and forces RLS | `restore_rls_not_enabled_and_forced` |
 | Every RLS policy in the schema is the seed's, field for field: table, name, command, permissive or restrictive, roles, and both expressions. PostgreSQL ORs permissive policies, so a policy added beside the tenant policy, or one whose roles widen, would open a table the two checks above call isolated | `restore_rls_policy_set_changed` |
+| Every table in the schema, not only the ones above, has the seed's two RLS flags (`relrowsecurity`, `relforcerowsecurity`), and the set of tables is the seed's. The policy set lives in `pg_policy`, which holds neither flag, so a table outside `TRACE_COMMONS_RLS_TABLES` whose RLS a restore disabled or un-forced would otherwise pass | `restore_rls_flags_changed` |
 | The runtime login holds every privilege it held before the dump, of every type: tables, columns, sequences, functions, and the schema | `restore_runtime_privileges_changed` |
 | Every tenant's `main` audit chain verifies (`main`'s own verifier). Checked before the fingerprint below, which covers the audit rows too, so a changed audit row reports here | `restore_audit_chain_broken` |
 | Every tenant's rows in those tables (count and row hash per table and tenant, read by the owner) equal the seed's | `restore_tenant_fingerprint_mismatch` |
 | The audit chains hold the seed's hashed events | `restore_audit_event_count_mismatch` |
 
 On success it prints a second line with this evidence (the table count,
-the policy set's hash and size, the privilege set's hash and size, the
-tenant count and fingerprint, and the hashed audit events verified):
+the policy set's hash and size, the RLS flag set's hash and table count,
+the privilege set's hash and size, the tenant count and fingerprint, and
+the hashed audit events verified):
 
 ```
 PipelineRestoreOK: database=sha256:... artifacts=sha256:... index=sha256:... legs_per_run=1 credit_events_per_run=1 pending_runs_resumed=1 duplicate_effects=0
-PipelineRestoreChecks: rls_tables=96 rls_policies=sha256:... rls_policy_count=165 runtime_privileges=sha256:... runtime_privilege_count=412 tenants=2 tenant_fingerprint=sha256:... audit_events_verified=2
+PipelineRestoreChecks: rls_tables=96 rls_policies=sha256:... rls_policy_count=165 rls_flags=sha256:... rls_flag_tables=114 runtime_privileges=sha256:... runtime_privilege_count=412 tenants=2 tenant_fingerprint=sha256:... audit_events_verified=2
 PipelineRestoreScope: filesystem_restore_local_only -- the artifact restore is a local filesystem copy, local evidence only, not a remote object-store restore
 ```
 

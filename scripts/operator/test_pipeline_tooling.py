@@ -1853,6 +1853,8 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "rls_table_count": 96,
                     "rls_policy_set_hash": _fake_hash("policies"),
                     "rls_policy_count": 150,
+                    "rls_flag_set_hash": _fake_hash("flags"),
+                    "rls_flag_table_count": 140,
                     "runtime_privilege_set_hash": _fake_hash("privileges"),
                     "runtime_privilege_count": 500,
                     "tenant_fingerprint": _fake_hash("tenants"),
@@ -1874,6 +1876,8 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "rls_tables_checked": seed["rls_table_count"],
                     "rls_policy_set_hash": seed["rls_policy_set_hash"],
                     "rls_policy_count": seed["rls_policy_count"],
+                    "rls_flag_set_hash": seed["rls_flag_set_hash"],
+                    "rls_flag_table_count": seed["rls_flag_table_count"],
                     "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
                     "tenant_fingerprint": seed["tenant_fingerprint"],
                     "tenant_count": seed["tenant_count"],
@@ -2002,6 +2006,7 @@ class RestoreDrillTests(_RestoreDrillCase):
         self.assertEqual(
             lines[1],
             f"PipelineRestoreChecks: rls_tables=96 rls_policies={_fake_hash('policies')} rls_policy_count=150 "
+            f"rls_flags={_fake_hash('flags')} rls_flag_tables=140 "
             f"runtime_privileges={_fake_hash('privileges')} "
             f"runtime_privilege_count=500 tenants=2 tenant_fingerprint={_fake_hash('tenants')} "
             "audit_events_verified=2",
@@ -2062,6 +2067,12 @@ class RestoreDrillTests(_RestoreDrillCase):
             ({"evidence": {"rls_policy_count": 151}}, "restore_evidence_mismatch"),
             ({"fingerprint": {"rls_policy_count": 0}}, "restore_fingerprint_invalid"),
             ({"fingerprint": {"rls_policy_set_hash": "sha256:short"}}, "restore_fingerprint_invalid"),
+            # Zaki's re-review of #1166, Medium: every table's RLS flags, not
+            # only the pipeline tables and `TRACE_COMMONS_RLS_TABLES`.
+            ({"evidence": {"rls_flag_set_hash": _fake_hash("other")}}, "restore_evidence_mismatch"),
+            ({"evidence": {"rls_flag_table_count": 139}}, "restore_evidence_mismatch"),
+            ({"fingerprint": {"rls_flag_table_count": 0}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"rls_flag_set_hash": "sha256:short"}}, "restore_fingerprint_invalid"),
             ({"evidence": {"runtime_privilege_set_hash": _fake_hash("other")}}, "restore_evidence_mismatch"),
             ({"evidence": {"tenant_fingerprint": _fake_hash("other")}}, "restore_evidence_mismatch"),
             ({"evidence": {"tenant_count": 1}}, "restore_evidence_mismatch"),
