@@ -19,7 +19,17 @@ struct MonitorWindowView: View {
         case inference = "Inference"
         case traces = "Traces"
 
+        /// The raw value is an identity (scene storage restores the tab by
+        /// it); `title` is the word shown, marked for localisation.
         var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .home: String(localized: "Home", comment: "Monitor tab")
+            case .inference: String(localized: "Inference", comment: "Monitor tab")
+            case .traces: String(localized: "Traces", comment: "Monitor tab")
+            }
+        }
     }
 
     enum MapTab: String {
@@ -196,15 +206,15 @@ private struct MonitorMainPane<Content: View>: View {
                 HStack(spacing: GlassTokens.Space.s4) {
                     Spacer(minLength: 0)
                     GlassToolbarGroup {
-                        GlassToolbarButton("Map", systemImage: "map", pressed: showsMap && !mapCompacted) {
+                        GlassToolbarButton(String(localized: "Map", comment: "Map pane toggle"), systemImage: "map", pressed: showsMap && !mapCompacted) {
                             showsMap.toggle()
                         }
                         .disabled(mapCompacted)
-                        GlassToolbarButton("Inspector", systemImage: "sidebar.right", pressed: showsInspector) {
+                        GlassToolbarButton(String(localized: "Inspector", comment: "Inspector pane toggle"), systemImage: "sidebar.right", pressed: showsInspector) {
                             showsInspector.toggle()
                         }
                     }
-                    GlassRoundButton("Settings", systemImage: "gearshape", small: true, action: onSettings)
+                    GlassRoundButton(String(localized: "Settings", comment: "Settings button"), systemImage: "gearshape", small: true, action: onSettings)
                 }
                 // Clearance for the real traffic lights, not an origin.
                 .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
@@ -219,11 +229,11 @@ private struct MonitorMainPane<Content: View>: View {
                 // inspector are doing.
                 ShellNotices()
                 GlassSegmentedTabs(
-                    "Monitor",
+                    String(localized: "Monitor", comment: "Monitor tabs name"),
                     selection: $tab,
                     segments: MonitorWindowView.Tab.allCases.map { item in
                         GlassSegment(
-                            item.rawValue, value: item,
+                            item.title, value: item,
                             badgeValue: item == .traces ? tracesBadge : nil,
                             dot: item == .inference ? inferenceDot : nil,
                             accessibilityValue: item == .inference
@@ -260,7 +270,7 @@ private struct MonitorMapPane: View {
                     center: .center, startRadius: 20, endRadius: 520)
                 map
                 GlassFloatingGroup {
-                    GlassSegmentedTabs("Map", selection: $mapTab, segments: segments, floating: true)
+                    GlassSegmentedTabs(String(localized: "Map", comment: "Map view selector name"), selection: $mapTab, segments: segments, floating: true)
                         .padding(GlassTokens.Space.panePadding)
                 }
                 stateLine
@@ -275,7 +285,7 @@ private struct MonitorMapPane: View {
         case .traces:
             FlowMapView(
                 scene: .traces(traces.tree), legend: [.autoUpload, .ask, .ignore], zoomable: true,
-                accessibilityName: MonitorWindowView.Tab.traces.rawValue, state: tracesState)
+                accessibilityName: MonitorWindowView.Tab.traces.title, state: tracesState)
         case .privateAI:
             if let harnesses = inference.harnesses, let privateAILabel {
                 FlowMapView(
@@ -325,7 +335,7 @@ private struct MonitorMapPane: View {
     /// Traces, and the Private AI tab once the Rust core has said what it is
     /// called (D11).
     private var segments: [GlassSegment<MonitorWindowView.MapTab>] {
-        var segments = [GlassSegment(MonitorWindowView.Tab.traces.rawValue, value: MonitorWindowView.MapTab.traces)]
+        var segments = [GlassSegment(MonitorWindowView.Tab.traces.title, value: MonitorWindowView.MapTab.traces)]
         if let privateAILabel {
             segments.append(GlassSegment(privateAILabel, value: .privateAI))
         }
