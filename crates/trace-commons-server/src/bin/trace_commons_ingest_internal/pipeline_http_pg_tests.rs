@@ -7690,6 +7690,83 @@ async fn a_pipeline_credit_event_carries_its_witness_label_and_mains_audit_event
     assert_eq!(audit_rows().await.len(), 1, "a second pass appends nothing");
 }
 
+/// Zaki review 3, Z3-L6: the worker's `CreditMutate` append is idempotent.
+/// A crash after the event reached the file audit log and before the leg was
+/// marked audited makes the next pass find the leg again; the event's id is
+/// the credit event's, so that pass skips an event the file log already
+/// holds instead of appending it twice. Here ingest has no database audit
+/// mirror, so the file log is the only record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credit_audit_event_already_in_the_file_log_is_not_appended_again() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-once-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    let principal = static_token_principal_ref(&format!("token-compat-audit-once-{suffix}"));
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let append = || async {
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32,
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(append().await, 1);
+    // The crash: the event is in the file log, and the leg is not marked.
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements SET credit_audited_at = NULL
+          WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'trace_credit'",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(append().await, 1, "the next pass finds the leg again");
+    let credit_mutations = read_audit_events_in_file_order(dir.path(), &tenant)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "credit_mutate")
+        .count();
+    assert_eq!(
+        credit_mutations, 1,
+        "one CreditMutate event in the file log"
+    );
+}
+
 /// Zaki review 1, round 2, N-8: under `main`'s database contributor reads,
 /// a minimal-family run's Trace Credit award is reported with its points,
 /// as under file reads and in the pipeline block: the status route answers

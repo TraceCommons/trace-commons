@@ -743,14 +743,26 @@ pub(crate) async fn append_pipeline_credit_audit_events(
         .list_unaudited_credit_events(tenant_id, limit)
         .await?;
     for item in &items {
-        let already_appended = match state.db_mirror.as_ref() {
+        // Zaki review 3, Z3-L6: the append is idempotent. The event's id is
+        // the credit event's, so an event a crashed pass already appended --
+        // to the database mirror, or to the file log before the mirror or
+        // the audited mark -- is found again and not appended twice; one in
+        // the file log only is mirrored, as it was written.
+        let in_database = match state.db_mirror.as_ref() {
             Some(db) => db
                 .get_trace_audit_event_by_id(tenant_id, item.credit_event_id)
                 .await?
                 .is_some(),
             None => false,
         };
-        if !already_appended {
+        let in_file = if in_database {
+            None
+        } else {
+            read_audit_events_in_file_order(&state.root, tenant_id)?
+                .into_iter()
+                .find(|event| event.event_id == item.credit_event_id)
+        };
+        if !in_database {
             let points = item
                 .points_delta
                 .parse::<f32>()
@@ -771,31 +783,40 @@ pub(crate) async fn append_pipeline_credit_audit_events(
                     Some("system"),
                 ),
             };
-            let mut event = TraceCommonsAuditEvent::credit_mutation(
-                &actor,
-                item.submission_id,
-                points,
-                item.reason.as_deref(),
-            );
-            event.event_id = item.credit_event_id;
-            append_audit_event_mirrored(
-                state,
-                &actor,
-                event,
-                AuditRowMirror {
-                    action: StorageTraceAuditAction::CreditMutate,
-                    metadata: StorageTraceAuditSafeMetadata::CreditMutation {
-                        event_type: item.event_type,
-                        credit_points_delta_micros: credit_delta_micros(points),
-                        reason_hash: sha256_prefixed(item.reason.as_deref().unwrap_or_default()),
-                        external_ref_hash: item.external_ref.as_deref().map(sha256_prefixed),
-                    },
-                    object_ref_id: None,
-                    actor_role_label,
+            let row = AuditRowMirror {
+                action: StorageTraceAuditAction::CreditMutate,
+                metadata: StorageTraceAuditSafeMetadata::CreditMutation {
+                    event_type: item.event_type,
+                    credit_points_delta_micros: credit_delta_micros(points),
+                    reason_hash: sha256_prefixed(item.reason.as_deref().unwrap_or_default()),
+                    external_ref_hash: item.external_ref.as_deref().map(sha256_prefixed),
                 },
-                "pipeline credit audit event",
-            )
-            .await?;
+                object_ref_id: None,
+                actor_role_label,
+            };
+            match in_file {
+                Some(event) => {
+                    let mirrored = mirror_audit_event_row_to_db(state, &actor, &event, row).await;
+                    enforce_db_mirror_write_result(state, "pipeline credit audit event", mirrored)?;
+                }
+                None => {
+                    let mut event = TraceCommonsAuditEvent::credit_mutation(
+                        &actor,
+                        item.submission_id,
+                        points,
+                        item.reason.as_deref(),
+                    );
+                    event.event_id = item.credit_event_id;
+                    append_audit_event_mirrored(
+                        state,
+                        &actor,
+                        event,
+                        row,
+                        "pipeline credit audit event",
+                    )
+                    .await?;
+                }
+            }
         }
         service.store().mark_credit_audited(tenant_id, item).await?;
     }
