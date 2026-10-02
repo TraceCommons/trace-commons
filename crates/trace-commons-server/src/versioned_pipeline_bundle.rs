@@ -1110,10 +1110,18 @@ mod tests {
             reference.scorer_model_id.clone(),
             reference.projection_id.clone(),
             reference.index_id.clone(),
-            2_000_000,
-            0,
-            500_000,
-            reference.embed_insert_novelty_micros,
+            &crate::versioned_pipeline_compat::MainGateConfig {
+                perplexity_floor_micros: Some(2_000_000),
+                tail_fraction_floor_micros: Some(0),
+                novelty_floor_micros: Some(500_000),
+                embed_insert_novelty_micros: reference.embed_insert_novelty_micros,
+                top_k: reference.top_k,
+                chunk_target_tokens: reference.chunk_target_tokens,
+                chunk_max_tokens: reference.chunk_max_tokens,
+                chunk_cap: reference.chunk_cap,
+                chunk_min_tokens: reference.chunk_min_tokens,
+                novelty_utility_microcredits: reference.novelty_utility_microcredits,
+            },
         )
         .expect("a production-compatible configuration validates");
         let qualifiable =

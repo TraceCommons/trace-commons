@@ -150,6 +150,35 @@ pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
 pub const PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL: &str = "artifact_store_unavailable";
+/// Safe label of a compatibility Score released, uncharged, because its
+/// tenant's Score lock was held by another Score (multi-lens review L3-2).
+/// The run is due again after `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS`,
+/// and the worker ends that tenant's batch for the pass.
+pub const PIPELINE_SCORE_LOCK_BUSY_LABEL: &str = "score_lock_busy";
+/// The fixed delay before a `score_lock_busy` run is due again: about one
+/// Score, so the lock holder has likely committed, and short, since the run
+/// waited for nothing of its own.
+pub const PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS: i64 = 2_000;
+/// The fence margin of Settle's index writes (multi-lens review L4-3): an
+/// index writer call must return within it. A write stops issuing calls at
+/// its lease's end, so a withdrawal that finds a `pending` write a lease may
+/// still be making queues the revision's invalidation no earlier than that
+/// lease's end plus this margin, which also covers clock skew between
+/// replicas.
+pub const PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS: i64 = 60;
+/// The longest Settle's index dispatch holds the run and submission rows
+/// (multi-lens review L4-1): past the earlier of its lease's end and this
+/// budget, it stops writing, rolls back, and the run waits uncharged as
+/// `index_unavailable`.
+pub const PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS: i64 = 30;
+/// Startup refusal labels of `PipelineService::check_tenant_bundles` that
+/// the default package's checks do not share: a tenant bundle whose scorer
+/// or embedder the service does not hold, one no policy family runs, and
+/// one that cannot be read (multi-lens review L5-2).
+pub const PIPELINE_TENANT_BUNDLE_DEPENDENCY_MISSING_LABEL: &str =
+    "pipeline_tenant_bundle_dependency_missing";
+pub const PIPELINE_TENANT_BUNDLE_NOT_RUNNABLE_LABEL: &str = "pipeline_tenant_bundle_not_runnable";
+pub const PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL: &str = "pipeline_tenant_bundle_unreadable";
 pub const PIPELINE_INDEX_CONFLICT_LABEL: &str = "index_key_conflict";
 pub const PIPELINE_CREDIT_HELD_LABEL: &str = "credit_held";
 pub const PIPELINE_CREDIT_CAP_LABEL: &str = "credit_cap_exceeded";
@@ -1373,6 +1402,27 @@ impl PgPipelineStore {
         Ok(())
     }
 
+    /// The bundles a worker may run for `tenant_id`: its active bundle and
+    /// the bundle of each run not yet `complete` or `failed` (a tenant keeps
+    /// both when the default package changes). Sorted, without repeats.
+    pub async fn runnable_bundle_ids(&self, tenant_id: &str) -> Result<Vec<String>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1
+                 UNION
+                 SELECT bundle_id FROM pipeline_runs
+                  WHERE tenant_id = $1
+                    AND state IN ('pending', 'leased', 'retry', 'awaiting_review')
+                 ORDER BY 1",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get("bundle_id")).collect())
+    }
+
     pub async fn active_bundle_id(&self, tenant_id: &str) -> Result<Option<String>, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
@@ -1502,16 +1552,27 @@ impl PgPipelineStore {
     ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // Multi-lens review L4-1 and L4-6(a): the sweep locks in run id order
+        // and skips a row another transaction holds (a live dispatch, a
+        // withdrawal), so a claim never waits behind one and two sweeps
+        // cannot deadlock with a withdrawal; a later claim sweeps the row.
         let swept = tx
             .query(
-                "UPDATE pipeline_runs
+                "WITH expired AS MATERIALIZED (
+                    SELECT run_id FROM pipeline_runs
+                     WHERE tenant_id = $1
+                       AND state = 'leased'
+                       AND lease_expires_at <= NOW()
+                       AND attempt_count >= max_attempts
+                     ORDER BY run_id
+                     FOR UPDATE SKIP LOCKED
+                 )
+                 UPDATE pipeline_runs p
                  SET state = 'failed', lease_token = NULL, lease_expires_at = NULL,
                      last_error_label = $2, updated_at = NOW()
-                 WHERE tenant_id = $1
-                   AND state = 'leased'
-                   AND lease_expires_at <= NOW()
-                   AND attempt_count >= max_attempts
-                 RETURNING run_id, next_phase",
+                 FROM expired
+                 WHERE p.tenant_id = $1 AND p.run_id = expired.run_id
+                 RETURNING p.run_id, p.next_phase",
                 &[&tenant_id, &PIPELINE_ATTEMPTS_EXHAUSTED_LABEL],
             )
             .await?;
@@ -2993,27 +3054,42 @@ impl PgPipelineStore {
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
         reason_code: &str,
+        not_before: Option<DateTime<Utc>>,
     ) -> Result<(), DatabaseError> {
         let revision_id = run.approved_revision_id.ok_or_else(|| {
             DatabaseError::Constraint("index_invalidation_revision_missing".to_string())
         })?;
+        // `not_before` (multi-lens review L4-3): an index write that may
+        // still be in flight ends by then, so the invalidation is not due
+        // earlier, and a pending row already queued is not due earlier
+        // either.
         tx.execute(
             "INSERT INTO pipeline_index_invalidations (
-                tenant_id, run_id, submission_id, registry_revision_id, reason_code
-             ) VALUES ($1,$2,$3,$4,$5)
-             ON CONFLICT (tenant_id, run_id) DO NOTHING",
+                tenant_id, run_id, submission_id, registry_revision_id, reason_code,
+                next_attempt_at
+             ) VALUES ($1,$2,$3,$4,$5, GREATEST(NOW(), COALESCE($6::timestamptz, NOW())))
+             ON CONFLICT (tenant_id, run_id) DO UPDATE
+                SET next_attempt_at = GREATEST(
+                        pipeline_index_invalidations.next_attempt_at,
+                        EXCLUDED.next_attempt_at
+                    )
+              WHERE pipeline_index_invalidations.state = 'pending'
+                AND $6::timestamptz IS NOT NULL",
             &[
                 &run.tenant_id,
                 &run.run_id,
                 &run.submission_id,
                 &revision_id,
                 &reason_code,
+                &not_before,
             ],
         )
         .await?;
         // Zaki review 1, item 6: queuing a revision whose invalidation
-        // `failed` runs it again, from the start.
-        reset_failed_index_invalidations_on_tx(tx, &run.tenant_id, Some(run.run_id)).await?;
+        // `failed` runs it again, from the start (and no earlier than
+        // `not_before`).
+        reset_failed_index_invalidations_on_tx(tx, &run.tenant_id, Some(run.run_id), not_before)
+            .await?;
         Ok(())
     }
 
@@ -3030,7 +3106,7 @@ impl PgPipelineStore {
     ) -> Result<u64, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let requeued = reset_failed_index_invalidations_on_tx(&tx, tenant_id, None).await?;
+        let requeued = reset_failed_index_invalidations_on_tx(&tx, tenant_id, None, None).await?;
         tx.commit().await?;
         Ok(requeued)
     }
@@ -3064,18 +3140,23 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
-                "UPDATE pipeline_index_invalidations
+                // A materialized CTE, not `IN (SELECT ... LIMIT ...)`: the
+                // planner may evaluate an `IN` subquery more than once, and
+                // with `SKIP LOCKED` each evaluation can pick other rows, so
+                // one claim could take more than `limit`.
+                "WITH due AS MATERIALIZED (
+                    SELECT run_id FROM pipeline_index_invalidations
+                     WHERE tenant_id = $1 AND state = 'pending'
+                       AND next_attempt_at <= NOW() AND attempt_count < max_attempts
+                     ORDER BY next_attempt_at, run_id
+                     LIMIT $2
+                     FOR UPDATE SKIP LOCKED
+                 )
+                 UPDATE pipeline_index_invalidations i
                     SET next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 millisecond')
-                  WHERE tenant_id = $1
-                    AND (tenant_id, run_id) IN (
-                        SELECT tenant_id, run_id FROM pipeline_index_invalidations
-                         WHERE tenant_id = $1 AND state = 'pending'
-                           AND next_attempt_at <= NOW() AND attempt_count < max_attempts
-                         ORDER BY next_attempt_at, run_id
-                         LIMIT $2
-                         FOR UPDATE SKIP LOCKED
-                    )
-                  RETURNING run_id, registry_revision_id, attempt_count, next_attempt_at",
+                   FROM due
+                  WHERE i.tenant_id = $1 AND i.run_id = due.run_id
+                  RETURNING i.run_id, i.registry_revision_id, i.attempt_count, i.next_attempt_at",
                 &[&tenant_id, &limit, &lease_milliseconds],
             )
             .await?;
@@ -3553,10 +3634,26 @@ impl PgPipelineStore {
                         &[&tenant_id, &run.run_id],
                     )
                     .await?;
-                    Self::enqueue_index_invalidation_on_tx(tx, run, reason_code).await?;
+                    // Multi-lens review L4-3: on a run still `leased`, a
+                    // dispatch that lost its row locks (a lost session, a
+                    // process exit) may still be writing. It starts no upsert
+                    // after the lease's end, and one in flight returns within
+                    // the fence margin, so the invalidation is not due
+                    // before then. A run that is not leased has no dispatch
+                    // writing: a dispatch releases its run only once its
+                    // writes ended.
+                    let not_before = (run.state == PipelineRunState::Leased)
+                        .then_some(run.lease_expires_at)
+                        .flatten()
+                        .map(|expires_at| {
+                            expires_at
+                                + Duration::seconds(PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS)
+                        });
+                    Self::enqueue_index_invalidation_on_tx(tx, run, reason_code, not_before)
+                        .await?;
                 }
                 "complete" | "failed" | "cancelled" => {
-                    Self::enqueue_index_invalidation_on_tx(tx, run, reason_code).await?;
+                    Self::enqueue_index_invalidation_on_tx(tx, run, reason_code, None).await?;
                 }
                 _ => {}
             }
@@ -4019,6 +4116,45 @@ impl PgPipelineStore {
                     AND lease_token = $4 AND lease_expires_at > NOW()
                   RETURNING *",
                 &[&run.tenant_id, &run.run_id, &error_label, &lease_token],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Releases a compatibility Score that found its tenant's Score lock held
+    /// by another Score (multi-lens review L3-2): uncharged, like
+    /// `mark_transient_retry`, but due again after the fixed
+    /// `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS`, not the phase-age
+    /// backoff, since the run waited for nothing of its own. Fenced by the
+    /// lease like `mark_transient_retry`.
+    pub async fn release_score_lock_busy(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET state = 'retry', lease_token = NULL, lease_expires_at = NULL,
+                        attempt_count = GREATEST(attempt_count - 1, 0),
+                        next_attempt_at = clock_timestamp()
+                            + ($3::bigint * INTERVAL '1 millisecond'),
+                        last_error_label = $4, updated_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND lease_token = $5 AND lease_expires_at > clock_timestamp()
+                  RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS,
+                    &PIPELINE_SCORE_LOCK_BUSY_LABEL,
+                    &lease_token,
+                ],
             )
             .await?
             .ok_or_else(stale_lease_error)?;
@@ -5661,15 +5797,17 @@ async fn reset_failed_index_invalidations_on_tx(
     tx: &Transaction<'_>,
     tenant_id: &str,
     run_id: Option<Uuid>,
+    not_before: Option<DateTime<Utc>>,
 ) -> Result<u64, DatabaseError> {
     let reset = tx
         .execute(
             "UPDATE pipeline_index_invalidations
                 SET state = 'pending', attempt_count = 0, last_error_label = NULL,
-                    completed_at = NULL, next_attempt_at = NOW()
+                    completed_at = NULL,
+                    next_attempt_at = GREATEST(NOW(), COALESCE($3::timestamptz, NOW()))
               WHERE tenant_id = $1 AND state = 'failed'
                 AND ($2::UUID IS NULL OR run_id = $2)",
-            &[&tenant_id, &run_id],
+            &[&tenant_id, &run_id, &not_before],
         )
         .await?;
     Ok(reset)
@@ -6020,8 +6158,9 @@ pub struct PipelineNearPayoutControls {
 /// - `issuer_principal_ref` is the principal the pipeline issues credit as
 ///   (Ruling T15-10), checked against that list in place of `main`'s calling
 ///   gate worker, and in place of the principal that runs `main`'s live
-///   settlement for a paid leg. With a non-empty list and no issuer, every
-///   positive award is withheld and no payout is made.
+///   settlement for a paid leg. With no issuer, every `NoveltyUtility` leg
+///   is withheld (Zaki review 3, Z3-2); with a non-empty list and no issuer,
+///   no payout is made either.
 /// - `require_production_gate` is `main`'s
 ///   `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` (Ruling T15-11).
 /// - `settlement_allowed_policy_versions` is `main`'s
@@ -6504,7 +6643,7 @@ impl PipelineServiceBuilder {
             object_store_name: self.object_store_name,
             lease_config: self.lease_config,
             crash_point: self.crash_point,
-            crash_pending: AtomicBool::new(self.crash_point.is_some()),
+            crash_pending: Arc::new(AtomicBool::new(self.crash_point.is_some())),
             score_evaluations: AtomicUsize::new(0),
             settle_evaluations: AtomicUsize::new(0),
             authority: self.authority,
@@ -6625,7 +6764,7 @@ pub struct PipelineService {
     object_store_name: String,
     lease_config: PipelineLeaseConfig,
     crash_point: Option<PipelineCrashPoint>,
-    crash_pending: AtomicBool,
+    crash_pending: Arc<AtomicBool>,
     score_evaluations: AtomicUsize,
     settle_evaluations: AtomicUsize,
     authority: Option<Arc<dyn PipelineAuthorityProvider>>,
@@ -6768,12 +6907,13 @@ impl PipelineService {
             .is_some()
     }
 
-    /// The index-insert threshold of the default bundle's compatibility
-    /// configuration (`CompatibilityBundleConfig::embed_insert_novelty_micros`);
-    /// `None` when the default bundle is not the compatibility bundle.
-    pub fn compatibility_embed_insert_novelty_micros(&self) -> Option<u64> {
+    /// The default bundle's compatibility configuration, which ingest
+    /// compares with `main`'s gate configuration at assembly; `None` when the
+    /// default bundle is not the compatibility bundle.
+    pub fn compatibility_config(
+        &self,
+    ) -> Option<crate::versioned_pipeline_compat::CompatibilityBundleConfig> {
         crate::versioned_pipeline_bundle::package_compatibility_config(&self.default_package)
-            .map(|config| config.embed_insert_novelty_micros)
     }
 
     /// The NEAR credit contract an enabled payout names
@@ -7060,11 +7200,73 @@ impl PipelineService {
         Ok(())
     }
 
-    fn inject_crash(&self, point: PipelineCrashPoint) -> anyhow::Result<()> {
-        if self.crash_point == Some(point) && self.crash_pending.swap(false, Ordering::SeqCst) {
-            anyhow::bail!(INJECTED_PIPELINE_CRASH);
+    /// The startup checks of every bundle a worker may run for `tenant_id`
+    /// (multi-lens review L5-2, Zaki review 3, Z3-2): its active bundle and
+    /// the bundle of each run in flight (`runnable_bundle_ids`), which a
+    /// tenant keeps when the default package changes
+    /// (`activate_bundle_if_none`). Each gets the checks ingest gives the
+    /// default package at assembly: its dependencies resolve (`construct`),
+    /// and a compatibility package holds `main`'s gate configuration
+    /// (`main_gate`), has the pipeline's credit issuer, and, with
+    /// `require_qualifiable`, is qualifiable. The error is the first
+    /// failure's label, the default package check's where they share one;
+    /// ingest refuses to start on it.
+    pub async fn check_tenant_bundles(
+        &self,
+        tenant_id: &str,
+        main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
+        require_qualifiable: bool,
+    ) -> anyhow::Result<()> {
+        let bundle_ids = self
+            .store
+            .runnable_bundle_ids(tenant_id)
+            .await
+            .map_err(|_| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?;
+        for bundle_id in bundle_ids {
+            let package = self
+                .store
+                .load_bundle(tenant_id, &bundle_id)
+                .await
+                .map_err(|_| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?;
+            self.check_runnable_package(&package, main_gate, require_qualifiable)
+                .map_err(|label| anyhow::anyhow!(label))?;
         }
         Ok(())
+    }
+
+    /// `check_tenant_bundles`'s checks of one package.
+    fn check_runnable_package(
+        &self,
+        package: &BundlePackage,
+        main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
+        require_qualifiable: bool,
+    ) -> Result<(), &'static str> {
+        self.construct(package.clone()).map_err(|label| {
+            if label == PIPELINE_DEPENDENCY_MISSING_LABEL {
+                PIPELINE_TENANT_BUNDLE_DEPENDENCY_MISSING_LABEL
+            } else {
+                PIPELINE_TENANT_BUNDLE_NOT_RUNNABLE_LABEL
+            }
+        })?;
+        if let Some(config) =
+            crate::versioned_pipeline_bundle::package_compatibility_config(package)
+        {
+            if !config.matches_main_gate(main_gate) {
+                return Err("pipeline_runtime_main_gate_config_mismatch");
+            }
+            if self.novelty_utility_checks.issuer_principal_ref.is_none() {
+                return Err("pipeline_credit_issuer_principal_missing");
+            }
+            if require_qualifiable && !config.is_qualifiable() {
+                return Err("pipeline_runtime_dependencies_not_production_qualified");
+            }
+        }
+        Ok(())
+    }
+
+    fn inject_crash(&self, point: PipelineCrashPoint) -> anyhow::Result<()> {
+        inject_crash_at(self.crash_point, &self.crash_pending, point)
     }
 
     /// Whether the submission behind a run is still operable right now
@@ -8545,10 +8747,13 @@ impl PipelineService {
         let (object_key, ciphertext_sha256) =
             (object_key.to_string(), ciphertext_sha256.to_string());
         // Not `artifact_store_call`: a stored command that cannot be read
-        // stays the charged `index_command_invalid` (multi-lens review L2-2,
-        // held for a ruling). A Settle run suspended on it for good would keep
-        // its command in every compatibility Score's unapplied set, which
-        // fails each of them closed (`index_unavailable`).
+        // stays the charged `index_command_invalid` (ruling RB-35 on
+        // multi-lens review L2-2). The store's errors carry no type, so a
+        // deleted or corrupt command looks like an outage; a Settle run
+        // suspended on it for good would keep its command in every
+        // compatibility Score's unapplied set, which fails each of them
+        // closed (`index_unavailable`), while a charged failure ends the run
+        // after its Settle budget and the tenant recovers.
         let wrapper = on_blocking_pool(move || {
             store.read_json_by_object_key(
                 tenant.as_str(),
@@ -9377,8 +9582,10 @@ impl PipelineService {
     /// (`submission_guard_on_tx`) that the commit locks. No other path takes
     /// the Score lock, so none holds a run or submission row while it waits
     /// for it. The approved bytes are read before the transaction opens, so
-    /// the Score holds one pooled connection at a time. A Score that waited
-    /// for the lock past its lease stops before it scores (uncharged, as a
+    /// the Score holds one pooled connection at a time. The lock is tried,
+    /// never waited for (multi-lens review L3-2): a Score that finds it held
+    /// releases its run uncharged (`release_score_lock_busy`), and a lease
+    /// that has passed stops the Score before it scores (uncharged, as a
     /// stale lease). Another family's Score (the minimal one) takes no lock.
     ///
     /// Rebase 10, option D: a compatibility Score also stages its attempt
@@ -9410,11 +9617,23 @@ impl PipelineService {
         let prestaged = self.stage_score_artifacts_before_lock(run).await?;
         let mut client = self.backend.trace_pool().get().await?;
         let lock = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
-        lock.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))",
-            &[&pipeline_compatibility_score_lock(&run.tenant_id)],
-        )
-        .await?;
+        // Multi-lens review L3-2: the lock is tried, never waited for. A
+        // replica that waited would hold this pooled connection and stall
+        // its other tenants behind one tenant's Score; a busy lock releases
+        // the run instead, uncharged, after a fixed delay, and the worker
+        // ends this tenant's batch for the pass.
+        let locked: bool = lock
+            .query_one(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))",
+                &[&pipeline_compatibility_score_lock(&run.tenant_id)],
+            )
+            .await?
+            .get(0);
+        if !locked {
+            drop(lock);
+            drop(client);
+            return Ok(self.store.release_score_lock_busy(run).await?);
+        }
         let lease_live = lock
             .query_opt(
                 "SELECT 1 FROM pipeline_runs
@@ -9962,90 +10181,52 @@ impl PipelineService {
             // dispatch does not need the command.
             self.ensure_live_lease(&run).await?;
             let command = self.load_index_command(&run, &score_evidence).await;
-            let mut client = self.backend.trace_pool().get().await?;
-            let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
-            // Lock order: the run row (`ensure_current_lease`), then the
-            // submission row (the guard).
-            ensure_current_lease(&tx, &run, required_lease_token(&run)?).await?;
-            let guard = PgPipelineStore::submission_guard_on_tx(&tx, &run).await?;
-            let cancelled = !guard.operable;
-            if cancelled {
-                // `pending` may be partly written: an earlier attempt can
-                // have applied entries and then rolled back. So the cancel
-                // queues an invalidation of the revision in the same
-                // transaction (a no-op for the index if nothing was written).
-                PgPipelineStore::enqueue_index_invalidation_on_tx(
-                    &tx,
-                    &run,
-                    PIPELINE_SUBMISSION_INOPERABLE_LABEL,
-                )
-                .await?;
-                run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "cancelled").await?;
-            } else {
-                let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
-                let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
-                // Each entry is written under its own key: the command pairs
-                // them, so one entry is never stored under another's key.
-                // The writes are synchronous index calls, so they run on the
-                // blocking pool while this transaction keeps the run and
-                // submission rows locked (N-6); a task that did not return
-                // may have written part of the command, as an `Uncertain`
-                // answer may.
-                let writer = self.index_writer.clone();
-                let entries = command
-                    .keyed_entries(&tenant)
-                    .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
-                    .collect::<Vec<_>>();
-                let written = tokio::task::spawn_blocking(move || {
-                    for (key, embedding, content_hash) in &entries {
-                        writer.upsert(key, embedding, content_hash)?;
-                    }
-                    Ok(())
-                })
-                .await
-                .unwrap_or(Err(IndexWriteError::Uncertain));
-                match written {
-                    Ok(()) => {}
-                    Err(IndexWriteError::Uncertain) | Err(IndexWriteError::Failed) => {
-                        // An index outage is a
-                        // dependency failure, like Score's own
-                        // `index_unavailable` -- an uncharged
-                        // suspension, which the Settle code records
-                        // itself rather than returning an `Err`. Ruling
-                        // S5: the transaction (rolled back, `pending`
-                        // stays) and its pooled client go before the
-                        // store call, which checks out its own.
-                        drop(tx);
-                        drop(client);
-                        return Ok(self
-                            .store
-                            .mark_transient_retry(&run, PIPELINE_INDEX_UNAVAILABLE_LABEL)
-                            .await?);
-                    }
-                    Err(IndexWriteError::ContentConflict) => {
-                        // Ruling S5, as above.
-                        drop(tx);
-                        drop(client);
-                        self.store.mark_index_write_state(&run, "failed").await?;
-                        return Err(anyhow::anyhow!(PIPELINE_INDEX_CONFLICT_LABEL));
-                    }
+            // Multi-lens review L4-3: the dispatch runs in a task of its own,
+            // which owns the transaction holding the run and submission rows
+            // and awaits the blocking writes, so a dropped Settle future
+            // (`join_or_abort` at shutdown) does not roll the transaction back
+            // while the writes go on: the task ends the writes and commits or
+            // rolls back itself.
+            let dispatch = tokio::spawn(dispatch_index_write(IndexDispatch {
+                backend: self.backend.clone(),
+                writer: self.index_writer.clone(),
+                run: run.clone(),
+                command,
+                crash_point: self.crash_point,
+                crash_pending: self.crash_pending.clone(),
+            }))
+            .await
+            .map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))??;
+            match dispatch {
+                IndexDispatchOutcome::Cancelled(updated) => {
+                    run = updated;
+                    self.wake_follow_ups(
+                        &run.tenant_id,
+                        PipelineFollowUps {
+                            index_invalidations: true,
+                            payouts: false,
+                            credit_audits: false,
+                        },
+                    );
                 }
-                // A crash here drops the transaction, so `pending` stays; the
-                // retry applies the same entries again, which the index
-                // reports as unchanged.
-                self.inject_crash(PipelineCrashPoint::AfterIndexApply)?;
-                run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "complete").await?;
-            }
-            tx.commit().await?;
-            if cancelled {
-                self.wake_follow_ups(
-                    &run.tenant_id,
-                    PipelineFollowUps {
-                        index_invalidations: true,
-                        payouts: false,
-                        credit_audits: false,
-                    },
-                );
+                IndexDispatchOutcome::Complete(updated) => run = updated,
+                IndexDispatchOutcome::WriteFailed(
+                    IndexWriteError::Uncertain | IndexWriteError::Failed,
+                ) => {
+                    // An index outage is a dependency failure, like Score's
+                    // own `index_unavailable` -- an uncharged suspension,
+                    // which the Settle code records itself rather than
+                    // returning an `Err`. The dispatch's transaction rolled
+                    // back (`pending` stays) before this store call.
+                    return Ok(self
+                        .store
+                        .mark_transient_retry(&run, PIPELINE_INDEX_UNAVAILABLE_LABEL)
+                        .await?);
+                }
+                IndexDispatchOutcome::WriteFailed(IndexWriteError::ContentConflict) => {
+                    self.store.mark_index_write_state(&run, "failed").await?;
+                    return Err(anyhow::anyhow!(PIPELINE_INDEX_CONFLICT_LABEL));
+                }
             }
         }
 
@@ -10873,18 +11054,16 @@ impl PipelineService {
         // that issued a `NoveltyUtility` event -- its calling gate worker --
         // as the event's actor. The pipeline issues it as its configured
         // issuer (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), the
-        // principal Settle checks against `main`'s central-issuer list. A
-        // runtime that routes or drains a compatibility bundle refuses to
-        // start without one, so the contributor stands in only on a runtime
-        // that processes no tenant. A `PipelineScore` event keeps the
+        // principal Settle checks against `main`'s central-issuer list. With
+        // no issuer the leg is withheld before its ledger row
+        // (`novelty_utility_withheld_reason`; Zaki review 3, Z3-2): nobody
+        // stands in for the issuer. A `PipelineScore` event keeps the
         // contributor, as PR 2 wrote it.
         let actor_principal_ref = match trace_credit_event {
-            PipelineTraceCreditEvent::NoveltyUtility => self
-                .novelty_utility_checks
-                .issuer_principal_ref
-                .clone()
-                .unwrap_or_else(|| account_ref.to_string()),
-            PipelineTraceCreditEvent::PipelineScore => account_ref.to_string(),
+            PipelineTraceCreditEvent::NoveltyUtility => {
+                self.novelty_utility_checks.issuer_principal_ref.clone()
+            }
+            PipelineTraceCreditEvent::PipelineScore => Some(account_ref.to_string()),
         };
         // Zaki review 1, item 4 (owner: as `main`): a batched leg's line
         // settles under `main`'s settlement key -- the principal's account,
@@ -11019,7 +11198,9 @@ impl PipelineService {
                 &ledger_event_type_label,
                 &actor_role,
                 &settlement_state,
-                &actor_principal_ref,
+                &actor_principal_ref.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+                })?,
                 &witness_provenance_class,
             ],
         )
@@ -11116,6 +11297,10 @@ impl PipelineService {
     /// - The central issuer: with a non-empty issuer allowlist, a positive
     ///   award needs the pipeline's configured issuer on it, where `main`
     ///   needs its calling gate worker there (`central_issuer_denied`).
+    /// - The issuer: with no configured pipeline issuer (and an empty list),
+    ///   the event has no actor, where `main` always has its calling gate
+    ///   worker (`credit_check_error`, as `main` fails a check it cannot
+    ///   make; Zaki review 3, Z3-2).
     /// - `main` also applies its calling token's scoped allowlists. Settle
     ///   has no calling token, so that check does not apply here (Ruling
     ///   T15-9); the tenant authority's own allowlists were applied to this
@@ -11155,6 +11340,12 @@ impl PipelineService {
                 .is_some_and(|issuer| checks.central_issuer_principal_refs.contains(issuer))
         {
             return Ok(Some(PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL));
+        }
+        // Zaki review 3, Z3-2: the event's actor is the configured issuer,
+        // and nobody stands in for a missing one, so the leg is withheld, as
+        // `main` fails a credit check it cannot make.
+        if checks.issuer_principal_ref.is_none() {
+            return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
         }
         let Some(authority) = self
             .authority
@@ -12319,6 +12510,153 @@ fn pipeline_receipt_object_id(run_id: Uuid, attempt_id: Uuid) -> String {
 /// The transaction-scoped advisory lock that serializes a tenant's
 /// compatibility Score from its neighbour read through its commit (Zaki
 /// review 1, round 2, finding 12).
+/// Fails as an injected crash when `point` is the service's crash point and
+/// the crash has not happened yet (`PipelineServiceBuilder::with_crash_point`).
+fn inject_crash_at(
+    crash_point: Option<PipelineCrashPoint>,
+    crash_pending: &AtomicBool,
+    point: PipelineCrashPoint,
+) -> anyhow::Result<()> {
+    if crash_point == Some(point) && crash_pending.swap(false, Ordering::SeqCst) {
+        anyhow::bail!(INJECTED_PIPELINE_CRASH);
+    }
+    Ok(())
+}
+
+/// What Settle's index dispatch task needs, owned, so the task outlives a
+/// dropped Settle future (`dispatch_index_write`).
+struct IndexDispatch {
+    backend: Arc<PgBackend>,
+    writer: Arc<dyn IdentifiedIndexWriter>,
+    run: PipelineRunRecord,
+    command: anyhow::Result<Option<SealedIndexCommand>>,
+    crash_point: Option<PipelineCrashPoint>,
+    crash_pending: Arc<AtomicBool>,
+}
+
+/// How Settle's index dispatch ended. `WriteFailed`'s transaction was rolled
+/// back, so `pending` stays.
+enum IndexDispatchOutcome {
+    Cancelled(PipelineRunRecord),
+    Complete(PipelineRunRecord),
+    WriteFailed(IndexWriteError),
+}
+
+/// Settle's index dispatch (Step 5), run in a task of its own (multi-lens
+/// review L4-3). One transaction locks the run row (`ensure_current_lease`)
+/// and then the submission row (the guard), and holds both through every
+/// upsert to the commit of the `index_write_state` it records. A withdrawal
+/// locks the submission row `FOR UPDATE`, so it either commits before the
+/// guard read (the dispatch then sees it, cancels, and queues an
+/// invalidation for whatever an earlier attempt wrote) or waits until the
+/// write and its `complete` have committed.
+///
+/// The writes are synchronous index calls on the blocking pool (N-6), and
+/// the writer does not see the row locks. The task owns the transaction and
+/// awaits the writes, so a dropped Settle future does not end it early. The
+/// locks can still go while the writes run -- a lost database session, or a
+/// process exit, which drops this task with the runtime while the blocking
+/// writes go on -- so the writes also stop at the deadline: no upsert starts
+/// once the earlier of `lease_expires_at` and the dispatch budget
+/// (`PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`, multi-lens review L4-1) has
+/// passed. At the deadline the transaction rolls back at once, so the rows
+/// are free, and the run is released only once the upsert in flight has
+/// returned (or the fence margin has passed). An upsert in flight then must
+/// return within `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, which a
+/// withdrawal waits out before the revision's invalidation runs
+/// (`end_runs_of_inoperable_submission_on_tx`). A task that did not return
+/// may have written part of the command, as an `Uncertain` answer may.
+async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDispatchOutcome> {
+    let IndexDispatch {
+        backend,
+        writer,
+        run,
+        command,
+        crash_point,
+        crash_pending,
+    } = dispatch;
+    let mut client = backend.trace_pool().get().await?;
+    let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+    // Lock order: the run row (`ensure_current_lease`), then the submission
+    // row (the guard).
+    ensure_current_lease(&tx, &run, required_lease_token(&run)?).await?;
+    let guard = PgPipelineStore::submission_guard_on_tx(&tx, &run).await?;
+    if !guard.operable {
+        // `pending` may be partly written: an earlier attempt can have
+        // applied entries and then rolled back. So the cancel queues an
+        // invalidation of the revision in the same transaction (a no-op for
+        // the index if nothing was written). This task holds the lease and
+        // writes nothing, so the invalidation is due at once.
+        PgPipelineStore::enqueue_index_invalidation_on_tx(
+            &tx,
+            &run,
+            PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+            None,
+        )
+        .await?;
+        let run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "cancelled").await?;
+        tx.commit().await?;
+        return Ok(IndexDispatchOutcome::Cancelled(run));
+    }
+    let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+    // Multi-lens review L4-1: the rows are held no longer than the earlier
+    // of the lease's end and the dispatch budget.
+    let deadline = run
+        .lease_expires_at
+        .ok_or_else(stale_lease_error)?
+        .min(Utc::now() + Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS));
+    let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+    // Each entry is written under its own key: the command pairs them, so
+    // one entry is never stored under another's key.
+    let entries = command
+        .keyed_entries(&tenant)
+        .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
+        .collect::<Vec<_>>();
+    let mut writes = tokio::task::spawn_blocking(move || {
+        for (key, embedding, content_hash) in &entries {
+            if Utc::now() >= deadline {
+                return Err(IndexWriteError::Uncertain);
+            }
+            writer.upsert(key, embedding, content_hash)?;
+        }
+        Ok(())
+    });
+    let budget = (deadline - Utc::now()).to_std().unwrap_or_default();
+    let written = match tokio::time::timeout(budget, &mut writes).await {
+        Ok(joined) => joined.unwrap_or(Err(IndexWriteError::Uncertain)),
+        Err(_) => {
+            // Past the deadline: roll back at once, so the rows are free,
+            // then wait (bounded by the fence margin) for the call in flight
+            // to return before the run is released, so that a run that is
+            // not leased has no write in flight.
+            drop(tx);
+            drop(client);
+            let margin = std::time::Duration::from_secs(
+                PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
+            );
+            let _ = tokio::time::timeout(margin, writes).await;
+            return Ok(IndexDispatchOutcome::WriteFailed(
+                IndexWriteError::Uncertain,
+            ));
+        }
+    };
+    if let Err(error) = written {
+        // Rolled back: `pending` stays.
+        drop(tx);
+        return Ok(IndexDispatchOutcome::WriteFailed(error));
+    }
+    // A crash here drops the transaction, so `pending` stays; the retry
+    // applies the same entries again, which the index reports as unchanged.
+    inject_crash_at(
+        crash_point,
+        &crash_pending,
+        PipelineCrashPoint::AfterIndexApply,
+    )?;
+    let run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "complete").await?;
+    tx.commit().await?;
+    Ok(IndexDispatchOutcome::Complete(run))
+}
+
 fn pipeline_compatibility_score_lock(tenant_id: &str) -> String {
     format!("pipeline-compatibility-score:{tenant_id}")
 }

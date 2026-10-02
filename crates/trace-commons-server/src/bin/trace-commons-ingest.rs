@@ -268,6 +268,7 @@ use trace_commons_server::versioned_pipeline::{
     PipelineReviewClaimOutcome, PipelineService, PipelineWithdrawalFollowUpState,
     PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
 };
+use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
     PIPELINE_EXPORT_SNAPSHOT_INVALIDATED, PIPELINE_EXPORT_SOURCE_INVALIDATED,
@@ -3925,6 +3926,15 @@ impl AppState {
         let near_settlement_mode = NearSettlementMode::from_env();
         let near_credit_require_adapter_auth =
             env_truthy(TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH);
+        // Multi-lens review L5-4 and Zaki review 3, Z3-3: `main`'s gate
+        // configuration and `NoveltyUtility` delta, which a compatibility
+        // bundle must hold.
+        let novelty_utility_credit_points_delta =
+            parse_novelty_utility_credit_points_delta_from_env()?;
+        let pipeline_main_gate = pipeline_main_gate_config_from_env(
+            pipeline_runtime_assembler.is_some(),
+            novelty_utility_credit_points_delta,
+        )?;
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
@@ -3940,12 +3950,7 @@ impl AppState {
                 require_adapter_auth: near_credit_require_adapter_auth,
             },
             &pipeline_novelty_utility_checks,
-            // Zaki review 1, round 2, finding 14: `main`'s own index-insert
-            // threshold, with `main`'s default.
-            parse_usize_env(
-                TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS,
-                TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS,
-            )? as u64,
+            pipeline_main_gate,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         if let Some(service) = pipeline_service.as_ref() {
@@ -3953,6 +3958,14 @@ impl AppState {
                 require_privacy_filter,
                 service,
             )?;
+            pipeline_runtime::validate_pipeline_tenant_bundles(
+                service,
+                &tenant_rollout_gates,
+                &pipeline_drain_tenant_ids,
+                &pipeline_main_gate,
+                pipeline_allow_test_dependencies,
+            )
+            .await?;
         }
         validate_pipeline_drain_tenants(&pipeline_drain_tenant_ids, pipeline_service.is_some())?;
         let pipeline_product = pipeline_service
@@ -4577,8 +4590,7 @@ impl AppState {
             gate_service: build_trace_gate_service_from_env().await?,
             revocation_propagation_max_attempts:
                 parse_revocation_propagation_max_attempts_from_env()?,
-            novelty_utility_credit_points_delta:
-                parse_novelty_utility_credit_points_delta_from_env()?,
+            novelty_utility_credit_points_delta,
             novelty_utility_require_production_gate,
             account_webauthn,
             account_ceremony_store,
@@ -6672,6 +6684,74 @@ fn pipeline_near_confirmation_interval_from_env(
         ));
     }
     parse_near_credit_outbox_scheduler_interval_from_env()
+}
+
+/// `main`'s gate configuration for an assembled pipeline runtime's
+/// compatibility bundle (multi-lens review L5-4, Zaki review 3, Z3-3): the
+/// three floors, top-k, the chunk knobs and index-insert threshold
+/// (`parse_gate_chunking_config_from_env`, Zaki review 1, round 2, finding
+/// 14), and `novelty_utility_credit_points_delta`, `main`'s parsed
+/// `NoveltyUtility` delta, in microcredits. `main` reads the gate variables
+/// only in its feature-gated enclave gate builders, so they are read here
+/// only when a pipeline runtime is assembled (Ruling F-I2, multi-lens review
+/// L5-1): with no pipeline, a value `main` would refuse does not stop
+/// startup, and `main`'s defaults stand in (no floors). A floor that is unset
+/// is `None`, which no compatibility bundle matches.
+fn pipeline_main_gate_config_from_env(
+    pipeline_runtime_assembled: bool,
+    novelty_utility_credit_points_delta: f32,
+) -> anyhow::Result<MainGateConfig> {
+    let novelty_utility_microcredits =
+        u64::try_from(credit_delta_micros(novelty_utility_credit_points_delta))
+            .context("the NoveltyUtility delta must be non-negative")?;
+    if !pipeline_runtime_assembled {
+        return Ok(MainGateConfig {
+            perplexity_floor_micros: None,
+            tail_fraction_floor_micros: None,
+            novelty_floor_micros: None,
+            embed_insert_novelty_micros: TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS
+                as u64,
+            top_k: TRACE_COMMONS_GATE_DEFAULT_TOP_K as u32,
+            chunk_target_tokens: TRACE_COMMONS_GATE_DEFAULT_CHUNK_TARGET_TOKENS as u32,
+            chunk_max_tokens: TRACE_COMMONS_GATE_DEFAULT_CHUNK_MAX_TOKENS as u32,
+            chunk_cap: TRACE_COMMONS_GATE_DEFAULT_CHUNK_CAP as u32,
+            chunk_min_tokens: TRACE_COMMONS_GATE_DEFAULT_CHUNK_MIN_TOKENS as u64,
+            novelty_utility_microcredits,
+        });
+    }
+    let optional_floor = |var: &'static str| -> anyhow::Result<Option<u64>> {
+        optional_trimmed_env(var)?
+            .map(|raw| {
+                raw.parse::<u64>()
+                    .with_context(|| format!("{var} must parse as a non-negative integer"))
+            })
+            .transpose()
+    };
+    let as_u32 = |var: &'static str, value: usize| -> anyhow::Result<u32> {
+        u32::try_from(value).with_context(|| format!("{var} is too large"))
+    };
+    let chunking = parse_gate_chunking_config_from_env()?;
+    Ok(MainGateConfig {
+        perplexity_floor_micros: optional_floor(TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS)?,
+        tail_fraction_floor_micros: optional_floor(TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS)?,
+        novelty_floor_micros: optional_floor(TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS)?,
+        embed_insert_novelty_micros: chunking.embed_insert_novelty_micros,
+        top_k: as_u32(
+            TRACE_COMMONS_GATE_TOP_K,
+            parse_usize_env(TRACE_COMMONS_GATE_TOP_K, TRACE_COMMONS_GATE_DEFAULT_TOP_K)?,
+        )?,
+        chunk_target_tokens: as_u32(
+            TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS,
+            chunking.chunk_target_tokens,
+        )?,
+        chunk_max_tokens: as_u32(
+            TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS,
+            chunking.chunk_max_tokens,
+        )?,
+        chunk_cap: as_u32(TRACE_COMMONS_GATE_CHUNK_CAP, chunking.chunk_cap)?,
+        chunk_min_tokens: chunking.chunk_min_tokens,
+        novelty_utility_microcredits,
+    })
 }
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()

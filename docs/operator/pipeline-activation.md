@@ -158,8 +158,22 @@ exceed a short lease on the pilot.
 The scorer, the embedder, the index, and the object store are synchronous,
 so the worker calls them on the blocking thread pool, never on a runtime
 worker thread that ingest's HTTP routes share: Score's whole evaluation,
-Settle's index writes (with the run and submission rows still locked), the
-invalidation pass, and every object read, write, and delete of a phase.
+Settle's index writes, the invalidation pass, and every object read, write,
+and delete of a phase.
+
+Settle's index writes run in a task of their own that holds the run and
+submission rows locked until the write commits, so a Settle that is stopped
+(a shutdown past its grace period) does not release them while the writes
+go on. The rows are held at most until the Settle lease's end or 30 seconds
+after the write starts, whichever is earlier: past that, the write rolls
+back, the rows are free, and once the index call in flight returns the run
+waits in `retry`, uncharged, as `index_unavailable`. The index cannot see
+the locks, and a lost database session or a process exit still releases
+them during a write. So the writes also stop at that deadline: no index call
+starts after it, and the index writer must return from each call within 60
+seconds. A withdrawal that finds an unfinished write on a run whose lease is
+still live queues the revision's removal no earlier than that lease's end
+plus those 60 seconds.
 
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` -- whole seconds, default 300
   (5 minutes).
@@ -711,12 +725,21 @@ configuration (all floors zero) fails the qualification gate
 as the bundle qualification's configuration term
 (`bundle_configuration_not_qualifiable`), the same one `qualify_bundle`
 refuses a package on, so a signed package whose configuration is not
-qualifiable cannot be recorded as qualified either. Score inserts a
-chunk into the index under `main`'s own threshold,
-`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS` (50000 unless configured),
-never the novelty floor: ingest hands it to the runtime and refuses one whose
-compatibility configuration holds another
-(`pipeline_runtime_embed_insert_novelty_mismatch`). When both gate
+qualifiable cannot be recorded as qualified either. The configuration holds
+`main`'s gate configuration, as
+ingest parses it, when a pipeline runtime is assembled: the three floors
+(`TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS`,
+`TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS`,
+`TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS`; with a floor unset, no
+compatibility bundle matches), top-k (`TRACE_COMMONS_GATE_TOP_K`, 5 unless
+configured), the four chunk knobs (`TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS`,
+`..._CHUNK_MAX_TOKENS`, `..._CHUNK_CAP`, `..._CHUNK_MIN_TOKENS`), the
+index-insert threshold (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`,
+50000 unless configured; Score inserts a chunk into the index under it, never
+under the novelty floor), and the `NoveltyUtility` delta (below). Ingest hands
+them to the runtime as one value and refuses one whose default package, or
+any bundle a routed or drained tenant may run (see "Each tenant's bundles at
+startup"), holds any other (`pipeline_runtime_main_gate_config_mismatch`). When both gate
 floors pass, Score awards the `NoveltyUtility` delta to `trace_credit`, and
 Settle records it as one `NoveltyUtility` ledger event, written as `main`
 writes that event: settlement state `final`, actor role `vector_worker`, the
@@ -724,9 +747,11 @@ actor the pipeline's issuer (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF
 where `main` records its issuing gate worker), and the reason
 `novelty_utility:compatibility_quality_novelty_v1`. A runtime that routes or
 drains a tenant through the compatibility bundle refuses to start without
-that issuer (`pipeline_credit_issuer_principal_missing`). That event type
-does not settle on `main`, so the pipeline never batches or pays it, and the
-contributor status reports the leg as `not_settlement_eligible`.
+that issuer (`pipeline_credit_issuer_principal_missing`), and with no issuer
+the leg is withheld (`credit_check_error`, below): the contributor never
+stands in for the issuer. That event type does not settle on `main`, so the
+pipeline never batches or pays it, and the contributor status reports the
+leg as `not_settlement_eligible`.
 
 Every credit event a Trace Credit leg writes records the witness provenance
 label `main` records (`unattested` when the submission has no verified
@@ -752,8 +777,18 @@ invalidation queued). So of several near-duplicate traces received together,
 only the first earns `NoveltyUtility` and gets index entries; each later one
 completes with no award and no index entries, as on `main`, whose gate inserts
 a trace's entries before it scores the next one. A tenant's compatibility
-Score throughput is therefore one Score at a time; other tenants and the other
-phases are not serialized.
+Score throughput is therefore one Score at a time, across every replica. A
+Score that finds the lock held does not wait for it: its run waits in `retry`,
+uncharged, as `score_lock_busy`, for 2 seconds, and that replica ends the
+tenant's batch for the pass and goes on to its other tenants. Other tenants
+and the other phases are not serialized.
+
+The Score holds its transaction (and the lock) open while the scorer and the
+embedder run, so the ingest login must not have an
+`idle_in_transaction_session_timeout` (or a `statement_timeout`) shorter than
+the Score lease (`TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE`, 30 minutes by
+default). A shorter timeout ends the transaction mid-Score; the Score then
+fails as `database_unavailable`, uncharged, and is retried without end.
 
 Before Settle writes the ledger event, it applies `main`'s `NoveltyUtility`
 credit checks, in `main`'s order. A check that refuses the credit withholds
@@ -766,7 +801,7 @@ charged Settle error.
 |---|---|
 | With `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` set, the runtime's scorer and embedder must be production-qualified (where `main` requires a production gate service). | `non_production_gate` |
 | With `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` set, the pipeline's issuer, `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`, must be on that list (where `main` checks its calling gate worker). With the list set and no pipeline issuer, every award is withheld. With the list unset, every award passes this check, as on `main`. | `central_issuer_denied` |
-| The tenant's authority must exist, and so must its policy when the authority requires one. The policy comes from the runtime's authority provider, the source the receipt uses. | `credit_check_error` |
+| The pipeline's issuer must be configured (with the list set and no issuer, the row above withholds first). The tenant's authority must exist, and so must its policy when the authority requires one. The policy comes from the runtime's authority provider, the source the receipt uses. | `credit_check_error` |
 | The submission's allowed uses must include `model_training`, and its consent scopes and `model_training` must be inside the tenant policy's allowlists. The default consent scope (debugging and evaluation) does not allow model training, so its credit is withheld, as on `main`. | `policy_mismatch` |
 
 `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is a canonical hashed
@@ -815,12 +850,50 @@ before it scores anything, so `main`'s gate path cannot award a second
 
 The delta is pinned in the signed bundle package
 (`novelty_utility_microcredits`, in microcredits). The pipeline does not read
-`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` at run time. For the
-pipeline to credit what the legacy path credits, the package's delta must
-equal that variable times 1,000,000 (a points delta of `2.5` is
-`2500000`). The default is `0` in both places: no award, no settlement leg,
-and no ledger event. A different delta is a different package, with its own
-bundle id, and it applies only to runs bound to that package.
+`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` at run time; at startup,
+ingest requires the package's delta to equal that variable times 1,000,000
+(a points delta of `2.5` is `2500000`), as part of the gate configuration
+above. The default is `0` in both places: no award, no settlement leg, and no
+ledger event. A different delta is a different package, with its own bundle
+id, and it applies only to runs bound to that package; to change it for a
+routed tenant, follow "Each tenant's bundles at startup".
+
+### Each tenant's bundles at startup
+
+A tenant keeps its first active bundle when the default package changes
+(registration activates the default package only for a tenant that has no
+active bundle), and a run stays bound to the bundle of its receipt. So
+before ingest serves, it checks every bundle a worker may run for each
+routed or drained tenant -- its active bundle and the bundle of each run not
+yet `complete` or `failed` -- as it checks the default package, and refuses
+to start on the first failure:
+
+| Check | Refused as |
+|---|---|
+| The runtime holds the scorer and embedder the package names. | `pipeline_tenant_bundle_dependency_missing` |
+| The package is a policy family the runtime runs. | `pipeline_tenant_bundle_not_runnable` |
+| A compatibility package holds `main`'s gate configuration (floors, top-k, chunk knobs, index-insert threshold, delta). | `pipeline_runtime_main_gate_config_mismatch` |
+| A compatibility package has the pipeline's issuer configured. | `pipeline_credit_issuer_principal_missing` |
+| A compatibility package is qualifiable, unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. | `pipeline_runtime_dependencies_not_production_qualified` |
+| The tenant's bundles can be read. | `pipeline_tenant_bundle_unreadable` |
+
+To change a value the default package carries (a floor, the threshold, the
+delta, the scorer or the embedder), every routed or drained tenant must
+leave its old bundle first, since startup refuses the new configuration
+while a tenant can still run the old one. For each such tenant:
+
+1. Under the old configuration, move the tenant from the receipts list to
+   the drain list (its receipts take `main`'s path again) and wait until the
+   operational summary shows no run of it in flight.
+2. As the database owner (the runtime login has no `DELETE` on the
+   selection), remove its selection:
+   `DELETE FROM pipeline_active_bundles WHERE tenant_id = '<tenant>'`.
+3. Start ingest with the new configuration and the tenant back on the
+   receipts list. Startup finds no old bundle to check for it, registers the
+   new default package, and activates it.
+
+A tenant left on the drain list for good keeps no active bundle and runs no
+new receipt, so step 3 may leave it on the drain list.
 
 ## Retention of pipeline submissions
 

@@ -10089,7 +10089,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .err()
     .unwrap();
@@ -10263,6 +10263,42 @@ fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
     );
 
     unsafe { std::env::remove_var(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS) };
+}
+
+/// Ruling F-I2 and multi-lens review L5-1: startup reads `main`'s gate
+/// variables for the pipeline (here `TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`)
+/// only when a pipeline runtime is assembled. With no pipeline, a value
+/// `main` would refuse does not stop startup (`main` reads it only in its
+/// feature-gated enclave gate builders), and `main`'s default stands in, with
+/// no floors. With a pipeline, the same value is refused, and a valid one is
+/// the threshold handed to the runtime. The delta is `main`'s, in
+/// microcredits, either way.
+#[test]
+fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
+    // SAFETY: env mutation in tests is OK here -- no other test in this
+    // suite reads this variable (only startup and `main`'s feature-gated
+    // gate builders do, and no test calls either).
+    unsafe { std::env::set_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS, "0.05") };
+    let unread = pipeline_main_gate_config_from_env(false, 2.5)
+        .expect("no pipeline: the gate variables are not read");
+    assert_eq!(
+        unread.embed_insert_novelty_micros,
+        TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS as u64
+    );
+    assert_eq!(unread.perplexity_floor_micros, None);
+    assert_eq!(unread.novelty_utility_microcredits, 2_500_000);
+    pipeline_main_gate_config_from_env(true, 2.5)
+        .expect_err("a pipeline runtime refuses a threshold that is not an integer");
+
+    unsafe { std::env::set_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS, "120000") };
+    assert_eq!(
+        pipeline_main_gate_config_from_env(true, 0.0)
+            .expect("an integer is read")
+            .embed_insert_novelty_micros,
+        120_000
+    );
+
+    unsafe { std::env::remove_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS) };
 }
 
 #[test]
@@ -10542,7 +10578,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("a service that ignores the configured store name is refused");
@@ -10565,7 +10601,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .unwrap()
     .unwrap();
@@ -11140,10 +11176,7 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
         reference.scorer_model_id.clone(),
         reference.projection_id.clone(),
         reference.index_id.clone(),
-        2_000_000,
-        0,
-        500_000,
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        &TEST_MAIN_GATE,
     )
     .expect("main's pilot floors validate");
     let production = service(&pilot);
@@ -11156,11 +11189,10 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
     assert!(pipeline_runtime_is_production_qualified(&production));
 }
 
-/// Builds a qualified compatibility service through the seam, with main's
-/// pilot floors and the index-insert threshold ingest hands it, or
-/// `embed_insert_novelty_micros` when set.
+/// Builds a qualified compatibility service through the seam from the
+/// `main` gate configuration ingest hands it, or from `main_gate` when set.
 struct CompatibilityAssembler {
-    embed_insert_novelty_micros: Option<u64>,
+    main_gate: Option<trace_commons_server::versioned_pipeline_compat::MainGateConfig>,
 }
 
 impl IngestPipelineRuntimeAssembler for CompatibilityAssembler {
@@ -11175,11 +11207,7 @@ impl IngestPipelineRuntimeAssembler for CompatibilityAssembler {
             reference.scorer_model_id,
             reference.projection_id,
             reference.index_id,
-            2_000_000,
-            0,
-            500_000,
-            self.embed_insert_novelty_micros
-                .unwrap_or(context.embed_insert_novelty_micros),
+            &self.main_gate.unwrap_or(context.main_gate),
         )?;
         qualified_compatibility_pipeline_service(
             context.backend,
@@ -11191,13 +11219,15 @@ impl IngestPipelineRuntimeAssembler for CompatibilityAssembler {
     }
 }
 
-/// Zaki review 1, round 2, finding 14: a compatibility bundle inserts a
-/// chunk into the index under `main`'s own threshold
-/// (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`). Ingest hands it to
-/// the assembly and refuses a runtime whose compatibility configuration
-/// holds another -- the novelty floor, for one.
+/// Multi-lens review L5-4 and Zaki review 3, Z3-3 (with Zaki review 1,
+/// round 2, finding 14): a compatibility bundle holds `main`'s gate
+/// configuration -- floors, index-insert threshold, top-k, chunk knobs and
+/// the `NoveltyUtility` delta. Ingest hands it to the assembly and refuses a
+/// runtime whose compatibility configuration holds any other value (the
+/// novelty floor as the threshold, `top_k` 8, a chunk cap, a delta `main`
+/// does not award).
 #[tokio::test]
-async fn pipeline_runtime_compatibility_inserts_under_mains_threshold() {
+async fn pipeline_runtime_compatibility_holds_mains_gate_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
     let assemble = |assembler: &CompatibilityAssembler| {
@@ -11213,28 +11243,68 @@ async fn pipeline_runtime_compatibility_inserts_under_mains_threshold() {
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
-            TEST_EMBED_INSERT_NOVELTY_MICROS,
+            TEST_MAIN_GATE,
         )
     };
 
-    let service = assemble(&CompatibilityAssembler {
-        embed_insert_novelty_micros: None,
-    })
-    .expect("a compatibility bundle at main's threshold starts")
-    .expect("an assembler was given, so a service is returned");
-    assert_eq!(
-        service.compatibility_embed_insert_novelty_micros(),
-        Some(TEST_EMBED_INSERT_NOVELTY_MICROS)
+    let service = assemble(&CompatibilityAssembler { main_gate: None })
+        .expect("a compatibility bundle with main's gate configuration starts")
+        .expect("an assembler was given, so a service is returned");
+    assert!(
+        service
+            .compatibility_config()
+            .expect("the compatibility bundle")
+            .matches_main_gate(&TEST_MAIN_GATE)
     );
-    let error = assemble(&CompatibilityAssembler {
-        embed_insert_novelty_micros: Some(500_000),
-    })
-    .err()
-    .expect("a compatibility bundle at the novelty floor is refused");
-    assert_eq!(
-        error.to_string(),
-        "pipeline_runtime_embed_insert_novelty_mismatch"
-    );
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+    for (other, what) in [
+        (
+            MainGateConfig {
+                embed_insert_novelty_micros: 500_000,
+                ..TEST_MAIN_GATE
+            },
+            "the novelty floor as the index-insert threshold",
+        ),
+        (
+            MainGateConfig {
+                top_k: 8,
+                ..TEST_MAIN_GATE
+            },
+            "a top-k main does not use",
+        ),
+        (
+            MainGateConfig {
+                chunk_cap: 8,
+                ..TEST_MAIN_GATE
+            },
+            "a chunk cap main does not use",
+        ),
+        (
+            MainGateConfig {
+                novelty_utility_microcredits: 2_500_000,
+                ..TEST_MAIN_GATE
+            },
+            "a delta main does not award",
+        ),
+        (
+            MainGateConfig {
+                novelty_floor_micros: Some(400_000),
+                ..TEST_MAIN_GATE
+            },
+            "a floor main does not use",
+        ),
+    ] {
+        let error = assemble(&CompatibilityAssembler {
+            main_gate: Some(other),
+        })
+        .err()
+        .unwrap_or_else(|| panic!("{what} is refused"));
+        assert_eq!(
+            error.to_string(),
+            "pipeline_runtime_main_gate_config_mismatch",
+            "{what}"
+        );
+    }
 }
 
 /// Zaki review 1, round 2, finding 15: a runtime that routes or drains a
@@ -11248,9 +11318,7 @@ async fn pipeline_runtime_refuses_a_compatibility_bundle_without_the_credit_issu
     let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
     let assemble = |tenants_processed: bool, checks: &PipelineNoveltyUtilityChecks| {
         assemble_ingest_pipeline_runtime(
-            Some(&CompatibilityAssembler {
-                embed_insert_novelty_micros: None,
-            }),
+            Some(&CompatibilityAssembler { main_gate: None }),
             Some(&connections),
             Some(&configured_store),
             false,
@@ -11261,7 +11329,7 @@ async fn pipeline_runtime_refuses_a_compatibility_bundle_without_the_credit_issu
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             checks,
-            TEST_EMBED_INSERT_NOVELTY_MICROS,
+            TEST_MAIN_GATE,
         )
     };
     let no_issuer = PipelineNoveltyUtilityChecks::default();
@@ -11572,7 +11640,7 @@ async fn an_unqualified_scorer_the_default_bundle_does_not_name_does_not_block_s
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .expect("an unqualified scorer the default bundle does not name does not block startup")
     .expect("an assembler was given, so a service is returned");
@@ -11598,7 +11666,7 @@ async fn an_unqualified_adapter_for_an_instrument_the_bundle_does_not_pin_does_n
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .expect("an unpinned unqualified settlement adapter does not block startup")
     .expect("an assembler was given, so a service is returned");
@@ -11625,7 +11693,7 @@ async fn an_unqualified_scorer_the_default_bundle_names_blocks_startup() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("a named unqualified scorer with routed tenants and no opt-in is refused");
@@ -11674,7 +11742,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("an unqualified dependency with routed tenants and no opt-in is refused");
@@ -11710,7 +11778,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_onl
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
-            TEST_EMBED_INSERT_NOVELTY_MICROS,
+            TEST_MAIN_GATE,
         )
     };
     let no_receipts = TraceTenantRolloutGates::default();
@@ -11752,7 +11820,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .expect("the opt-in lets an unqualified dependency start")
     .expect("an assembler was given, so a service is returned");
@@ -11779,7 +11847,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("the test opt-in never combines with the required flag");
@@ -11809,7 +11877,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .expect("assemble a qualified runtime")
     .expect("an assembler was given, so a service is returned");
@@ -11839,7 +11907,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_auth
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("a missing authority provider with routed tenants and no opt-in is refused");
@@ -11868,7 +11936,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .err()
     .expect("a missing privacy boundary with routed tenants and no opt-in is refused");
@@ -11923,6 +11991,42 @@ const TEST_NEAR_CONFIRMATION_INTERVAL: StdDuration = StdDuration::from_secs(60);
 /// (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`), as the assembly tests
 /// hand it to the runtime.
 const TEST_EMBED_INSERT_NOVELTY_MICROS: u64 = 50_000;
+
+/// `main`'s gate configuration the assembly tests hand the runtime: `main`'s
+/// defaults, the floors `CompatibilityAssembler` builds with, and no
+/// `NoveltyUtility` delta.
+const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateConfig =
+    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(2_000_000),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: TEST_EMBED_INSERT_NOVELTY_MICROS,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: 0,
+    };
+
+/// The `main` gate configuration `config` holds, for a test assembler that
+/// builds `config` itself.
+fn main_gate_of(
+    config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
+) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(config.perplexity_floor_micros),
+        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
+        novelty_floor_micros: Some(config.novelty_floor_micros),
+        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
+        top_k: config.top_k,
+        chunk_target_tokens: config.chunk_target_tokens,
+        chunk_max_tokens: config.chunk_max_tokens,
+        chunk_cap: config.chunk_cap,
+        chunk_min_tokens: config.chunk_min_tokens,
+        novelty_utility_microcredits: config.novelty_utility_microcredits,
+    }
+}
 
 /// `main`'s NEAR payout controls the pipeline tests assemble with: the
 /// injected adapter pays (`http`), and no adapter credential is required.
@@ -12004,7 +12108,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
-            TEST_EMBED_INSERT_NOVELTY_MICROS,
+            TEST_MAIN_GATE,
         )
     };
 
@@ -12101,7 +12205,7 @@ async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_che
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &checks,
-            TEST_EMBED_INSERT_NOVELTY_MICROS,
+            TEST_MAIN_GATE,
         )
     };
 
@@ -12138,7 +12242,7 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
-            TEST_EMBED_INSERT_NOVELTY_MICROS,
+            TEST_MAIN_GATE,
         )
     };
 
@@ -12191,7 +12295,7 @@ async fn pipeline_runtime_payout_follows_mains_near_payout_controls() {
             TEST_NEAR_CONFIRMATION_INTERVAL,
             mains,
             &PipelineNoveltyUtilityChecks::default(),
-            TEST_EMBED_INSERT_NOVELTY_MICROS,
+            TEST_MAIN_GATE,
         )
     };
 
@@ -12298,7 +12402,7 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        TEST_MAIN_GATE,
     )
     .expect("no routed tenants and no required flag: an unqualified dependency starts")
     .expect("an assembler was given, so a service is returned");

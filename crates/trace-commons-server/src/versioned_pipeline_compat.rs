@@ -62,6 +62,39 @@ pub const COMPATIBILITY_ZERO_FLOOR_LABEL: &str = "compatibility_zero_floor";
 /// credit ledger's bound.
 pub const COMPATIBILITY_DELTA_OUT_OF_RANGE_LABEL: &str = "compatibility_delta_out_of_range";
 
+/// Safe label for a production-compatible configuration built from a
+/// `main` gate configuration that has no floors: `main` reads them only on
+/// its production gate path, and a compatibility bundle cannot claim to hold
+/// values `main` does not have.
+pub const COMPATIBILITY_MAIN_GATE_FLOORS_MISSING_LABEL: &str =
+    "compatibility_main_gate_floors_missing";
+
+/// `main`'s gate configuration, as ingest parses it, that a compatibility
+/// bundle must hold (multi-lens review L5-4, Zaki review 3, Z3-3): the three
+/// floors (`TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS`,
+/// `..._TAIL_FRACTION_FLOOR_MICROS`, `..._NOVELTY_FLOOR_MICROS`), the
+/// index-insert threshold and the four chunk knobs
+/// (`parse_gate_chunking_config_from_env`), top-k
+/// (`TRACE_COMMONS_GATE_TOP_K`), and the `NoveltyUtility` delta
+/// (`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`, in microcredits). A
+/// floor `main` has no value for is `None`, and no compatibility
+/// configuration matches it. Ingest hands it to the assembly and refuses a
+/// runtime whose compatibility bundle holds anything else
+/// ([`CompatibilityBundleConfig::matches_main_gate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MainGateConfig {
+    pub perplexity_floor_micros: Option<u64>,
+    pub tail_fraction_floor_micros: Option<u64>,
+    pub novelty_floor_micros: Option<u64>,
+    pub embed_insert_novelty_micros: u64,
+    pub top_k: u32,
+    pub chunk_target_tokens: u32,
+    pub chunk_max_tokens: u32,
+    pub chunk_cap: u32,
+    pub chunk_min_tokens: u64,
+    pub novelty_utility_microcredits: u64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityQualification {
@@ -134,20 +167,31 @@ impl CompatibilityBundleConfig {
         }
     }
 
-    /// A production-compatible configuration with `main`'s gate settings:
-    /// its three floors, and `embed_insert_novelty_micros`, `main`'s own
-    /// index-insert threshold (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`,
-    /// which ingest hands the assembly), never the novelty floor (Zaki review
-    /// 1, round 2, finding 14).
+    /// A production-compatible configuration with `main`'s gate settings,
+    /// every one taken from `gate`, the configuration ingest hands the
+    /// assembly (multi-lens review L5-4, Zaki review 3, Z3-3): the three
+    /// floors, `main`'s own index-insert threshold (never the novelty floor;
+    /// Zaki review 1, round 2, finding 14), top-k, the four chunk knobs, and
+    /// the `NoveltyUtility` delta. `main` without floors refuses
+    /// (`compatibility_main_gate_floors_missing`).
     pub fn production_compatible(
         scorer_model_id: String,
         projection_id: String,
         index_id: String,
-        perplexity_floor_micros: u64,
-        tail_fraction_floor_micros: u64,
-        novelty_floor_micros: u64,
-        embed_insert_novelty_micros: u64,
+        gate: &MainGateConfig,
     ) -> anyhow::Result<Self> {
+        let (
+            Some(perplexity_floor_micros),
+            Some(tail_fraction_floor_micros),
+            Some(novelty_floor_micros),
+        ) = (
+            gate.perplexity_floor_micros,
+            gate.tail_fraction_floor_micros,
+            gate.novelty_floor_micros,
+        )
+        else {
+            anyhow::bail!(COMPATIBILITY_MAIN_GATE_FLOORS_MISSING_LABEL);
+        };
         let config = Self {
             qualification: CompatibilityQualification::ProductionCompatible,
             scorer_model_id,
@@ -156,17 +200,32 @@ impl CompatibilityBundleConfig {
             perplexity_floor_micros,
             tail_fraction_floor_micros,
             novelty_floor_micros,
-            embed_insert_novelty_micros,
-            top_k: 8,
-            chunk_target_tokens: 2048,
-            chunk_max_tokens: 3072,
-            chunk_cap: 16,
-            chunk_min_tokens: 64,
-            novelty_utility_microcredits: 0,
+            embed_insert_novelty_micros: gate.embed_insert_novelty_micros,
+            top_k: gate.top_k,
+            chunk_target_tokens: gate.chunk_target_tokens,
+            chunk_max_tokens: gate.chunk_max_tokens,
+            chunk_cap: gate.chunk_cap,
+            chunk_min_tokens: gate.chunk_min_tokens,
+            novelty_utility_microcredits: gate.novelty_utility_microcredits,
             instrument: default_trace_credit_instrument(),
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Whether this configuration holds every value of `main`'s gate
+    /// configuration `gate`. A floor `main` has no value for matches nothing.
+    pub fn matches_main_gate(&self, gate: &MainGateConfig) -> bool {
+        gate.perplexity_floor_micros == Some(self.perplexity_floor_micros)
+            && gate.tail_fraction_floor_micros == Some(self.tail_fraction_floor_micros)
+            && gate.novelty_floor_micros == Some(self.novelty_floor_micros)
+            && gate.embed_insert_novelty_micros == self.embed_insert_novelty_micros
+            && gate.top_k == self.top_k
+            && gate.chunk_target_tokens == self.chunk_target_tokens
+            && gate.chunk_max_tokens == self.chunk_max_tokens
+            && gate.chunk_cap == self.chunk_cap
+            && gate.chunk_min_tokens == self.chunk_min_tokens
+            && gate.novelty_utility_microcredits == self.novelty_utility_microcredits
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -1718,10 +1777,12 @@ mod tests {
                 "scorer.v1".to_string(),
                 MINIMAL_PROJECTION_ID.to_string(),
                 MINIMAL_INDEX_ID.to_string(),
-                perplexity,
-                tail,
-                novelty,
-                50_000,
+                &MainGateConfig {
+                    perplexity_floor_micros: Some(perplexity),
+                    tail_fraction_floor_micros: Some(tail),
+                    novelty_floor_micros: Some(novelty),
+                    ..main_gate()
+                },
             )
         };
         assert_eq!(
@@ -1734,22 +1795,74 @@ mod tests {
         config(0, 0, 1).expect("one positive floor is enough, as on main");
     }
 
-    /// Finding 14: the index-insert threshold is `main`'s own setting,
-    /// passed in, not the novelty floor.
+    /// `main`'s defaults for every gate value but the floors (the pilot
+    /// template's 0/0/500000), with a non-zero delta.
+    fn main_gate() -> MainGateConfig {
+        MainGateConfig {
+            perplexity_floor_micros: Some(0),
+            tail_fraction_floor_micros: Some(0),
+            novelty_floor_micros: Some(500_000),
+            embed_insert_novelty_micros: 50_000,
+            top_k: 5,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            novelty_utility_microcredits: 2_500_000,
+        }
+    }
+
+    /// Finding 14, multi-lens review L5-4 and Zaki review 3, Z3-3: every
+    /// gate value is `main`'s own setting, passed in -- the index-insert
+    /// threshold (not the novelty floor), top-k, the chunk knobs and the
+    /// delta -- and the result matches only that configuration. `main`
+    /// without floors builds nothing.
     #[test]
-    fn production_compatibility_takes_mains_index_insert_threshold() {
+    fn production_compatibility_takes_every_value_from_mains_gate() {
+        let gate = main_gate();
         let config = CompatibilityBundleConfig::production_compatible(
             "scorer.v1".to_string(),
             MINIMAL_PROJECTION_ID.to_string(),
             MINIMAL_INDEX_ID.to_string(),
-            2_000_000,
-            0,
-            500_000,
-            50_000,
+            &gate,
         )
         .unwrap();
         assert_eq!(config.embed_insert_novelty_micros, 50_000);
         assert_eq!(config.novelty_floor_micros, 500_000);
+        assert_eq!(config.top_k, 5);
+        assert_eq!(config.novelty_utility_microcredits, 2_500_000);
+        assert!(config.matches_main_gate(&gate));
+        for other in [
+            MainGateConfig { top_k: 8, ..gate },
+            MainGateConfig {
+                chunk_cap: 8,
+                ..gate
+            },
+            MainGateConfig {
+                novelty_utility_microcredits: 0,
+                ..gate
+            },
+            MainGateConfig {
+                perplexity_floor_micros: None,
+                ..gate
+            },
+        ] {
+            assert!(!config.matches_main_gate(&other), "{other:?}");
+        }
+        assert_eq!(
+            CompatibilityBundleConfig::production_compatible(
+                "scorer.v1".to_string(),
+                MINIMAL_PROJECTION_ID.to_string(),
+                MINIMAL_INDEX_ID.to_string(),
+                &MainGateConfig {
+                    novelty_floor_micros: None,
+                    ..gate
+                },
+            )
+            .unwrap_err()
+            .to_string(),
+            COMPATIBILITY_MAIN_GATE_FLOORS_MISSING_LABEL
+        );
     }
 
     #[test]

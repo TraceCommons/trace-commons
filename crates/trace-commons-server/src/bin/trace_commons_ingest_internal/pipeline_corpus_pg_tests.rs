@@ -43,7 +43,9 @@ use trace_commons_protocol::trace_contribution::{
     RawTraceCaptureTurn, RawTraceContribution, TracePipelineStatusUpdate,
 };
 use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
-use trace_commons_server::versioned_pipeline_bundle::PipelineBundleConfig;
+use trace_commons_server::versioned_pipeline_bundle::{
+    PipelineBundleConfig, package_compatibility_config,
+};
 use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_IMPLEMENTATION, CompatibilityBundleConfig,
 };
@@ -559,13 +561,19 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
 /// ingest's real boot uses, exactly as the other HTTP tests' services do,
 /// with the pipeline's credit issuer configured, which a runtime that
 /// routes the compatibility bundle needs (PR 3: Zaki review 1, round 2,
-/// finding 15); the minimal bundle ignores it.
+/// finding 15); the minimal bundle ignores it. `main`'s gate configuration
+/// is the one a compatibility package holds, which ingest requires of a
+/// default package (PR 3, 9b54b647); a package of another family holds
+/// none and is handed `TEST_MAIN_GATE`.
 fn assemble_corpus_service(
     backend: Arc<PgBackend>,
     artifacts: Arc<LocalEncryptedTraceArtifactStore>,
     index: Arc<IsolatedPipelineIndex>,
     package: BundlePackage,
 ) -> Arc<PipelineService> {
+    let main_gate = package_compatibility_config(&package)
+        .map(|config| main_gate_of(&config))
+        .unwrap_or(TEST_MAIN_GATE);
     let assembler = CorpusAssembler { package, index };
     let connections = TraceCorpusDbConnections {
         database: backend.clone() as Arc<dyn Database>,
@@ -586,7 +594,7 @@ fn assemble_corpus_service(
             issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
             ..PipelineNoveltyUtilityChecks::default()
         },
-        TEST_EMBED_INSERT_NOVELTY_MICROS,
+        main_gate,
     )
     .expect("assemble the injected corpus pipeline runtime")
     .expect("an assembler was given, so a service is returned")

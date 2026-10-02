@@ -8774,6 +8774,22 @@ async fn held_index_test_service(
     artifact_store: Arc<dyn TraceArtifactStore>,
     config: PipelineBundleConfig,
 ) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
+    held_index_test_service_with_leases(
+        backend,
+        artifact_store,
+        config,
+        PipelineLeaseConfig::default(),
+    )
+    .await
+}
+
+/// `held_index_test_service` with `lease_config`.
+async fn held_index_test_service_with_leases(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    lease_config: PipelineLeaseConfig,
+) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
@@ -8810,9 +8826,332 @@ async fn held_index_test_service(
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_lease_config(lease_config)
     .build()
     .expect("build pipeline service");
     (Arc::new(service), index, held)
+}
+
+/// Multi-lens review L4-3 and the PR 4 review: Settle's index writes run in
+/// a task of their own that holds the run and submission rows, so a dropped
+/// Settle future (`join_or_abort` at shutdown) does not roll the
+/// transaction back while the blocking writes go on. The rows stay locked
+/// while the held write runs, and the task commits the write when it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_settle_keeps_its_rows_locked_until_its_index_writes_end() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) =
+        held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
+    let tenant = format!("dispatch-dropped-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    settle.abort();
+    let _ = settle.await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+        .await
+        .unwrap();
+    let locked = tx
+        .query_opt(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await;
+    assert!(
+        locked.is_err(),
+        "the run row stays locked while the dropped Settle's write runs"
+    );
+    drop(tx);
+    drop(client);
+
+    held.release();
+    let runs = PgPipelineStore::new(backend.clone());
+    let written = tokio::time::timeout(HELD_CALL_BOUND, async {
+        loop {
+            let current = runs.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+            if current.index_write_state == "complete" {
+                return current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the write's own task commits it once the write ends");
+    assert_eq!(written.index_write_state, "complete");
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+}
+
+/// Multi-lens review L4-3: the index write stops at its lease's deadline. A
+/// write held past a one-second Settle lease applies the entry already in
+/// flight and no other, so a dispatch whose locks were lost cannot keep
+/// writing a withdrawn revision's entries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_write_stops_at_its_lease_deadline() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) = held_index_test_service_with_leases(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap(),
+    )
+    .await;
+    let tenant = format!("dispatch-deadline-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
+    let entry_count = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command")
+        .keyed_entries(&tenant_ref)
+        .count();
+    assert!(entry_count >= 2, "the command has entries after the first");
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    held.release();
+    let _ = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle ends once released");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        1,
+        "only the entry in flight at the deadline is written"
+    );
+    let current = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.index_write_state, "pending");
+}
+
+/// Multi-lens review L4-1 (Zaki review 3, Z3-M2): the index dispatch does
+/// not hold the run and submission rows past its deadline (the lease's end,
+/// or 30 seconds). A write held past a one-second Settle lease leaves the
+/// run row free while the held call still runs, and the run is released only
+/// once that call returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_write_past_its_deadline_releases_the_rows() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) = held_index_test_service_with_leases(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap(),
+    )
+    .await;
+    let tenant = format!("dispatch-timeout-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+        .await
+        .unwrap();
+    let state: String = tx
+        .query_one(
+            "SELECT state FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect("the run row is free once the dispatch's deadline passed")
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        state, "leased",
+        "the run is not released while its write runs"
+    );
+
+    held.release();
+    let _ = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle ends once released");
+    let current = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (current.state, current.index_write_state.as_str()),
+        (PipelineRunState::Retry, "pending")
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+}
+
+/// Multi-lens review L4-1 and L4-6(a): `claim_next`'s sweep of expired,
+/// exhausted leases skips a run row another transaction holds (it locks in
+/// run id order, `SKIP LOCKED`), so a claim never waits behind it, and a
+/// later claim sweeps it.
+#[tokio::test]
+async fn the_claim_sweep_skips_a_locked_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("sweep-skip-locked-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = PgPipelineStore::new(backend.clone());
+    store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("a worker claims the Settle");
+    set_attempt_count(&backend, &tenant, run.run_id, run.max_attempts as i32).await;
+    expire_lease(&backend, &tenant, run.run_id).await;
+
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let held = tenant_tx(&mut holder, &tenant).await;
+    held.query_one(
+        "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    let claimed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.claim_next(&tenant, PipelineLeaseConfig::default()),
+    )
+    .await
+    .expect("the sweep does not wait for the locked run")
+    .unwrap();
+    assert!(claimed.is_none());
+    held.rollback().await.unwrap();
+    drop(holder);
+    assert_eq!(
+        store
+            .get_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        PipelineRunState::Leased,
+        "the locked run was skipped"
+    );
+
+    store
+        .claim_next(&tenant, PipelineLeaseConfig::default())
+        .await
+        .unwrap();
+    let swept = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(
+        (swept.state, swept.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        )
+    );
+}
+
+/// Multi-lens review L4-3: a withdrawal that finds a `pending` index write
+/// on a run another Settle holds the lease of queues the revision's
+/// invalidation no earlier than that lease's end plus the fence margin, so
+/// an upsert still in flight cannot land after the invalidation ran.
+#[tokio::test]
+async fn a_withdrawal_delays_the_invalidation_of_a_write_a_live_lease_may_make() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("dispatch-invalidation-floor-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = PgPipelineStore::new(backend.clone());
+    let leased = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(120))
+        .await
+        .unwrap()
+        .expect("another Settle holds the lease");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET index_write_state = 'pending'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+
+    service
+        .withdraw_submission(&tenant, run.submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner withdraws the submission");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let due: chrono::DateTime<chrono::Utc> = tx
+        .query_one(
+            "SELECT next_attempt_at FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    let floor = leased.lease_expires_at.unwrap()
+        + chrono::Duration::seconds(PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS);
+    assert!(
+        due >= floor - chrono::Duration::seconds(1),
+        "due {due} is before the lease's end plus the margin, {floor}"
+    );
 }
 
 /// An embedder whose first `embed` call is held (`CallHold`) until the test
@@ -10818,7 +11157,7 @@ async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
     // row and the run's state as they are.
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &tenant).await;
-    PgPipelineStore::enqueue_index_invalidation_on_tx(&tx, &settled, "withdrawn")
+    PgPipelineStore::enqueue_index_invalidation_on_tx(&tx, &settled, "withdrawn", None)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -16871,7 +17210,7 @@ async fn compatibility_test_service_with_payout(
         config,
         near,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
     )
     .await
 }
@@ -17533,13 +17872,9 @@ async fn a_compatibility_award_needs_the_model_training_allowed_use() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let service = checked_compatibility_service(
-        &backend,
-        &dir,
-        allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
-    )
-    .await;
+    let service =
+        checked_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
+            .await;
     let default_consent = envelope(uuid::Uuid::new_v4()).await;
     assert!(
         !default_consent
@@ -17624,7 +17959,7 @@ async fn the_production_gate_flag_withholds_an_award_from_unqualified_dependenci
         allow_all_authority(),
         PipelineNoveltyUtilityChecks {
             require_production_gate: true,
-            ..PipelineNoveltyUtilityChecks::default()
+            ..issuing_checks()
         },
     )
     .await;
@@ -17674,13 +18009,9 @@ async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
             require_policy: true,
         },
     )));
-    let service = checked_compatibility_service(
-        &backend,
-        &dir,
-        evaluation_only.clone(),
-        PipelineNoveltyUtilityChecks::default(),
-    )
-    .await;
+    let service =
+        checked_compatibility_service(&backend, &dir, evaluation_only.clone(), issuing_checks())
+            .await;
     assert_withheld(
         &settled_compatibility_award(
             &service,
@@ -17770,13 +18101,9 @@ async fn a_compatibility_award_needs_a_consent_scope_the_tenant_policy_allows() 
                 require_policy: true,
             },
         )));
-        let service = checked_compatibility_service(
-            &backend,
-            &dir,
-            authority.clone(),
-            PipelineNoveltyUtilityChecks::default(),
-        )
-        .await;
+        let service =
+            checked_compatibility_service(&backend, &dir, authority.clone(), issuing_checks())
+                .await;
         let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
         let env = model_training_envelope(uuid::Uuid::new_v4()).await;
         assert_eq!(env.consent.scopes, vec![ConsentScope::ModelTraining]);
@@ -18324,8 +18651,9 @@ async fn withdrawal_before_selection_excludes_the_index() {
 
 /// Ruling T7-3: a run whose index write is `pending` may be partly written.
 /// A withdrawal cancels the write, excludes the run from the index, and
-/// queues an invalidation in the same transaction. Settle then finishes
-/// without writing.
+/// queues an invalidation in the same transaction (due after the leased
+/// run's lease plus the fence margin, multi-lens review L4-3). Settle then
+/// finishes without writing.
 #[tokio::test]
 async fn withdrawal_during_pending_index_work_cancels_it() {
     let Some(backend) = runtime_backend(4).await else {
@@ -18371,6 +18699,9 @@ async fn withdrawal_during_pending_index_work_cancels_it() {
         .unwrap();
     assert_eq!(cancelled.index_write_state, "cancelled");
     assert_eq!(cancelled.index_membership, "excluded");
+    // Multi-lens review L4-3: the crashed worker's run is still leased, and
+    // a dispatch on that lease could still be writing, so the invalidation is
+    // queued but not due before the lease's end plus the fence margin.
     let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
     assert_eq!(
         rows,
@@ -18378,7 +18709,7 @@ async fn withdrawal_during_pending_index_work_cancels_it() {
             revision_id,
             "withdrawn".to_string(),
             "pending".to_string(),
-            true
+            false
         )]
     );
     assert_eq!(run_state, "pending");
@@ -25217,13 +25548,9 @@ async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let service = checked_compatibility_service(
-        &backend,
-        &dir,
-        allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
-    )
-    .await;
+    let service =
+        checked_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
+            .await;
     let tenant = format!("compat-held-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:compat-held";
     service.register_default_bundle(&tenant).await.unwrap();
@@ -25372,6 +25699,187 @@ async fn a_novelty_utility_ledger_row_names_the_pipeline_issuer() {
         "the issuer, not the contributor"
     );
     assert_eq!(row.get::<_, String>("actor_role"), "vector_worker");
+}
+
+/// The pipeline issuer the compatibility tests configure: with none, every
+/// `NoveltyUtility` leg is withheld (Zaki review 3, Z3-2).
+const TEST_PIPELINE_ISSUER: &str =
+    "principal_sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+/// `PipelineNoveltyUtilityChecks` with `TEST_PIPELINE_ISSUER` as the issuer
+/// and every other check at its default.
+fn issuing_checks() -> PipelineNoveltyUtilityChecks {
+    PipelineNoveltyUtilityChecks {
+        issuer_principal_ref: Some(TEST_PIPELINE_ISSUER.to_string()),
+        ..PipelineNoveltyUtilityChecks::default()
+    }
+}
+
+/// Zaki review 3, Z3-2: with no configured pipeline issuer, a compatibility
+/// run's `NoveltyUtility` leg is withheld (`credit_check_error`, as `main`
+/// fails a credit check it cannot make): no ledger row, and never the
+/// contributor standing in as the issuer.
+#[tokio::test]
+async fn a_novelty_utility_award_with_no_configured_issuer_is_withheld() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("compat-no-issuer-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-no-issuer-contributor";
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "no issuer, no NoveltyUtility row"
+    );
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref()
+        ),
+        (
+            "complete",
+            Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+        )
+    );
+}
+
+/// The `main` gate configuration `config` holds.
+fn main_gate_of(
+    config: &CompatibilityBundleConfig,
+) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(config.perplexity_floor_micros),
+        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
+        novelty_floor_micros: Some(config.novelty_floor_micros),
+        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
+        top_k: config.top_k,
+        chunk_target_tokens: config.chunk_target_tokens,
+        chunk_max_tokens: config.chunk_max_tokens,
+        chunk_cap: config.chunk_cap,
+        chunk_min_tokens: config.chunk_min_tokens,
+        novelty_utility_microcredits: config.novelty_utility_microcredits,
+    }
+}
+
+/// Multi-lens review L5-2 and Zaki review 3, Z3-2: startup checks every
+/// bundle a worker may run for a routed or drained tenant -- its active
+/// bundle, and the bundle of each run in flight -- as it checks the default
+/// package: `main`'s gate configuration (here its index-insert threshold),
+/// the pipeline's credit issuer, and (without test dependencies) a
+/// qualifiable configuration.
+#[tokio::test]
+async fn startup_checks_every_bundle_a_tenant_may_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let old_config = near_duplicate_config();
+    let mut new_config = near_duplicate_config();
+    new_config.embed_insert_novelty_micros = old_config.embed_insert_novelty_micros * 2;
+    let gate = main_gate_of(&new_config);
+    let old = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        old_config,
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let new = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        new_config.clone(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let label = |result: anyhow::Result<()>| result.unwrap_err().to_string();
+    let tenant = format!("startup-tenant-bundles-{}", uuid::Uuid::new_v4());
+
+    old.register_default_bundle(&tenant).await.unwrap();
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, &gate, false).await),
+        "pipeline_runtime_main_gate_config_mismatch",
+        "the tenant keeps its first active bundle when the default package changes"
+    );
+
+    let run_id = receive_envelope(
+        &old,
+        &tenant,
+        "principal_sha256:startup-tenant-bundles",
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    new.register_default_bundle(&tenant).await.unwrap();
+    // The bundle switch, as an operator makes it (the runtime login has no
+    // UPDATE on the selection).
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_active_bundles SET bundle_id = $2 WHERE tenant_id = $1",
+        &[&tenant, &new.bundle_id()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, &gate, false).await),
+        "pipeline_runtime_main_gate_config_mismatch",
+        "a run in flight is still bound to the old bundle"
+    );
+    process_until_idle(&old, &tenant).await;
+    let run = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.state, PipelineRunState::Complete);
+    new.check_tenant_bundles(&tenant, &gate, false)
+        .await
+        .expect("only the new bundle is left to run");
+    assert_eq!(
+        label(new.check_tenant_bundles(&tenant, &gate, true).await),
+        "pipeline_runtime_dependencies_not_production_qualified",
+        "the local reference configuration is not qualifiable"
+    );
+
+    let no_issuer = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        new_config,
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+        index,
+    )
+    .await;
+    assert_eq!(
+        label(no_issuer.check_tenant_bundles(&tenant, &gate, false).await),
+        "pipeline_credit_issuer_principal_missing"
+    );
 }
 
 /// Finding 16, first bullet: the payout pays only a leg Score seeded for
@@ -25607,6 +26115,7 @@ async fn a_withheld_novelty_utility_leg_never_reaches_its_adapter() {
         .with_embedder(embedder)
         .with_authority(allow_all_authority())
         .with_privacy(default_privacy_boundary())
+        .with_novelty_utility_checks(issuing_checks())
         .build()
         .expect("build the compatibility service"),
     );
@@ -25749,7 +26258,7 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_one_worker() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -25777,7 +26286,7 @@ async fn identical_receipts_earn_one_novelty_utility_award_when_interleaved() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -25808,8 +26317,155 @@ async fn identical_receipts_earn_one_novelty_utility_award_when_interleaved() {
     assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
 }
 
+/// Zaki review 3, Z3-M1: makes two Scores overlap for certain. While
+/// `armed`, the first scorer call waits (on its blocking-pool thread) until
+/// two Scores have read their approved bytes -- the read a Score makes
+/// before it takes the tenant's Score lock -- or a bound passes.
+#[derive(Default)]
+struct ScoreBarrier {
+    armed: AtomicBool,
+    entered: AtomicUsize,
+    waited: AtomicBool,
+}
+
+impl ScoreBarrier {
+    fn wait_for_the_second_score(&self) {
+        if !self.armed.load(Ordering::SeqCst) || self.waited.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.entered.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+/// The reference scorer, under a `ScoreBarrier`.
+struct BarrierScorer {
+    inner: ReferencePerplexityScorer,
+    barrier: Arc<ScoreBarrier>,
+}
+
+impl trace_commons_gate_api::PerplexityScorer for BarrierScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.barrier.wait_for_the_second_score();
+        trace_commons_gate_api::PerplexityScorer::score(&self.inner, plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<trace_commons_gate_api::ChunkPerplexity> {
+        self.barrier.wait_for_the_second_score();
+        trace_commons_gate_api::PerplexityScorer::score_chunk(&self.inner, chunk)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for BarrierScorer {
+    fn dependency_identity(&self) -> &str {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::dependency_identity(&self.inner)
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::content_descriptor(&self.inner)
+    }
+}
+
+/// A store that counts, while its `ScoreBarrier` is armed, the reads of
+/// contribution-envelope objects: in a Score round, each Score's read of its
+/// approved bytes.
+struct BarrierStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    barrier: Arc<ScoreBarrier>,
+}
+
+impl TraceArtifactStore for BarrierStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        if self.barrier.armed.load(Ordering::SeqCst)
+            && expected_artifact_kind == TraceArtifactKind::ContributionEnvelope
+        {
+            self.barrier.entered.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
 /// Finding 12 with two workers: two services over one database and one
-/// index process the two identical receipts at the same time.
+/// index process the two identical receipts at the same time. Zaki review 3,
+/// Z3-M1: the two Scores overlap for certain -- the first worker's scorer
+/// call waits until the second worker has entered its Score
+/// (`ScoreBarrier`) -- so without the tenant's Score lock both would score
+/// against an empty unapplied set and both would earn.
 #[tokio::test]
 async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
     let Some(backend) = runtime_backend(4).await else {
@@ -25817,31 +26473,179 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
     };
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
+    let barrier = Arc::new(ScoreBarrier::default());
+    let config = near_duplicate_config();
     let worker = || {
-        compatibility_test_service_on(
-            backend.clone(),
-            artifact_store(&dir),
-            near_duplicate_config(),
-            None,
-            allow_all_authority(),
-            PipelineNoveltyUtilityChecks::default(),
-            index.clone(),
+        let scorer = Arc::new(BarrierScorer {
+            inner: ReferencePerplexityScorer::new(),
+            barrier: barrier.clone(),
+        });
+        let embedder = Arc::new(ReferenceEmbedder::new());
+        let package =
+            MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+                .expect("build compatibility bundle package");
+        let trace_credit = RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        );
+        let registry =
+            SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+                .expect("build settlement adapter registry");
+        let caps = PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::from([(
+                InstrumentId::trace_credit().as_str().to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            )]),
+        };
+        Arc::new(
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                Arc::new(BarrierStore {
+                    inner: artifact_store(&dir),
+                    barrier: barrier.clone(),
+                }),
+                package,
+                index.clone(),
+                index.clone(),
+                registry,
+                caps,
+            )
+            .with_scorer(scorer)
+            .with_embedder(embedder)
+            .with_authority(allow_all_authority())
+            .with_privacy(default_privacy_boundary())
+            .with_novelty_utility_checks(issuing_checks())
+            .build()
+            .expect("build pipeline service"),
         )
     };
-    let (one, two) = (worker().await, worker().await);
+    let (one, two) = (worker(), worker());
     let (tenant, first, second) = identical_receipts().await;
     let principal = "principal_sha256:compat-near-duplicate";
-    receive_envelope(&one, &tenant, principal, &first).await;
-    receive_envelope(&two, &tenant, principal, &second).await;
-    for phase in ["Review", "Score", "Settle"] {
+    one.register_default_bundle(&tenant).await.unwrap();
+    let first_run = receive_envelope(&one, &tenant, principal, &first).await;
+    let second_run = receive_envelope(&two, &tenant, principal, &second).await;
+    for phase in ["Review", "Score"] {
+        barrier.armed.store(phase == "Score", Ordering::SeqCst);
         let (a, b) = tokio::join!(one.process_one(&tenant), two.process_one(&tenant));
         assert!(
             a.unwrap().is_some() && b.unwrap().is_some(),
             "both workers ran a {phase}"
         );
     }
+    barrier.armed.store(false, Ordering::SeqCst);
+    assert!(
+        barrier.waited.load(Ordering::SeqCst) && barrier.entered.load(Ordering::SeqCst) >= 2,
+        "the first Score waited while the second entered its Score"
+    );
+    // The Score that found the tenant's lock held waits, uncharged, for a
+    // fixed delay (multi-lens review L3-2); make it due now.
+    let runs = PgPipelineStore::new(backend.clone());
+    for run_id in [first_run, second_run] {
+        if runs
+            .get_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_error_label
+            .as_deref()
+            == Some(PIPELINE_SCORE_LOCK_BUSY_LABEL)
+        {
+            force_due(&backend, &tenant, run_id).await;
+        }
+    }
     process_until_idle(&one, &tenant).await;
     assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// Multi-lens review L3-2 (Zaki review 3, Z3-M2): a compatibility Score
+/// that finds its tenant's Score lock held does not wait for it. It is
+/// released at once, uncharged, as `score_lock_busy`, due again after a
+/// fixed delay (not the phase-age backoff), and runs once the lock is free.
+#[tokio::test]
+async fn a_score_that_finds_the_tenant_lock_held_is_released_uncharged() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let runs = PgPipelineStore::new(backend.clone());
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(
+        &service,
+        &tenant,
+        "principal_sha256:score-lock-busy",
+        &first,
+    )
+    .await;
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let before = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+
+    // Another replica's Score holds the tenant's lock.
+    let holder = backend.trace_pool_for_test().get().await.unwrap();
+    holder
+        .execute(
+            "SELECT pg_advisory_lock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    let released = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.process_run(&tenant, run_id),
+    )
+    .await
+    .expect("the Score does not wait for the lock")
+    .unwrap()
+    .expect("the Score is claimed");
+    assert_eq!(
+        (
+            released.state,
+            released.last_error_label.as_deref(),
+            released.attempt_count,
+            released.next_phase,
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_SCORE_LOCK_BUSY_LABEL),
+            before.attempt_count,
+            Some(Phase::Score),
+        )
+    );
+    let delay = released.next_attempt_at - released.updated_at;
+    assert!(
+        delay >= chrono::Duration::seconds(1) && delay <= chrono::Duration::seconds(5),
+        "a fixed short delay, not the phase-age backoff: {delay:?}"
+    );
+
+    holder
+        .execute(
+            "SELECT pg_advisory_unlock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    force_due(&backend, &tenant, run_id).await;
+    let scored = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the Score runs once the lock is free");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
 }
 
 /// Finding 12 on a pool of one: a compatibility Score reads its approved
@@ -25863,7 +26667,7 @@ async fn compatibility_score_never_holds_two_pooled_connections() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -25913,7 +26717,7 @@ async fn a_phase_that_commits_on_its_last_attempt_leaves_the_next_phase_its_budg
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -25963,7 +26767,7 @@ async fn a_run_no_claim_can_select_is_not_a_compatibility_neighbour() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         index.clone(),
     )
     .await;
@@ -26161,7 +26965,7 @@ impl TraceArtifactStore for OutageArtifactStore {
 /// `artifact_store_unavailable`, at each of the run path's store calls:
 /// Review's source read and approved write, and Score's approved read and
 /// object write. The run then completes once the store is back. (Settle's
-/// read of the stored index command stays charged, held for a ruling;
+/// read of the stored index command stays charged, ruling RB-35;
 /// `stored_command_binding_failures_fail_closed` covers it.)
 #[tokio::test]
 async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
@@ -26176,7 +26980,7 @@ async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
         near_duplicate_config(),
         None,
         allow_all_authority(),
-        PipelineNoveltyUtilityChecks::default(),
+        issuing_checks(),
         IsolatedPipelineIndex::new(),
     )
     .await;
@@ -26469,10 +27273,18 @@ fn production_compatible_config() -> CompatibilityBundleConfig {
         "qualified_production_perplexity.v1".to_string(),
         "qualified_production_projection.v1".to_string(),
         "qualified_production_index.v1".to_string(),
-        1_000,
-        1_000,
-        1_000,
-        50_000,
+        &trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+            perplexity_floor_micros: Some(1_000),
+            tail_fraction_floor_micros: Some(1_000),
+            novelty_floor_micros: Some(1_000),
+            embed_insert_novelty_micros: 50_000,
+            top_k: 8,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            novelty_utility_microcredits: 0,
+        },
     )
     .expect("production-compatible config validates")
 }
@@ -30103,6 +30915,7 @@ async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_novelty_utility_checks(issuing_checks())
     .build()
     .expect("build pipeline service");
     let tenant = format!("compat-blocking-pool-{}", uuid::Uuid::new_v4());
