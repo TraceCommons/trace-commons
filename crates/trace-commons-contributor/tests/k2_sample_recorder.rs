@@ -65,12 +65,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use uuid::Uuid;
 
-use trace_commons_contributor::config::{ConfigStore, ContributorConfig, CONTRIBUTOR_CONFIG_SCHEMA_VERSION};
+use trace_commons_contributor::config::{
+    CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig,
+};
 use trace_commons_contributor::daemon::history::{HistoryCache, HistoryRecord};
 use trace_commons_contributor::daemon::ipc::{DaemonShared, bind, serve};
 use trace_commons_contributor::daemon::policy::{ProjectMode, ProjectPolicy, project_id_for};
 use trace_commons_contributor::daemon::preview_scheduler;
-use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, SessionShape, entry_id_for};
+use trace_commons_contributor::daemon::queue::{
+    Queue, QueueEntry, QueueState, SessionShape, entry_id_for,
+};
 use trace_commons_contributor::daemon::second_look::{ScrubCounts, ScrubRecord};
 use trace_commons_contributor::daemon::settings::{DaemonSettings, ScrubCheck, SourceDeclaration};
 use trace_commons_contributor::daemon::state::{CwdCacheEntry, DaemonState};
@@ -92,14 +96,22 @@ struct Client {
 
 impl Client {
     async fn connect(store_dir: &Path) -> Self {
-        let stream = UnixStream::connect(store_dir.join("daemon.sock")).await.unwrap();
+        let stream = UnixStream::connect(store_dir.join("daemon.sock"))
+            .await
+            .unwrap();
         let (r, w) = stream.into_split();
-        Client { reader: BufReader::new(r), writer: w }
+        Client {
+            reader: BufReader::new(r),
+            writer: w,
+        }
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Value {
         let line = json!({ "id": 1, "method": method, "params": params });
-        self.writer.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+        self.writer
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .unwrap();
         self.writer.flush().await.unwrap();
         let mut reply = String::new();
         self.reader.read_line(&mut reply).await.unwrap();
@@ -116,7 +128,9 @@ impl Client {
 }
 
 fn dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s).unwrap_or_else(|e| panic!("bad timestamp {s:?}: {e}")).with_timezone(&Utc)
+    DateTime::parse_from_rfc3339(s)
+        .unwrap_or_else(|e| panic!("bad timestamp {s:?}: {e}"))
+        .with_timezone(&Utc)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,9 +142,18 @@ struct Project {
     label: &'static str,
 }
 
-const API: Project = Project { key: "/Users/sample/src/api", label: "api" };
-const WEB: Project = Project { key: "/Users/sample/src/web", label: "web" };
-const INFRA: Project = Project { key: "/Users/sample/src/infra", label: "infra" };
+const API: Project = Project {
+    key: "/Users/sample/src/api",
+    label: "api",
+};
+const WEB: Project = Project {
+    key: "/Users/sample/src/web",
+    label: "web",
+};
+const INFRA: Project = Project {
+    key: "/Users/sample/src/infra",
+    label: "infra",
+};
 
 // ---------------------------------------------------------------------------
 // Entry authoring. One function builds a `QueueEntry` from the same kind of
@@ -173,10 +196,17 @@ impl EntryPlan {
     fn build(self) -> QueueEntry {
         let session_hash = format!("k2-sample-{}", self.n);
         let entry_id = entry_id_for(&session_hash);
-        let scrub = self.scrub.map(|(marks, content_marks, unsure_spans)| ScrubRecord {
-            envelope_digest: "sha256:k2-sample-pinned".into(),
-            counts: ScrubCounts { marks, content_marks, unsure_spans, unsure_unreadable: false },
-        });
+        let scrub = self
+            .scrub
+            .map(|(marks, content_marks, unsure_spans)| ScrubRecord {
+                envelope_digest: "sha256:k2-sample-pinned".into(),
+                counts: ScrubCounts {
+                    marks,
+                    content_marks,
+                    unsure_spans,
+                    unsure_unreadable: false,
+                },
+            });
         let previewed_envelope_digest = scrub.as_ref().map(|r| r.envelope_digest.clone());
         let shape = self.shape.map(|(started, ended, user_turns)| SessionShape {
             started_at: Some(dt(started)),
@@ -190,7 +220,9 @@ impl EntryPlan {
             project_key: self.project.key.into(),
             project_path: Some(self.project.key.into()),
             project_label: self.project.label.into(),
-            path: self.path.unwrap_or_else(|| PathBuf::from(format!("/sample/sessions/k2-{}.jsonl", self.n))),
+            path: self
+                .path
+                .unwrap_or_else(|| PathBuf::from(format!("/sample/sessions/k2-{}.jsonl", self.n))),
             size_bytes: self.size_bytes,
             discovered_at: dt(self.discovered_at),
             state: QueueState::Pending,
@@ -239,10 +271,50 @@ fn sample_history_records() -> Vec<HistoryRecord> {
         approved_verdict: verdict.map(str::to_string),
     };
     vec![
-        row(1, &API, "submitted", Some(false), Some("worked"), 3.5, None, false, 1),
-        row(2, &INFRA, "accepted", Some(true), None, 0.0, Some(6.0), false, 2),
-        row(3, &WEB, "quarantined", Some(false), Some("partly"), 2.0, None, false, 4),
-        row(4, &API, "withdrawn", Some(false), Some("failed"), 0.0, None, true, 6),
+        row(
+            1,
+            &API,
+            "submitted",
+            Some(false),
+            Some("worked"),
+            3.5,
+            None,
+            false,
+            1,
+        ),
+        row(
+            2,
+            &INFRA,
+            "accepted",
+            Some(true),
+            None,
+            0.0,
+            Some(6.0),
+            false,
+            2,
+        ),
+        row(
+            3,
+            &WEB,
+            "quarantined",
+            Some(false),
+            Some("partly"),
+            2.0,
+            None,
+            false,
+            4,
+        ),
+        row(
+            4,
+            &API,
+            "withdrawn",
+            Some(false),
+            Some("failed"),
+            0.0,
+            None,
+            true,
+            6,
+        ),
         // Predates the provenance fields: `approved_unattended` is `None`,
         // which decodes as "not recorded" rather than as either answer.
         row(5, &WEB, "accepted", None, None, 0.0, Some(4.0), false, 20),
@@ -254,7 +326,10 @@ fn sample_history_records() -> Vec<HistoryRecord> {
 /// the one entry `approve` actually runs its redaction pipeline over.
 /// Returns the session reference and the root `find_session` must be told
 /// to watch (via `claude_source`) to find it again by path at approve time.
-fn real_claude_code_session(root: &Path, content: &str) -> (trace_commons_contributor::source::SessionRef, PathBuf) {
+fn real_claude_code_session(
+    root: &Path,
+    content: &str,
+) -> (trace_commons_contributor::source::SessionRef, PathBuf) {
     let sessions_root = root.join("sessions/projects");
     let project = sessions_root.join("-Users-testuser-code-api");
     std::fs::create_dir_all(&project).unwrap();
@@ -268,7 +343,11 @@ fn real_claude_code_session(root: &Path, content: &str) -> (trace_commons_contri
         "sessionId": session,
         "uuid": "a1",
     });
-    std::fs::write(project.join(format!("{session}.jsonl")), format!("{user}\n")).unwrap();
+    std::fs::write(
+        project.join(format!("{session}.jsonl")),
+        format!("{user}\n"),
+    )
+    .unwrap();
     let src = ClaudeCodeSource::new(sessions_root.clone());
     let session_ref = TraceSource::discover(&src).unwrap().remove(0);
     (session_ref, sessions_root)
@@ -340,11 +419,16 @@ async fn start_daemon(
     let store = ConfigStore::open(store_dir.clone()).unwrap();
     build(&store);
     settings.save(&store).unwrap();
-    let shared = std::sync::Arc::new(DaemonShared::load(ConfigStore::open(store_dir.clone()).unwrap()).unwrap());
-    let runner: std::sync::Arc<dyn preview_scheduler::PreviewJobRunner> =
-        std::sync::Arc::new(preview_scheduler::DaemonPreviewRunner::new(std::sync::Arc::clone(&shared)));
+    let shared = std::sync::Arc::new(
+        DaemonShared::load(ConfigStore::open(store_dir.clone()).unwrap()).unwrap(),
+    );
+    let runner: std::sync::Arc<dyn preview_scheduler::PreviewJobRunner> = std::sync::Arc::new(
+        preview_scheduler::DaemonPreviewRunner::new(std::sync::Arc::clone(&shared)),
+    );
     preview_scheduler::spawn_workers(std::sync::Arc::clone(&shared.previews), runner);
-    let listener = bind(&ConfigStore::open(store_dir.clone()).unwrap()).await.unwrap();
+    let listener = bind(&ConfigStore::open(store_dir.clone()).unwrap())
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = serve(listener, shared).await;
     });
@@ -354,8 +438,12 @@ async fn start_daemon(
 
 fn default_settings() -> DaemonSettings {
     DaemonSettings {
-        claude_source: Some(SourceDeclaration::Watch { path: PathBuf::from("/sample/claude") }),
-        codex_source: Some(SourceDeclaration::Watch { path: PathBuf::from("/sample/codex") }),
+        claude_source: Some(SourceDeclaration::Watch {
+            path: PathBuf::from("/sample/claude"),
+        }),
+        codex_source: Some(SourceDeclaration::Watch {
+            path: PathBuf::from("/sample/codex"),
+        }),
         quiescence_secs: 0,
         ..DaemonSettings::default()
     }
@@ -371,8 +459,15 @@ fn default_settings() -> DaemonSettings {
 /// file authored, and so differs on every run. Everything else either comes
 /// from a literal this file chose or is derived from one by a pure function
 /// (`entry_id_for`, `project_id_for`), and is therefore already stable.
-const VOLATILE_KEYS: &[&str] =
-    &["next_digest_at", "resets_at", "since", "observed_at", "last_refresh_at", "next_retry_at", "hold_until"];
+const VOLATILE_KEYS: &[&str] = &[
+    "next_digest_at",
+    "resets_at",
+    "since",
+    "observed_at",
+    "last_refresh_at",
+    "next_retry_at",
+    "hold_until",
+];
 
 /// A fixed, recognizably-fake instant that still decodes as a real one.
 /// `<next_digest_at>` would say "this value varies" just as plainly, but
@@ -393,10 +488,8 @@ fn normalize(value: &mut Value, key: Option<&str>) {
                 normalize(v, key);
             }
         }
-        Value::String(s) => {
-            if key.is_some_and(|k| VOLATILE_KEYS.contains(&k)) && !s.is_empty() {
-                *s = VOLATILE_TIMESTAMP_PLACEHOLDER.to_string();
-            }
+        Value::String(s) if key.is_some_and(|k| VOLATILE_KEYS.contains(&k)) && !s.is_empty() => {
+            *s = VOLATILE_TIMESTAMP_PLACEHOLDER.to_string();
         }
         _ => {}
     }
@@ -438,16 +531,45 @@ struct StateRecording {
 async fn capture_state_varying(client: &mut Client) -> Vec<(&'static str, Value)> {
     vec![
         ("status", client.result("status", json!({})).await),
-        ("list_pending", client.result("list_pending", json!({})).await),
+        (
+            "list_pending",
+            client.result("list_pending", json!({})).await,
+        ),
         ("list_kept", client.result("list_kept", json!({})).await),
-        ("list_projects", client.result("list_projects", json!({})).await),
-        ("harness_list", client.result("harness_list", json!({})).await),
-        ("get_settings", client.result("get_settings", json!({})).await),
-        ("list_history", client.result("list_history", json!({ "limit": 50 })).await),
-        ("history_rollup", client.result("history_rollup", json!({})).await),
-        ("commons_credit_summary", client.result("commons_credit_summary", json!({})).await),
-        ("tool_destinations", client.result("tool_destinations", json!({})).await),
-        ("inference_calls", client.result("inference_calls", json!({ "limit": 25 })).await),
+        (
+            "list_projects",
+            client.result("list_projects", json!({})).await,
+        ),
+        (
+            "harness_list",
+            client.result("harness_list", json!({})).await,
+        ),
+        (
+            "get_settings",
+            client.result("get_settings", json!({})).await,
+        ),
+        (
+            "list_history",
+            client.result("list_history", json!({ "limit": 50 })).await,
+        ),
+        (
+            "history_rollup",
+            client.result("history_rollup", json!({})).await,
+        ),
+        (
+            "commons_credit_summary",
+            client.result("commons_credit_summary", json!({})).await,
+        ),
+        (
+            "tool_destinations",
+            client.result("tool_destinations", json!({})).await,
+        ),
+        (
+            "inference_calls",
+            client
+                .result("inference_calls", json!({ "limit": 25 }))
+                .await,
+        ),
     ]
 }
 
@@ -459,7 +581,10 @@ async fn record_empty() -> StateRecording {
         // null.
     })
     .await;
-    StateRecording { per_method: capture_state_varying(&mut client).await, shared: Vec::new() }
+    StateRecording {
+        per_method: capture_state_varying(&mut client).await,
+        shared: Vec::new(),
+    }
 }
 
 async fn record_normal_day() -> StateRecording {
@@ -480,15 +605,23 @@ async fn record_normal_day() -> StateRecording {
     // `claude_source` must watch the real session's root so `approve`'s
     // `find_session` can locate it again by path, rather than the sample
     // paths `default_settings` points at for every other entry.
-    let settings =
-        DaemonSettings { claude_source: Some(SourceDeclaration::Watch { path: approve_sessions_root }), ..default_settings() };
+    let settings = DaemonSettings {
+        claude_source: Some(SourceDeclaration::Watch {
+            path: approve_sessions_root,
+        }),
+        ..default_settings()
+    };
 
     let (_store_dir, mut client) = start_daemon(dir.path(), settings, |store| {
         enroll(store);
 
         let mut policy = ProjectPolicy::new();
-        policy.set_mode(API.key, ProjectMode::NotifyOnly, dt("2026-09-02T10:00:00Z")).unwrap();
-        policy.set_mode(WEB.key, ProjectMode::NotifyOnly, dt("2026-09-02T10:00:00Z")).unwrap();
+        policy
+            .set_mode(API.key, ProjectMode::NotifyOnly, dt("2026-09-02T10:00:00Z"))
+            .unwrap();
+        policy
+            .set_mode(WEB.key, ProjectMode::NotifyOnly, dt("2026-09-02T10:00:00Z"))
+            .unwrap();
         policy.save(store).unwrap();
 
         let mut queue = Queue::new();
@@ -526,25 +659,41 @@ async fn record_normal_day() -> StateRecording {
     // Pin the two settings `testProjectsAndToolsCarryK1AndK2Fields` reads a
     // literal value for: local notifications on, and the evening digest at
     // 18:00.
-    let _ = client.result("set_settings", json!({ "local_notifications": true })).await;
-    let _ = client.result("set_settings", json!({ "digest_schedule": { "mode": "evening", "hour": 18 } })).await;
+    let _ = client
+        .result("set_settings", json!({ "local_notifications": true }))
+        .await;
+    let _ = client
+        .result(
+            "set_settings",
+            json!({ "digest_schedule": { "mode": "evening", "hour": 18 } }),
+        )
+        .await;
 
     // Keep one entry and approve another before capturing anything, so the
     // normalDay narrative's three waiting entries are exactly the three
     // still `Pending` afterwards -- the kept and approved ones have already
     // left the queue, just as they would have in a real session. This
     // doubles as the real `keep` and `approve` recordings for `shared/`.
-    let keep_reply = client.result("keep", json!({ "entry_id": kept_entry_id })).await;
-    let approve_reply = client.result("approve", json!({ "entry_id": approve_entry_id })).await;
+    let keep_reply = client
+        .result("keep", json!({ "entry_id": kept_entry_id }))
+        .await;
+    let approve_reply = client
+        .result("approve", json!({ "entry_id": approve_entry_id }))
+        .await;
 
     let per_method = capture_state_varying(&mut client).await;
 
     // Captured after the per-state methods above, so these mutations never
     // change what normalDay's own methods answered.
     let set_project_mode_reply = client
-        .result("set_project_mode", json!({ "project_id": project_id_for(WEB.key), "mode": "notify_only" }))
+        .result(
+            "set_project_mode",
+            json!({ "project_id": project_id_for(WEB.key), "mode": "notify_only" }),
+        )
         .await;
-    let undo_keep_reply = client.result("undo_keep", json!({ "entry_id": kept_entry_id })).await;
+    let undo_keep_reply = client
+        .result("undo_keep", json!({ "entry_id": kept_entry_id }))
+        .await;
 
     StateRecording {
         per_method,
@@ -564,7 +713,9 @@ async fn record_busy_queue() -> StateRecording {
 
         let mut policy = ProjectPolicy::new();
         for p in [&API, &WEB, &INFRA] {
-            policy.set_mode(p.key, ProjectMode::NotifyOnly, dt("2026-09-02T10:00:00Z")).unwrap();
+            policy
+                .set_mode(p.key, ProjectMode::NotifyOnly, dt("2026-09-02T10:00:00Z"))
+                .unwrap();
         }
         policy.save(store).unwrap();
 
@@ -593,8 +744,13 @@ async fn record_busy_queue() -> StateRecording {
     .await;
 
     let kept_entry_id = entry_id_for("k2-sample-90");
-    let _ = client.result("keep", json!({ "entry_id": kept_entry_id })).await;
-    StateRecording { per_method: capture_state_varying(&mut client).await, shared: Vec::new() }
+    let _ = client
+        .result("keep", json!({ "entry_id": kept_entry_id }))
+        .await;
+    StateRecording {
+        per_method: capture_state_varying(&mut client).await,
+        shared: Vec::new(),
+    }
 }
 
 async fn record_held_sessions() -> StateRecording {
@@ -605,8 +761,12 @@ async fn record_held_sessions() -> StateRecording {
         enroll(store);
 
         let mut policy = ProjectPolicy::new();
-        policy.set_mode(API.key, ProjectMode::AutoUpload, dt("2026-09-02T10:00:00Z")).unwrap();
-        policy.set_mode(WEB.key, ProjectMode::AutoUpload, dt("2026-09-02T10:00:00Z")).unwrap();
+        policy
+            .set_mode(API.key, ProjectMode::AutoUpload, dt("2026-09-02T10:00:00Z"))
+            .unwrap();
+        policy
+            .set_mode(WEB.key, ProjectMode::AutoUpload, dt("2026-09-02T10:00:00Z"))
+            .unwrap();
         policy.save(store).unwrap();
 
         let mut queue = Queue::new();
@@ -645,8 +805,13 @@ async fn record_held_sessions() -> StateRecording {
     .await;
 
     let kept_entry_id = entry_id_for("k2-sample-90");
-    let _ = client.result("keep", json!({ "entry_id": kept_entry_id })).await;
-    StateRecording { per_method: capture_state_varying(&mut client).await, shared: Vec::new() }
+    let _ = client
+        .result("keep", json!({ "entry_id": kept_entry_id }))
+        .await;
+    StateRecording {
+        per_method: capture_state_varying(&mut client).await,
+        shared: Vec::new(),
+    }
 }
 
 async fn record_armed_folder() -> StateRecording {
@@ -657,7 +822,9 @@ async fn record_armed_folder() -> StateRecording {
 
         let armed_at = dt("2026-09-30T08:00:00Z");
         let mut policy = ProjectPolicy::new();
-        policy.set_mode(INFRA.key, ProjectMode::AutoUpload, armed_at).unwrap();
+        policy
+            .set_mode(INFRA.key, ProjectMode::AutoUpload, armed_at)
+            .unwrap();
         policy.arm_from_now(INFRA.key, armed_at);
         // A source already recorded for this arming, with every path it saw
         // on disk at that moment: only `backlog_path` is in it, so the two
@@ -670,7 +837,9 @@ async fn record_armed_folder() -> StateRecording {
             .expect("arm_from_now just inserted this key")
             .recorded_sources
             .insert("claude-code".into(), 0);
-        policy.sessions_on_disk_at_arming.insert(backlog_path.to_string_lossy().into_owned(), 0);
+        policy
+            .sessions_on_disk_at_arming
+            .insert(backlog_path.to_string_lossy().into_owned(), 0);
         policy.save(store).unwrap();
 
         let mut queue = Queue::new();
@@ -694,7 +863,10 @@ async fn record_armed_folder() -> StateRecording {
     })
     .await;
 
-    StateRecording { per_method: capture_state_varying(&mut client).await, shared: Vec::new() }
+    StateRecording {
+        per_method: capture_state_varying(&mut client).await,
+        shared: Vec::new(),
+    }
 }
 
 async fn record_unknown_counts() -> StateRecording {
@@ -721,7 +893,10 @@ async fn record_unknown_counts() -> StateRecording {
     })
     .await;
 
-    StateRecording { per_method: capture_state_varying(&mut client).await, shared: Vec::new() }
+    StateRecording {
+        per_method: capture_state_varying(&mut client).await,
+        shared: Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -730,7 +905,8 @@ async fn record_unknown_counts() -> StateRecording {
 // ---------------------------------------------------------------------------
 
 fn samples_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../macos/Sources/TCShellCore/DataContract/RecordedSamples")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../macos/Sources/TCShellCore/DataContract/RecordedSamples")
 }
 
 fn file_for(key: &str) -> PathBuf {
@@ -758,9 +934,20 @@ async fn record_samples_to_disk() {
 fn first_diff(expected: &Value, actual: &Value, path: &str) -> Option<String> {
     match (expected, actual) {
         (Value::Object(e), Value::Object(a)) => {
-            for key in e.keys().chain(a.keys()).collect::<std::collections::BTreeSet<_>>() {
-                let next = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
-                let (ev, av) = (e.get(key).unwrap_or(&Value::Null), a.get(key).unwrap_or(&Value::Null));
+            for key in e
+                .keys()
+                .chain(a.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                let next = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                let (ev, av) = (
+                    e.get(key).unwrap_or(&Value::Null),
+                    a.get(key).unwrap_or(&Value::Null),
+                );
                 if let Some(d) = first_diff(ev, av, &next) {
                     return Some(d);
                 }
@@ -790,26 +977,47 @@ async fn drift_sample_data_matches_the_real_daemon() {
     let mut failures = Vec::new();
     for (key, actual) in &fresh {
         let path = file_for(key);
-        let committed_text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{key}: no committed recording at {path:?} ({e}); run record_samples_to_disk"));
-        let committed: Value = serde_json::from_str(&committed_text).unwrap_or_else(|e| panic!("{key}: {e}"));
+        let committed_text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("{key}: no committed recording at {path:?} ({e}); run record_samples_to_disk")
+        });
+        let committed: Value =
+            serde_json::from_str(&committed_text).unwrap_or_else(|e| panic!("{key}: {e}"));
         if let Some(diff) = first_diff(&committed, actual, "") {
             failures.push(format!("{key}: {diff}"));
         }
     }
     // A method the committed set no longer has (the recorder was narrowed)
     // is as much a drift as a changed field.
-    for entry in std::fs::read_dir(samples_dir()).into_iter().flatten().flatten() {
+    for entry in std::fs::read_dir(samples_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         if entry.path().is_dir() {
-            for file in std::fs::read_dir(entry.path()).into_iter().flatten().flatten() {
+            for file in std::fs::read_dir(entry.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 let set = entry.file_name().to_string_lossy().into_owned();
-                let method = file.path().file_stem().unwrap().to_string_lossy().into_owned();
+                let method = file
+                    .path()
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
                 let key = format!("{set}/{method}");
                 if !fresh.contains_key(&key) {
-                    failures.push(format!("{key}: committed file has no matching recording any more"));
+                    failures.push(format!(
+                        "{key}: committed file has no matching recording any more"
+                    ));
                 }
             }
         }
     }
-    assert!(failures.is_empty(), "the real daemon no longer matches the committed samples:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "the real daemon no longer matches the committed samples:\n{}",
+        failures.join("\n")
+    );
 }
