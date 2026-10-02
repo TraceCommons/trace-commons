@@ -72,6 +72,9 @@ jobs:
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
 
+      - name: Offline network recording privacy projections
+        run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
+
   postgres-suites:
     name: database suites against a real PostgreSQL
     runs-on: ubuntu-latest
@@ -103,6 +106,7 @@ jobs:
         admission_test_account_trust_route
         admission_test_witness_evidence
         admission_test_source_sessions
+        admission_test_activity_missions
         admission_test_inference_connection
         admission_test_inference_connection_route
         admission_test_walletv2
@@ -370,6 +374,14 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_session_withdrawal_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_source_sessions
+      # Activity progress uses the owner URL only to migrate and seed fixtures.
+      # Its account-history SELECT grants stay in this fresh test database;
+      # the reader SET ROLEs to trace_ingest_runtime and asserts NOBYPASSRLS,
+      # no superuser privileges, and no rows without tenant context.
+      - name: activity_missions_pg
+        run: cargo test --locked -p trace-commons-server --test activity_missions_pg -- --nocapture
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_activity_missions
       # The R1 measurement script (scripts/operator/r1-pipeline-measurement.sql)
       # run through the real psql against a current and a pre-V76 schema. The
       # suite creates and drops databases of its own, so the xact_commit guard

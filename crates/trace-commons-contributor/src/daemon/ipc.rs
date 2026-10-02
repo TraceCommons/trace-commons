@@ -290,6 +290,19 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "account_bind",
+    "account_binding",
+    "account_session_status",
+    "account_sign_in",
+    "account_sign_out",
+    "passkey_add_begin",
+    "passkey_add_complete",
+    "passkey_cancel",
+    "passkey_create_begin",
+    "passkey_create_complete",
+    "passkey_login_begin",
+    "passkey_login_complete",
+    "passkey_state",
     "acknowledge_arming_rewordings",
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
@@ -304,6 +317,9 @@ pub const METHODS: &[&str] = &[
     "cancel",
     "clear_public_profile",
     "commons_credit_summary",
+    "mission_catalogue",
+    "activity_missions_catalogue",
+    "activity_missions_status",
     "consent_options",
     "discover_routing",
     "dismiss",
@@ -341,6 +357,12 @@ pub const METHODS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "inference_calls",
+    "inference_summary",
+    "inference_call_proof",
+    "model_spend",
+    "private_ai",
+    "set_private_ai",
+    "invite_lookup",
     "tool_destinations",
     "list_audit",
     "list_history",
@@ -499,6 +521,7 @@ pub struct GateHeld {
 
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
+    pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
     pub store: ConfigStore,
     pub queue: Mutex<Queue>,
     pub policy: Mutex<ProjectPolicy>,
@@ -834,6 +857,7 @@ impl DaemonShared {
                 super::private_inference::PrivateInferenceState::Off,
             )),
             harness_plans: super::harness::PlanStore::default(),
+            native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
         })
     }
@@ -1225,7 +1249,7 @@ impl DaemonShared {
     /// contributor asked for; this is what actually happened, and a shell
     /// that renders the boolean alone would show a proxy as on while it was
     /// refusing to start.
-    fn private_inference_value(&self) -> serde_json::Value {
+    pub(crate) fn private_inference_value(&self) -> serde_json::Value {
         let state = self
             .private_inference_state
             .lock()
@@ -2342,6 +2366,23 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    ("inference_summary", "inference-summary-requires-async"),
+    ("model_spend", "model-spend-requires-async"),
+    ("set_private_ai", "private-ai-requires-async"),
+    ("invite_lookup", "invite-lookup-requires-async"),
+    ("account_bind", "identity-requires-async"),
+    ("account_binding", "identity-requires-async"),
+    ("account_session_status", "identity-requires-async"),
+    ("account_sign_in", "identity-requires-async"),
+    ("account_sign_out", "identity-requires-async"),
+    ("passkey_add_begin", "identity-requires-async"),
+    ("passkey_add_complete", "identity-requires-async"),
+    ("passkey_cancel", "identity-requires-async"),
+    ("passkey_create_begin", "identity-requires-async"),
+    ("passkey_create_complete", "identity-requires-async"),
+    ("passkey_login_begin", "identity-requires-async"),
+    ("passkey_login_complete", "identity-requires-async"),
+    ("passkey_state", "identity-requires-async"),
     (
         "prepare_admission_session",
         "admission-setup-requires-async",
@@ -2376,6 +2417,15 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     (
         "commons_credit_summary",
         "commons-credit-summary-requires-async",
+    ),
+    ("mission_catalogue", "mission-catalogue-requires-async"),
+    (
+        "activity_missions_catalogue",
+        "activity-missions-requires-async",
+    ),
+    (
+        "activity_missions_status",
+        "activity-missions-requires-async",
     ),
     (
         "inference_connection_offers",
@@ -2446,6 +2496,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "route_disclosure" => handle_route_disclosure(shared, req),
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "inference_call_proof" => super::network_data::handle_proof(shared, req),
+        "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_kept" => handle_list_kept(shared, req),
         "keep" => handle_keep(shared, req),
@@ -4016,7 +4068,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
 /// the same friction `rebuild_effective_routing` exists to avoid for a typed port.
 /// The reported state is re-read after the reconcile so the answer describes
 /// what happened rather than what was true a moment before it.
-async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
+pub(crate) async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
     shared.absorb_near_ai_credential_change().await;
     let mut response = handle_set_settings(shared, req);
     if response.error.is_some() {
@@ -4045,6 +4097,24 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
+        "inference_summary" => super::network_data::handle_summary(shared, req).await,
+        "model_spend" => super::network_data::handle_model_spend(shared, req).await,
+        "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
+        "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
+        "account_bind" => super::native_identity::handle(shared, req).await,
+        "account_binding" => super::native_identity::handle(shared, req).await,
+        "account_session_status" => super::native_identity::handle(shared, req).await,
+        "account_sign_in" => super::native_identity::handle(shared, req).await,
+        "account_sign_out" => super::native_identity::handle(shared, req).await,
+        "passkey_add_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_add_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_cancel" => super::native_identity::handle(shared, req).await,
+        "passkey_create_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_create_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_login_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_login_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_state" => super::native_identity::handle(shared, req).await,
+
         "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
         "prepare_admission_session" => super::native_flow::admission_response(
             super::admission_setup::handle_prepare_admission_session(shared, req).await,
@@ -4090,6 +4160,11 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "commons_credit_summary" => {
             super::commons_credit::handle_commons_credit_summary(shared, req).await
         }
+        "mission_catalogue" => super::mission_catalogue::handle_catalogue(shared, req).await,
+        "activity_missions_catalogue" => {
+            super::activity_missions::handle_catalogue(shared, req).await
+        }
+        "activity_missions_status" => super::activity_missions::handle_status(shared, req).await,
         "inference_connection_offers" => {
             super::inference_connection::handle_offers(shared, req).await
         }
@@ -6783,6 +6858,10 @@ fn signer_attestor_for(
 
 #[cfg(test)]
 mod tests {
+    mod missions {
+        include!("mission_catalogue_tests.rs");
+        include!("activity_missions_tests.rs");
+    }
     mod witnessed_flow {
         include!("ipc_witness_flow_test.rs");
     }
@@ -13251,9 +13330,48 @@ mod tests {
     }
 
     #[test]
+    fn network_methods_are_reachable_and_unknown_is_not_zero() {
+        let s = shared();
+        for method in [
+            "inference_summary",
+            "inference_call_proof",
+            "model_spend",
+            "private_ai",
+            "set_private_ai",
+            "invite_lookup",
+        ] {
+            assert!(METHODS.contains(&method), "{method} must be advertised");
+        }
+        let spend = handle_local(&s, "model_spend", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(spend["known"], false);
+        assert_eq!(spend["reason_label"], "billed-model-spend-unavailable");
+        let summary = handle_local(&s, "inference_summary", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(summary["readable"], false);
+        assert!(summary["summary"].is_null());
+        let proof = handle_local(&s, "inference_call_proof", serde_json::json!({"call_id":1}))
+            .result
+            .unwrap();
+        assert_eq!(proof["readable"], false);
+        assert_eq!(proof["found"], false);
+        let private = handle_local(&s, "private_ai", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(private["on"], false);
+        assert_eq!(private["state"], "off");
+        assert_eq!(
+            private["disclosure"],
+            crate::private_inference_copy::OFFER_EXPOSURE
+        );
+    }
+
+    #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 36);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 56);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -13605,6 +13723,18 @@ mod tests {
         assert_eq!(PROBE_UNREACHABLE, "unreachable");
     }
 
+    #[tokio::test]
+    async fn native_identity_no_config_status_and_logout_are_available() {
+        let s = shared();
+        let status =
+            handle_request_async(&s, &req("account_session_status", serde_json::json!({}))).await;
+        assert_eq!(status.result.unwrap()["signed_in"], false);
+        let logout =
+            handle_request_async(&s, &req("account_sign_out", serde_json::json!({}))).await;
+        assert_eq!(logout.result.unwrap()["signed_out"], true);
+        assert!(s.store.load_config().unwrap().is_none());
+    }
+
     /// `hello`'s method list and the dispatchers are one contract, checked
     /// here in BOTH directions against this file's own source.
     ///
@@ -13682,8 +13812,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 55, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 57, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 63, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

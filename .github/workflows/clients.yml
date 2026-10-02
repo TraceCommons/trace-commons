@@ -26,6 +26,8 @@ on:
       - "scripts/make-appinstaller.ps1"
       - "scripts/ci/verify-macos-entitlements.sh"
       - "scripts/ci/test-verify-macos-entitlements.sh"
+      - "scripts/ci/native-passkey-entitlements.py"
+      - "scripts/ci/tests/test_native_passkey_entitlements.py"
       # The fixture test also reads the Tauri app's entitlements.
       - "tauri-desktop/src-tauri/entitlements.plist"
       - "crates/trace-commons-contributor/**"

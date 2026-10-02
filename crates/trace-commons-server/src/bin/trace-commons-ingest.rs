@@ -5,6 +5,8 @@
 mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
 mod account_trust_growth_routes;
+#[path = "trace_commons_ingest_internal/activity_missions.rs"]
+mod activity_missions;
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
@@ -1633,6 +1635,8 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 
 #[derive(Clone)]
 struct AppState {
+    activity_missions_policy:
+        Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -4612,6 +4616,7 @@ impl AppState {
             account_native_codes,
             account_near_config,
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
+            activity_missions_policy: activity_missions::policy_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8088,6 +8093,10 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         )
         .get("/v1/account/credit-summary", account_credit_summary_handler)
         .get(
+            "/v1/account/activity-missions/status",
+            activity_missions::status,
+        )
+        .get(
             "/v1/account/traces/{submission_id}",
             account_trace_detail_handler,
         )
@@ -8240,6 +8249,7 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
+        .route("/v1/activity-missions", get(activity_missions::catalogue))
         .route(
             "/v1/missions/{mission_id}",
             get(rewards::mission_publication),
