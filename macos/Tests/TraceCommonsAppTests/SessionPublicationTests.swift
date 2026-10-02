@@ -203,6 +203,13 @@ final class SessionPublicationTests: XCTestCase {
         XCTAssertEqual(copy.contributionStatusChoices.count, 10)
         XCTAssertEqual(copy.contributionStatusLabel(for: "submitted"), "Submitted")
         XCTAssertEqual(copy.contributionStatusLabel(for: "accepted"), "Accepted into the commons")
+        // K8 (#1173), the counterpart of the Tauri frontend's
+        // `historyStatusLabel`: the privacy-backstop hold and the quarantine
+        // hold each read with their own core-chosen label, not a shared
+        // generic one.
+        XCTAssertEqual(copy.contributionStatusLabel(for: "quarantined"), "Held for privacy review")
+        XCTAssertEqual(
+            copy.contributionStatusLabel(for: "awaiting_pii_backstop"), "Waiting for privacy review")
         XCTAssertEqual(copy.contributionStatusLabel(for: "future_state"), copy.unrecognizedValue)
         XCTAssertEqual(copy.permittedUseChoices.count, 6)
         XCTAssertEqual(copy.permittedUseLabel(for: "model_training"), "Model training")
@@ -238,10 +245,29 @@ final class SessionPublicationTests: XCTestCase {
         for status in ["withdrawn", "revoked", "purged", "expired"] {
             XCTAssertTrue(ContributionStatusPresentation.isTerminal(status), status)
         }
-        for status in ["submitted", "received", "quarantined", "accepted", "rejected"] {
+        // K8 (#1173): `awaiting_pii_backstop` is a pre-acceptance hold, named
+        // withdrawable on the same terms as the rest of this set by the
+        // Tauri frontend's `canWithdrawStatus` (`withdrawal-eligibility.ts`).
+        for status in ["submitted", "received", "quarantined", "awaiting_pii_backstop", "accepted", "rejected"] {
             XCTAssertFalse(ContributionStatusPresentation.isTerminal(status), status)
         }
         XCTAssertFalse(ContributionStatusPresentation.isTerminal(nil))
+    }
+
+    /// `isTerminal` is a denylist of the four closed statuses, not an
+    /// allowlist of the ones this build currently shows: an unrecognized
+    /// status this app has never seen -- a wider future status enum, or a
+    /// label from a newer daemon -- still offers Withdraw, through the core's
+    /// own generic prompt (`WithdrawalCopy.Stage.unknown`,
+    /// `testAnUnknownStatusIsConfirmedWithTheCorePrompt`). This is a
+    /// deliberate difference from the Tauri frontend's `canWithdrawStatus`,
+    /// which is an allowlist and answers `false` for a status it does not
+    /// name (including "unknown" itself): that shell fails closed on the
+    /// unexpected, this one fails open, because it already has a safe,
+    /// core-sourced confirmation to show rather than a withdraw it cannot
+    /// word at all.
+    func testAnUnrecognizedContributionStateIsNotTreatedAsTerminal() {
+        XCTAssertFalse(ContributionStatusPresentation.isTerminal("a-status-from-the-future"))
     }
 
     func testEditorUsesTheSharedRustValidatorAndNormalizedDraft() throws {
