@@ -30,7 +30,9 @@ public struct GlassListRow: View {
     /// a row with no switch of its own (a session). A nil `onSubmit` with a
     /// `submitTitle` shows the pill disabled. Every word is the caller's:
     /// `watchLabel` names the switch, `expandLabel` the chevron and
-    /// `menuLabel` the row menu (the title when empty), from the core's copy; the components author no wording.
+    /// `menuLabel` the row menu, from the core's copy; the components author no
+    /// wording. A row menu with an empty `menuLabel` is not drawn, so it can
+    /// never borrow the row's own name.
     public init(
         depth: Depth,
         tile: GlassToolTile.Kind,
@@ -73,6 +75,13 @@ public struct GlassListRow: View {
         self.onMenu = onMenu
     }
 
+    /// The ink a selected row sets its title, sub-line and chevron in, on
+    /// `GlassTokens.Color.selection`. Solid, so the sub-line keeps text
+    /// contrast too (`SelectionContrastTests`).
+    static let selectedInk = GlassTokens.Color.textOnAccent
+    /// The sub-line's ink when selected: the same solid ink, not a faded one.
+    static let selectedSubInk = selectedInk
+
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             Group {
@@ -80,7 +89,7 @@ public struct GlassListRow: View {
                     Button(action: onToggleExpand) {
                         Text("›")
                             .glassGlyph(14)
-                            .foregroundStyle(selected ? Color.white : GlassTokens.Color.statusOff.color)
+                            .foregroundStyle(selected ? Self.selectedInk.color : GlassTokens.Color.statusOff.color)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                     }
                     .buttonStyle(.plain)
@@ -127,15 +136,17 @@ public struct GlassListRow: View {
             }
 
             Group {
-                if let onMenu {
-                    GlassKebab(menuLabel.isEmpty ? title : menuLabel, open: menuOpen, action: onMenu)
+                // The kebab needs its own name: falling back to the row title
+                // gave it the same VoiceOver name as the row it sits in.
+                if let onMenu, !menuLabel.isEmpty {
+                    GlassKebab(menuLabel, open: menuOpen, action: onMenu)
                 } else {
                     Color.clear
                 }
             }
             .frame(width: 22)
         }
-        .foregroundStyle(selected ? Color.white : GlassColor.textPrimary)
+        .foregroundStyle(selected ? Self.selectedInk.color : GlassColor.textPrimary)
         .padding(.leading, 8 + CGFloat(depth.rawValue) * 18)
         .padding(.trailing, 6)
         .frame(minHeight: GlassTokens.Size.listRow)
@@ -162,7 +173,7 @@ public struct GlassListRow: View {
     }
 
     private var subColor: Color {
-        if selected { return Color.white.opacity(0.8) }
+        if selected { return Self.selectedSubInk.color }
         return switch flag {
         case .ask: GlassTokens.Color.statusAsk.color
         case .on: GlassTokens.Color.statusOn.color

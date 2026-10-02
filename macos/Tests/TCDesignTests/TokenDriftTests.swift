@@ -110,6 +110,7 @@ final class TokenDriftTests: XCTestCase {
             let entry = raw as? [String: Any] ?? [:]
             guard let made = GlassTokens.TypeScale.all[name] else { continue }
             XCTAssertTrue(Double(made.size) == Self.number(entry["size"]), "type.\(name) size")
+            XCTAssertEqual(String(describing: made.weight), entry["weight"] as? String, "type.\(name) weight")
             XCTAssertTrue(Double(made.lineHeight) == Self.number(entry["lineHeight"]), "type.\(name) lineHeight")
             XCTAssertTrue(Double(made.tracking) == Self.number(entry["tracking"]), "type.\(name) tracking")
             XCTAssertTrue(made.uppercase == ((entry["uppercase"] as? Bool) ?? false), "type.\(name) uppercase")
