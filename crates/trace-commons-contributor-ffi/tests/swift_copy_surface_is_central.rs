@@ -342,8 +342,8 @@ macro_rules! json {
 /// The core sentences no Swift literal may hold, by where they come from.
 fn pinned_sentences() -> Vec<(&'static str, String)> {
     use trace_commons_contributor::{
-        consent_copy as consent, daemon::automatic_gate::Disclosure, preview_copy,
-        privacy_scan_copy, project_copy, quit_copy, withdraw,
+        consent_copy as consent, daemon::automatic_gate::Disclosure, daemon::policy::ProjectMode,
+        preview_copy, privacy_scan_copy, project_copy, quit_copy, withdraw,
     };
     let counted = |text: String| text.replace(&COUNT.to_string(), HOLE);
     let mut pinned: Vec<(&'static str, String)> = Vec::new();
@@ -408,6 +408,28 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             .into_iter()
             .map(counted)
             .collect(),
+    );
+    // The menu-bar Contribution mode pill and its override confirmations
+    // (#1173): not built in macOS yet, pinned so it arrives with the core's
+    // words.
+    add(
+        "project_copy::contribution_mode_copy",
+        table(json!(project_copy::contribution_mode_copy())),
+    );
+    add(
+        "project_copy::contribution_override_confirm_copy",
+        [
+            ProjectMode::NotifyOnly,
+            ProjectMode::AutoUpload,
+            ProjectMode::Ignore,
+        ]
+        .into_iter()
+        .flat_map(|m| {
+            table(json!(project_copy::contribution_override_confirm_copy(
+                m, None
+            )))
+        })
+        .collect(),
     );
     add(
         "project_copy::ignore_project_copy",

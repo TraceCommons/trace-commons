@@ -2337,6 +2337,23 @@ char*       tc_project_ignore_reconciled_text(const char* project_label, int64_t
  */
 char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count);
 
+/* The menu-bar Contribution mode pill (#1173, project_copy::
+ * contribution_mode_copy): {title, mixed, choices, override_active, clear},
+ * choices being [{mode, label, line}] for Ask me, Auto contribute and Never.
+ * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ */
+char*       tc_contribution_mode_copy_json(void);
+
+/* The confirmation for one contribution override (#1173, project_copy::
+ * contribution_override_confirm_copy): {mode, title, body, confirm, cancel,
+ * arming}. mode is "notify_only", "auto_upload" or "ignore". arming is the
+ * arming disclosure for auto_upload, read for the configuration in
+ * config_dir, and null otherwise; config_dir may be NULL for the other two.
+ * NULL for an unknown or unreadable mode, for auto_upload with an unreadable
+ * config_dir or configuration, and on a caught panic.
+ */
+char*       tc_contribution_override_confirm_json(const char* mode, const char* config_dir);
+
 /* The legacy invite migration offer (consent_copy::legacy_migration_offer),
  * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
  */
