@@ -756,15 +756,29 @@ pub fn trusted_key_for_pkcs8(key_id: &str, pkcs8: &[u8]) -> anyhow::Result<Trust
     })
 }
 
+/// The signature of a [`PipelineCheckAttestation`]: the algorithm
+/// ([`PACKAGE_SIGNATURE_ALGORITHM`]), the id of the key that made it, the
+/// hash that was signed ([`attestation_hash`], recorded so a reader sees
+/// what the signature claims to cover; verification recomputes it and
+/// requires the two to be equal), and the signature itself, base64url. Its
+/// own type, not [`BundlePackageSignature`]: a package signature has a
+/// different field for the hash it covers, and a reader that takes one for
+/// the other fails to parse it. No other field is accepted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckAttestationSignature {
+    pub algorithm: String,
+    pub key_id: String,
+    pub attestation_hash: String,
+    pub signature_base64url: String,
+}
+
 /// A check result and the signature of the key that vouches for it (P5-D13).
 /// The result stays exactly [`PIPELINE_CHECK_RESULT_SCHEMA`]; this envelope
 /// adds the one thing a result file lacks, who made it. The signature covers
 /// every other field ([`attestation_hash`]): the result, the maximum age
 /// the signer gives its evidence, and the two digests of the corpus run that
 /// produced it. Any change after signing breaks the signature.
-///
-/// `signature.package_hash` holds the hash that was signed (the signature
-/// type is shared with package signatures; the name is the package one's).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineCheckAttestation {
@@ -773,7 +787,7 @@ pub struct PipelineCheckAttestation {
     pub maximum_age_seconds: u64,
     pub corpus_digest: Option<String>,
     pub input_digest: Option<String>,
-    pub signature: BundlePackageSignature,
+    pub signature: CheckAttestationSignature,
 }
 
 impl PipelineCheckAttestation {
@@ -838,10 +852,10 @@ pub fn sign_check_result(
         maximum_age_seconds,
         corpus_digest,
         input_digest,
-        signature: BundlePackageSignature {
+        signature: CheckAttestationSignature {
             algorithm: PACKAGE_SIGNATURE_ALGORITHM.to_string(),
             key_id: key_id.to_string(),
-            package_hash: String::new(),
+            attestation_hash: String::new(),
             signature_base64url: String::new(),
         },
     };
@@ -850,7 +864,7 @@ pub fn sign_check_result(
         .map_err(|label| anyhow::anyhow!(label))?;
     let hash = attestation_hash(&attestation).map_err(|label| anyhow::anyhow!(label))?;
     let signature = key_pair.sign(hash.as_bytes());
-    attestation.signature.package_hash = hash;
+    attestation.signature.attestation_hash = hash;
     attestation.signature.signature_base64url =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_ref());
     Ok(attestation)
@@ -953,7 +967,7 @@ impl CheckResultTrustStore {
             .get(&signature.key_id)
             .ok_or_else(|| CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL.to_string())?;
         let hash = attestation_hash(attestation)?;
-        if signature.package_hash != hash {
+        if signature.attestation_hash != hash {
             return Err(CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL.to_string());
         }
         let signature_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -2811,7 +2825,7 @@ mod tests {
             a.result.safe_blockers = Vec::new()
         });
         change("the signature's own hash", &signed, &|a| {
-            a.signature.package_hash = sha256_prefixed(b"another-hash")
+            a.signature.attestation_hash = sha256_prefixed(b"another-hash")
         });
         change("a blank signature", &signed, &|a| {
             a.signature.signature_base64url = String::new()
@@ -2940,6 +2954,25 @@ mod tests {
         assert!(serde_json::from_value::<PipelineCheckAttestation>(with_extra).is_err());
         let bare = serde_json::to_value(sample_check_result()).unwrap();
         assert!(serde_json::from_value::<PipelineCheckAttestation>(bare).is_err());
+        // The signature has its own fields and no others: an unknown field
+        // inside it is refused, and so is a package signature's field name.
+        let mut extra_in_signature = serde_json::to_value(&signed).unwrap();
+        extra_in_signature["signature"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<PipelineCheckAttestation>(extra_in_signature).is_err());
+        let mut package_field_name = serde_json::to_value(&signed).unwrap();
+        let hash = package_field_name["signature"]
+            .as_object_mut()
+            .unwrap()
+            .remove("attestation_hash")
+            .unwrap();
+        package_field_name["signature"]
+            .as_object_mut()
+            .unwrap()
+            .insert("package_hash".to_string(), hash);
+        assert!(serde_json::from_value::<PipelineCheckAttestation>(package_field_name).is_err());
 
         // The same check id twice is refused, as is anything else that would
         // let one attestation hide another from the digests.
@@ -3095,12 +3128,76 @@ mod tests {
             CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL
         );
 
-        // The reverse: a package signature is not an attestation (the hash
-        // it signs is the package's, not an attestation's).
-        assert_ne!(
-            std::any::TypeId::of::<BundlePackageTrustStore>(),
-            std::any::TypeId::of::<CheckResultTrustStore>()
-        );
+        // The reverse, for real: a signature made over an attestation is not
+        // a package signature, and a package signature is not an attestation
+        // signature, even with the same key behind both and the same key id,
+        // whichever hash is recorded beside it.
+        let reverse = attestation_for_reverse(&package_pkcs8);
+        let signature = &reverse.signature;
+        let package = minimal_test_package();
+        let package_hash = package.package_hash().unwrap();
+        for recorded in [signature.attestation_hash.clone(), package_hash.clone()] {
+            let moved = SignedBundlePackage {
+                package: package.clone(),
+                signature: BundlePackageSignature {
+                    algorithm: signature.algorithm.clone(),
+                    key_id: signature.key_id.clone(),
+                    package_hash: recorded,
+                    signature_base64url: signature.signature_base64url.clone(),
+                },
+            };
+            assert_eq!(
+                package_trust.verify(&moved),
+                Err(PACKAGE_SIGNATURE_INVALID_LABEL.to_string()),
+                "an attestation's signature does not sign a package"
+            );
+        }
+        let own_check_store = CheckResultTrustStore::new([trusted_key_for_pkcs8(
+            "release-2026-09",
+            package_pkcs8.as_ref(),
+        )
+        .unwrap()])
+        .unwrap();
+        let mut moved = sign_check_result(
+            sample_check_result(),
+            3_600,
+            None,
+            None,
+            "release-2026-09",
+            other_pkcs8.as_ref(),
+        )
+        .unwrap();
+        for recorded_correctly in [false, true] {
+            moved.signature = CheckAttestationSignature {
+                algorithm: signed_package.signature.algorithm.clone(),
+                key_id: signed_package.signature.key_id.clone(),
+                attestation_hash: signed_package.signature.package_hash.clone(),
+                signature_base64url: signed_package.signature.signature_base64url.clone(),
+            };
+            if recorded_correctly {
+                moved.signature.attestation_hash = attestation_hash(&moved).unwrap();
+            }
+            assert_eq!(
+                own_check_store
+                    .verify_all(std::slice::from_ref(&moved))
+                    .unwrap_err(),
+                CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL,
+                "a package signature does not sign an attestation (hash recorded correctly: {recorded_correctly})"
+            );
+        }
+    }
+
+    /// An attestation signed with `pkcs8` under the key id of the package key.
+    fn attestation_for_reverse(pkcs8: &ring::pkcs8::Document) -> PipelineCheckAttestation {
+        sign_check_result(
+            sample_check_result(),
+            3_600,
+            None,
+            None,
+            "release-2026-09",
+            pkcs8.as_ref(),
+        )
+        .unwrap()
     }
 
     #[test]

@@ -81,6 +81,14 @@ BUNDLES = ("minimal", "compatibility")
 DEFAULT_EVIDENCE_AGE_SECONDS = 24 * 60 * 60
 EVIDENCE_AGE_CEILING_SECONDS = 7 * 24 * 60 * 60
 
+# The signing step writes into this directory of the run directory; the files
+# move to the results directory only once every later check has passed.
+ATTESTATION_STAGING = "attestations-staging"
+
+# Commands that keep nothing: their run directory is removed when they succeed
+# (or fail before they wrote anything).
+EPHEMERAL_COMMANDS = frozenset({"revision", "keygen"})
+
 # `restore-drill`: the two ignored tests around the dump, the restore, and
 # the artifact copy, and the one check the resume emits.
 RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
@@ -905,16 +913,44 @@ def signing_options(args):
     return Signing(key_path, args.signing_key_id, args.evidence_max_age_seconds)
 
 
-def attest_results(run, results, signing):
+def _staging_dir(run):
+    return run.run_dir / ATTESTATION_STAGING
+
+
+def discard_attestations(run):
+    """Removes the staging directory and every attestation file of the run's
+    results directory: the two places this tool writes them. Called before a
+    failed run writes its report, so that a failed run leaves no attestation
+    file anywhere in its directory (the server accepts an attestation set
+    for the revision it names). Best effort, file by file: one that cannot be
+    removed does not stop the others, nor replace the failure."""
+    shutil.rmtree(_staging_dir(run), ignore_errors=True)
+    for path in run.results_dir.glob("*.attestation.json"):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def attest_results(run, accepted, signing):
     """The signing step: starts the ignored test
-    `pipeline_check_attestations_write`, which signs every result file of the
-    run and verifies what it wrote, then checks the files it left (one for
-    each result, no other). Runs only for a result set that passed
-    `require_current_pass_results`. The key path goes to the test's
-    environment and nowhere else (the test's own output goes to the step's
-    log). Returns the number of attestations."""
+    `pipeline_check_attestations_write`, which signs the result file of each
+    accepted check (`accepted`: check id to the `CheckResult` that
+    `require_current_pass_results` accepted; the test refuses any other result
+    file and any accepted check without one) into the staging directory and
+    verifies what it wrote, then checks the files it left against the accepted
+    results. Runs only for a result set that passed
+    `require_current_pass_results`. The files stay in the staging directory
+    (`publish_attestations` moves them once every later check has passed). The
+    key path goes to the test's environment and nowhere else (the test's own
+    output goes to the step's log). Returns the number of attestations."""
+    staging = _staging_dir(run)
+    discard_attestations(run)
+    staging.mkdir(mode=0o700)
     extra = {
         "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
+        "TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR": str(staging),
+        "TRACE_COMMONS_PIPELINE_CHECK_IDS": ",".join(sorted(accepted)),
         "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH": str(signing.key_path),
         "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID": signing.key_id,
         "TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS": str(signing.maximum_age_seconds),
@@ -922,7 +958,28 @@ def attest_results(run, results, signing):
     cargo_test(
         run, "check_attestations", INGEST_TEST_ARGS, ATTESTATION_WRITER, child_environment(extra), exact=True, ignored=True
     )
-    return require_attestations(run, results, signing.key_id, signing.maximum_age_seconds)
+    return require_attestations(run, accepted, signing.key_id, signing.maximum_age_seconds, staging)
+
+
+def _publish_file(source, destination):
+    os.replace(source, destination)
+
+
+def publish_attestations(run, accepted):
+    """Moves the staged attestation files to their final names, beside the
+    results they sign, and removes the staging directory. The last step of a
+    run before it archives anything: it runs only after every check that
+    follows the signing step has passed. A file that cannot be moved is
+    `check_attestation_publish_failed`; the caller then removes what was
+    already moved."""
+    staging = _staging_dir(run)
+    try:
+        for check_id in sorted(accepted):
+            name = f"{check_id}.attestation.json"
+            _publish_file(staging / name, run.results_dir / name)
+        staging.rmdir()
+    except OSError as error:
+        raise ToolingError("check_attestation_publish_failed") from error
 
 
 def qualify(args, run):
@@ -939,9 +996,15 @@ def qualify(args, run):
     written is left out.
 
     With `--signing-key` (P5-D13), a run whose every required check passed
-    then signs each result (`attest_results`), before the report: the
-    attestation files, `<check_id>.attestation.json`, are what the server's
-    `qualify_bundle_attested` reads. The report says `attested` and counts
+    then signs each required result (`attest_results`): the attestation files,
+    `<check_id>.attestation.json`, are what the server's
+    `qualify_bundle_attested` reads, and they name this run's code revision.
+    The tree is checked before the signing step and again after it, and the
+    files are signed into a staging directory and moved to their final names
+    (`publish_attestations`) only once the report is written, so a run that
+    fails after signing started removes the staging directory and every
+    attestation file before it writes its failed report: a failed run leaves
+    none, as its report says (`attested: false`). The report of a pass counts
     them. Flags that are wrong are refused before anything runs."""
     signing = signing_options(args)
     inputs = {
@@ -955,25 +1018,33 @@ def qualify(args, run):
     (LOCAL_DIR / REPORT_NAME).unlink(missing_ok=True)
     try:
         results = _run_required_checks(args, run, inputs)
-        # After `require_current_pass_results` (the end of
-        # `_run_required_checks`) and before the tree check, so a tree edited
-        # while the results were signed fails the run too.
+        accepted = {check_id: results[check_id] for check_id in required_specs()}
         if signing is not None:
-            attested = attest_results(run, results, signing)
-        # Before the report: a tree edited during the run writes a failed
-        # report under `code_revision_changed`, never a pass.
+            # After `require_current_pass_results` (the end of
+            # `_run_required_checks`). A tree edited during the checks is
+            # refused before anything is signed.
+            run.require_code_revision_unchanged()
+            attested = attest_results(run, accepted, signing)
+        # Before the report: a tree edited during the run (while the results
+        # were signed too) writes a failed report under `code_revision_changed`,
+        # never a pass.
         run.require_code_revision_unchanged()
         report_path = write_report(run, results, inputs, local_dir=LOCAL_DIR, attestation_count=attested)
+        if signing is not None:
+            publish_attestations(run, accepted)
         if args.archive:
             catalog_path = LOCAL_DIR / CATALOG_NAME
             update_catalog(catalog_path, report_path, records=corpus_records(run))
     except ToolingError as error:
+        discard_attestations(run)
         _write_failed_report(run, inputs, str(error))
         raise
     except KeyboardInterrupt:
+        discard_attestations(run)
         _write_failed_report(run, inputs, "qualify_interrupted")
         raise
     except Exception:
+        discard_attestations(run)
         _write_failed_report(run, inputs, "qualify_internal_error")
         raise
     line = f"PipelineQualificationOK: report={_shown(report_path)} checks={len(results)}"
@@ -1009,6 +1080,10 @@ def main(argv=None):
         primary_label = str(error)
     except KeyboardInterrupt:
         primary = 130
+    if getattr(args, "command", None) in EPHEMERAL_COMMANDS and (primary == 0 or not any(run.run_dir.rglob("*.log"))):
+        # `revision` and `keygen` keep nothing: no empty run directory is left
+        # behind. A failed step keeps its log, and the failure line names it.
+        shutil.rmtree(run.run_dir, ignore_errors=True)
     cleanup = 1 if run.cleanup_failed else 0
     # `qualify` raises `cleanup_failed` itself (its report must say so);
     # the line is printed once.

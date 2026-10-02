@@ -17,6 +17,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from .errors import ToolingError, require
@@ -35,7 +36,7 @@ ATTESTATION_ALGORITHM = "Ed25519"
 _ATTESTATION_KEYS = frozenset(
     {"schema", "result", "maximum_age_seconds", "corpus_digest", "input_digest", "signature"}
 )
-_SIGNATURE_KEYS = frozenset({"algorithm", "key_id", "package_hash", "signature_base64url"})
+_SIGNATURE_KEYS = frozenset({"algorithm", "key_id", "attestation_hash", "signature_base64url"})
 # An Ed25519 signature is 64 bytes: 86 characters of unpadded base64url.
 _SIGNATURE_BYTES = re.compile(r"[A-Za-z0-9_-]{86}\Z")
 
@@ -247,28 +248,54 @@ def _attested_digests(evidence):
     return None, None
 
 
-def require_attestations(run, results, key_id, maximum_age_seconds):
-    """After the signing step: one `<check_id>.attestation.json` for each
-    result (a map of check id to `CheckResult`, as `load_results` returns it)
-    and no other, each exactly the envelope the server reads: the schema, the
-    result file's own value, the maximum age the step was given, the two
-    digests of the check's evidence (or none), and a signature of the
-    algorithm and key id that were asked for. Returns the count. Problems
-    are `check_attestation_count_mismatch` (a missing or extra file) and
-    `check_attestation_invalid`; neither names a path."""
-    results_dir = run.results_dir
+def _is_the_accepted_result(raw, accepted):
+    """Whether `raw`, the `result` of an attestation file, is exactly
+    `accepted` (a `CheckResult` that `require_current_pass_results` accepted):
+    every field equal, the time as an instant."""
+    if not isinstance(raw, dict) or set(raw) != REQUIRED_KEYS:
+        return False
+    try:
+        observed_at = _parse_observed_at(raw["observed_at"])
+    except ToolingError:
+        return False
+    return (
+        observed_at == accepted.observed_at
+        and isinstance(raw["safe_blockers"], list)
+        and tuple(raw["safe_blockers"]) == accepted.safe_blockers
+        and all(
+            raw[key] == getattr(accepted, key)
+            for key in REQUIRED_KEYS - {"observed_at", "safe_blockers"}
+        )
+    )
+
+
+def require_attestations(run, accepted, key_id, maximum_age_seconds, directory):
+    """After the signing step: in `directory`, one `<check_id>.attestation.json`
+    for each of `accepted` (a map of check id to the `CheckResult` that
+    `require_current_pass_results` accepted) and no other file of that kind,
+    each exactly the envelope the server reads: the schema, a result equal to
+    the accepted result (not to whatever the result file holds now, so a file
+    changed between the check and the signer cannot pass), the maximum age the
+    step was given, the two digests of the check's evidence (or none), and a
+    signature of the algorithm and key id that were asked for. Returns the
+    count. Problems are `check_attestation_count_mismatch` (a missing or extra
+    file) and `check_attestation_invalid`; neither names a path."""
+    directory = Path(directory)
     require(
-        {path.name for path in results_dir.glob("*.attestation.json")}
-        == {f"{check_id}.attestation.json" for check_id in results},
+        {path.name for path in directory.glob("*.attestation.json")}
+        == {f"{check_id}.attestation.json" for check_id in accepted},
         "check_attestation_count_mismatch",
     )
-    for check_id in sorted(results):
-        raw = _read_json_file(results_dir / f"{check_id}.attestation.json", "check_attestation_invalid")
-        result = _read_json_file(results_dir / f"{check_id}.result.json", "check_result_schema_invalid")
-        evidence = _read_json_file(results_dir / f"{check_id}.evidence.json", "check_evidence_malformed")
+    for check_id in sorted(accepted):
+        raw = _read_json_file(directory / f"{check_id}.attestation.json", "check_attestation_invalid")
+        evidence = _read_json_file(run.results_dir / f"{check_id}.evidence.json", "check_evidence_malformed")
         require(isinstance(raw, dict) and set(raw) == _ATTESTATION_KEYS, "check_attestation_invalid")
         require(raw["schema"] == ATTESTATION_SCHEMA, "check_attestation_invalid")
-        require(raw["result"] == result, "check_attestation_invalid")
+        require(_is_the_accepted_result(raw["result"], accepted[check_id]), "check_attestation_invalid")
+        # The evidence the digests come from is still the evidence accepted.
+        require(
+            sha256_digest(canonical(evidence)) == accepted[check_id].evidence_hash, "check_attestation_invalid"
+        )
         require(
             type(raw["maximum_age_seconds"]) is int and raw["maximum_age_seconds"] == maximum_age_seconds,
             "check_attestation_invalid",
@@ -280,13 +307,13 @@ def require_attestations(run, results, key_id, maximum_age_seconds):
             and set(signature) == _SIGNATURE_KEYS
             and signature["algorithm"] == ATTESTATION_ALGORITHM
             and signature["key_id"] == key_id
-            and isinstance(signature["package_hash"], str)
-            and _HASH.fullmatch(signature["package_hash"]) is not None
+            and isinstance(signature["attestation_hash"], str)
+            and _HASH.fullmatch(signature["attestation_hash"]) is not None
             and isinstance(signature["signature_base64url"], str)
             and _SIGNATURE_BYTES.fullmatch(signature["signature_base64url"]) is not None,
             "check_attestation_invalid",
         )
-    return len(results)
+    return len(accepted)
 
 
 def require_one_package(results):

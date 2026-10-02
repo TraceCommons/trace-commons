@@ -2636,6 +2636,14 @@ class _QualifyCase(_RestoreDrillCase):
         # its result, the last check `qualify` runs: a late change to what an
         # earlier check left behind.
         self.after_last_check = None
+        # Called with the signing step's environment before the fake signer
+        # reads the results (a change between the check and the signer), and
+        # after it wrote its files (a change between the signer and the tool's
+        # final checks).
+        self.before_signing = None
+        self.during_signing = None
+        # Whether the fake signer refuses result files off the list it is given.
+        self.signer_honors_ids = True
 
     def _invoke(self, command, *, env, capture=False, input_text=None, log_path=None):
         if any(str(part).endswith(_INVENTORY_SCRIPT) for part in command) and "--output" in command:
@@ -2672,7 +2680,11 @@ class _QualifyCase(_RestoreDrillCase):
             elif test_filter == _ATTESTATION_WRITER:
                 if self.attestation_fails:
                     raise errors.StepFailed(step, 101, run.log_path(step))
+                if self.before_signing is not None:
+                    self.before_signing(env)
                 self._write_attestations(env)
+                if self.during_signing is not None:
+                    self.during_signing(env)
             elif test_filter in by_test and "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR" in env:
                 check = by_test[test_filter]
                 if check.check_id == self.interrupt:
@@ -2698,7 +2710,16 @@ class _QualifyCase(_RestoreDrillCase):
         it was given. The signature bytes are fake: only the Rust writer
         verifies them."""
         result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
-        for result_path in sorted(result_dir.glob("*.result.json")):
+        output_dir = Path(env.get("TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR", result_dir))
+        accepted = set(env["TRACE_COMMONS_PIPELINE_CHECK_IDS"].split(",")) if self.signer_honors_ids else None
+        result_paths = sorted(result_dir.glob("*.result.json"))
+        if accepted is not None:
+            # The real signer refuses a result file that is not on the list,
+            # and a listed check without one, before it signs anything.
+            found = {json.loads(path.read_bytes())["check_id"] for path in result_paths}
+            if found != accepted:
+                raise errors.StepFailed("check_attestations", 101, self.run.log_path("check_attestations"))
+        for result_path in result_paths:
             result = json.loads(result_path.read_bytes())
             check_id = result["check_id"]
             if check_id in self.attestation_skip:
@@ -2714,12 +2735,12 @@ class _QualifyCase(_RestoreDrillCase):
                 "signature": {
                     "algorithm": "Ed25519",
                     "key_id": self.attestation_key_id or env["TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID"],
-                    "package_hash": _fake_hash(f"attestation:{check_id}"),
+                    "attestation_hash": _fake_hash(f"attestation:{check_id}"),
                     "signature_base64url": "A" * 86,
                 },
             }
             attestation.update(self.attestation_edits.get(check_id, {}))
-            (result_dir / f"{check_id}.attestation.json").write_text(json.dumps(attestation))
+            (output_dir / f"{check_id}.attestation.json").write_text(json.dumps(attestation))
 
     def _fake_export(self, run, path, env, *, local_dir=None):
         self.calls.append(("export", Path(path), local_dir))
@@ -3135,6 +3156,61 @@ class QualifyTests(_QualifyCase):
             self.assertEqual(str(ctx.exception), cases[1][2])
             self.assertFalse(self.catalog_path.exists())
 
+    def test_a_v1_report_without_the_attestation_keys_validates_and_is_archived(self):
+        """The report keeps schema `v1`. A report written by `main`'s tool has
+        neither `attested` nor `attestation_count`: it validates, reads as
+        unattested, and `qualify --archive` archives such a report. A report
+        with one of the two keys must have both, and they must agree."""
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        written = json.loads(self.report_path.read_text())
+        self.assertEqual((written["attested"], written["attestation_count"]), (False, 0), "the tool writes both keys")
+        main_style = {key: value for key, value in written.items() if key not in ("attested", "attestation_count")}
+        self.assertEqual(main_style["schema"], "trace_commons.pipeline_qualification_report.v1")
+        report_module.validate_qualification_report(main_style)
+        self.assertEqual(report_module.report_attestation(main_style), (False, 0))
+        self.assertEqual(report_module.report_attestation(written), (False, 0))
+        archived_source = self.tmp / "main-style-report.json"
+        archived_source.write_text(json.dumps(main_style))
+        catalog.update_catalog(self.catalog_path, archived_source)
+        [entry] = json.loads(self.catalog_path.read_text())["qualifications"]
+        self.assertEqual(entry["status"], "pass")
+
+        # A signed pass report, then each way a report can contradict itself.
+        self._fresh_run()
+        self.assertEqual(self._qualify("--signing-key", str(self._key()), "--signing-key-id", "ci_key"), 0, self.stderr.getvalue())
+        signed = json.loads(self.report_path.read_text())
+        self.assertEqual((signed["attested"], signed["attestation_count"]), (True, 16))
+        report_module.validate_qualification_report(signed)
+        self.assertEqual(report_module.report_attestation(signed), (True, 16))
+        failed = {**signed, "status": "fail", "failure": "check_attestation_invalid"}
+        cases = {
+            # One key alone, even when it agrees with what the other would read as.
+            "only attested, false": {**main_style, "attested": False},
+            "only attestation_count, zero": {**main_style, "attestation_count": 0},
+            "only attested": {key: value for key, value in signed.items() if key != "attestation_count"},
+            "only attestation_count": {key: value for key, value in signed.items() if key != "attested"},
+            "attested with no attestation": {**signed, "attestation_count": 0},
+            "attestations that are not attested": {**signed, "attested": False},
+            "fewer attestations than checks": {**signed, "attestation_count": 15},
+            "more attestations than checks": {**signed, "attestation_count": 17},
+            "a count that is not a number": {**signed, "attestation_count": "16"},
+            "an attested failed report": failed,
+        }
+        for label, report in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    report_module.validate_qualification_report(report)
+                self.assertEqual(str(ctx.exception), "qualification_report_invalid")
+        # An unattested failed report is valid, and any other key is not.
+        report_module.validate_qualification_report({**failed, "attested": False, "attestation_count": 0})
+        with self.assertRaises(errors.ToolingError):
+            report_module.validate_qualification_report({**main_style, "unknown_key": 1})
+
+    def _key(self):
+        key = self.tmp / "tcsecretkey-report-test.pk8"
+        key.write_bytes(b"a disposable test key, not a real one")
+        return key
+
     def test_qualify_reports_an_empty_result_file_with_a_label(self):
         """Final review M1: an empty (or malformed) result file fails with
         `check_result_schema_invalid` and a fail report, not a traceback."""
@@ -3188,6 +3264,8 @@ class QualifyTests(_QualifyCase):
 
 _ATTESTATION_VARS = (
     "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR",
+    "TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR",
+    "TRACE_COMMONS_PIPELINE_CHECK_IDS",
     "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH",
     "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID",
     "TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS",
@@ -3240,6 +3318,12 @@ class SignedQualifyTests(_QualifyCase):
         self.assertEqual((cargo_args, test_filter, exact, ignored), (_INGEST_ARGS, _ATTESTATION_WRITER, True, True))
         self.assertEqual({key for key in env if key.startswith("TRACE_COMMONS_")}, set(_ATTESTATION_VARS))
         self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"], str(self.run.results_dir))
+        # The signer writes into a staging directory of the run directory, and
+        # signs exactly the required checks.
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR"], str(self.run.run_dir / "attestations-staging"))
+        self.assertEqual(
+            env["TRACE_COMMONS_PIPELINE_CHECK_IDS"].split(","), sorted(checks.REQUIRED_CHECK_IDS)
+        )
         self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH"], str(self.key.resolve()))
         self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID"], "ci_key")
         self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS"], "86400")
@@ -3337,6 +3421,107 @@ class SignedQualifyTests(_QualifyCase):
                 self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
         self.after_last_check = None
 
+    def _assert_no_attestation_anywhere(self):
+        self.assertEqual(
+            sorted(path.name for path in self.run.run_dir.rglob("*.attestation.json")), [],
+            "a failed run leaves no attestation file anywhere in its directory",
+        )
+        self.assertFalse((self.run.run_dir / "attestations-staging").exists(), "no staging directory is left")
+
+    def _assert_failed_unattested(self, failure):
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", failure))
+        self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
+        self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+
+    def test_a_signed_run_whose_tree_changed_leaves_no_attestation(self):
+        """The tree check of PR 4 exists so that evidence from a mixed tree is
+        never credited to the starting revision. Attestations name that
+        revision and the server accepts them when it is deployed, so a run
+        that fails the tree check leaves none, whenever the tree changed."""
+        # Changed during the checks: the tree is checked before anything is
+        # signed, so nothing is signed.
+        self.tree_edited = True
+        self.assertEqual(self._signed("--archive"), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: code_revision_changed")
+        self.assertEqual(self._attestation_calls(), [], "the tree is checked before the signing step")
+        self._assert_no_attestation_anywhere()
+        self._assert_failed_unattested("code_revision_changed")
+        self.assertEqual(self.tree_hash_calls, 1)
+        self.assertFalse(self.catalog_path.exists(), "nothing is archived")
+
+    def test_a_tree_that_changes_while_the_results_are_signed_leaves_no_attestation(self):
+        def edit_the_tree(env):
+            self.tree_edited = True
+
+        self.during_signing = edit_the_tree
+        self.assertEqual(self._signed("--archive"), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: code_revision_changed")
+        self.assertEqual(len(self._attestation_calls()), 1, "the results were signed, then the second check failed")
+        self._assert_no_attestation_anywhere()
+        self._assert_failed_unattested("code_revision_changed")
+        self.assertEqual(self.tree_hash_calls, 2, "once before the signing step, once after it")
+        self.assertFalse(self.catalog_path.exists(), "nothing is archived")
+
+    def test_a_failure_while_the_attestations_are_published_leaves_none(self):
+        published = []
+        real = pipeline._publish_file
+
+        def failing(source, destination):
+            published.append(destination.name)
+            if len(published) == 5:
+                raise OSError("disk full")
+            real(source, destination)
+
+        with mock.patch.object(pipeline, "_publish_file", failing):
+            self.assertEqual(self._signed("--archive"), 1)
+        self.assertEqual(len(published), 5, "four files were already in place when the fifth failed")
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: check_attestation_publish_failed")
+        self._assert_no_attestation_anywhere()
+        self._assert_failed_unattested("check_attestation_publish_failed")
+        self.assertFalse(self.catalog_path.exists(), "nothing is archived")
+
+    def test_a_signed_run_that_passes_leaves_its_files_in_place_and_no_staging_directory(self):
+        self.assertEqual(self._signed(), 0, self.stderr.getvalue())
+        self.assertEqual(
+            sorted(path.name for path in self.run.results_dir.glob("*.attestation.json")),
+            sorted(f"{check_id}.attestation.json" for check_id in checks.REQUIRED_CHECK_IDS),
+        )
+        self.assertEqual(
+            sorted(path.name for path in self.run.run_dir.rglob("*.attestation.json")),
+            sorted(path.name for path in self.run.results_dir.glob("*.attestation.json")),
+            "the only attestation files are the final ones",
+        )
+        self.assertFalse((self.run.run_dir / "attestations-staging").exists())
+        self.assertEqual(self.tree_hash_calls, 2, "checked before the signing step and again after it")
+
+    def test_a_result_file_changed_before_the_signer_reads_it_is_not_signed(self):
+        """The attestations are compared with the results that
+        `require_current_pass_results` accepted, not with the files on disk, so
+        a result file changed between the check and the signer cannot be signed
+        and pass."""
+
+        def changing(**fields):
+            def tamper(env):
+                path = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"]) / "pipeline_crash_matrix.result.json"
+                path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
+
+            return tamper
+
+        for label, tamper in (
+            ("a status changed", changing(status="fail")),
+            ("a time moved", changing(observed_at=_iso(datetime.now(timezone.utc) + timedelta(seconds=30)))),
+            ("a safe blocker added", changing(safe_blockers=["extra_blocker"])),
+        ):
+            with self.subTest(label):
+                self._fresh_run()
+                self.before_signing = tamper
+                self.assertEqual(self._signed(), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: check_attestation_invalid")
+                self._assert_no_attestation_anywhere()
+                self._assert_failed_unattested("check_attestation_invalid")
+        self.before_signing = None
+
     def test_a_failed_attestation_step_fails_the_qualification(self):
         cases = {
             "no file for one result": ({"attestation_skip": {"pipeline_crash_matrix"}}, 1, "check_attestation_count_mismatch"),
@@ -3387,6 +3572,65 @@ class SignedQualifyTests(_QualifyCase):
                 self.assertEqual((value["status"], value["failure"]), ("fail", failure))
                 self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
                 self.assertFalse(self.catalog_path.exists(), "a failed qualify archives nothing")
+
+    def test_a_result_file_that_is_not_a_required_check_is_never_signed(self):
+        """`require_current_pass_results` checks only the required ids, so a
+        result file of another id is not accepted. The signer is told the
+        accepted ids and refuses the extra file; if a signer signed it anyway,
+        the tool refuses the attestation set. Either way the run fails with a
+        label and leaves no attestation."""
+
+        def add_an_extra_result(env):
+            _emit_check(env, "pipeline_extra_check", digests=False)
+
+        for label, honors, failure, exit_code in (
+            ("the signer refuses it", True, "step_failed:check_attestations", 101),
+            ("a signer that signs it anyway", False, "check_attestation_count_mismatch", 1),
+        ):
+            with self.subTest(label):
+                self._fresh_run()
+                self.signer_honors_ids = honors
+                self.after_last_check = add_an_extra_result
+                self.assertEqual(self._signed("--archive"), exit_code, self.stderr.getvalue())
+                self.assertTrue(self.stderr.getvalue().startswith(f"PipelineFailure: {failure}"), self.stderr.getvalue())
+                self.assertEqual(len(self._attestation_calls()), 1)
+                self._assert_no_attestation_anywhere()
+                self._assert_failed_unattested(failure)
+                self.assertFalse(self.catalog_path.exists())
+        self.signer_honors_ids = True
+        self.after_last_check = None
+
+        with self.subTest("without a signing key the extra result file changes nothing"):
+            self._fresh_run()
+            self.after_last_check = add_an_extra_result
+            self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+            self.assertIn("pipeline_extra_check", {item["check_id"] for item in json.loads(self.report_path.read_text())["checks"]})
+            self.after_last_check = None
+
+    def test_the_attestation_signature_has_exactly_its_own_fields(self):
+        """The signature of an attestation is its own type: it names the hash
+        it signed `attestation_hash` (not `package_hash`) and holds no other
+        field."""
+        good = {"algorithm": "Ed25519", "key_id": "ci_key", "attestation_hash": _fake_hash("a"), "signature_base64url": "A" * 86}
+        cases = (
+            (
+                "the package field name",
+                {**{k: v for k, v in good.items() if k != "attestation_hash"}, "package_hash": _fake_hash("a")},
+            ),
+            ("an unknown field", {**good, "note": "x"}),
+            ("a missing field", {k: v for k, v in good.items() if k != "key_id"}),
+            ("another algorithm", {**good, "algorithm": "HS256"}),
+            ("a hash that is not a hash", {**good, "attestation_hash": "not-a-hash"}),
+            ("a signature of the wrong length", {**good, "signature_base64url": "A" * 85}),
+        )
+        for label, signature in cases:
+            with self.subTest(label):
+                self._fresh_run()
+                self.attestation_edits = {"pipeline_crash_matrix": {"signature": signature}}
+                self.assertEqual(self._signed(), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: check_attestation_invalid")
+                self._assert_no_attestation_anywhere()
+        self.attestation_edits = {}
 
     def test_the_signing_key_path_never_reaches_output(self):
         """The key path goes to the writer's environment and nowhere else:
@@ -3669,6 +3913,86 @@ class RevisionTests(_CorpusRunCase):
         self.assertEqual(self.stderr.getvalue(), "")
         self.assertEqual(self.calls, [], "no child process")
         self.assertRegex(self.stdout.getvalue(), r"^sha256:[0-9a-f]{64}\n\Z")
+
+
+class EphemeralCommandTests(unittest.TestCase):
+    """`revision` and `keygen` keep nothing, so they leave no run directory
+    (the real `Run`, in a scratch root): not when they succeed, and not when
+    they are refused before they ran anything. A failed step keeps its log in
+    the run directory and the failure line names it."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        self.out = self.root / "keys" / "check-key.pk8"
+        self.trusted = self.root / "keys" / "check-key.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _runs(self):
+        directory = self.root / ".local" / "pipeline" / "runs"
+        return sorted(path.name for path in directory.iterdir()) if directory.exists() else []
+
+    def _main(self, argv, cargo=None):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(environment, "ROOT", self.root))
+            stack.enter_context(mock.patch.object(pipeline, "ROOT", self.root))
+            stack.enter_context(mock.patch.object(environment, "_code_revision_hash", lambda: _fake_hash("tree")))
+            if cargo is not None:
+                stack.enter_context(mock.patch.object(pipeline, "cargo_test", cargo))
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
+            stack.enter_context(contextlib.redirect_stderr(self.stderr))
+            return pipeline.main(argv)
+
+    def _keygen_argv(self):
+        return ["keygen", "--output", str(self.out), "--key-id", "local_check_key", "--trusted-key-output", str(self.trusted)]
+
+    def _writing_cargo(self, run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+        key = Path(env["TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_OUTPUT"])
+        key.write_bytes(b"fake pkcs8 bytes")
+        key.chmod(0o600)
+        Path(env["TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_TRUSTED_KEY_OUTPUT"]).write_text(
+            json.dumps({"key_id": "local_check_key", "public_key_base64url": "A" * 43})
+        )
+        # What a real step leaves: its log, in the run directory.
+        run.log_path(step).write_text("cargo output")
+
+    def test_revision_leaves_no_run_directory(self):
+        self.assertEqual(self._main(["revision"]), 0, self.stderr.getvalue())
+        self.assertEqual(self.stdout.getvalue(), _fake_hash("tree") + "\n")
+        self.assertEqual(self._runs(), [])
+
+    def test_a_keygen_that_succeeds_leaves_no_run_directory(self):
+        self.assertEqual(self._main(self._keygen_argv(), cargo=self._writing_cargo), 0, self.stderr.getvalue())
+        self.assertEqual(self.stdout.getvalue().strip(), "PipelineKeygenOK: key_id=local_check_key")
+        self.assertEqual(self._runs(), [])
+        self.assertTrue(self.out.is_file() and self.trusted.is_file(), "the keys it wrote are kept")
+
+    def test_a_keygen_that_is_refused_before_it_ran_leaves_no_run_directory(self):
+        self.out.parent.mkdir(parents=True)
+        self.out.write_bytes(b"an older key")
+        self.assertEqual(self._main(self._keygen_argv(), cargo=self._writing_cargo), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: signing_key_output_exists")
+        self.assertEqual(self._runs(), [])
+        self.assertEqual(self.out.read_bytes(), b"an older key")
+
+    def test_a_keygen_whose_step_failed_keeps_the_log_the_failure_names(self):
+        def failing(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            log = run.log_path(step)
+            log.write_text("cargo output")
+            raise errors.StepFailed(step, 101, log)
+
+        self.assertEqual(self._main(self._keygen_argv(), cargo=failing), 101)
+        [name] = self._runs()
+        self.assertIn(f".local/pipeline/runs/{name}/logs/keygen.log", self.stderr.getvalue())
+        self.assertTrue((self.root / ".local" / "pipeline" / "runs" / name / "logs" / "keygen.log").is_file())
+
+    def test_other_commands_keep_their_run_directory(self):
+        corpus_path = self.root / "corpus.json"
+        corpus_path.write_text("{}")
+        self.assertEqual(self._main(["run", "--bundle", "minimal", "--corpus", str(corpus_path)]), 1)
+        self.assertEqual(len(self._runs()), 1, "only revision and keygen remove theirs")
 
 
 class CodeRevisionChangedTests(_QualifyCase):

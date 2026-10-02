@@ -18,10 +18,14 @@ port's declared drills:
 - `status` (`pass`, or `fail` with the safe `failure` label), and
   `evidence_hash`, the SHA-256 of the canonical `{"inputs", "checks"}`.
 - `attested` and `attestation_count`: whether `qualify --signing-key` signed
-  the results (P5-D13), and how many attestation files it wrote (one for each
-  check of a pass report). Neither is under `evidence_hash`: the attestations
-  are separate files, signed and verified on their own. A failed report is
-  never attested.
+  the results (P5-D13), and how many attestation files it left (one for each
+  required check of a pass report). Neither is under `evidence_hash`: the
+  attestations are separate files, signed and verified on their own. A failed
+  report is never attested, and a failed run leaves no attestation file at all
+  (`pipeline.qualify` stages the files and removes them on any failure). The
+  schema stays `v1`: a report without the two keys (one written before they
+  existed, or by `main`'s tool) is valid and reads as unattested
+  (`report_attestation`); a report that has one must have both.
 
 Not carried from the port: `base_revision_hash` (the code revision hash
 already binds the tree) and the fixed `acceptance_layers` list, which no
@@ -74,13 +78,13 @@ _REPORT_KEYS = frozenset(
         "external_payout_enabled",
         "safe_blockers",
         "run_id",
-        "attested",
-        "attestation_count",
         "inputs",
         "checks",
         "evidence_hash",
     }
 )
+# Written by this tool, optional on read (see the module docstring).
+_ATTESTATION_KEYS = frozenset({"attested", "attestation_count"})
 _INPUT_HASHES = ("code_revision_hash", "contract_manifest_digest", "inventory_digest")
 _CORPUS_RUN_HASHES = ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "report_digest")
 _CORPUS_RUN_KEYS = frozenset({"check_id", "corpus_digests", "fixture_count", *_CORPUS_RUN_HASHES})
@@ -217,9 +221,21 @@ def validate_qualification_report(report):
         raise ToolingError("qualification_report_invalid") from error
 
 
+def report_attestation(report):
+    """`(attested, attestation_count)` of a report. A report that has neither
+    key reads as `(False, 0)`: one written before the keys existed, or by
+    `main`'s tool, is unsigned, so that reading is true."""
+    return report.get("attested", False), report.get("attestation_count", 0)
+
+
 def _validate(report):
+    require(isinstance(report, dict), "qualification_report_invalid")
+    present = set(report) & _ATTESTATION_KEYS
+    # Either both attestation keys or neither: one alone is refused.
     require(
-        isinstance(report, dict) and set(report) == _REPORT_KEYS and report["schema"] == REPORT_SCHEMA,
+        present in (set(), _ATTESTATION_KEYS)
+        and set(report) - present == _REPORT_KEYS
+        and report["schema"] == REPORT_SCHEMA,
         "qualification_report_invalid",
     )
     validate_evidence(report)
@@ -238,9 +254,9 @@ def _validate(report):
         "qualification_report_invalid",
     )
     require(_is_label(report["run_id"]), "qualification_report_invalid")
-    count = report["attestation_count"]
+    attested, count = report_attestation(report)
     require(
-        type(count) is int and count >= 0 and report["attested"] is (count > 0) and (passed or count == 0),
+        type(count) is int and count >= 0 and attested is (count > 0) and (passed or count == 0),
         "qualification_report_invalid",
     )
 
@@ -299,8 +315,9 @@ def _validate(report):
             "qualification_report_incomplete",
         )
         _require_one_package(checks)
-        # An attested pass report has one attestation for each check.
-        require(count in (0, len(checks)), "qualification_report_invalid")
+        # An attested pass report has one attestation for each check it lists
+        # (a signed run refuses a result file that is not a required check).
+        require(not attested or count == len(checks), "qualification_report_invalid")
 
 
 def _require_one_package(checks):

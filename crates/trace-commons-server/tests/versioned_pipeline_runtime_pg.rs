@@ -28451,6 +28451,7 @@ async fn qualify_bundle_refuses_a_package_whose_configuration_is_not_qualifiable
 // ---------------------------------------------------------------------------
 
 const ATTESTATION_KEY_ID: &str = "qualification-check-key";
+const PACKAGE_KEY_ID: &str = "qualification-release-key";
 
 /// What a signed qualification needs: a production-qualified package and its
 /// dependency profile, the package signed and trusted, a check key and the
@@ -28461,6 +28462,7 @@ struct AttestedQualification {
     profile: ProductionDependencyProfile,
     signed: SignedBundlePackage,
     package_trust: BundlePackageTrustStore,
+    package_pkcs8: Vec<u8>,
     check_pkcs8: Vec<u8>,
     check_trust: CheckResultTrustStore,
     evidence: Vec<DrillEvidence>,
@@ -28480,14 +28482,10 @@ async fn attested_qualification(
     assert!(profile.blockers().is_empty(), "{:?}", profile.blockers());
     let random = ring::rand::SystemRandom::new();
     let package_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).unwrap();
-    let signed = sign_bundle_package(
-        package.clone(),
-        "qualification-release-key",
-        package_pkcs8.as_ref(),
-    )
-    .expect("package signs");
+    let signed = sign_bundle_package(package.clone(), PACKAGE_KEY_ID, package_pkcs8.as_ref())
+        .expect("package signs");
     let package_trust = BundlePackageTrustStore::new([trusted_key_for_pkcs8(
-        "qualification-release-key",
+        PACKAGE_KEY_ID,
         package_pkcs8.as_ref(),
     )
     .expect("trusted key builds")])
@@ -28507,6 +28505,7 @@ async fn attested_qualification(
         profile,
         signed,
         package_trust,
+        package_pkcs8: package_pkcs8.as_ref().to_vec(),
         check_pkcs8,
         check_trust,
         evidence,
@@ -28699,20 +28698,39 @@ async fn an_unsigned_or_altered_result_cannot_qualify_a_bundle() {
             .await,
         CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
     );
-    // The package's signing key is not a check key either.
-    let package_key_store = CheckResultTrustStore::new(std::iter::empty()).unwrap();
+    // The package's signing key is not a check key. A check store that holds
+    // the package's public key (under the package key's id) does not know the
+    // check key that signed these attestations; and attestations signed with
+    // the package's own key are refused by the check store, which was built
+    // from other keys.
+    let store_of_the_package_key = CheckResultTrustStore::new([trusted_key_for_pkcs8(
+        PACKAGE_KEY_ID,
+        &qualification.package_pkcs8,
+    )
+    .unwrap()])
+    .unwrap();
     assert_refused(
         store
             .qualify_bundle_attested(
                 &tenant,
                 &qualification.signed,
                 &qualification.package_trust,
-                &package_key_store,
+                &store_of_the_package_key,
                 &qualification.profile,
                 &attestations,
                 &code_revision,
             )
             .await,
+        CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
+    );
+    let signed_with_the_package_key = attest_all(
+        &qualification.evidence,
+        &qualification.package_pkcs8,
+        PACKAGE_KEY_ID,
+        3_600,
+    );
+    assert_refused(
+        attest(&signed_with_the_package_key).await,
         CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
     );
 
