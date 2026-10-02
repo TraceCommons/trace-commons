@@ -12,9 +12,15 @@ struct TCDesignGalleryApp: App {
 
     var body: some Scene {
         WindowGroup {
+            // The gallery is debug-only, so a release build of this tool
+            // opens an empty glass window.
+            #if DEBUG
             GlassGallery(scene: false)
                 .glassWindow()
                 .onAppear { NSApp.activate(ignoringOtherApps: true) }
+            #else
+            Color.clear.glassWindow()
+            #endif
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1320, height: 900)
