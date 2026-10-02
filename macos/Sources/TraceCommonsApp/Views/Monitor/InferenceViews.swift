@@ -196,7 +196,7 @@ struct PrivateAIInspectorView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                Text(destinationLabel ?? MonitorWindowView.Tab.inference.rawValue)
+                Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
                 if let failure = store.failures["harness_list"] {
