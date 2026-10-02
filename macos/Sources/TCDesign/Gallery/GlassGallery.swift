@@ -259,8 +259,8 @@ public struct GlassGallery: View {
             GlassPane(padding: 8) {
                 VStack(spacing: 2) {
                     GlassListRow(depth: .tool, tile: .tool(.claudeCode), title: "tool", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, onToggleExpand: {}, onSubmit: {})
-                    GlassListRow(depth: .folder, tile: .folder, title: "folder", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, onToggleExpand: {}, onSubmit: {}, onMenu: {})
-                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", onSubmit: {}, onMenu: {})
+                    GlassListRow(depth: .folder, tile: .folder, title: "folder", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, menuLabel: "menu", onToggleExpand: {}, onSubmit: {}, onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
                 }
             }
             .frame(width: 420, height: 150)

@@ -55,7 +55,8 @@ public enum GlassTokens {
         public static let menuSeparator: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.14)
         public static let nodeCardFill: GlassRGBA = GlassRGBA(0x14161C, alpha: 0.72)
         public static let scrim: GlassRGBA = GlassRGBA(0x000000, alpha: 0.4)
-        public static let selection: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1)
+        /// Darker than blue so white row text clears 4.5:1 (5.3:1); white on #3a7bd5 was 4.22:1.
+        public static let selection: GlassRGBA = GlassRGBA(0x2F6AC0, alpha: 1)
         public static let mapIdle: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.35)
         public static let mapNodeOff: GlassRGBA = GlassRGBA(0x5D5D63, alpha: 1)
         public static let mapFieldInner: GlassRGBA = GlassRGBA(0x1E2A3A, alpha: 1)
