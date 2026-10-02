@@ -77,7 +77,7 @@ struct TracesTreeView: View {
                     .foregroundStyle(GlassColor.textTertiary)
                     .frame(maxWidth: .infinity)
                     .padding(.top, GlassTokens.Space.s10)
-                    .accessibilityLabel(MonitorWindowView.Tab.traces.rawValue)
+                    .accessibilityLabel(MonitorWindowView.Tab.traces.title)
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -232,9 +232,38 @@ struct TracesTreeView: View {
         switch direction {
         case .down: next = current.map { min($0 + 1, sessions.count - 1) } ?? 0
         case .up: next = current.map { max($0 - 1, 0) } ?? 0
-        default: return
+        case .left, .right:
+            disclose(selection, open: direction == .right)
+            return
+        @unknown default: return
         }
         selection = sessions[next].entryId
+    }
+
+    /// Left collapses the selected session's folder; right expands it and
+    /// its tool. The selection stays, so the two undo each other and the
+    /// inspector keeps the session.
+    private func disclose(_ entryId: String, open: Bool) {
+        guard let path = TracesTreeView.path(to: entryId, in: store.tree) else { return }
+        if open {
+            if let tool = path.tool { collapsed.remove(tool) }
+            collapsed.remove(path.folder)
+        } else {
+            collapsed.insert(path.folder)
+        }
+    }
+
+    /// The tool (if placed under one) and folder holding a session.
+    static func path(to entryId: String, in tree: TracesTree) -> (tool: String?, folder: String)? {
+        for tool in tree.tools {
+            for folder in tool.folders where folder.sessions.contains(where: { $0.entryId == entryId }) {
+                return (tool.id, folder.id)
+            }
+        }
+        for folder in tree.unplaced where folder.sessions.contains(where: { $0.entryId == entryId }) {
+            return (nil, folder.id)
+        }
+        return nil
     }
 
     private var isEmpty: Bool { store.tree.tools.isEmpty && store.tree.unplaced.isEmpty }

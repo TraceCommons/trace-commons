@@ -118,6 +118,17 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertEqual(store.phase, .loaded)
         XCTAssertEqual(store.tree.allSessions.count, 3)
     }
+    /// Left and right find the selected session's folder (and tool) to
+    /// collapse and expand; a session not in the tree finds nothing.
+    func test_arrowKeysFindTheSelectedSessionsFolder() async throws {
+        let built = try await tree(.normalDay)
+        let session = try XCTUnwrap(built.allSessions.first)
+        let path = try XCTUnwrap(TracesTreeView.path(to: session.entryId, in: built))
+        let folders: [TracesTree.FolderNode] = built.tools.flatMap { $0.folders } + built.unplaced
+        let folder = try XCTUnwrap(folders.first { $0.id == path.folder })
+        XCTAssertTrue(folder.sessions.contains { $0.entryId == session.entryId })
+        XCTAssertNil(TracesTreeView.path(to: "no-such-entry", in: built))
+    }
 }
 
 /// Review of #1183: a folder keeps its three modes, and ignoring one says
@@ -176,4 +187,5 @@ final class TracesFolderModeTests: XCTestCase {
         XCTAssertEqual(store.phase, .failed(.unreachable))
         XCTAssertTrue(store.writing.isEmpty)
     }
+
 }
