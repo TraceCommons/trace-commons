@@ -160,6 +160,10 @@ pub const PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS: i64 = 60;
 /// budget, it stops writing, rolls back, and the run waits uncharged as
 /// `index_unavailable`.
 pub const PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS: i64 = 30;
+/// The key of a pipeline NEAR outbox line's stored call that records the
+/// settlement mode that submitted it (`dry_run` or `http`); only that mode
+/// confirms the line (Zaki review 3, Z3-L2).
+pub const PIPELINE_NEAR_SUBMISSION_MODE_KEY: &str = "pipeline_submission_mode";
 /// Startup refusal labels of `PipelineService::check_tenant_bundles` that
 /// the default package's checks do not share: a tenant bundle whose scorer
 /// or embedder the service does not hold, one no policy family runs, and
@@ -10387,16 +10391,23 @@ impl PipelineService {
                     batch_id,
                     &line.credit_account_hash,
                 );
-                let (status, call) = match near_outbox_line(client, run, outbox_id).await? {
+                let (status, submission_mode, call) = match near_outbox_line(client, run, outbox_id)
+                    .await?
+                {
                     Some((status, stored_call)) => {
+                        let submission_mode = stored_call
+                            .get(PIPELINE_NEAR_SUBMISSION_MODE_KEY)
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string);
                         let call: crate::near_credit::NearCreditReceiptCall =
                             serde_json::from_value(stored_call)
                                 .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?;
                         call.validate()
                             .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?;
-                        (Some(status), call)
+                        (Some(status), submission_mode, call)
                     }
                     None => (
+                        None,
                         None,
                         disabled_near_call(
                             near_contract_id,
@@ -10408,13 +10419,15 @@ impl PipelineService {
                         .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?,
                     ),
                 };
-                work.push((line, call, outbox_id, status));
+                work.push((line, call, outbox_id, status, submission_mode));
             }
 
             let mut contract_changed = false;
             let mut held_payout = None;
-            for (line, call, outbox_id, status) in &work {
+            let mode = config.controls.settlement_mode.as_label();
+            for (line, call, outbox_id, status, submission_mode) in &work {
                 let outbox_id = *outbox_id;
+                let mut submission_mode = submission_mode.clone();
                 match status.as_deref() {
                     Some("confirmed") | Some("disabled") => continue,
                     Some("failed") if !retry_failed => continue,
@@ -10460,8 +10473,10 @@ impl PipelineService {
                                     run,
                                     outbox_id,
                                     &sha256_prefixed(transaction_ref.as_bytes()),
+                                    mode,
                                 )
                                 .await?;
+                                submission_mode = Some(mode.to_string());
                                 self.inject_crash(PipelineCrashPoint::AfterNearSubmit)?;
                             }
                             Err(_) => {
@@ -10476,6 +10491,14 @@ impl PipelineService {
                             }
                         }
                     }
+                }
+                // Zaki review 3, Z3-L2: a line is confirmed only in the mode
+                // that submitted it. The dry-run adapter cannot know what
+                // became of a line the injected adapter sent (its synthetic
+                // hash would replace the real one), and the injected one
+                // never saw a dry-run line; such a line waits for its mode.
+                if submission_mode.as_deref() != Some(mode) {
+                    continue;
                 }
                 let Some(evidence) = adapter.confirmation(&call.idempotency_key).await else {
                     continue;
@@ -10502,12 +10525,14 @@ impl PipelineService {
                             confirmed_at = NOW(),
                             last_error_hash = NULL
                       WHERE tenant_id = $1 AND near_outbox_id = $2
-                        AND status = 'submitted'",
+                        AND status = 'submitted'
+                        AND near_call_json ->> 'pipeline_submission_mode' = $5",
                     &[
                         &run.tenant_id,
                         &outbox_id,
                         &evidence.transaction_hash_hash,
                         &evidence.receipt_hash,
+                        &mode,
                     ],
                 )
                 .await?;
@@ -10685,18 +10710,30 @@ async fn mark_near_outbox_line_submitted(
     run: &PipelineRunRecord,
     outbox_id: Uuid,
     near_transaction_hash: &str,
+    submission_mode: &str,
 ) -> anyhow::Result<()> {
     let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
+    // The mode that submitted the line rides in its stored call
+    // (`PIPELINE_NEAR_SUBMISSION_MODE_KEY`), which `main`'s call type
+    // ignores; only that mode confirms it (Zaki review 3, Z3-L2).
     tx.execute(
         "UPDATE trace_near_credit_outbox
             SET status = 'submitted',
                 near_transaction_hash = $3,
+                near_call_json = jsonb_set(
+                    near_call_json, '{pipeline_submission_mode}', to_jsonb($4::TEXT), TRUE
+                ),
                 submitted_at = COALESCE(submitted_at, NOW()),
                 confirmed_at = NULL,
                 last_error_hash = NULL
           WHERE tenant_id = $1 AND near_outbox_id = $2
             AND status IN ('pending', 'failed')",
-        &[&run.tenant_id, &outbox_id, &near_transaction_hash],
+        &[
+            &run.tenant_id,
+            &outbox_id,
+            &near_transaction_hash,
+            &submission_mode,
+        ],
     )
     .await?;
     tx.commit().await?;

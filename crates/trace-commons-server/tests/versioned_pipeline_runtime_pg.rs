@@ -21799,6 +21799,63 @@ async fn a_payout_under_mains_dry_run_settlement_mode_confirms_without_the_adapt
     );
 }
 
+/// Zaki review 3, Z3-L2: a line is confirmed only in the settlement mode
+/// that submitted it. A line the injected adapter submitted under `http`,
+/// with no confirmation yet, is not confirmed by the dry-run adapter after
+/// `main`'s mode flips to `dry_run`: the synthetic hash never replaces the
+/// real transaction hash, and the line waits for `http` to confirm it.
+#[tokio::test]
+async fn a_line_submitted_under_http_is_not_confirmed_under_dry_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let http = payout_service_under(&backend, &dir, near.clone(), HTTP_NEAR_PAYOUT_CONTROLS).await;
+    let tenant = format!("payout-mode-flip-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&http, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(http.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let transaction_hash = || async {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let row = tx
+            .query_one(
+                "SELECT status, near_transaction_hash FROM trace_near_credit_outbox
+                  WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        (
+            row.get::<_, String>("status"),
+            row.get::<_, Option<String>>("near_transaction_hash"),
+        )
+    };
+    let submitted = transaction_hash().await;
+    assert_eq!(submitted.0, "submitted");
+
+    let dry_run = payout_service_under(
+        &backend,
+        &dir,
+        near.clone(),
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::DryRun,
+            require_adapter_auth: false,
+        },
+    )
+    .await;
+    dry_run
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("the dry-run pass runs");
+    assert_eq!(
+        transaction_hash().await,
+        submitted,
+        "the http line keeps its real transaction hash and stays submitted"
+    );
+}
+
 /// Finding 2: under `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, as
 /// `main` refuses to start its NEAR adapters without their credentials, an
 /// enabled payout on an adapter that presents none is refused at build,
