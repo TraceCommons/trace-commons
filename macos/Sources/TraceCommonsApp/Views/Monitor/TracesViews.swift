@@ -189,13 +189,16 @@ struct TracesTreeView: View {
             depth: .tool,
             tile: .tool(Self.glassTool(tool.kind)),
             title: tool.kind.displayName,
-            sub: tool.waiting > 0 ? String(tool.waiting) : nil,
+            // The core's sentence for the declaration (an unset Claude Code
+            // is read from its usual folder; unreadable settings say so),
+            // after the count waiting.
+            sub: Self.toolSub(tool),
             off: tool.mode == .off,
             expanded: tool.folders.isEmpty ? nil : isOpen(tool.id),
             // The source declaration. Unset draws no switch: never off.
             // Disabled until the contract carries a source-mode write, so it
             // is not announced as a control that does nothing.
-            watched: tool.mode == .unset ? nil : .constant(tool.mode == .watch),
+            watched: tool.mode == .watch || tool.mode == .off ? .constant(tool.mode == .watch) : nil,
             watchDisabled: true,
             watchLabel: tool.kind.displayName,
             expandLabel: tool.kind.displayName,
@@ -240,6 +243,11 @@ struct TracesTreeView: View {
     }
 
     static let reviewTitle = MonitorWords.review
+
+    static func toolSub(_ tool: TracesTree.ToolNode) -> String? {
+        let parts = [tool.waiting > 0 ? String(tool.waiting) : nil, TracesStore.sourceLine(tool)].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 
     // MARK: Formatting
 

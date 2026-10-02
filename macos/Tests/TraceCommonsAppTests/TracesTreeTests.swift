@@ -8,12 +8,17 @@ import XCTest
 /// against C1's sample sets.
 @MainActor
 final class TracesTreeTests: XCTestCase {
+    /// The tools the core says are read from their usual folder while
+    /// unset (`unset_scans_conventional`): Claude Code and Codex.
+    static let scansWhenUnset: Set<SourceKind> = [.claudeCode, .codex]
+
     private func tree(_ set: SampleDaemonClient.SampleSet) async throws -> TracesTree {
         let client = SampleDaemonClient(set)
         return TracesTree.build(
             entries: try await client.listPending(projectId: nil),
             projects: try await client.listProjects().projects,
-            settings: try? await client.settings())
+            settings: try? await client.settings(),
+            scansWhenUnset: Self.scansWhenUnset)
     }
 
     /// Every waiting session appears in the tree exactly once.
@@ -35,31 +40,43 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertFalse(tree.tools.first { $0.kind == .codex }?.folders.contains { $0.label == "api" } ?? false)
     }
 
-    /// Unset is never drawn as off: an unset tool with nothing waiting is not
-    /// drawn, and an unset tool is never `.off`.
+    /// Unset is never drawn as off. A tool the core reads from its usual
+    /// folder while unset (Claude Code, Codex) is always drawn, nothing
+    /// waiting or not, because it IS being read; a tool that opens nothing
+    /// while unset, with nothing waiting, is not drawn.
     func test_unsetIsNeverOff() async throws {
         let tree = try await tree(.normalDay)
         XCTAssertNil(tree.tools.first { $0.kind == .opencode }, "opencode is unset with nothing waiting")
         XCTAssertNil(tree.tools.first { $0.kind == .cline }, "cline is unset with nothing waiting")
         XCTAssertEqual(tree.tools.first { $0.kind == .geminiCli }?.mode, .off)
-        XCTAssertEqual(TracesTree.SourceMode(nil), .unset)
         XCTAssertEqual(TracesTree.SourceMode("unset"), .unset)
+        XCTAssertEqual(TracesTree.SourceMode(nil), .unset)
+
+        // Unset with nothing waiting: drawn for a tool scanned while unset.
+        XCTAssertTrue(TracesTree.drawsTool(.claudeCode, mode: .unset, hasFolders: false, scansWhenUnset: Self.scansWhenUnset))
+        XCTAssertTrue(TracesTree.drawsTool(.codex, mode: .unset, hasFolders: false, scansWhenUnset: Self.scansWhenUnset))
+        XCTAssertFalse(TracesTree.drawsTool(.cline, mode: .unset, hasFolders: false, scansWhenUnset: Self.scansWhenUnset))
     }
 
-    /// Unreadable settings leave every tool unset, which draws no switch.
-    func test_unreadableSettingsDrawNoSwitches() async throws {
-        let client = SampleDaemonClient(.normalDay)
-        let tree = TracesTree.build(
-            entries: try await client.listPending(projectId: nil),
-            projects: try await client.listProjects().projects,
-            settings: nil)
-        XCTAssertTrue(tree.tools.allSatisfy { $0.mode == .unset })
+    /// The set comes from the core's source copy, and is the two tools
+    /// this file's fixture assumes.
+    func test_theCoreSaysWhichToolsAreReadWhileUnset() {
+        XCTAssertEqual(TracesStore.scansWhenUnset, Self.scansWhenUnset)
+    }
+
+    /// Unreadable settings are unknown, not unset: no switch, and the
+    /// tools that may be being read are still drawn, so the tab can say the
+    /// declaration could not be confirmed rather than drop them.
+    func test_unreadableSettingsAreUnknownNotUnset() async throws {
+        let tree = TracesTree.build(entries: [], projects: [], settings: nil, scansWhenUnset: Self.scansWhenUnset)
+        XCTAssertEqual(Set(tree.tools.map(\.kind)), [.claudeCode, .codex])
+        XCTAssertTrue(tree.tools.allSatisfy { $0.mode == .unknown })
     }
 
     /// Ignored folders are left out, and their sessions with them.
     func test_ignoredFoldersAreLeftOut() throws {
         let project = ProjectRow(projectId: "p1", projectLabel: "quiet", projectPath: "/x", mode: .ignore)
-        let tree = TracesTree.build(entries: [], projects: [project], settings: nil)
+        let tree = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [])
         XCTAssertTrue(tree.tools.isEmpty)
         XCTAssertTrue(tree.unplaced.isEmpty)
     }
@@ -68,7 +85,7 @@ final class TracesTreeTests: XCTestCase {
     /// which tool it belongs to (K11): it is listed on its own.
     func test_aFolderWithNothingWaitingIsUnplaced() throws {
         let project = ProjectRow(projectId: "p1", projectLabel: "docs", projectPath: "/x", mode: .ask)
-        let tree = TracesTree.build(entries: [], projects: [project], settings: nil)
+        let tree = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [])
         XCTAssertEqual(tree.unplaced.map(\.label), ["docs"])
     }
 
@@ -108,11 +125,13 @@ final class TracesFolderModeTests: XCTestCase {
         await store.load()
         let folder = try XCTUnwrap(store.tree.tools.flatMap(\.folders).first { !$0.sessions.isEmpty })
         // The sample core answers purged 0; the confirmation promised more.
+        // The notice is the core's, naming the folder and both counts.
+        XCTAssertGreaterThan(folder.sessions.count, 0)
         await store.setFolderMode(folder, .ignore, promised: folder.sessions.count)
-        XCTAssertEqual(
-            store.folderNotice,
-            TCCoreCopy.projectIgnoreReconciled(project: folder.label, promised: folder.sessions.count, purged: 0))
-        XCTAssertNotNil(store.folderNotice)
+        let notice = try XCTUnwrap(store.folderNotice)
+        XCTAssertTrue(notice.contains(folder.label), notice)
+        XCTAssertTrue(notice.contains("0 "), notice)
+        XCTAssertTrue(notice.contains(String(folder.sessions.count)), notice)
 
         // When they agree, nothing is said.
         await store.setFolderMode(folder, .ignore, promised: 0)

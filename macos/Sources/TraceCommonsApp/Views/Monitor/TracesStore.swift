@@ -35,6 +35,22 @@ final class TracesStore {
         self.client = client
     }
 
+    /// The tools the core reads from their usual folder while unset, from
+    /// its source copy. Empty if the copy is unavailable: then only tools
+    /// with a declaration or something waiting are drawn.
+    static let scansWhenUnset: Set<SourceKind> = {
+        guard let copy = TCSourceChecks.settingsCopy() else { return [] }
+        return Set(SourceKind.allCases.filter { copy.tools[$0.rawValue]?.unsetScansConventional == true })
+    }()
+
+    /// A tool row's sub-line: the core's sentence for its declaration, or
+    /// its "could not be confirmed" sentence when settings were unreadable.
+    static func sourceLine(_ tool: TracesTree.ToolNode) -> String? {
+        guard let copy = TCSourceChecks.settingsCopy(), let entry = copy.tools[tool.kind.rawValue] else { return nil }
+        guard let wire = tool.mode.wire else { return copy.unavailable }
+        return TCSourceChecks.checkLine(tool: entry.key, sourceMode: wire)
+    }
+
     /// Loads, then follows the event stream for as long as the calling task
     /// runs. Call it from a view's `.task`: when the view goes, the task is
     /// cancelled and the stream with it.
@@ -58,9 +74,11 @@ final class TracesStore {
             async let entries = client.listPending(projectId: nil)
             async let projects = client.listProjects()
             // Settings only decide the tool switches. Unreadable settings
-            // leave every tool unset, which draws no switch: never off.
+            // are unknown: no switch, never off, and the row says so.
             async let settings = try? client.settings()
-            let built = TracesTree.build(entries: try await entries, projects: try await projects.projects, settings: await settings)
+            let built = TracesTree.build(
+                entries: try await entries, projects: try await projects.projects, settings: await settings,
+                scansWhenUnset: Self.scansWhenUnset)
             guard mine == generation else { return }
             tree = built
             phase = .loaded
