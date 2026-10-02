@@ -36,9 +36,10 @@
 //! # What the ledger cannot say
 //!
 //! No kind of work (no classifier is invented here); no tool id (a call is
-//! attributed only when exactly one tool connected now speaks its protocol
-//! family, the rule `harness_list` applies, so a row can be misattributed
-//! after a connection changes); no billed cost (the ledger prices every
+//! attributed from the endpoint it called, which names the one tool whose
+//! connection writes that endpoint, and on a proxy too old to record the
+//! endpoint only when exactly one tool connected now speaks its protocol
+//! family -- see [`attribute`]); no billed cost (the ledger prices every
 //! call); and no calls that never passed through the proxy. See the IPC
 //! document.
 
@@ -91,6 +92,12 @@ struct ToolSpec {
     harness: Option<&'static str>,
     /// The protocol family the ledger records this tool's calls under.
     family: Option<&'static str>,
+    /// The `(facade, path)` endpoints the connection IronWire writes for
+    /// this tool sends its calls to. Claude Code is pointed at
+    /// `/anthropic` and speaks Messages; Codex is pointed at `/openai/v1`
+    /// with `wire_api = "responses"`. Empty for a tool nothing here
+    /// connects.
+    endpoints: &'static [(&'static str, &'static str)],
     name: &'static str,
 }
 
@@ -99,30 +106,38 @@ const TOOLS: &[ToolSpec] = &[
         source: crate::source::SOURCE_CLAUDE_CODE,
         harness: Some("claude"),
         family: Some("anthropic"),
+        endpoints: &[
+            ("anthropic", "/v1/messages"),
+            ("anthropic", "/v1/messages/count_tokens"),
+        ],
         name: "Claude Code",
     },
     ToolSpec {
         source: crate::source::SOURCE_CODEX,
         harness: Some("codex"),
         family: Some("openai"),
+        endpoints: &[("openai", "/v1/responses")],
         name: "Codex",
     },
     ToolSpec {
         source: crate::source::SOURCE_GEMINI_CLI,
         harness: None,
         family: None,
+        endpoints: &[],
         name: "Gemini CLI",
     },
     ToolSpec {
         source: crate::source::SOURCE_CLINE,
         harness: None,
         family: None,
+        endpoints: &[],
         name: "Cline",
     },
     ToolSpec {
         source: crate::source::SOURCE_OPENCODE,
         harness: None,
         family: None,
+        endpoints: &[],
         name: "OpenCode",
     },
 ];
@@ -339,7 +354,7 @@ pub fn tool_counts(
         })
         .collect();
     for row in rows.unwrap_or(&[]).iter().filter(|row| row.id.is_some()) {
-        let tool = attribute(&row.facade, speakers);
+        let tool = attribute(row, speakers);
         match counts.iter_mut().find(|count| count.tool == tool) {
             Some(count) => *count.inference_calls.get_or_insert(0) += 1,
             None => *unattributed.get_or_insert(0) += 1,
@@ -610,13 +625,52 @@ fn decode_cursor(cursor: &str) -> Option<(i64, i64)> {
     Some((at.parse().ok()?, id.parse().ok()?))
 }
 
+/// The one tool whose connection writes this endpoint, or `None`.
+fn endpoint_tool(facade: &str, path: &str) -> Option<&'static str> {
+    let mut writers = TOOLS
+        .iter()
+        .filter(|spec| spec.endpoints.contains(&(facade, path)));
+    match (writers.next(), writers.next()) {
+        (Some(only), None) => Some(only.source),
+        _ => None,
+    }
+}
+
 /// Which tool made a call, or `unknown`.
 ///
-/// The ledger records a protocol family, not a tool. A call is named only
-/// when exactly one tool connected *now* speaks its family -- the rule
-/// `harness_list` applies to `answering`. Approximate by construction: a row
-/// from before a connection changed can carry the wrong name.
-fn attribute(facade: &str, speakers: &[(&'static str, &'static str)]) -> &'static str {
+/// IronWire's log rows carry no harness: a row says which facade took the
+/// call and which endpoint inside it was called, and nothing else about the
+/// caller. So, in order:
+///
+/// 1. **The endpoint**, when the row records one. Each tool this daemon
+///    connects is pointed at its own facade and speaks its own API there --
+///    Claude Code `/anthropic` + Messages, Codex `/openai/v1` + Responses --
+///    so an endpoint exactly one tool's connection writes names that tool,
+///    whether or not it is still connected. An endpoint no connection
+///    writes (`/v1/chat/completions`, say) is `unknown`: it is not the
+///    connected tool's own wire, so naming that tool would be a guess. So is
+///    a named endpoint while a *different* connected tool speaks the same
+///    family.
+/// 2. **The harness that set the proxy**, on a proxy too old to record the
+///    endpoint: the one tool connected *now* that speaks the call's family,
+///    the rule `harness_list` applies to `answering`. Approximate by
+///    construction -- a row from before a connection changed can carry the
+///    wrong name -- which is why the endpoint outranks it.
+///
+/// A tool pointed at the proxy by hand, speaking the same API at the same
+/// facade as a tool this daemon connects, is indistinguishable in the row
+/// and reads as that tool. Nothing in the row can tell them apart.
+fn attribute(row: &RoutedExchange, speakers: &[(&'static str, &'static str)]) -> &'static str {
+    let facade = row.facade.as_str();
+    if let Some(path) = row.path.as_deref().filter(|path| !path.is_empty()) {
+        let Some(tool) = endpoint_tool(facade, path) else {
+            return UNKNOWN;
+        };
+        let contested = speakers
+            .iter()
+            .any(|(source, family)| *family == facade && *source != tool);
+        return if contested { UNKNOWN } else { tool };
+    }
     let mut speaking = speakers.iter().filter(|(_, family)| *family == facade);
     match (speaking.next(), speaking.next()) {
         (Some((only, _)), None) => only,
@@ -661,7 +715,7 @@ pub fn calls_page(
             serde_json::json!({
                 "id": row.id,
                 "at": row.started_at.to_rfc3339(),
-                "tool": attribute(&row.facade, speakers),
+                "tool": attribute(row, speakers),
                 "family": family_label(&row.facade),
                 "model": model_label(row.served_model.as_deref().or(row.requested_model.as_deref())),
                 "route": route_label(row),
@@ -747,6 +801,7 @@ mod tests {
             client_session_id: Some("SESSION-SECRET".to_string()),
             total_ms: Some(10),
             facade: "openai".to_string(),
+            path: None,
             backend: "my-backend".to_string(),
             requested_model: Some(MODEL.to_string()),
             served_model: Some(MODEL.to_string()),
@@ -1056,15 +1111,113 @@ mod tests {
                 state: crate::harness_state::HarnessState::NotConnected,
             }
         }
+        // A row from a proxy too old to record the endpoint: only the
+        // harness that set the proxy can name it.
         let codex = speakers_from_rows(&[harness("codex", "openai", true)]);
-        assert_eq!(attribute("openai", &codex), "codex");
-        assert_eq!(attribute("anthropic", &codex), "unknown");
+        assert_eq!(attribute(&called("openai", None), &codex), "codex");
+        assert_eq!(attribute(&called("anthropic", None), &codex), "unknown");
         assert_eq!(
             attribute(
-                "openai",
+                &called("openai", None),
                 &speakers_from_rows(&[harness("codex", "openai", false)])
             ),
             "unknown"
+        );
+    }
+
+    fn called(facade: &str, path: Option<&str>) -> RoutedExchange {
+        let mut r = row(1, 0, Some(ProofStatus::Verified));
+        r.facade = facade.to_string();
+        r.path = path.map(str::to_string);
+        r
+    }
+
+    /// Claude Code's connection points it at `/anthropic`, where it speaks
+    /// Messages: those endpoints name it, connected now or not.
+    #[test]
+    fn the_anthropic_messages_endpoints_name_claude_code_without_a_connection() {
+        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+            assert_eq!(
+                attribute(&called("anthropic", Some(path)), &[]),
+                "claude-code",
+                "{path}"
+            );
+        }
+    }
+
+    /// Codex's connection points it at `/openai/v1` with
+    /// `wire_api = "responses"`: the Responses endpoint names it.
+    #[test]
+    fn the_openai_responses_endpoint_names_codex_without_a_connection() {
+        assert_eq!(
+            attribute(&called("openai", Some("/v1/responses")), &[]),
+            "codex"
+        );
+    }
+
+    /// An endpoint no connection here writes is not the connected tool's own
+    /// wire, so it is not named for it -- even with Codex connected, a chat
+    /// completions call is somebody else's, and so is an unknown facade.
+    #[test]
+    fn an_endpoint_no_connection_writes_stays_unknown_even_with_a_speaker_connected() {
+        let codex = vec![(crate::source::SOURCE_CODEX, "openai")];
+        assert_eq!(
+            attribute(&called("openai", Some("/v1/chat/completions")), &codex),
+            "unknown"
+        );
+        assert_eq!(
+            attribute(&called("anthropic", Some("/v1/responses")), &[]),
+            "unknown"
+        );
+        assert_eq!(
+            attribute(&called("gemini", Some("/v1/messages")), &[]),
+            "unknown"
+        );
+        // An empty endpoint is no endpoint: the harness rule decides.
+        assert_eq!(attribute(&called("openai", Some("")), &codex), "codex");
+    }
+
+    /// A named endpoint is not taken over a different tool connected now in
+    /// the same family: the row cannot tell which of them called.
+    #[test]
+    fn a_named_endpoint_contested_by_another_connected_speaker_is_unknown() {
+        let both = vec![
+            (crate::source::SOURCE_CLAUDE_CODE, "anthropic"),
+            (crate::source::SOURCE_CLINE, "anthropic"),
+        ];
+        assert_eq!(
+            attribute(&called("anthropic", Some("/v1/messages")), &both),
+            "unknown"
+        );
+        let claude = vec![(crate::source::SOURCE_CLAUDE_CODE, "anthropic")];
+        assert_eq!(
+            attribute(&called("anthropic", Some("/v1/messages")), &claude),
+            "claude-code"
+        );
+    }
+
+    /// The real page IronWire served: its rows carry `path`, and the two
+    /// rows attribute by it with no tool connected.
+    #[test]
+    fn a_real_proxy_page_attributes_by_its_recorded_endpoint() {
+        let body: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/ironwire/log-page-2026-09-03.json"
+        ))
+        .unwrap();
+        let rows: Vec<RoutedExchange> = body["exchanges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_value(r.clone()).unwrap())
+            .collect();
+        assert_eq!(rows[0].path.as_deref(), Some("/v1/messages"));
+        assert_eq!(attribute(&rows[0], &[]), "claude-code");
+        // `/v1/chat/completions` is not Codex's wire.
+        assert_eq!(attribute(&rows[1], &[]), "unknown");
+        let (calls, _) = calls_page(&rows, &[], None, 10);
+        assert!(
+            !serde_json::to_string(&calls).unwrap().contains("/v1/"),
+            "the endpoint is read, never passed through"
         );
     }
 
