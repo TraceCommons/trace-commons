@@ -64,8 +64,12 @@ struct MonitorWindowView: View {
             MonitorMapPane(mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination)
         } inspector: {
             GlassPane {
+                // An empty branch would leave the pane nothing to draw, and
+                // it would vanish while the layout still reserved its width.
                 if tab == .traces {
                     SessionInspectorView(client: traces.client, entry: selectedEntry)
+                } else {
+                    Color.clear
                 }
             }
         }
