@@ -20,3 +20,14 @@ and whatever Rust change prompted the re-recording --
 in the same file, re-records every sample set in memory on every run and
 fails, naming the method, the sample set and the first differing field path,
 the moment a committed file stops matching what the daemon now sends.
+
+Three recorded files are hand-adjusted after the real capture, each marked
+with its own `"_sample"` reason and listed in `HAND_WRITTEN_OVERRIDES`
+(excluded from the drift test, since a fresh real capture can never equal a
+value deliberately edited away from): `unknownCounts/status.json` has
+`decisions_owed` removed by hand, because the badge draws "—" for an older
+or unreachable daemon and the real daemon always sends a concrete count;
+`normalDay/inference_calls.json` and `busyQueue/inference_calls.json` are a
+hand-written `readable: true` page, shaped exactly like the real reply
+`calls_page` builds in `daemon/inference_map.rs`, because `readable` needs a
+live IronWire proxy answering and no temp store runs one.

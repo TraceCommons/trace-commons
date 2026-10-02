@@ -43,6 +43,12 @@
 //! yet"`. `coreDown` stays hand-written too: it answers `nil` for every
 //! method by construction, nothing to record.
 //!
+//! Three more recordings cannot be the raw real capture either, because the
+//! screen each feeds needs a state a temp store cannot exhibit --
+//! `HAND_WRITTEN_OVERRIDES` and `apply_hand_written_overrides` below. Each is
+//! marked `"_sample"` and excluded from the drift test, with the reason why
+//! next to it.
+//!
 //! # Re-recording
 //!
 //! `cargo test -p trace-commons-contributor --test k2_sample_recorder -- --ignored record_samples_to_disk`
@@ -914,13 +920,81 @@ fn file_for(key: &str) -> PathBuf {
     samples_dir().join(format!("{key}.json"))
 }
 
+/// Three recordings a temp store cannot produce for real, each marked
+/// `_sample` (ignored by every decoder, like Zaki's provisional methods) and
+/// excluded from the drift test below -- see that test for why each is
+/// excluded rather than compared.
+const HAND_WRITTEN_OVERRIDES: &[&str] = &[
+    "unknownCounts/status",
+    "normalDay/inference_calls",
+    "busyQueue/inference_calls",
+];
+
+/// Applied to a fresh `record_all()` map before it is written to disk, never
+/// before it is compared in the drift test -- so the drift test's own
+/// "fresh" values stay the honest real capture, and these three committed
+/// files are the ones that can never match it (by design, not by drift).
+fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
+    // Ron's badge draws "—" for `decisions_owed` when the daemon is too old
+    // to send it or unreachable -- never a fact a temp store's real daemon
+    // can exhibit, since `status_value` (`daemon::ipc`) always computes a
+    // concrete count. Take the real recording for every other field and
+    // remove this one by hand.
+    if let Some(Value::Object(status)) = all.get_mut("unknownCounts/status") {
+        status.remove("decisions_owed");
+        status.insert(
+            "_sample".into(),
+            Value::String("absent on purpose: older daemon".into()),
+        );
+    }
+
+    // `readable: true` needs a live IronWire ledger answering
+    // `shared.routing_ledger()`, refreshed by the daemon's main loop
+    // (`refresh_routing`, `pub(crate)`) polling a real proxy over HTTP --
+    // nothing an IPC-only temp store can be. Shaped exactly like the real
+    // reply `calls_page` builds (`daemon/inference_map.rs` and its own
+    // tests): `id`, `at`, `tool`, `family`, `model`, `route`,
+    // `cost.{known,priced_micros}`, `proof`.
+    for key in ["normalDay/inference_calls", "busyQueue/inference_calls"] {
+        all.insert(key.to_string(), hand_written_inference_calls());
+    }
+}
+
+fn hand_written_inference_calls() -> Value {
+    json!({
+        "_sample": "no live IronWire in a temp store",
+        "readable": true,
+        "window_hours": 24,
+        "calls": [
+            {"id": 414, "at": "2026-09-30T09:04:11+00:00", "tool": "claude-code", "family": "anthropic",
+             "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 8400},
+             "proof": "verified"},
+            {"id": 413, "at": "2026-09-30T08:58:40+00:00", "tool": "codex", "family": "openai",
+             "model": "Qwen/Qwen3.6-27B-FP8", "route": "routed", "cost": {"known": true, "priced_micros": 12300},
+             "proof": "gateway_only"},
+            {"id": 412, "at": "2026-09-30T08:51:02+00:00", "tool": "unknown", "family": "unknown",
+             "model": "unknown", "route": "outside", "cost": {"known": false, "priced_micros": null},
+             "proof": "outside"},
+            {"id": 411, "at": "2026-09-30T08:40:19+00:00", "tool": "claude-code", "family": "anthropic",
+             "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 5100},
+             "proof": "pending"},
+            {"id": 410, "at": "2026-09-30T08:31:55+00:00", "tool": "claude-code", "family": "anthropic",
+             "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 4900},
+             "proof": "failed"}
+        ],
+        "next_cursor": null
+    })
+}
+
 /// Re-records every sample set and overwrites the committed files. Run this,
 /// then `swift test` in `macos/`, and commit both when re-recording for a
 /// daemon change. Not run by a plain `cargo test`.
 #[tokio::test]
 #[ignore = "writes into the repo; run explicitly to re-record"]
 async fn record_samples_to_disk() {
-    for (key, value) in record_all().await {
+    let mut all = record_all().await;
+    apply_hand_written_overrides(&mut all);
+    for (key, value) in all {
         let path = file_for(&key);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut text = serde_json::to_string_pretty(&value).unwrap();
@@ -976,6 +1050,13 @@ async fn drift_sample_data_matches_the_real_daemon() {
     let fresh = record_all().await;
     let mut failures = Vec::new();
     for (key, actual) in &fresh {
+        // `HAND_WRITTEN_OVERRIDES`: these three committed files are never
+        // the raw real capture by design (see `apply_hand_written_overrides`),
+        // so comparing them against `fresh`'s honest capture would fail on
+        // every run for a reason that is not drift.
+        if HAND_WRITTEN_OVERRIDES.contains(&key.as_str()) {
+            continue;
+        }
         let path = file_for(key);
         let committed_text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             panic!("{key}: no committed recording at {path:?} ({e}); run record_samples_to_disk")

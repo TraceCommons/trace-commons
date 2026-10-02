@@ -61,16 +61,19 @@ final class DaemonDataContractTests: XCTestCase {
 
     // MARK: - Unknown stays unknown
 
-    // K2 of #1173: there used to be a test here asserting that `unknownCounts`
-    // decodes `decisions_owed` as nil. That was never a real daemon reply --
-    // `status_value` (`daemon::ipc`) always writes `decisions_owed` as a
-    // concrete count, for every state a temp store can reach; K2's recording
-    // surfaced that the hand-written sample's "absent" case had no real
-    // counterpart. The model's own tolerance for an absent or null
-    // `decisions_owed` (a daemon too old to send it) is still real and still
-    // covered below; `unknownCounts`'s actual distinguishing facts --
-    // discovered-but-unconfigured folders, and credit/spend/harness staying
-    // unknown -- are covered by `testUnknownCreditAndSpendStayUnknown`.
+    /// `unknownCounts` draws Ron's badge as "—": the one state meant for an
+    /// older daemon, or one that is unreachable, neither of which a temp
+    /// store's real daemon can be (`status_value` in `daemon::ipc` always
+    /// computes a concrete `decisions_owed`). K2's recorder records the real
+    /// reply and then removes this one field by hand, marking the file
+    /// `"_sample":"absent on purpose: older daemon"` -- see
+    /// `k2_sample_recorder.rs`'s `apply_hand_written_overrides` -- so this is
+    /// the one sample file the drift test excludes rather than compares.
+    func testAbsentDecisionsOwedDecodesAsNil() async throws {
+        let status = try await SampleDaemonClient(.unknownCounts).status()
+        XCTAssertNil(status.decisionsOwed)
+        XCTAssertNotNil(status.queueDepth, "queue_depth is present and must not stand in for it")
+    }
 
     func testNullAndAbsentDecisionsOwedBothDecodeAsNilAndZeroStaysZero() throws {
         let decoder = DaemonDataDecoding.decoder()
@@ -155,13 +158,21 @@ final class DaemonDataContractTests: XCTestCase {
         XCTAssertEqual(rollup.takenBack, 1)
     }
 
-    /// K2: `inference_calls` is recorded from the real daemon, which answers
-    /// an empty, unreadable page whenever no routing proxy is declared --
-    /// true of every sample set, since none can declare a live one. What
-    /// this test is actually about, `ProofLabel.isProof`, is exercised
-    /// directly against decoded calls rather than against sample data that
-    /// cannot carry a live proxy's rows.
+    /// K2 of #1173: `inference_calls` is only ever `readable` with a live
+    /// IronWire proxy answering (`shared.routing_ledger()`), which no temp
+    /// store can run, so `normalDay`'s recording is hand-written --
+    /// `k2_sample_recorder.rs`'s `apply_hand_written_overrides`, marked
+    /// `"_sample":"no live IronWire in a temp store"` and excluded from the
+    /// drift test -- shaped exactly like the real reply `calls_page` builds
+    /// (`daemon/inference_map.rs` and its own tests), not invented.
     func testOnlyVerifiedIsProof() async throws {
+        let sampleCalls = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls
+        XCTAssertEqual(sampleCalls.filter { $0.proofLabel.isProof }.map(\.proof), ["verified"])
+        XCTAssertTrue(sampleCalls.contains { $0.proofLabel == .failed })
+
+        // The filter this test is actually about, `ProofLabel.isProof`,
+        // exercised directly against decoded calls too, so it holds
+        // independent of the sample's own content.
         func call(proof: String) throws -> DaemonData.InferenceCall {
             try DaemonDataDecoding.decoder().decode(
                 DaemonData.InferenceCall.self,

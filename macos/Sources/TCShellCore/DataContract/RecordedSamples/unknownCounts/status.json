@@ -7,7 +7,11 @@
   ],
   "paused": false,
   "queue_depth": 3,
-  "decisions_owed": 3,
+  "automatic_contribution_held": {
+    "held_sessions": 0,
+    "reasons": [],
+    "projects": []
+  },
   "next_digest_at": null,
   "health": {
     "last_error_label": null,
@@ -45,9 +49,5 @@
     "notice": null
   },
   "arming_rewordings": [],
-  "automatic_contribution_held": {
-    "held_sessions": 0,
-    "reasons": [],
-    "projects": []
-  }
+  "_sample": "absent on purpose: older daemon"
 }

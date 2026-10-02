@@ -29,6 +29,22 @@ import Foundation
 /// `previewSummary(for:)`) and the write acknowledgements that carry a
 /// caller's own parameters (`approvedGroup`, `approveSkipped`). The marker
 /// key is ignored by every decoder.
+///
+/// Three more files under `RecordedSamples/` carry a `"_sample"` marker of
+/// their own for the same reason: a temp store's real daemon cannot exhibit
+/// the state the screen needs to draw. `unknownCounts/status.json` is the
+/// real `status` recording with `decisions_owed` removed by hand (the badge
+/// draws "—" for an older daemon or an unreachable one, and the real
+/// `status_value` always computes a concrete count); `normalDay/` and
+/// `busyQueue/inference_calls.json` are hand-written `readable: true` pages
+/// shaped exactly like the real reply `calls_page` builds
+/// (`daemon/inference_map.rs`), because `readable` needs a live IronWire
+/// proxy answering and no temp store runs one. All three are listed in
+/// `k2_sample_recorder.rs`'s `HAND_WRITTEN_OVERRIDES`: re-recording still
+/// regenerates them (`apply_hand_written_overrides` runs after the real
+/// capture, before the write), but its drift test excludes them, since a
+/// fresh real capture can never equal a value it was deliberately edited
+/// away from.
 enum SampleDaemonData {
     typealias Sample = SampleDaemonClient.SampleSet
 
