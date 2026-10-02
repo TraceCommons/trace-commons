@@ -25,6 +25,9 @@ struct TracesTreeView: View {
     /// A tool switch change waiting on the core's explanation of what the
     /// source declaration does.
     @State private var sourceChange: SourceChange?
+    /// VoiceOver's focus, which follows the selection the arrow keys move,
+    /// so a person hearing the tree hears where it went.
+    @AccessibilityFocusState private var spoken: String?
 
     struct SourceChange {
         let kind: SourceKind
@@ -61,8 +64,20 @@ struct TracesTreeView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            if let sample = store.sample, let words = store.words {
+                // Debug builds draw sample data here; say so, and say when
+                // the set asked for was not one.
+                GlassChip("\(words.sample) · \(sample)", status: store.sampleUnknown ? .ask : .off)
+            }
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
+            }
+            // Why approved sessions are not moving, beside the tree and
+            // before Contribute is reached, in the words the main window uses.
+            ForEach(store.safeguards, id: \.title) { safeguard in
+                GlassNotice(tone: .ask, title: safeguard.title) {
+                    if let body = safeguard.body { Text(body) }
+                }
             }
             if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
                 // The core's line for a core that does not answer, or for a
@@ -98,6 +113,7 @@ struct TracesTreeView: View {
                         withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
                             proxy.scrollTo(selected)
                         }
+                        spoken = selected
                     }
                 }
                 .scrollIndicators(.never)
@@ -105,6 +121,13 @@ struct TracesTreeView: View {
                 // move the selection through the sessions as drawn.
                 .focusable()
                 .onMoveCommand(perform: move)
+                // Return opens the selected session's review, so the pill
+                // need not be its own tab stop on every row.
+                .onKeyPress(.return) {
+                    guard !selection.isEmpty else { return .ignored }
+                    onReview(selection)
+                    return .handled
+                }
             }
         }
         .confirmationDialog(
@@ -275,6 +298,7 @@ struct TracesTreeView: View {
         if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
     }
 
+    @ViewBuilder
     private func toolRow(_ tool: TracesTree.ToolNode) -> some View {
         GlassListRow(
             depth: .tool,
@@ -296,6 +320,42 @@ struct TracesTreeView: View {
             expandLabel: tool.kind.displayName,
             onToggleExpand: { toggle(tool.id) }
         )
+        notes(refusal(tool.id).map { [$0] } ?? [], depth: .tool)
+    }
+
+    /// The core's line for a write it refused on this row, if one is held.
+    private func refusal(_ id: String) -> String? {
+        store.writeErrors[id].flatMap { store.words?.line(for: $0) }
+    }
+
+    /// What a folder says under its row, whether open or not: a refused
+    /// write; the core's disclosure for an armed folder, chosen by the
+    /// daemon; and why the bucket can never be armed.
+    func folderNotes(_ folder: TracesTree.FolderNode) -> [String] {
+        var lines: [String] = []
+        if let refused = refusal(folder.id) { lines.append(refused) }
+        lines += store.disclosureLines(folder.disclosure)
+        if folder.isBucket { lines.append(ProjectCopy.unresolvedBucketNote) }
+        return lines
+    }
+
+    /// Caption lines under a row, indented to its content.
+    @ViewBuilder
+    private func notes(_ lines: [String], depth: GlassListRow.Depth) -> some View {
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                ForEach(lines, id: \.self) { line in
+                    Text(line)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 8 + 16 + GlassTokens.Space.s4 + CGFloat(depth.rawValue) * 18)
+            .padding(.trailing, 6)
+            .padding(.bottom, GlassTokens.Space.s2)
+        }
     }
 
     @ViewBuilder
@@ -314,6 +374,7 @@ struct TracesTreeView: View {
             onToggleExpand: { toggle(folder.id) }
         )
         .disabled(store.writing.contains(folder.id))
+        notes(folderNotes(folder), depth: .folder)
         if isOpen(folder.id) {
             ForEach(folder.sessions) { sessionRow($0) }
         }
@@ -324,15 +385,18 @@ struct TracesTreeView: View {
             depth: .session,
             tile: .session,
             title: Self.when(entry),
-            sub: Self.measures(entry),
-            flag: Self.flag(entry),
+            sub: Self.sub(entry, held: store.words?.held, ineligible: store.ineligibleLine(entry)),
+            flag: Self.flag(entry, ineligible: store.ineligibleLine(entry) != nil),
             selected: selection == entry.entryId,
-            // D10 default: a session's pill opens its review.
+            // D10 default: a session's pill opens its review. Focus roves:
+            // only the selected row's pill is a tab stop; Return opens it.
             submitTitle: store.words?.review,
+            submitFocusable: selection == entry.entryId,
             onSelect: { selection = entry.entryId },
             onSubmit: { onReview(entry.entryId) }
         )
         .id(entry.entryId)
+        .accessibilityFocused($spoken, equals: entry.entryId)
     }
 
 
@@ -372,13 +436,24 @@ struct TracesTreeView: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    /// Amber when a person has to look before it can go: a second-look hold,
+    /// Held when a person has to look before it can go: a second-look hold,
     /// Manual Scrub check, or back from Keep.
-    static func flag(_ entry: DaemonData.QueueEntry) -> GlassListRow.Flag? {
-        if entry.heldForSecondLook || entry.heldByManualScrubCheck || entry.returnedFromKeep {
-            return .ask
-        }
-        return nil
+    static func isHeld(_ entry: DaemonData.QueueEntry) -> Bool {
+        entry.heldForSecondLook || entry.heldByManualScrubCheck || entry.returnedFromKeep
+    }
+
+    /// Amber when held, or when the core says the session cannot go as it
+    /// stands.
+    static func flag(_ entry: DaemonData.QueueEntry, ineligible: Bool = false) -> GlassListRow.Flag? {
+        isHeld(entry) || ineligible ? .ask : nil
+    }
+
+    /// A session's sub-line. The amber is never the only signal: a held
+    /// session says the core's word for it, and one that cannot be
+    /// contributed says the core's sentence, before its measures.
+    static func sub(_ entry: DaemonData.QueueEntry, held: String?, ineligible: String?) -> String? {
+        let parts = [isHeld(entry) ? held : nil, ineligible, measures(entry)].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 
@@ -433,7 +508,9 @@ struct SessionInspectorView: View {
                             }
                         }
                         if let words {
-                            GlassKeyValueList(Self.rows(entry, summary, words: words))
+                            GlassKeyValueList(Self.rows(
+                                entry, summary, words: words,
+                                eligibility: store.eligibilityValue(entry), attestation: store.attestationValue(entry)))
                         }
                         if let summary { redactions(summary) }
                         if let reasons = entry.secondLook, !reasons.isEmpty {
@@ -535,10 +612,14 @@ struct SessionInspectorView: View {
     @ViewBuilder
     private func review(_ entry: DaemonData.QueueEntry) -> some View {
         let busy = store.acting.contains(entry.entryId)
+        // The scrubbing caveat, repeated at the commit as the review sheet
+        // repeats it, then the gate statement, at reading weight: they sit
+        // directly above an irreversible button.
+        ScrubbingCaveatAtCommit()
         if let consent {
             Text(consent.gateStatement)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
+                .glassType(GlassTokens.TypeScale.label)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         // Why this session cannot be contributed, beside the disarmed
@@ -564,6 +645,9 @@ struct SessionInspectorView: View {
                 Button(words.contribute) { act(.contribute, entry) }
                     .buttonStyle(GlassButtonStyle(.primary, small: true))
                     .disabled(!armed(entry))
+                    // Why it is armed or not, in the core's words, as the
+                    // review sheet's Contribute says it.
+                    .help(consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")
             }
             .disabled(busy)
         }
@@ -608,7 +692,8 @@ struct SessionInspectorView: View {
 
     /// One word a row, and only what the daemon reported. Unknown is a dash.
     static func rows(
-        _ entry: DaemonData.QueueEntry, _ summary: DaemonData.PreviewSummary?, words: MonitorTracesCopy
+        _ entry: DaemonData.QueueEntry, _ summary: DaemonData.PreviewSummary?, words: MonitorTracesCopy,
+        eligibility: String? = nil, attestation: String? = nil
     ) -> [GlassKeyValueList.Item] {
         let dash = "—"
         func bytes(_ value: Int?) -> String {
@@ -616,7 +701,7 @@ struct SessionInspectorView: View {
         }
         func number(_ value: Int?) -> String { value.map(String.init) ?? dash }
         let tool = SourceKind(rawValue: entry.declaredSource ?? entry.source)?.displayName ?? entry.source
-        return [
+        var rows: [GlassKeyValueList.Item] = [
             .init(words.tool, tool),
             .init(words.folder, entry.projectLabel),
             .init(words.started, entry.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? dash),
@@ -630,6 +715,19 @@ struct SessionInspectorView: View {
             .init(words.marks, number(entry.marks)),
             .init(words.unsure, number(entry.unsureSpans)),
         ]
+        // Whether it may go, and what the witness attested, in the core's
+        // sentences; left out when the core has nothing to say.
+        if let eligibility { rows.append(.init(words.eligibility, eligibility)) }
+        if let attestation { rows.append(.init(words.attestation, attestation)) }
+        // Only the full preview carries these. Categories only: the matched
+        // text is never reported. The risk is the core's label.
+        if let labels = summary?.piiLabelsPresent, !labels.isEmpty {
+            rows.append(.init(words.personalInformation, labels.joined(separator: ", ")))
+        }
+        if let risk = summary?.residualRisk, !risk.isEmpty {
+            rows.append(.init(words.residualRisk, risk.replacingOccurrences(of: "_", with: " ")))
+        }
+        return rows
     }
 }
 /// The inspector's one preview, keyed by the session it was asked for. A

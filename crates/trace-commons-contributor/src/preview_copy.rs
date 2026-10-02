@@ -129,6 +129,22 @@ pub struct MonitorTracesCopy {
     pub sends: &'static str,
     pub marks: &'static str,
     pub unsure: &'static str,
+    /// The inspector's rows for whether the session may be contributed and
+    /// what the privacy witness attested; their values are the core's own
+    /// state and reason lines.
+    pub eligibility: &'static str,
+    pub attestation: &'static str,
+    /// A row's hold flag in words, so the amber flag is never colour only.
+    pub held: &'static str,
+    /// The marker a debug build shows over sample data.
+    pub sample: &'static str,
+    /// The inspector's rows for the full preview's residual-risk label and
+    /// the personal-information categories it saw (categories only).
+    pub residual_risk: &'static str,
+    pub personal_information: &'static str,
+    /// Added to the Traces badge's text equivalent when a waiting session
+    /// is worth a second look (nothing matched, or trimmed to fit).
+    pub second_look_waiting: &'static str,
     /// The review's actions.
     pub contribute: &'static str,
     pub keep: &'static str,
@@ -158,6 +174,13 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         sends: "Sends",
         marks: "Marks",
         unsure: "Unsure",
+        eligibility: "Eligibility",
+        attestation: "Attestation",
+        held: "Held",
+        sample: "Sample",
+        residual_risk: "Residual risk",
+        personal_information: "Personal information",
+        second_look_waiting: "some worth a second look",
         contribute: "Contribute",
         keep: customize.keep,
         dismiss: "Not this one",
