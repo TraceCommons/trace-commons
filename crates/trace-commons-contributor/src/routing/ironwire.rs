@@ -205,6 +205,12 @@ pub struct IronWireLedger {
     /// known", which is distinct from `Some(false)`: one is a proxy that did
     /// not answer, the other is a proxy that answered and said no.
     nearai_authenticated: Arc<RwLock<Option<bool>>>,
+    /// The highest row id [`Self::take_added_rows`] has already handed out,
+    /// or `None` before the first completed refresh was looked at.
+    ///
+    /// Per ledger, so a ledger rebuilt for a new endpoint starts from its
+    /// own first window rather than from another proxy's ids.
+    seen_through: Arc<RwLock<Option<i64>>>,
 }
 
 impl std::fmt::Debug for IronWireLedger {
@@ -265,7 +271,59 @@ impl IronWireLedger {
             client: reqwest::Client::builder().build().ok(),
             spend_today_micros: Arc::new(RwLock::new(None)),
             nearai_authenticated: Arc::new(RwLock::new(None)),
+            seen_through: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// The rows the snapshot holds that no earlier call handed out, oldest
+    /// first by id.
+    ///
+    /// For the `inference_call_added` event, so a shell can pulse once per
+    /// call instead of polling. Called after [`Self::refresh`] on the poll
+    /// tick that already reads the log; it reads only the snapshot.
+    ///
+    /// - Nothing before the first completed refresh, and nothing on the
+    ///   first look after one: that window is the backlog, not new calls,
+    ///   and announcing a day of rows at once would only flood subscribers.
+    ///   It sets the baseline instead.
+    /// - Rows without an id (a proxy too old to expose one) are never
+    ///   handed out: without an id nothing can say a row is new.
+    /// - A snapshot whose highest id is below the baseline is a proxy whose
+    ///   ledger started over. Its rows cannot be told apart from ones
+    ///   already seen, so it re-baselines and hands out nothing.
+    /// - A refresh that failed leaves the snapshot as it was, so nothing
+    ///   new comes out of it.
+    #[must_use]
+    pub fn take_added_rows(&self) -> Vec<RoutedExchange> {
+        if self.last_refresh_at().is_none() {
+            return Vec::new();
+        }
+        let Ok(snapshot) = self.snapshot.read() else {
+            return Vec::new();
+        };
+        let Ok(mut seen) = self.seen_through.write() else {
+            return Vec::new();
+        };
+        let highest = snapshot.iter().filter_map(|row| row.id).max();
+        let Some(through) = *seen else {
+            // Ids start at 1, so an empty first window baselines at 0 and
+            // every later row is new.
+            *seen = Some(highest.unwrap_or(0));
+            return Vec::new();
+        };
+        let Some(highest) = highest else {
+            return Vec::new();
+        };
+        // Below the baseline is a ledger that started over: nothing passes
+        // the filter, and the baseline drops to where it now is.
+        let mut added: Vec<RoutedExchange> = snapshot
+            .iter()
+            .filter(|row| row.id.is_some_and(|id| id > through))
+            .cloned()
+            .collect();
+        added.sort_by_key(|row| row.id);
+        *seen = Some(highest);
+        added
     }
 
     /// Fetch the last [`REFRESH_WINDOW_HOURS`] from the proxy.
@@ -621,6 +679,7 @@ mod tests {
             client: None,
             spend_today_micros: Arc::new(RwLock::new(None)),
             nearai_authenticated: Arc::new(RwLock::new(None)),
+            seen_through: Arc::new(RwLock::new(None)),
         };
         ledger.refresh().await;
         assert!(
@@ -628,6 +687,58 @@ mod tests {
                 .exchanges_since(chrono::DateTime::UNIX_EPOCH)
                 .is_empty()
         );
+    }
+
+    fn id_row(id: Option<i64>) -> RoutedExchange {
+        RoutedExchange {
+            id,
+            facade: "anthropic".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn commit(ledger: &IronWireLedger, ids: &[Option<i64>]) {
+        *ledger.snapshot.write().unwrap() = ids.iter().copied().map(id_row).collect();
+        *ledger.last_refresh_at.write().unwrap() = Some(Utc::now());
+    }
+
+    fn ids(rows: &[RoutedExchange]) -> Vec<i64> {
+        rows.iter().filter_map(|row| row.id).collect()
+    }
+
+    /// The first window is the backlog and baselines; each later refresh
+    /// hands out only the rows past it, once, oldest first.
+    #[test]
+    fn added_rows_are_handed_out_once_each_after_the_first_window() {
+        let ledger = IronWireLedger::new(1, String::new());
+        // Nothing has answered yet: nothing to baseline on.
+        assert!(ledger.take_added_rows().is_empty());
+        commit(&ledger, &[Some(1), Some(2)]);
+        assert!(
+            ledger.take_added_rows().is_empty(),
+            "the backlog is not new"
+        );
+        commit(&ledger, &[Some(4), Some(1), Some(2), Some(3), None]);
+        assert_eq!(ids(&ledger.take_added_rows()), vec![3, 4]);
+        assert!(ledger.take_added_rows().is_empty(), "never twice");
+        // A refresh that failed leaves the snapshot, so nothing new.
+        assert!(ledger.take_added_rows().is_empty());
+        // A proxy whose ledger started over re-baselines.
+        commit(&ledger, &[Some(1)]);
+        assert!(ledger.take_added_rows().is_empty());
+        commit(&ledger, &[Some(1), Some(2)]);
+        assert_eq!(ids(&ledger.take_added_rows()), vec![2]);
+    }
+
+    /// An empty first window is a baseline of nothing, so the first call is
+    /// new.
+    #[test]
+    fn an_empty_first_window_makes_every_later_row_new() {
+        let ledger = IronWireLedger::new(1, String::new());
+        commit(&ledger, &[]);
+        assert!(ledger.take_added_rows().is_empty());
+        commit(&ledger, &[Some(1)]);
+        assert_eq!(ids(&ledger.take_added_rows()), vec![1]);
     }
 
     #[test]

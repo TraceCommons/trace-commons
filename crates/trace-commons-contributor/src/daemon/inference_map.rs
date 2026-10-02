@@ -729,6 +729,52 @@ pub fn calls_page(
     (calls, next)
 }
 
+/// The most `inference_call_added` events one poll tick publishes.
+///
+/// Well under the event buffer, so a burst of calls -- a machine waking
+/// after a day, say -- cannot push a subscriber into `resync_required` and
+/// cost it a `queue_changed`. A busier tick keeps the newest; the event is a
+/// pulse, and the counts on `tool_destinations` stay exact.
+pub const MAX_ADDED_PER_TICK: usize = 64;
+
+/// The `inference_call_added` data for one row.
+///
+/// The same labels `inference_calls` puts on the row, and nothing else: the
+/// ledger id, the tool, the model label and IronWire's proof label. No body,
+/// URL, endpoint, session id, digest or token.
+#[must_use]
+pub fn call_added(
+    row: &RoutedExchange,
+    speakers: &[(&'static str, &'static str)],
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": row.id,
+        "tool": attribute(row, speakers),
+        "model": model_label(row.served_model.as_deref().or(row.requested_model.as_deref())),
+        "proof": proof_label(row),
+    })
+}
+
+/// Publish one `inference_call_added` per added row, oldest first, at most
+/// [`MAX_ADDED_PER_TICK`] of the newest.
+///
+/// Reads the harness rows only when there is something to publish: they
+/// read tool config files, and most ticks add nothing.
+pub(crate) fn publish_added_calls(shared: &DaemonShared, added: &[RoutedExchange]) {
+    let listed: Vec<&RoutedExchange> = added.iter().filter(|row| row.id.is_some()).collect();
+    if listed.is_empty() {
+        return;
+    }
+    let speakers = speakers_from_rows(&super::harness::rows_now(shared));
+    let skip = listed.len().saturating_sub(MAX_ADDED_PER_TICK);
+    for row in listed.into_iter().skip(skip) {
+        shared.publish(
+            super::ipc::EVENT_INFERENCE_CALL_ADDED,
+            call_added(row, &speakers),
+        );
+    }
+}
+
 /// The ledger's rows for the window, or `None` when no ledger has answered.
 fn ledger_rows(shared: &DaemonShared) -> Option<Vec<RoutedExchange>> {
     let ledger = shared.routing_ledger()?;
@@ -1295,6 +1341,126 @@ mod tests {
         assert_eq!(value["unattributed_calls"], serde_json::Value::Null);
     }
 
+    /// The event carries the list's labels for the row, and none of the
+    /// row's identifiers, bodies or endpoint.
+    #[test]
+    fn a_call_added_event_is_label_only() {
+        let mut r = row(7, 0, Some(ProofStatus::GatewayOnly));
+        r.facade = "anthropic".to_string();
+        r.path = Some("/v1/messages".to_string());
+        let value = call_added(&r, &[]);
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "id": 7,
+                "tool": "claude-code",
+                "model": MODEL,
+                "proof": "gateway_only",
+            })
+        );
+        let text = value.to_string();
+        for forbidden in [
+            "SESSION-SECRET",
+            UPSTREAM_ID,
+            BODY_REF,
+            REQUEST_DIGEST,
+            RESPONSE_DIGEST,
+            "/v1/",
+            "my-backend",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
+        }
+    }
+
+    /// One event per added row, oldest first, capped at the newest
+    /// `MAX_ADDED_PER_TICK`; nothing at all for nothing added.
+    #[test]
+    fn added_calls_publish_one_event_each_up_to_the_cap() {
+        let (_dir, s) = shared();
+        let mut rx = s.events.subscribe();
+        publish_added_calls(&s, &[]);
+        assert!(rx.try_recv().is_err(), "nothing added, nothing published");
+
+        let added: Vec<RoutedExchange> = (1..=3).map(|id| row(id, id, None)).collect();
+        publish_added_calls(&s, &added);
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            assert_eq!(event.event, super::super::ipc::EVENT_INFERENCE_CALL_ADDED);
+            seen.push(event.data["id"].as_i64().unwrap());
+        }
+        assert_eq!(seen, vec![1, 2, 3]);
+
+        let burst: Vec<RoutedExchange> = (1..=(MAX_ADDED_PER_TICK as i64 + 10))
+            .map(|id| row(id, id, None))
+            .collect();
+        publish_added_calls(&s, &burst);
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event.data["id"].as_i64().unwrap());
+        }
+        assert_eq!(seen.len(), MAX_ADDED_PER_TICK);
+        assert_eq!(seen.first(), Some(&11), "the newest are kept");
+    }
+
+    /// Through the daemon's own poll-tick entry point against a mock proxy:
+    /// the first window baselines, and a call the next read finds is one
+    /// event.
+    #[tokio::test]
+    async fn the_poll_tick_publishes_a_call_the_log_newly_shows() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let served = std::sync::Arc::clone(&reads);
+        let router = axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(move || {
+                let n = served.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let row = |id: usize| {
+                        serde_json::json!({
+                            "id": id, "started_at": Utc::now().to_rfc3339(),
+                            "facade": "openai", "path": "/v1/responses",
+                            "backend": "b", "rung": "full", "attempts": 1,
+                            "status": 200, "served_model": "m-1", "proof": "verified",
+                        })
+                    };
+                    let rows: Vec<serde_json::Value> = (1..=(2 + n.min(1))).map(row).collect();
+                    axum::Json(serde_json::json!({ "exchanges": rows }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let (_dir, s) = shared();
+        s.install_routing_ledger_for_test(crate::routing::ironwire::IronWireLedger::new(
+            port,
+            "t".to_string(),
+        ));
+        let mut rx = s.events.subscribe();
+        let added = |rx: &mut tokio::sync::broadcast::Receiver<super::super::ipc::Event>| {
+            let mut out = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if event.event == super::super::ipc::EVENT_INFERENCE_CALL_ADDED {
+                    out.push(event.data);
+                }
+            }
+            out
+        };
+        s.refresh_routing().await;
+        assert!(added(&mut rx).is_empty(), "the first window is the backlog");
+        s.refresh_routing().await;
+        assert_eq!(
+            added(&mut rx),
+            vec![serde_json::json!({
+                "id": 3, "tool": "codex", "model": "m-1", "proof": "verified",
+            })]
+        );
+        s.refresh_routing().await;
+        assert!(added(&mut rx).is_empty(), "a call is announced once");
+    }
+
     fn shared() -> (tempfile::TempDir, DaemonShared) {
         let (dir, store) = crate::config::tests_support::temp_store();
         (dir, DaemonShared::load(store).unwrap())
@@ -1319,6 +1485,15 @@ mod tests {
         for method in ["tool_destinations", "inference_calls"] {
             assert!(super::super::ipc::METHODS.contains(&method), "{method}");
         }
+        let hello =
+            super::super::ipc::handle_request(&shared().1, &call("hello", serde_json::json!({})));
+        assert!(
+            hello.result.unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("inference_call_added")),
+            "hello must list the event a shell subscribes for"
+        );
         assert!(!super::super::ipc::METHODS.contains(&"inference_call_proof"));
         let (_dir, s) = shared();
         let r = super::super::ipc::handle_request(
