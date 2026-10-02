@@ -365,10 +365,18 @@ const PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT: usize = 32;
 /// rest.
 const PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT: usize = 32;
 
-/// The most lost revocation or withdrawal follow-ups one worker pass
+/// The most lost revocation or withdrawal follow-ups one recovery step
 /// recovers for one tenant (`recover_lost_inoperable_follow_ups`; poldsam
-/// P-2).
+/// P-2). A step that used the whole limit runs again on the next pass.
 const PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT: usize = 32;
+
+/// How often the worker runs a tenant's lost follow-up recovery. Nothing
+/// wakes it: a follow-up is lost only when a process stops, or a follow-up
+/// fails, between `main`'s mark and the follow-up's own transaction. The
+/// recovery's read probes every revoked or withdrawn submission of the
+/// tenant, recovered or not, so it does not run on the 10-second
+/// invalidation clock.
+const PIPELINE_WORKER_LOST_FOLLOW_UP_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
 /// How many of one tenant's complete runs the worker pays out each time it
 /// runs the tenant's payout step (`PipelineService::process_payouts`), after
@@ -401,6 +409,7 @@ pub(crate) enum PipelineFollowUpStep {
     IndexInvalidations,
     Payouts,
     CreditAudits,
+    LostFollowUps,
 }
 
 /// When the worker last ran each tenant's follow-up steps, so an idle
@@ -453,6 +462,20 @@ impl PipelineFollowUpCadence {
                 now,
             ),
         }
+    }
+
+    /// Whether the lost follow-up recovery runs for `tenant_id` on the pass
+    /// at `now`, recorded as run at `now` when it does: on the tenant's
+    /// first pass, and once `PIPELINE_WORKER_LOST_FOLLOW_UP_INTERVAL` has
+    /// passed since it last ran. Nothing wakes it.
+    pub(crate) fn lost_follow_ups_due(&mut self, tenant_id: &str, now: std::time::Instant) -> bool {
+        self.take_due(
+            tenant_id,
+            PipelineFollowUpStep::LostFollowUps,
+            false,
+            PIPELINE_WORKER_LOST_FOLLOW_UP_INTERVAL,
+            now,
+        )
     }
 
     fn take_due(
@@ -568,13 +591,14 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// never the tenant id or the error's own text -- and ends this tenant's
 /// batch for the pass.
 ///
+/// Then, once a minute for the tenant, it runs again up to
+/// `PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT` revocation or withdrawal
+/// follow-ups that were lost (`recover_lost_inoperable_follow_ups`).
+///
 /// Then, whatever the runs did, it runs the follow-up steps `cadence` finds
 /// due (`PipelineFollowUpCadence::due_steps`, with the steps this service
 /// woke): it releases the tenant's parked runs whose submission is no
-/// longer operable (`release_inoperable_parked_runs`), runs again up to
-/// `PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT` revocation or withdrawal
-/// follow-ups that were lost (`recover_lost_inoperable_follow_ups`),
-/// processes up to
+/// longer operable (`release_inoperable_parked_runs`), processes up to
 /// `PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT` of the tenant's due
 /// index invalidations (`process_index_invalidations`, which removes a
 /// withdrawn or cancelled revision from the index), and pays out up to
@@ -623,6 +647,37 @@ pub(crate) async fn drain_pipeline_tenant(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
+    // poldsam P-2: a revocation or withdrawal whose pipeline follow-up was
+    // lost (`main` marks the submission in one transaction, the follow-up
+    // runs in another) leaves index work no invalidation reaches; the
+    // follow-up is run again here. Its read probes every revoked or
+    // withdrawn submission of the tenant, so it has its own, slow clock. It
+    // runs before the woken steps are taken: a recovered follow-up wakes the
+    // invalidation step, which then runs in this pass.
+    if lock_cadence().lost_follow_ups_due(&tenant_id, std::time::Instant::now()) {
+        match service
+            .recover_lost_inoperable_follow_ups(
+                &tenant_id,
+                PIPELINE_WORKER_AUDIT_ACTOR_REF,
+                PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT,
+            )
+            .await
+        {
+            Ok(recovered) => {
+                if recovered >= PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::LostFollowUps);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_lost_follow_up_recovery_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker lost follow-up recovery failed"
+                );
+            }
+        }
+    }
     let due = lock_cadence().due_steps(
         &tenant_id,
         service.take_follow_ups(&tenant_id),
@@ -645,26 +700,6 @@ pub(crate) async fn drain_pipeline_tenant(
                 tenant_storage_ref = %tenant_storage_ref(&tenant_id),
                 error_hash = %safe_display_error_hash(&error),
                 "pipeline worker parked run release failed"
-            );
-        }
-        // poldsam P-2: a revocation or withdrawal whose pipeline follow-up
-        // was lost (`main` marks the submission in one transaction, the
-        // follow-up runs in another) leaves index work no invalidation
-        // reaches; the follow-up is run again here, before the
-        // invalidations, so its invalidations are processed in this pass.
-        if let Err(error) = service
-            .recover_lost_inoperable_follow_ups(
-                &tenant_id,
-                PIPELINE_WORKER_AUDIT_ACTOR_REF,
-                PIPELINE_WORKER_MAX_LOST_FOLLOW_UPS_PER_TENANT,
-            )
-            .await
-        {
-            tracing::warn!(
-                error_class = "pipeline_worker_lost_follow_up_recovery_failed",
-                tenant_storage_ref = %tenant_storage_ref(&tenant_id),
-                error_hash = %safe_display_error_hash(&error),
-                "pipeline worker lost follow-up recovery failed"
             );
         }
         match service

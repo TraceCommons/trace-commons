@@ -12288,6 +12288,29 @@ fn the_worker_runs_a_follow_up_step_when_woken_or_once_its_interval_has_passed()
         steps(true, true),
         "each tenant has its own clock"
     );
+
+    // The owner's runtime lens on poldsam P-2: the lost follow-up recovery
+    // has its own clock, once a minute, and no step's wakeup runs it.
+    assert!(
+        cadence.lost_follow_ups_due("tenant-a", at(84)),
+        "a tenant's first pass runs the recovery"
+    );
+    cadence.due_steps("tenant-a", steps(true, true), payout_interval, at(85));
+    assert!(
+        !cadence.lost_follow_ups_due("tenant-a", at(143)),
+        "not again within a minute, whatever was woken"
+    );
+    assert!(cadence.lost_follow_ups_due("tenant-a", at(144)));
+    assert!(!cadence.lost_follow_ups_due("tenant-a", at(145)));
+    cadence.run_again("tenant-a", PipelineFollowUpStep::LostFollowUps);
+    assert!(
+        cadence.lost_follow_ups_due("tenant-a", at(146)),
+        "a full recovery batch leaves it due on the next pass"
+    );
+    assert!(
+        cadence.lost_follow_ups_due("tenant-b", at(146)),
+        "each tenant has its own clock"
+    );
     assert_eq!(
         without_audits(cadence.due_steps("tenant-c", steps(true, true), None, at(0))),
         steps(true, false),

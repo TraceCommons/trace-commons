@@ -494,14 +494,18 @@ the content first would leave a failed follow-up with no retry.
 
 `main` marks the submission in one transaction and the follow-up runs in
 another, so a process that stops between the two loses the follow-up. The
-worker recovers it: on each invalidation step (below), before claiming
-invalidations, it finds up to 32 of the tenant's revoked or withdrawn
-submissions with a run whose index write started and no queued
+worker recovers it: once a minute for each tenant (and on the tenant's
+first pass after a start), it finds up to 32 of the tenant's revoked or
+withdrawn submissions with a run whose index write started and no queued
 invalidation, and makes the follow-up for each (reason `withdrawn` when a
-withdrawal row exists, `revoked` otherwise, actor `pipeline_worker`). A
+withdrawal row exists, `revoked` otherwise, actor `pipeline_worker`); the
+invalidations it queues are processed in the same pass. So a lost follow-up
+waits at most about a minute once a worker runs. The read checks every
+revoked or withdrawn submission of the tenant on each run, recovered or
+not, which is why it does not run on the 10-second invalidation step. A
 recovery failure is logged as
-`pipeline_worker_lost_follow_up_recovery_failed` and retried on the next
-step.
+`pipeline_worker_lost_follow_up_recovery_failed` and retried a minute
+later.
 
 The response is `main`'s withdrawal response plus two follow-up states,
 `index_invalidation` and `revocation_propagation`. Each is `not_required`,

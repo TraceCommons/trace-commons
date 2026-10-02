@@ -3460,7 +3460,10 @@ impl PgPipelineStore {
     /// when the withdrawal row exists and `revoked` otherwise, with
     /// `actor_principal_ref` as the actor. A follow-up is idempotent and
     /// queues an invalidation for every such run, so a recovered submission
-    /// is not found again. Returns how many it recovered.
+    /// is not found again. Returns how many it recovered. The read probes
+    /// every revoked or withdrawn submission of the tenant, recovered or
+    /// not, so the worker runs it at a low cadence
+    /// (`PIPELINE_WORKER_LOST_FOLLOW_UP_INTERVAL`), not on every pass.
     pub async fn recover_lost_inoperable_follow_ups(
         &self,
         tenant_id: &str,
@@ -3473,26 +3476,24 @@ impl PgPipelineStore {
             let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
             let rows = tx
                 .query(
-                    "SELECT s.submission_id,
-                            EXISTS (
-                                SELECT 1 FROM trace_withdrawals w
-                                 WHERE w.tenant_id = s.tenant_id
-                                   AND w.submission_id = s.submission_id
-                            ) AS withdrawn
-                       FROM trace_submissions s
-                      WHERE s.tenant_id = $1
-                        AND (
-                            s.status = 'revoked'
-                            OR EXISTS (
-                                SELECT 1 FROM trace_withdrawals w
-                                 WHERE w.tenant_id = s.tenant_id
-                                   AND w.submission_id = s.submission_id
-                            )
-                        )
-                        AND EXISTS (
+                    // The owner's runtime lens: read from the two indexed
+                    // sources of an inoperable submission (the status index
+                    // for `revoked`, the withdrawals key), never from every
+                    // submission of the tenant.
+                    "SELECT c.submission_id, bool_or(c.withdrawn) AS withdrawn
+                       FROM (
+                            SELECT s.submission_id, FALSE AS withdrawn
+                              FROM trace_submissions s
+                             WHERE s.tenant_id = $1 AND s.status = 'revoked'
+                            UNION ALL
+                            SELECT w.submission_id, TRUE AS withdrawn
+                              FROM trace_withdrawals w
+                             WHERE w.tenant_id = $1
+                       ) c
+                      WHERE EXISTS (
                             SELECT 1 FROM pipeline_runs r
-                             WHERE r.tenant_id = s.tenant_id
-                               AND r.submission_id = s.submission_id
+                             WHERE r.tenant_id = $1
+                               AND r.submission_id = c.submission_id
                                AND r.approved_revision_id IS NOT NULL
                                AND r.index_write_state IN
                                    ('pending', 'complete', 'failed', 'cancelled')
@@ -3501,7 +3502,8 @@ impl PgPipelineStore {
                                     WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
                                )
                         )
-                      ORDER BY s.submission_id
+                      GROUP BY c.submission_id
+                      ORDER BY c.submission_id
                       LIMIT $2",
                     &[&tenant_id, &limit],
                 )
@@ -6493,18 +6495,31 @@ impl PipelineService {
 
     /// Recovers `tenant_id`'s revocation and withdrawal follow-ups that were
     /// lost (`PgPipelineStore::recover_lost_inoperable_follow_ups`; poldsam
-    /// P-2); the worker runs it on its invalidation step, before the
-    /// invalidations, so a recovered one is processed in the same pass.
+    /// P-2); the worker runs it once a minute for each tenant, before it
+    /// takes the tenant's woken steps. A recovered follow-up wakes the
+    /// invalidation step, so its invalidations are processed in the same
+    /// pass.
     pub async fn recover_lost_inoperable_follow_ups(
         &self,
         tenant_id: &str,
         actor_principal_ref: &str,
         limit: usize,
     ) -> anyhow::Result<usize> {
-        Ok(self
+        let recovered = self
             .store
             .recover_lost_inoperable_follow_ups(tenant_id, actor_principal_ref, limit)
-            .await?)
+            .await?;
+        if recovered > 0 {
+            self.wake_follow_ups(
+                tenant_id,
+                PipelineFollowUps {
+                    index_invalidations: true,
+                    payouts: false,
+                    credit_audits: false,
+                },
+            );
+        }
+        Ok(recovered)
     }
 
     /// Releases `tenant_id`'s parked runs whose submission is no longer
