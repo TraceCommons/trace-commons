@@ -89,6 +89,22 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertEqual(tree.unplaced.map(\.label), ["docs"])
     }
 
+    /// The tab's words are the core's: the store holds the decoded export,
+    /// and the inspector's row labels are its fields, not Swift strings.
+    func test_theTabsWordsComeFromTheCore() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        let words = try XCTUnwrap(store.words)
+        XCTAssertEqual(words, MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        let client = SampleDaemonClient(.normalDay)
+        let pending = try await client.listPending(projectId: nil)
+        let entry = try XCTUnwrap(pending.first)
+        let keys = SessionInspectorView.rows(entry, nil, words: words).map(\.label)
+        XCTAssertEqual(keys, [words.tool, words.folder, words.started, words.length, words.prompts,
+                              words.size, words.sends, words.marks, words.unsure])
+        // A failure is said in the core's line, not the error's label.
+        XCTAssertEqual(words.line(for: .unreachable), words.coreUnreachable)
+    }
+
     /// The core being down is a failure the tab says, not an empty tree.
     func test_coreDownIsAFailureNotAnEmptyTree() async {
         let store = TracesStore(client: SampleDaemonClient(.coreDown))

@@ -5185,6 +5185,20 @@ fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
 }
 
 #[test]
+fn the_monitor_traces_copy_crosses_the_abi() {
+    use trace_commons_contributor::preview_copy::{decisions_owed_text, monitor_traces_copy};
+    use trace_commons_contributor_ffi::{tc_decisions_owed_text, tc_monitor_traces_copy_json};
+    assert_eq!(
+        json_owned(tc_monitor_traces_copy_json()),
+        serde_json::to_value(monitor_traces_copy()).unwrap()
+    );
+    let text = |count: i64| take_owned(tc_decisions_owed_text(count));
+    assert_eq!(text(-1), decisions_owed_text(None));
+    assert_eq!(text(0), "");
+    assert_eq!(text(3), decisions_owed_text(Some(3)));
+}
+
+#[test]
 fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
     use trace_commons_contributor::consent_copy::inference_connection_copy;
     use trace_commons_contributor::privacy_scan_copy::{DISCLOSURE, privacy_scan_copy};

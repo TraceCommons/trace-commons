@@ -5419,6 +5419,35 @@ pub unsafe extern "C" fn tc_legacy_migration_refusal_text(label: *const c_char) 
     })
 }
 
+/// The glass monitor's Traces words (`preview_copy::monitor_traces_copy`):
+/// a JSON object of `MonitorTracesCopy`'s fields.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_monitor_traces_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::preview_copy::monitor_traces_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The Traces badge's text equivalent
+/// (`preview_copy::decisions_owed_text`). A negative `decisions_owed` is an
+/// unknown count, which is never read as zero.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. The EMPTY
+/// STRING for zero (no badge). NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_decisions_owed_text(decisions_owed: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let count = u64::try_from(decisions_owed).ok();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::preview_copy::decisions_owed_text(count),
+        ))
+    })
+}
+
 /// The connecting-inference step's sentences (K12,
 /// `consent_copy::inference_connection_copy`), as a JSON object of
 /// `InferenceConnectionCopy`'s fields.

@@ -79,7 +79,7 @@ struct MonitorWindowView: View {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
                 if tab == .traces {
-                    SessionInspectorView(client: traces.client, entry: selectedEntry)
+                    SessionInspectorView(client: traces.client, entry: selectedEntry, words: traces.words)
                 } else {
                     Color.clear
                 }

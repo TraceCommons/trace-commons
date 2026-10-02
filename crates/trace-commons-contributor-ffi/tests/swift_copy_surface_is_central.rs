@@ -608,6 +608,13 @@ fn no_pinned_core_sentence_is_a_swift_literal() {
 /// must reach.
 const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     (
+        "monitor Traces words",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "TCCoreCopy.monitorTracesCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_monitor_traces_copy_json",
+    ),
+    (
         "consent gate",
         "TraceCommonsApp/Views/PreviewSheet.swift",
         "TCConsentCopy.copyJSON",
@@ -752,6 +759,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
 /// Bridge functions for surfaces macOS has not built yet. Each must still
 /// reach its export, so the screen that comes has the core's words to read.
 const BRIDGE_ONLY: &[(&str, &str)] = &[
+    ("TCBridge/TCCoreCopy.swift", "tc_decisions_owed_text"),
     (
         "TCBridge/TCCoreCopy.swift",
         "tc_legacy_migration_offer_json",

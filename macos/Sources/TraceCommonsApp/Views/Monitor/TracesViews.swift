@@ -63,10 +63,11 @@ struct TracesTreeView: View {
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            if case .failed(let error) = store.phase {
-                // The core's own fixed label until K4 gives this state its
-                // words. The last good tree stays below it.
-                GlassNotice(tone: .outside, title: error.description) { EmptyView() }
+            if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
+                // The core's line for a core that does not answer, or for a
+                // refused request; never the error's fixed label. The last
+                // good tree stays below it.
+                GlassNotice(tone: .outside, title: line) { EmptyView() }
             }
             if store.phase == .loading && isEmpty {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity)
@@ -297,14 +298,13 @@ struct TracesTreeView: View {
             flag: Self.flag(entry),
             selected: selection == entry.entryId,
             // D10 default: a session's pill opens its review.
-            submitTitle: Self.reviewTitle,
+            submitTitle: store.words?.review,
             onSelect: { selection = entry.entryId },
             onSubmit: { onReview(entry.entryId) }
         )
         .id(entry.entryId)
     }
 
-    static let reviewTitle = MonitorWords.review
 
     static func toolSub(_ tool: TracesTree.ToolNode) -> String? {
         let parts = [tool.waiting > 0 ? String(tool.waiting) : nil, TracesStore.sourceLine(tool)].compactMap { $0 }
@@ -357,6 +357,8 @@ struct TracesTreeView: View {
 struct SessionInspectorView: View {
     let client: any DaemonDataClient
     let entry: DaemonData.QueueEntry?
+    /// The tab's words, from the core.
+    let words: MonitorTracesCopy?
 
     /// The preview, keyed by the session it was asked for. Only the
     /// selected session's answer is ever read out of it.
@@ -379,10 +381,12 @@ struct SessionInspectorView: View {
                             .glassType(GlassTokens.TypeScale.title)
                             .foregroundStyle(GlassColor.textPrimary)
                             .lineLimit(3)
-                        if let failure {
-                            GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
+                        if let failure, let line = words?.line(for: failure) {
+                            GlassNotice(tone: .outside, title: line) { EmptyView() }
                         }
-                        GlassKeyValueList(Self.rows(entry, summary))
+                        if let words {
+                            GlassKeyValueList(Self.rows(entry, summary, words: words))
+                        }
                         if let reasons = entry.secondLook, !reasons.isEmpty {
                             // The core's fixed reason labels until K4 gives
                             // them words.
@@ -419,7 +423,9 @@ struct SessionInspectorView: View {
     }
 
     /// One word a row, and only what the daemon reported. Unknown is a dash.
-    static func rows(_ entry: DaemonData.QueueEntry, _ summary: DaemonData.PreviewSummary?) -> [GlassKeyValueList.Item] {
+    static func rows(
+        _ entry: DaemonData.QueueEntry, _ summary: DaemonData.PreviewSummary?, words: MonitorTracesCopy
+    ) -> [GlassKeyValueList.Item] {
         let dash = "—"
         func bytes(_ value: Int?) -> String {
             value.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? dash
@@ -427,18 +433,18 @@ struct SessionInspectorView: View {
         func number(_ value: Int?) -> String { value.map(String.init) ?? dash }
         let tool = SourceKind(rawValue: entry.declaredSource ?? entry.source)?.displayName ?? entry.source
         return [
-            .init(MonitorWords.tool, tool),
-            .init(MonitorWords.folder, entry.projectLabel),
-            .init(MonitorWords.started, entry.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? dash),
-            .init(MonitorWords.length, entry.durationSecs.map {
+            .init(words.tool, tool),
+            .init(words.folder, entry.projectLabel),
+            .init(words.started, entry.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? dash),
+            .init(words.length, entry.durationSecs.map {
                 Duration.seconds($0).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
             } ?? dash),
-            .init(MonitorWords.prompts, number(entry.userTurns)),
-            .init(MonitorWords.size, bytes(entry.sizeBytes)),
-            .init(MonitorWords.sends, bytes(summary?.wouldSendBytes)),
+            .init(words.prompts, number(entry.userTurns)),
+            .init(words.size, bytes(entry.sizeBytes)),
+            .init(words.sends, bytes(summary?.wouldSendBytes)),
             // Absent until scrubbed: a dash, never zero.
-            .init(MonitorWords.marks, number(entry.marks)),
-            .init(MonitorWords.unsure, number(entry.unsureSpans)),
+            .init(words.marks, number(entry.marks)),
+            .init(words.unsure, number(entry.unsureSpans)),
         ]
     }
 }
@@ -477,21 +483,4 @@ struct PreviewSlot: Equatable {
     }
 }
 
-/// The monitor's own words, in one place, while the core has none for
-/// them. TODO(K4): every one of these moves to the Rust core's copy and is
-/// read across the ABI, like the consent words already are; this enum is
-/// the list to move, and nothing outside it may add a label. Debug-only,
-/// with the monitor.
-enum MonitorWords {
-    static let review = "Review"
-    static let tool = "Tool"
-    static let folder = "Folder"
-    static let started = "Started"
-    static let length = "Length"
-    static let prompts = "Prompts"
-    static let size = "Size"
-    static let sends = "Sends"
-    static let marks = "Marks"
-    static let unsure = "Unsure"
-}
 #endif

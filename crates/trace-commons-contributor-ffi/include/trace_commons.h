@@ -2348,6 +2348,18 @@ char*       tc_legacy_migration_offer_json(void);
  */
 char*       tc_legacy_migration_refusal_text(const char* label);
 
+/* The glass monitor's Traces words (preview_copy::monitor_traces_copy):
+ * the inspector's row labels, the review's actions, and the lines for a core
+ * that does not answer. NULL only on a caught panic.
+ */
+char*       tc_monitor_traces_copy_json(void);
+
+/* The Traces badge's text equivalent (preview_copy::decisions_owed_text).
+ * A negative decisions_owed is an unknown count, never zero. The EMPTY
+ * STRING for zero. NULL only on a caught panic.
+ */
+char*       tc_decisions_owed_text(int64_t decisions_owed);
+
 /* The connecting-inference step's sentences (K12,
  * consent_copy::inference_connection_copy). NULL only on a caught panic.
  */

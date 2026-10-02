@@ -31,6 +31,11 @@ final class TracesStore {
     /// dropped, so an older read never overwrites a newer tree.
     private var generation = 0
 
+    /// The tab's words, from the core (`tc_monitor_traces_copy_json`),
+    /// decoded once rather than on every redraw. Nil leaves a label out
+    /// rather than writing one here.
+    let words: MonitorTracesCopy? = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())
+
     init(client: any DaemonDataClient) {
         self.client = client
     }

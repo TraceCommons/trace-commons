@@ -118,6 +118,19 @@ public enum TCCoreCopy {
         take(tc_privacy_scan_copy_json())
     }
 
+    /// `tc_monitor_traces_copy_json`: the monitor's Traces words. Decoded by
+    /// `TCShellCore.MonitorTracesCopy`.
+    public static func monitorTracesCopyJSON() -> String? {
+        take(tc_monitor_traces_copy_json())
+    }
+
+    /// `tc_decisions_owed_text`: the Traces badge's text equivalent. Nil
+    /// `decisionsOwed` is an unknown count, which the core never words as
+    /// zero; the empty string is zero (no badge).
+    public static func decisionsOwedText(_ decisionsOwed: Int?) -> String? {
+        take(tc_decisions_owed_text(decisionsOwed.map(Int64.init) ?? -1))
+    }
+
     /// `tc_quit_prompt_json` with no handle: the prompt for a process with no
     /// watcher to stop. `TCDaemon.quitPromptJSON()` is the one to use while
     /// a daemon handle exists.
