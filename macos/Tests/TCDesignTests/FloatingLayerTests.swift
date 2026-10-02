@@ -29,18 +29,22 @@ final class FloatingLayerTests: XCTestCase {
         }
     }
 
+    /// Under Reduce Transparency a floating surface is opaque: the painted
+    /// tier over the opaque pane base, not a translucent fill showing the
+    /// map's dots sharply through its text. In a pane nothing changes, since
+    /// the pane under it is already opaque.
+    func test_reduceTransparencyMakesAFloatingSurfaceOpaque() {
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: true, reduceTransparency: true), .opaqueBase)
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: false, reduceTransparency: true), .painted)
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: false, reduceTransparency: false), .painted)
+        let native: GlassSurfaceBacking
+        if #available(macOS 26.0, *) { native = .liquidGlass } else { native = .blur }
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: true, reduceTransparency: false), native)
+        XCTAssertEqual(GlassTokens.Color.paneOpaque.alpha, 1)
+    }
+
     private static func sources() throws -> [(String, String)] {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/TCDesign")
-        let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
-            .compactMap { $0 as? URL }
-            .filter { $0.pathExtension == "swift" }
-        XCTAssertGreaterThanOrEqual(files.count, 8)
-        return try files.map { ($0.lastPathComponent, try String(contentsOf: $0, encoding: .utf8)) }
-            .sorted { $0.0 < $1.0 }
+        try DesignSources.all()
     }
 }
 

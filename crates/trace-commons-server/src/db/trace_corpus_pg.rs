@@ -133,14 +133,15 @@ const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
 const TRACE_NEAR_CREDIT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash, near_call_json, \
     status, payout_near_account_id, created_at, submitted_at, near_transaction_hash, \
-    last_error_hash, confirmed_at";
+    last_error_hash, confirmed_at, instrument_id";
 
-// The account-hold outbox table has no payout designation; project a typed NULL
-// so the shared `row_to_near_credit_outbox_item` mapper can read the column.
+// The account-hold outbox table has no payout designation and no pipeline
+// instrument; project typed NULLs so the shared `row_to_near_credit_outbox_item`
+// mapper can read both columns.
 const TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, credit_hold_id AS settlement_batch_id, credit_account_hash, \
     near_call_json, status, NULL::text AS payout_near_account_id, created_at, submitted_at, \
-    near_transaction_hash, last_error_hash, confirmed_at";
+    near_transaction_hash, last_error_hash, confirmed_at, NULL::text AS instrument_id";
 
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS: &str = "\
     tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref, \
@@ -628,6 +629,7 @@ fn row_to_near_credit_outbox_item(
         near_transaction_hash: row.get("near_transaction_hash"),
         last_error_hash: row.get("last_error_hash"),
         confirmed_at: row.get("confirmed_at"),
+        instrument_id: row.get("instrument_id"),
     })
 }
 
@@ -1611,6 +1613,126 @@ async fn append_trace_audit_row_in_transaction(
     Ok(())
 }
 
+/// The session half of a source-session withdrawal (#1021), on the caller's
+/// transaction. When `submission_id` is mapped to one of `account_id`'s
+/// source sessions, this marks the session withdrawn (the first withdrawal's
+/// time is kept) -- which also takes the session row's lock, so no new
+/// mapping or cooperating content write lands while the sibling list is in
+/// use -- and returns that time and every submission mapped to the session,
+/// by id. Every sibling is checked to belong to the account before anything
+/// else is written; one that does not refuses the whole withdrawal
+/// (`TraceSourceSessionConflict`). `None` when the submission is not mapped
+/// for this account: nothing is locked or written.
+pub(crate) async fn withdraw_source_session_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    account_id: Uuid,
+    submission_id: Uuid,
+    withdrawn_at: DateTime<Utc>,
+) -> Result<Option<(DateTime<Utc>, Vec<Uuid>)>, DatabaseError> {
+    let mapping = tx
+        .query_opt(
+            "SELECT session_digest FROM trace_submission_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND submission_id = $3",
+            &[&tenant_id, &account_id, &submission_id],
+        )
+        .await?;
+    let Some(mapping) = mapping else {
+        return Ok(None);
+    };
+    let digest: Vec<u8> = mapping.get(0);
+    let row = tx
+        .query_one(
+            "UPDATE trace_source_sessions
+             SET withdrawn_at = COALESCE(withdrawn_at, $4)
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+             RETURNING withdrawn_at",
+            &[&tenant_id, &account_id, &digest, &withdrawn_at],
+        )
+        .await?;
+    let first_withdrawn_at: DateTime<Utc> = row.get(0);
+    let mapped = tx
+        .query(
+            "SELECT submission_id FROM trace_submission_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+             ORDER BY submission_id",
+            &[&tenant_id, &account_id, &digest],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, Uuid>(0))
+        .collect::<Vec<_>>();
+    // Validate all siblings before any content mutation or returning IDs
+    // to the file/object cleanup caller. The session lock prevents new
+    // mappings and cooperating content writes while this snapshot is used.
+    for id in &mapped {
+        if !source_submission_owned_by_account(tx, tenant_id, *id, account_id).await? {
+            return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+        }
+    }
+    Ok(Some((first_withdrawn_at, mapped)))
+}
+
+/// The per-submission half of a source-session withdrawal, on the caller's
+/// transaction, which already holds the submission row locked (or knows it
+/// is gone: `content_status` is `None`). Writes the `trace_withdrawals` row
+/// (first writer wins, so a retry keeps the first tier and time) and moves
+/// the submission to `revoked` with `withdrawn_at`, `revoked_at` and
+/// `purged_at` set. The tier: any export membership ever recorded --
+/// invalidated or not, or `exported_elsewhere` (an export the caller knows
+/// of that `trace_export_manifest_items` does not record) -- put copies out;
+/// otherwise an accepted submission, or one whose row is gone, was in the
+/// commons; otherwise it was not distributed.
+pub(crate) async fn record_source_submission_withdrawal_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    content_status: Option<&str>,
+    withdrawn_at: DateTime<Utc>,
+    exported_elsewhere: bool,
+) -> Result<(), DatabaseError> {
+    let prior_status = content_status.unwrap_or("purged");
+    let exported: bool = tx
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM trace_export_manifest_items
+                  WHERE tenant_id = $1 AND submission_id = $2)",
+            &[&tenant_id, &submission_id],
+        )
+        .await?
+        .get(0);
+    let reach = if exported || exported_elsewhere {
+        "commons_distributed"
+    } else if prior_status == "accepted" || content_status.is_none() {
+        "commons_not_distributed"
+    } else {
+        "not_distributed"
+    };
+    tx.execute(
+        "INSERT INTO trace_withdrawals
+            (tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+        &[
+            &tenant_id,
+            &submission_id,
+            &withdrawn_at,
+            &prior_status,
+            &reach,
+        ],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE trace_submissions SET status = 'revoked',
+            withdrawn_at = COALESCE(withdrawn_at, $3),
+            revoked_at = COALESCE(revoked_at, $3),
+            purged_at = COALESCE(purged_at, $3), updated_at = NOW()
+         WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant_id, &submission_id, &withdrawn_at],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Claims and content creation take this lock before the session lock. It
 /// covers the absent-content case, where a row lock cannot serialize ownership.
 /// Withdrawal takes the session lock then content row locks and never this lock.
@@ -1809,47 +1931,14 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<Option<TraceSourceSessionWithdrawal>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let mapping = tx
-            .query_opt(
-                "SELECT session_digest FROM trace_submission_sessions
-             WHERE tenant_id = $1 AND account_id = $2 AND submission_id = $3",
-                &[&tenant_id, &account_id, &submission_id],
-            )
-            .await?;
-        let Some(mapping) = mapping else {
+        let Some((first_withdrawn_at, mapped)) =
+            withdraw_source_session_on_tx(&tx, tenant_id, account_id, submission_id, withdrawn_at)
+                .await?
+        else {
             return Ok(None);
         };
-        let digest: Vec<u8> = mapping.get(0);
-        let row = tx
-            .query_one(
-                "UPDATE trace_source_sessions
-             SET withdrawn_at = COALESCE(withdrawn_at, $4)
-             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
-             RETURNING withdrawn_at",
-                &[&tenant_id, &account_id, &digest, &withdrawn_at],
-            )
-            .await?;
-        let first_withdrawn_at: DateTime<Utc> = row.get(0);
-        let mapped = tx
-            .query(
-                "SELECT submission_id FROM trace_submission_sessions
-             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
-             ORDER BY submission_id",
-                &[&tenant_id, &account_id, &digest],
-            )
-            .await?;
-        // Validate all siblings before any content mutation or returning IDs
-        // to the file/object cleanup caller. The session lock prevents new
-        // mappings and cooperating content writes while this snapshot is used.
-        for mapped_row in &mapped {
-            let id: Uuid = mapped_row.get(0);
-            if !source_submission_owned_by_account(&tx, tenant_id, id, account_id).await? {
-                return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
-            }
-        }
         let mut affected_submission_ids = Vec::with_capacity(mapped.len());
-        for mapped_row in mapped {
-            let id: Uuid = mapped_row.get(0);
+        for id in mapped {
             affected_submission_ids.push(id);
             let content = tx
                 .query_opt(
@@ -1858,40 +1947,14 @@ impl TraceCorpusStore for PgBackend {
                     &[&tenant_id, &id],
                 )
                 .await?;
-            let prior_status: String = content
-                .as_ref()
-                .map(|row| row.get(0))
-                .unwrap_or_else(|| "purged".into());
-            let exported: bool = tx
-                .query_one(
-                    "SELECT EXISTS(SELECT 1 FROM trace_export_manifest_items
-                  WHERE tenant_id = $1 AND submission_id = $2)",
-                    &[&tenant_id, &id],
-                )
-                .await?
-                .get(0);
-            let reach = if exported {
-                "commons_distributed"
-            } else if prior_status == "accepted" || content.is_none() {
-                "commons_not_distributed"
-            } else {
-                "not_distributed"
-            };
-            tx.execute(
-                "INSERT INTO trace_withdrawals
-                    (tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (tenant_id, submission_id) DO NOTHING",
-                &[&tenant_id, &id, &first_withdrawn_at, &prior_status, &reach],
-            )
-            .await?;
-            tx.execute(
-                "UPDATE trace_submissions SET status = 'revoked',
-                    withdrawn_at = COALESCE(withdrawn_at, $3),
-                    revoked_at = COALESCE(revoked_at, $3),
-                    purged_at = COALESCE(purged_at, $3), updated_at = NOW()
-                 WHERE tenant_id = $1 AND submission_id = $2",
-                &[&tenant_id, &id, &first_withdrawn_at],
+            let content_status: Option<String> = content.as_ref().map(|row| row.get(0));
+            record_source_submission_withdrawal_on_tx(
+                &tx,
+                tenant_id,
+                id,
+                content_status.as_deref(),
+                first_withdrawn_at,
+                false,
             )
             .await?;
         }
@@ -2315,6 +2378,38 @@ impl TraceCorpusStore for PgBackend {
         Ok(record)
     }
 
+    async fn get_trace_submissions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT
+                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis
+                 FROM trace_submissions
+                 WHERE tenant_id = $1 AND submission_id = ANY($2)",
+                &[&tenant_id, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_submission).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
     async fn list_trace_submissions(
         &self,
         tenant_id: &str,
@@ -2635,6 +2730,34 @@ impl TraceCorpusStore for PgBackend {
                  WHERE tenant_id = $1
                  ORDER BY occurred_at ASC",
                 &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_credit_event).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn list_trace_credit_events_for_submissions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT
+                    tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
+                    event_type, points_delta, reason, external_ref, actor_principal_ref,
+                    actor_role, settlement_state, occurred_at, witness_provenance_class
+                 FROM trace_credit_ledger
+                 WHERE tenant_id = $1 AND submission_id = ANY($2)
+                 ORDER BY occurred_at ASC",
+                &[&tenant_id, &submission_ids],
             )
             .await
             .map_err(DatabaseError::Postgres)?;

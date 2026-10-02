@@ -28,8 +28,8 @@ the link.
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback, withdrawal tombstone repair) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
-| Running the versioned pipeline lab (design stage) | [`./pipeline-lab.md`](./pipeline-lab.md) |
-| Qualifying a versioned pipeline candidate (design stage) | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
+| Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
+| Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Activating or containing the versioned pipeline (design stage) | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
@@ -203,10 +203,13 @@ Every runbook in this directory, with a one-line description.
 - [`./pipeline-activation.md`](./pipeline-activation.md) — design stage:
   activation, containment, rollback, and legacy-writer retirement for
   qualified bundles.
-- [`./pipeline-lab.md`](./pipeline-lab.md) — design stage: local corpus,
-  package, report, catalog, and qualification workflow.
-- [`./pipeline-qualification.md`](./pipeline-qualification.md) — design stage:
-  package trust, operational evidence, restore checks, and promotion gates.
+- [`./pipeline-lab.md`](./pipeline-lab.md) — running a versioned pipeline
+  corpus locally with `pipeline.py run` and `pipeline.py package`: the HF
+  pin, report fields, isolation and privacy, and failure labels.
+- [`./pipeline-qualification.md`](./pipeline-qualification.md) — running
+  `pipeline.py qualify` and `restore-drill` locally: what each check does,
+  the result contract, `.local/` outputs, the catalog, and what local
+  evidence is not.
 - [`./pii-classify-policy.md`](./pii-classify-policy.md) — `TRACE_COMMONS_PII_CLASSIFY_POLICY`
   (`all-events` / `prose-only`): the measured ~10x round-trip reduction from
   restricting the NEAR AI privacy filter to prose events, the accepted

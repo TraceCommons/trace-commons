@@ -2728,6 +2728,27 @@ pub use crate::daemon::private_inference::{
 mod tests {
     use super::*;
 
+    /// Reviewed on #1162: the Scrub check's two hold labels used to fall
+    /// through to "Status unavailable", so every shell listed held sessions
+    /// that are still waiting as "N -- Status unavailable". Both share the
+    /// one line #1162 merged, which says the session is waiting and was not
+    /// sent.
+    #[test]
+    fn the_scrub_check_holds_have_waiting_lines_not_status_unavailable() {
+        use crate::daemon::second_look::{
+            REASON_SCRUB_CHECK_MANUAL, REASON_SECOND_LOOK_REVIEW_REQUIRED,
+        };
+        for label in [
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let line = queue_outcome_line(label);
+            assert_eq!(line, "Waiting for review; not sent", "{label}");
+            assert!(line.contains("Waiting"), "{line}");
+            assert!(line.contains("not sent"), "{line}");
+        }
+    }
+
     /// The failure this surface exists to prevent, pinned.
     ///
     /// If the destination could not be read, or was read and is not ours, the
