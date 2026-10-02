@@ -260,6 +260,8 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_index_invalidations",
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
+    "pipeline_bundle_qualifications",
+    "pipeline_attempt_artifacts",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1655,6 +1657,26 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         106,
         "versioned_pipeline_exports",
         include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+    ),
+    // V107 (PR 4) adds the immutable production-qualification table the
+    // qualification store writes once per bundle; PR 5's activation gate
+    // reads it. No cross-tenant claim function, same as V105/V106.
+    (
+        107,
+        "versioned_pipeline_qualification",
+        include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+    ),
+    // V108 (PR 4) adds the table that tracks each pipeline phase attempt's
+    // objects, staged before they are published and committed with the
+    // phase commit, so the worker can sweep the objects of an attempt that
+    // crashed, lost its lease, or had its commit refused. A committed
+    // attempt's objects are object refs of the submission, which the
+    // withdrawal and main's revocation-propagation worker delete. No
+    // cross-tenant claim function, same as V105/V106/V107.
+    (
+        108,
+        "versioned_pipeline_attempt_artifacts",
+        include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
     ),
 ];
 
@@ -7011,6 +7033,8 @@ mod tests {
         (95, 4),
         (105, 4),
         (106, 4),
+        (107, 4),
+        (108, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7752,6 +7776,8 @@ mod tests {
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7785,6 +7811,8 @@ mod tests {
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7870,6 +7898,10 @@ mod tests {
         let review_invalidation =
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql");
         let exports = include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql");
+        let qualification =
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql");
+        let attempt_artifacts =
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -7985,6 +8017,76 @@ mod tests {
             assert!(
                 !exports.contains(forbidden),
                 "V106 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_bundle_qualifications",
+            "reject_pipeline_bundle_qualification_mutation",
+            "CREATE TRIGGER pipeline_bundle_qualifications_reject_update",
+            "CREATE TRIGGER pipeline_bundle_qualifications_reject_delete",
+            "ON DELETE CASCADE",
+            "ALTER TABLE pipeline_bundle_qualifications FORCE ROW LEVEL SECURITY;",
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_bundle_qualifications",
+            "GRANT SELECT, INSERT ON pipeline_bundle_qualifications TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                qualification.contains(required),
+                "V107 is missing `{required}`"
+            );
+        }
+        for forbidden in ["SECURITY DEFINER", "SET search_path", "ON DELETE RESTRICT"] {
+            assert!(
+                !qualification.contains(forbidden),
+                "V107 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_attempt_artifacts",
+            "artifact IN ('approved', 'index-command', 'score-neighbors')",
+            // Rebase 10, option D: a compatibility Score stages its rows
+            // before its tenant lock, with no hash; a committed row always
+            // has one.
+            "ciphertext_sha256 TEXT CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            "OR (state = 'committed' AND committed_at IS NOT NULL AND ciphertext_sha256 IS NOT NULL)",
+            // Rebase 10 review, M8: an `approved` row always has its hash.
+            "CONSTRAINT pipeline_attempt_artifacts_approved_hash\n        CHECK (ciphertext_sha256 IS NOT NULL OR artifact <> 'approved')",
+            "state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed'))",
+            "PRIMARY KEY (tenant_id, run_id, lease_token, artifact)",
+            "UNIQUE (tenant_id, object_key)",
+            "ON DELETE CASCADE",
+            "CREATE INDEX pipeline_attempt_artifacts_due",
+            // Final review M6: a row moves only from `staged` to
+            // `committed`, so a committed object never reaches the sweep.
+            "guard_pipeline_attempt_artifact_update",
+            "CREATE TRIGGER pipeline_attempt_artifacts_guard_update",
+            "BEFORE UPDATE ON pipeline_attempt_artifacts",
+            "IF OLD.state = 'staged'\n        AND NEW.state = 'committed'\n        AND NEW.committed_at IS NOT NULL",
+            "(OLD.ciphertext_sha256 IS NOT NULL\n                AND NEW.ciphertext_sha256 = OLD.ciphertext_sha256)",
+            "OR (OLD.ciphertext_sha256 IS NULL\n                AND NEW.ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            "ALTER TABLE pipeline_attempt_artifacts FORCE ROW LEVEL SECURITY;",
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_attempt_artifacts",
+            "GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
+            "GRANT UPDATE (state, committed_at, ciphertext_sha256) ON pipeline_attempt_artifacts\n    TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                attempt_artifacts.contains(required),
+                "V108 is missing `{required}`"
+            );
+        }
+        // Controller ruling R2-1: a committed attempt's objects are object
+        // refs of the submission, which the withdrawal and main's
+        // revocation-propagation worker delete, so V108 has no `deleted`
+        // state for the sweep to record a second deletion in.
+        for forbidden in [
+            "SECURITY DEFINER",
+            "SET search_path",
+            "ON DELETE RESTRICT",
+            "'deleted'",
+            "deleted_at",
+        ] {
+            assert!(
+                !attempt_artifacts.contains(forbidden),
+                "V108 must not contain `{forbidden}`"
             );
         }
     }

@@ -61,3 +61,6 @@ __pycache__/
 
 # Node tooling under tools/ (trajectory-export)
 node_modules/
+
+# pipeline tooling evidence, logs, and database dumps
+/.local/

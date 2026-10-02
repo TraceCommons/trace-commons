@@ -25,6 +25,13 @@ pub enum IndexFault {
 #[derive(Debug, Clone)]
 struct StoredEntry {
     revision_id: Uuid,
+    /// The digest `content_digest` derives from the raw content hash and the
+    /// embedding together -- binds the two so a second upsert under the same
+    /// key with either changed is a conflict rather than a silent overwrite.
+    content_digest: String,
+    /// The raw content hash `upsert` was called with, kept alongside the
+    /// digest so `entry_set_hash` can hash over the same fields a caller
+    /// actually wrote, not a derived digest.
     content_hash: String,
     embedding: Vec<f32>,
 }
@@ -115,6 +122,34 @@ impl IsolatedPipelineIndex {
             .map(|(_, entry)| entry.revision_id)
             .collect::<std::collections::BTreeSet<_>>()
             .len()
+    }
+
+    /// SHA-256 over every entry this tenant's index holds under `index_id`:
+    /// the entry id, its raw content hash, and its embedding as
+    /// little-endian `f32` bytes, in ascending entry-id order. The
+    /// `BTreeMap` already iterates in `(tenant, index, entry_id)` order, so
+    /// filtering to one tenant and index yields entries already sorted by
+    /// entry id -- no separate sort is needed.
+    ///
+    /// Used to compare two indexes' contents for exact equality -- for
+    /// example a live index against one rebuilt from the same sealed
+    /// commands -- without comparing every entry field by hand. Two indexes
+    /// with the same entries under the same tenant and index id hash equal
+    /// regardless of the order they were written in.
+    pub fn entry_set_hash(&self, tenant_storage_ref: &TenantStorageRef, index_id: &str) -> String {
+        let state = self.state.lock().expect("index mutex");
+        let mut hasher = Sha256::new();
+        for ((stored_tenant, stored_index, entry_id), entry) in &state.entries {
+            if stored_tenant == tenant_storage_ref && stored_index == index_id {
+                hasher.update(entry_id.as_bytes());
+                hasher.update(entry.content_hash.as_bytes());
+                hasher.update(b"\0");
+                for value in &entry.embedding {
+                    hasher.update(value.to_le_bytes());
+                }
+            }
+        }
+        format!("sha256:{:x}", hasher.finalize())
     }
 }
 
@@ -222,7 +257,7 @@ impl VectorIndexWriter for IsolatedPipelineIndex {
         );
         let digest = content_digest(embedding, content_hash);
         let result = if let Some(existing) = state.entries.get(&map_key) {
-            if existing.content_hash == digest {
+            if existing.content_digest == digest {
                 IndexUpsertResult::Unchanged
             } else {
                 return Err(IndexWriteError::ContentConflict);
@@ -232,7 +267,8 @@ impl VectorIndexWriter for IsolatedPipelineIndex {
                 map_key,
                 StoredEntry {
                     revision_id: key.revision_id,
-                    content_hash: digest,
+                    content_digest: digest,
+                    content_hash: content_hash.to_string(),
                     embedding: embedding.to_vec(),
                 },
             );

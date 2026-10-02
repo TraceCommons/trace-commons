@@ -262,13 +262,13 @@ use trace_commons_server::trace_score_attestation::{
     sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore,
-    PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNearPayoutControls,
-    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
-    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
-    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
-    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
-    is_pipeline_score_object_ref,
+    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+    PgPipelineStore, PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport,
+    PipelineLeaseConfig, PipelineNearPayoutControls, PipelineNearSettlementMode,
+    PipelineNoveltyUtilityChecks, PipelineQuotaScope, PipelineReceiptRequest,
+    PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction, PipelineReviewClaim,
+    PipelineReviewClaimOutcome, PipelineService, PipelineWithdrawalFollowUpState,
+    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
 use trace_commons_server::versioned_pipeline_product::{
@@ -1687,6 +1687,10 @@ struct AppState {
     /// refused at startup without a pipeline runtime
     /// (`validate_pipeline_drain_tenants`).
     pipeline_drain_tenant_ids: Arc<BTreeSet<String>>,
+    /// The index rebuilds this process runs
+    /// (`POST /v1/workers/pipeline/index-rebuild`): one per tenant at a time,
+    /// drained at shutdown (`pipeline_runtime::PipelineIndexRebuilds`).
+    pipeline_index_rebuilds: Arc<pipeline_runtime::PipelineIndexRebuilds>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -4480,6 +4484,7 @@ impl AppState {
             pipeline_runtime_required,
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
+            pipeline_index_rebuilds: Arc::default(),
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -8900,6 +8905,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(register_stats_refresh_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
+        .route(
+            "/v1/workers/pipeline/index-rebuild",
+            post(pipeline_index_rebuild_handler),
+        )
         .route(
             "/v1/workers/gate/evaluate",
             post(gate_evaluate_worker_handler),
@@ -19781,7 +19790,8 @@ use near_provisioning::{
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
 mod pipeline_runtime;
 use pipeline_runtime::{
-    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime, pipeline_readiness_handler,
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
+    pipeline_index_rebuild_handler, pipeline_readiness_handler,
     pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 
@@ -42497,8 +42507,10 @@ fn pipeline_reviewer_principal_ref(principal_ref: &str) -> String {
     )
 }
 
-/// 404 when no pipeline runtime was injected -- the shared refusal for all
-/// three pipeline review routes.
+/// 404 when no pipeline runtime was injected -- the shared refusal for every
+/// route that needs one: the three pipeline review routes, the pipeline
+/// withdrawal route, the admin index-invalidation requeue route, and the
+/// worker index-rebuild route.
 fn require_pipeline_service(state: &AppState) -> ApiResult<&Arc<PipelineService>> {
     state
         .pipeline_service
