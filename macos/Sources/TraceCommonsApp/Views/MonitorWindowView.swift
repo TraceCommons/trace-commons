@@ -1,6 +1,7 @@
 #if DEBUG
 import SwiftUI
 import TCDesign
+import TCShellCore
 
 /// The glass monitor window (R5 of #1173): the three-pane shell the native
 /// screens are built into. The leading pane holds the tabs, the center the
@@ -32,10 +33,27 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.mapTab") private var mapTab: MapTab = .traces
     @SceneStorage("monitor.showsLeading") private var showsLeading = true
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
+    /// The selected session's entry id; empty for none.
+    @SceneStorage("monitor.selectedSession") private var selectedSession = ""
+
+    /// The screens' data (C1). Sample data in this debug window until K1
+    /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
+    /// the set (`normalDay` by default).
+    @State private var traces = TracesStore(client: MonitorWindowView.dataClient())
+
+    static func dataClient() -> any DaemonDataClient {
+        let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] ?? ""
+        return DaemonDataWiring.sample(SampleDaemonClient.SampleSet(rawValue: name) ?? .normalDay)
+    }
 
     var body: some View {
         GlassThreePane(showsLeading: showsLeading, showsTrailing: showsInspector) {
-            MonitorLeadingPane(tab: $tab, inferenceDot: inferenceDot, onSettings: { openSettings() })
+            MonitorLeadingPane(tab: $tab, inferenceDot: inferenceDot, onSettings: { openSettings() }) {
+                switch tab {
+                case .traces: TracesTreeView(store: traces, selection: $selectedSession)
+                case .home, .inference: Spacer(minLength: 0)
+                }
+            }
         } center: {
             MonitorMapPane(
                 mapTab: $mapTab,
@@ -44,11 +62,19 @@ struct MonitorWindowView: View {
                 showsInspector: $showsInspector)
         } trailing: {
             GlassPane {
-                Color.clear
+                if tab == .traces {
+                    SessionInspectorView(client: traces.client, entry: selectedEntry)
+                }
             }
         }
         .frame(minWidth: GlassTokens.Size.mapWidth, minHeight: GlassTokens.Size.windowHeight * 0.7)
         .glassWindow()
+        .task { traces.start() }
+    }
+
+    /// The selected session, while it is still in the tree.
+    private var selectedEntry: DaemonData.QueueEntry? {
+        traces.tree.allSessions.first { $0.entryId == selectedSession }
     }
 
     /// Inference's dot: Private AI on or off, and none while the daemon has
@@ -62,10 +88,11 @@ struct MonitorWindowView: View {
 /// The leading pane: the window's controls and Settings on the top row,
 /// then the tabs. The tabs' screens are R6 (Traces), R8 (Inference) and R9
 /// (Home).
-private struct MonitorLeadingPane: View {
+private struct MonitorLeadingPane<Content: View>: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
     let onSettings: () -> Void
+    @ViewBuilder let content: () -> Content
     @Environment(\.glassWindowControlsInset) private var controlsInset
 
     var body: some View {
@@ -82,7 +109,8 @@ private struct MonitorLeadingPane: View {
                     segments: MonitorWindowView.Tab.allCases.map { item in
                         GlassSegment(item.rawValue, value: item, dot: item == .inference ? inferenceDot : nil)
                     })
-                Spacer(minLength: 0)
+                content()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
     }

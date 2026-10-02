@@ -112,8 +112,7 @@ public struct GlassListRow: View {
 
             if let watched {
                 Toggle(watchLabel, isOn: watched)
-                    .labelsHidden()
-                    .toggleStyle(GlassToggleStyle(.watch))
+                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
             }
 
             Group {

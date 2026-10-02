@@ -348,9 +348,14 @@ public enum GlassSwitchKind: Sendable, Equatable {
 /// `Toggle("Start at login", isOn: $on).toggleStyle(GlassToggleStyle(.settings))`.
 public struct GlassToggleStyle: ToggleStyle {
     private let kind: GlassSwitchKind
+    private let showsLabel: Bool
 
-    public init(_ kind: GlassSwitchKind = .standard) {
+    /// `showsLabel: false` draws the switch alone; the label still names it
+    /// for VoiceOver. `.labelsHidden()` does not reach a custom style before
+    /// macOS 15, so this is the way to hide it.
+    public init(_ kind: GlassSwitchKind = .standard, showsLabel: Bool = true) {
         self.kind = kind
+        self.showsLabel = showsLabel
     }
 
     public func makeBody(configuration: Configuration) -> some View {
@@ -363,8 +368,12 @@ public struct GlassToggleStyle: ToggleStyle {
         case .settings: GlassTokens.Color.toggleOnSettings
         case .watch: GlassTokens.Color.watchOn
         }
-        return HStack(spacing: GlassTokens.Space.s6) {
+        return HStack(spacing: showsLabel ? GlassTokens.Space.s6 : 0) {
+            // Hidden, the label stays in the tree at no size, so the
+            // combined element below still reads it to VoiceOver.
             configuration.label
+                .frame(width: showsLabel ? nil : 0, height: showsLabel ? nil : 0)
+                .clipped()
             Button {
                 withAnimation(.easeOut(duration: GlassTokens.Motion.fast)) { configuration.isOn.toggle() }
             } label: {
@@ -382,6 +391,7 @@ public struct GlassToggleStyle: ToggleStyle {
             .accessibilityAddTraits(.isToggle)
             .accessibilityValue(configuration.isOn ? "on" : "off")
         }
+        .accessibilityElement(children: .combine)
     }
 }
 

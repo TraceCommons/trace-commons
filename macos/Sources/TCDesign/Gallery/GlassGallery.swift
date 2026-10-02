@@ -162,9 +162,9 @@ public struct GlassGallery: View {
                 )
             }
             HStack(spacing: 14) {
-                Toggle("Toggle", isOn: $toggle).labelsHidden().toggleStyle(GlassToggleStyle())
-                Toggle("settings", isOn: $settingsToggle).labelsHidden().toggleStyle(GlassToggleStyle(.settings))
-                Toggle("watch", isOn: $watched).labelsHidden().toggleStyle(GlassToggleStyle(.watch))
+                Toggle("Toggle", isOn: $toggle).toggleStyle(GlassToggleStyle(showsLabel: false))
+                Toggle("settings", isOn: $settingsToggle).toggleStyle(GlassToggleStyle(.settings, showsLabel: false))
+                Toggle("watch", isOn: $watched).toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
                 Toggle("Single", isOn: $checked).toggleStyle(GlassCheckboxStyle())
                 Toggle("Group", isOn: Binding(
                     get: { children.allSatisfy { $0 } },
