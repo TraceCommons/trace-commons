@@ -124,7 +124,6 @@ public struct GlassBadge: View {
         Text("\(count)")
             .glassType(GlassTokens.TypeScale.micro)
             .monospacedDigit()
-            .monospacedDigit()
             .foregroundStyle(subtle ? GlassColor.textPrimary : GlassTokens.Color.textOnStatus.color)
             .padding(.horizontal, 5)
             .frame(minWidth: subtle ? nil : 16, minHeight: subtle ? 14 : 16)
