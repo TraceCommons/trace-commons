@@ -9475,10 +9475,10 @@ async fn containment_refuses_new_receipts_and_keeps_pending_work() {
         "the run completed while the tenant was contained"
     );
 
-    // (6) The row says `pipeline` again: P2, refused above, is accepted. The
-    // admission attempt of a refused upload, where there is one, ends as
-    // failed through the handler's own `attempt.finish`, so the retry can
-    // reserve again.
+    // (6) The row says `pipeline` again: P2, refused above, is accepted. A
+    // static-token upload has no admission attempt, so there is none to
+    // release here; the refusals of an upload with admission release their
+    // attempt (`a_contained_upload_releases_its_admission_attempt`).
     write_routing_as_operator(tenant, "pipeline").await;
     let client = reqwest::Client::new();
     let (status, accepted) = post_trace(&client, &base, &fixture.token, &body_of(&p2)).await;
@@ -9782,6 +9782,284 @@ async fn the_receipt_transactions_routing_answer_wins_over_the_handlers_read() {
     assert_eq!(fixture.runs(tenant, id).await, 0);
     assert!(fixture.legacy_record_exists(tenant, id).await);
     assert_eq!(fixture.owner(tenant, id).await, Some(ReceiptOwner::Legacy));
+}
+
+/// One NEAR-anchored tenant whose uploads go through the admission ledger
+/// (`state.admission`: the evidence-verified reservation the replay tests
+/// use), with a pipeline service, over a real HTTP server. The upload's
+/// bytes and evidence headers are built once and reused for every POST, so a
+/// retry is the same request. `listed` puts the tenant on the receipts list.
+struct AdmissionRoutingFixture {
+    admin: PgBackend,
+    backend: Arc<PgBackend>,
+    tenant: String,
+    anchor: String,
+    submission_id: Uuid,
+    token: String,
+    body: Vec<u8>,
+    evidence_headers: HeaderMap,
+    base: String,
+    stop: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    _dir: tempfile::TempDir,
+}
+
+impl AdmissionRoutingFixture {
+    async fn new(token: &str, listed: bool) -> Option<Self> {
+        let backend = runtime_backend(4).await?;
+        let url = pipeline_http_database_url()
+            .await
+            .expect("checked by runtime_backend, which already returned Some");
+        let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+            .await
+            .expect("connect as the migration owner for the near-account fixture rows");
+        let principal = o1_principal_for(token);
+        let (tenant, anchor, _device) =
+            admission_pg_tests::provision_synthetic_near_account(&admin, &principal).await;
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, &tenant, token, TokenRole::Contributor);
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let service = o1_pipeline_service(backend.clone(), &dir);
+        let (provider, provider_key, signer, trust) = o1_evidence_identity();
+        let mut state = test_state_with_tokens(dir.path().to_path_buf(), tokens);
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.db_mirror = Some(backend.clone() as Arc<dyn Database>);
+        state_mut.require_db_mirror_writes = true;
+        state_mut.accept_medium_risk_submissions = true;
+        state_mut.pipeline_service = Some(service);
+        state_mut.pipeline_activation = routing_store(&backend);
+        if listed {
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+                TraceTenantRolloutFeature::PipelineReceipts,
+                &[tenant.as_str()],
+            );
+        }
+        state_mut.admission = Some(admission::AdmissionConfig {
+            limits: o1_admission_limits(),
+            providers: trust.clone(),
+        });
+        let (body, evidence_headers, policy_version) = evidenced_upload(
+            &state,
+            token,
+            &anchor,
+            &signer,
+            &provider,
+            &provider_key,
+            trust,
+            None,
+            "the routed upload",
+        )
+        .await;
+        Arc::make_mut(&mut state).witness_bypass =
+            trace_commons_server::redaction_witness::config::witness_bypass_config_from_values(
+                Some("true"),
+                Some(&signer.address()),
+                Some("synthetic-admission-measurement"),
+                Some(&policy_version),
+                None,
+            )
+            .unwrap();
+        let submission_id = first_receipt_submission_id(&body);
+        let (base, stop, server) = serve_pipeline_app(state).await;
+        Some(Self {
+            admin,
+            backend,
+            tenant,
+            anchor,
+            submission_id,
+            token: token.to_string(),
+            body,
+            evidence_headers,
+            base,
+            stop,
+            server,
+            _dir: dir,
+        })
+    }
+
+    /// The upload, with its evidence headers: the same request every time.
+    async fn post(&self) -> (StatusCode, serde_json::Value) {
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/traces", self.base))
+            .headers(reqwest_headers(auth_headers(&self.token)))
+            .headers(reqwest_headers(self.evidence_headers.clone()))
+            .header("content-type", "application/json")
+            .body(self.body.clone())
+            .send()
+            .await
+            .expect("upload over real HTTP");
+        let status = response.status();
+        let text = response.text().await.expect("a response body");
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)),
+        )
+    }
+
+    /// The admission ledger row's status for the upload's submission id.
+    async fn ledger_status(&self) -> Option<String> {
+        self.admin
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .query_opt(
+                "SELECT status FROM trace_admission_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&self.tenant, &self.submission_id],
+            )
+            .await
+            .unwrap()
+            .map(|row| row.get(0))
+    }
+
+    /// The cost bound the tenant's admission account holds, and the one the
+    /// whole ledger holds: a reservation adds the processing cost bound to
+    /// both, and only a release (from `reserved`) gives it back.
+    async fn cost_bound_used(&self) -> (i64, i64) {
+        let client = self.admin.trace_pool_for_test().get().await.unwrap();
+        let account = client
+            .query_opt(
+                "SELECT cost_bound_used FROM trace_admission_accounts
+                  WHERE tenant_id = $1 AND anchor_hash = $2",
+                &[&self.tenant, &self.anchor],
+            )
+            .await
+            .unwrap()
+            .map_or(0, |row| row.get(0));
+        let global = client
+            .query_opt(
+                "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
+                &[],
+            )
+            .await
+            .unwrap()
+            .map_or(0, |row| row.get(0));
+        (account, global)
+    }
+
+    async fn runs(&self) -> i64 {
+        self.admin
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT COUNT(*) FROM pipeline_runs WHERE tenant_id = $1",
+                &[&self.tenant],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    async fn shutdown(self) {
+        self.stop.send(()).expect("send shutdown");
+        join_within(self.server, 20, "admission routing test server").await;
+    }
+}
+
+/// A refusal of a new upload that the route decision makes leaves the
+/// admission attempt `reserved`, so the handler's `attempt.finish(false)`
+/// releases it: the ledger row is `released` (not `processing`, which holds a
+/// live lease and refuses a retry as in progress, and not `completed`), and
+/// the cost bound the reservation took is given back. An immediate retry is
+/// refused again for its own reason, never as in progress, and is accepted
+/// once the row says `pipeline`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contained_upload_releases_its_admission_attempt() {
+    let Some(fixture) = AdmissionRoutingFixture::new("near-contained-release-token", true).await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "pipeline").await;
+    routing_store(&fixture.backend)
+        .expect("a routing store")
+        .contain(
+            tenant,
+            &format!("principal_sha256:{}", "ab".repeat(32)),
+            "contain_for_test",
+        )
+        .await
+        .expect("contain the tenant");
+    assert_eq!(
+        fixture.ledger_status().await,
+        None,
+        "nothing is reserved yet"
+    );
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    let (status, refused) = fixture.post().await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    assert_eq!(
+        fixture.ledger_status().await.as_deref(),
+        Some("released"),
+        "the attempt was reserved, not processing, and `finish(false)` released it"
+    );
+    assert_eq!(
+        fixture.cost_bound_used().await,
+        (0, global_before),
+        "the reservation's cost bound is given back"
+    );
+    assert_eq!(fixture.runs().await, 0);
+
+    // Immediately again: the same refusal, not `409` in progress.
+    let (status, refused) = fixture.post().await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("released"));
+    assert_eq!(fixture.cost_bound_used().await, (0, global_before));
+
+    // The row says `pipeline` again: the retry is accepted and completes.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, accepted) = fixture.post().await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs().await, 1);
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("completed"));
+
+    fixture.shutdown().await;
+}
+
+/// The same release for a tenant whose row says `pipeline` but that is not on
+/// this process's receipts list: `503 pipeline_tenant_not_served`, the
+/// attempt released, its cost bound given back, and a retry refused for the
+/// same reason, not as in progress.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_not_served_upload_releases_its_admission_attempt() {
+    let Some(fixture) = AdmissionRoutingFixture::new("near-not-served-release-token", false).await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    for attempt in ["first", "retry"] {
+        let (status, refused) = fixture.post().await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{attempt}: {refused}"
+        );
+        assert_eq!(refused["error"], "pipeline_tenant_not_served", "{attempt}");
+        assert_eq!(
+            fixture.ledger_status().await.as_deref(),
+            Some("released"),
+            "{attempt}"
+        );
+        assert_eq!(
+            fixture.cost_bound_used().await,
+            (0, global_before),
+            "{attempt}"
+        );
+        assert_eq!(fixture.runs().await, 0, "{attempt}");
+    }
+
+    fixture.shutdown().await;
 }
 
 /// A withdrawal of a pipeline submission does not depend on the tenant's
