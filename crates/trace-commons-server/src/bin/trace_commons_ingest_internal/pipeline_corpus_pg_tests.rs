@@ -552,6 +552,7 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
         .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary))
+        .with_unqualified_routing(true)
         .build()?;
         Ok(Arc::new(service))
     }

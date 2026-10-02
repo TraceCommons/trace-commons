@@ -10529,7 +10529,8 @@ fn minimal_pipeline_service_builder(
         },
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_unqualified_routing(true);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -10996,7 +10997,8 @@ fn qualified_pipeline_service_with_privacy(
         },
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_unqualified_routing(true);
     if let Some(extra_scorer) = extra_scorer {
         builder = builder.with_scorer(extra_scorer);
     }
@@ -11070,7 +11072,8 @@ fn pipeline_service_with_unqualified_named_scorer(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(Arc::new(QualifiedTestAuthority))
-    .with_privacy(Arc::new(QualifiedTestPrivacy));
+    .with_privacy(Arc::new(QualifiedTestPrivacy))
+    .with_unqualified_routing(true);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -11123,7 +11126,8 @@ fn qualified_compatibility_pipeline_service(
     .with_embedder(embedder)
     .with_authority(Arc::new(QualifiedTestAuthority))
     .with_privacy(Arc::new(QualifiedTestPrivacy))
-    .with_novelty_utility_checks(checks);
+    .with_novelty_utility_checks(checks)
+    .with_unqualified_routing(true);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }

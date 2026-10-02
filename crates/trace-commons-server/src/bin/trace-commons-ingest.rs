@@ -14291,6 +14291,11 @@ async fn pipeline_owned_submission_receipt(
             | PipelineReceiptResult::SourceSessionWithdrawn => {
                 Err(internal_error("pipeline_replay_result_unexpected"))
             }
+            // Neither routing result is ever built by `replay_receipt`, and
+            // nothing here acts on one yet: fail closed.
+            PipelineReceiptResult::LegacyOwned | PipelineReceiptResult::NotRouted(_) => {
+                Err(internal_error("pipeline_routing_result_unexpected"))
+            }
         };
     }
     if let Some(store) = state.pipeline_store.as_ref() {
@@ -14421,6 +14426,12 @@ async fn route_pipeline_receipt(
         // item 5).
         PipelineReceiptResult::SourceSessionWithdrawn => {
             Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"))
+        }
+        // The routing results: the handler does not act on them yet, so a
+        // receipt the pipeline refused for its routing or its owner fails
+        // closed rather than reaching the legacy upsert.
+        PipelineReceiptResult::LegacyOwned | PipelineReceiptResult::NotRouted(_) => {
+            Err(internal_error("pipeline_routing_result_unexpected"))
         }
     }
 }

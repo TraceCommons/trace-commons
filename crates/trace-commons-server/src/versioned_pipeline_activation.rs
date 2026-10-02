@@ -61,7 +61,7 @@ impl RoutingState {
         }
     }
 
-    fn from_db(value: &str) -> Result<Self, DatabaseError> {
+    pub(crate) fn from_db(value: &str) -> Result<Self, DatabaseError> {
         match value {
             "legacy" => Ok(Self::Legacy),
             "pipeline" => Ok(Self::Pipeline),

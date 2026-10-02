@@ -2400,7 +2400,8 @@ async fn test_service(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
-    .with_privacy(default_privacy_boundary());
+    .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true);
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -2468,6 +2469,7 @@ async fn test_service_with_adapters_and_caps(
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
     .build()
     .expect("build pipeline service");
     Arc::new(service)
@@ -2518,7 +2520,8 @@ async fn test_service_with_adapters_and_index(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
-    .with_privacy(default_privacy_boundary());
+    .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true);
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -2579,6 +2582,7 @@ async fn test_service_with_embedder(
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
     .build()
     .expect("build pipeline service");
     Arc::new(service)
@@ -2617,7 +2621,8 @@ async fn test_service_with_controls(
         },
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_unqualified_routing(true);
     if let Some(authority) = authority {
         builder = builder.with_authority(authority);
     }
@@ -2755,6 +2760,7 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
     .build()
     .expect("build a pipeline service holding both Q and U");
 
@@ -3244,6 +3250,7 @@ async fn score_lease_test_service(
     .with_lease_config(lease_config)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
     .build()
     .expect("build pipeline service");
     Arc::new(service)
@@ -5226,6 +5233,7 @@ async fn transformed_content_flows_to_score_and_replay_stays_exact() {
     .with_embedder(embedder.clone())
     .with_authority(allow_all_authority())
     .with_privacy(Arc::new(MarkerRedactingBoundary))
+    .with_unqualified_routing(true)
     .build()
     .expect("build pipeline service");
 
@@ -5343,6 +5351,10 @@ async fn quota_is_counted_before_the_store_under_concurrency() {
         match task.await.unwrap() {
             PipelineReceiptResult::Created(_) => created += 1,
             PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Tenant) => refused += 1,
+            routing
+            @ (PipelineReceiptResult::LegacyOwned | PipelineReceiptResult::NotRouted(_)) => {
+                panic!("a tenant without a routing row is refused by routing: {routing:?}")
+            }
             other => panic!("unexpected receipt result {other:?}"),
         }
     }
@@ -6139,6 +6151,10 @@ async fn concurrent_receipts_for_one_key_commit_one_object() {
             PipelineReceiptResult::Replayed(run) => {
                 replayed += 1;
                 run_ids.push(run.run_id);
+            }
+            routing
+            @ (PipelineReceiptResult::LegacyOwned | PipelineReceiptResult::NotRouted(_)) => {
+                panic!("a tenant without a routing row is refused by routing: {routing:?}")
             }
             other => panic!("unexpected receipt result {other:?}"),
         }
@@ -8830,6 +8846,7 @@ async fn held_index_test_service_with_leases(
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
     .with_lease_config(lease_config)
     .build()
     .expect("build pipeline service");
@@ -17333,6 +17350,7 @@ fn compatibility_test_builder_with_scorer(
     .with_embedder(embedder)
     .with_authority(authority)
     .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
     .with_novelty_utility_checks(checks);
     match near {
         Some(near) => service.with_payout(
@@ -17429,6 +17447,48 @@ async fn activate_bundle_as_operator(tenant_id: &str, bundle_id: &str) {
         .expect("activate the bundle as the operator");
     assert_eq!(activated, 1, "the bundle is registered for the tenant");
     tx.commit().await.expect("commit activating the bundle");
+}
+
+/// Writes `tenant_id`'s routing row as an operator, through an owner
+/// connection, with the statement of `write_routing_in` and no event: the
+/// receipt tests need a routing state, not the history of how a tenant came
+/// to it. The row satisfies V110's checks (an activation record id, an actor
+/// reference, a reason code, an evidence hash). `state` is `legacy`,
+/// `pipeline`, or `contained`.
+async fn write_routing_as_operator(tenant_id: &str, state: &str) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+         ON CONFLICT (tenant_id) DO NOTHING",
+        &[&tenant_id],
+    )
+    .await
+    .expect("seed the tenant for a routing row");
+    tx.execute(
+        "INSERT INTO pipeline_tenant_routing (
+            tenant_id, routing_state, activation_record_id,
+            actor_principal_ref, reason_code, evidence_hash, recorded_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
+         ON CONFLICT (tenant_id) DO UPDATE
+         SET routing_state = EXCLUDED.routing_state,
+             activation_record_id = EXCLUDED.activation_record_id,
+             actor_principal_ref = EXCLUDED.actor_principal_ref,
+             reason_code = EXCLUDED.reason_code,
+             evidence_hash = EXCLUDED.evidence_hash,
+             recorded_at = EXCLUDED.recorded_at",
+        &[
+            &tenant_id,
+            &state,
+            &uuid::Uuid::new_v4(),
+            &routing_actor(),
+            &"test_routing_state",
+            &sha256_prefixed(b"test-routing-state"),
+        ],
+    )
+    .await
+    .expect("write the routing row as the operator");
+    tx.commit().await.expect("commit the routing row");
 }
 
 /// Review Focus 3 / Ruling S11: a compatibility run's Trace Credit leg
@@ -21949,7 +22009,8 @@ fn payout_test_builder(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
-    .with_privacy(default_privacy_boundary());
+    .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true);
     if let Some(payout) = payout {
         builder = builder.with_payout(near, payout);
     }
@@ -26282,6 +26343,7 @@ async fn a_withheld_novelty_utility_leg_never_reaches_its_adapter() {
         .with_embedder(embedder)
         .with_authority(allow_all_authority())
         .with_privacy(default_privacy_boundary())
+        .with_unqualified_routing(true)
         .with_novelty_utility_checks(issuing_checks())
         .build()
         .expect("build the compatibility service"),
@@ -26724,6 +26786,7 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
             .with_embedder(embedder)
             .with_authority(allow_all_authority())
             .with_privacy(default_privacy_boundary())
+            .with_unqualified_routing(true)
             .with_novelty_utility_checks(issuing_checks())
             .build()
             .expect("build pipeline service"),
@@ -31061,6 +31124,7 @@ async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
     .with_novelty_utility_checks(issuing_checks())
     .build()
     .expect("build pipeline service");
@@ -31688,4 +31752,1103 @@ async fn a_routing_change_waits_for_a_receipt_holding_the_routing_lock() {
         .expect("the routing change completes once the lock is free");
     assert_eq!(contained.routing_state, RoutingState::Contained);
     assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 1);
+}
+
+// Receipt ownership and routing in the receipt transaction (delivery PR 5,
+// Task 3). Each test uses a fresh tenant, so the tests do not share rows.
+
+/// What a receipt writes for a tenant, counted through an owner connection
+/// (it sees every table). A refused receipt stores nothing: every field but
+/// the ones a test expects stays at its default.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ReceiptRows {
+    runs: i64,
+    outcomes: i64,
+    submissions: i64,
+    object_refs: i64,
+    staging: i64,
+    usage: i64,
+    ownership: i64,
+}
+
+async fn receipt_rows(tenant_id: &str) -> ReceiptRows {
+    ReceiptRows {
+        runs: count_tenant_rows(tenant_id, "pipeline_runs").await,
+        outcomes: count_tenant_rows(tenant_id, "phase_outcomes").await,
+        submissions: count_tenant_rows(tenant_id, "trace_submissions").await,
+        object_refs: count_tenant_rows(tenant_id, "trace_object_refs").await,
+        staging: count_tenant_rows(tenant_id, "pipeline_receipt_artifacts").await,
+        usage: count_tenant_rows(tenant_id, "pipeline_admission_usage").await,
+        ownership: count_tenant_rows(tenant_id, "pipeline_receipt_ownership").await,
+    }
+}
+
+/// A service over the reference scorer and embedder that never calls
+/// `with_unqualified_routing`, so it keeps the default (`false`): the one
+/// shape of service that `test_service` and its siblings no longer build.
+fn service_with_default_routing(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+) -> PipelineService {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(false),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        SettlementAdapterRegistry::new(Vec::new()).expect("build settlement adapter registry"),
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .build()
+    .expect("build pipeline service")
+}
+
+/// A store that holds the write of a receipt's object until the test lets it
+/// go: `publish_serialized_json` (the receipt's one object write) tells the
+/// test it has begun over `reached`, then waits on `release`. It holds the
+/// first write only, and every other call goes straight to the store
+/// underneath. The write runs on a blocking thread, after the staging
+/// transaction committed and before the commit transaction begins, so a test
+/// can change the world in exactly that window.
+struct PausingArtifactStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    reached: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl TraceArtifactStore for PausingArtifactStore {
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let release = self.release.lock().unwrap().take();
+        if let Some(release) = release {
+            if let Some(reached) = self.reached.lock().unwrap().take() {
+                let _ = reached.send(());
+            }
+            release
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("the test released the held write within the bound");
+        }
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// The receipt transaction commits the pipeline's ownership row with the
+/// run: the first owner row a pipeline receipt writes is `owner = 'pipeline'`
+/// and names a run that does not exist yet when the row is inserted (the
+/// deferred foreign key is checked at commit). A replay adds no row.
+#[tokio::test]
+async fn a_receipt_commits_its_ownership_with_its_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let activation = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("owned");
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    assert_eq!(
+        activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let PipelineReceiptResult::Created(run) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the first receipt creates a run")
+    };
+    assert_eq!(
+        activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        Some(ReceiptOwnership {
+            owner: ReceiptOwner::Pipeline,
+            submission_id: env.submission_id,
+            run_id: Some(run.run_id),
+        })
+    );
+
+    let PipelineReceiptResult::Replayed(replayed) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the same key and body replay")
+    };
+    assert_eq!(replayed.run_id, run.run_id);
+    assert_eq!(
+        visible_rows(&backend, &tenant, "pipeline_receipt_ownership").await,
+        1
+    );
+}
+
+/// Review Focus 1: a submission id that the legacy path owns is never given
+/// a pipeline run. (a) The legacy path claimed the id (`claim_legacy_receipt`).
+/// (b) No claim exists, but a legacy submission row does (a legacy receipt
+/// from before the tenant had ownership rows): the pipeline's `trace_submissions`
+/// insert would collide with it, and the receipt is `LegacyOwned` rather than
+/// an internal error.
+#[tokio::test]
+async fn a_legacy_submission_is_never_given_a_pipeline_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let activation = PipelineActivationStore::new(backend.clone());
+
+    // (a) The legacy path claimed the id.
+    let tenant = routing_tenant("legacy-claimed");
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    assert_eq!(
+        activation
+            .claim_legacy_receipt(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        ReceiptOwner::Legacy
+    );
+    let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, PipelineReceiptResult::LegacyOwned),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        receipt_rows(&tenant).await,
+        ReceiptRows {
+            ownership: 1,
+            ..ReceiptRows::default()
+        },
+        "a refused receipt stores nothing: no run, outcome, submission, object ref, \
+         staging row, or usage row"
+    );
+    assert!(
+        receipt_artifact_rows(&backend, &tenant)
+            .await
+            .iter()
+            .all(|row| row.state != "committed"),
+        "no committed receipt artifact exists for the key"
+    );
+    assert_eq!(count_files_under(dir.path()), 0);
+    assert_eq!(
+        activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        Some(ReceiptOwnership {
+            owner: ReceiptOwner::Legacy,
+            submission_id: env.submission_id,
+            run_id: None,
+        })
+    );
+
+    // (b) No ownership row, but a legacy submission row for the id.
+    let tenant = routing_tenant("legacy-record");
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+        tx.execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                redaction_counts
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+            &[
+                &tenant,
+                &env.submission_id,
+                &env.trace_id,
+                &"legacy-principal",
+                &"ironclaw.trace_contribution.v1",
+                &"v1",
+                &serde_json::json!([]),
+                &serde_json::json!([]),
+                &"retention-default",
+                &"accepted",
+                &"low",
+                &"v1",
+                &env.privacy.redaction_hash,
+                &serde_json::json!({}),
+            ],
+        )
+        .await
+        .expect("seed a legacy submission row");
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(
+        activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        None
+    );
+    let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, PipelineReceiptResult::LegacyOwned),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        receipt_rows(&tenant).await,
+        ReceiptRows {
+            submissions: 1,
+            ..ReceiptRows::default()
+        },
+        "only the legacy submission row exists"
+    );
+    assert_eq!(count_files_under(dir.path()), 0);
+}
+
+/// Review Focus 1: the ownership row is the one place the two paths meet. In
+/// each round a fresh id is claimed by the legacy path and received by the
+/// pipeline at the same moment (the claim starts a little later each round, so
+/// it lands in a different part of the receipt). Whichever commits first owns
+/// the id, and the other learns it: a legacy claim means no run, and a
+/// created run means the claim comes back `Pipeline`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_owners_cannot_commit_for_one_submission() {
+    let Some(backend) = runtime_backend(8).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let activation = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("two-owners");
+    service.register_default_bundle(&tenant).await.unwrap();
+
+    let mut created = 0;
+    for round in 0..20u64 {
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        let claim_delay = std::time::Duration::from_millis(round * 4);
+        let (claimed, received) = tokio::join!(
+            async {
+                tokio::time::sleep(claim_delay).await;
+                activation
+                    .claim_legacy_receipt(&tenant, env.submission_id)
+                    .await
+            },
+            service.submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS)),
+        );
+        let claimed = claimed.unwrap();
+        let received = received.unwrap();
+
+        let owner_rows: i64 = {
+            let mut owner = owner_client().await;
+            let tx = owner_tenant_tx(&mut owner, &tenant).await;
+            let count = tx
+                .query_one(
+                    "SELECT COUNT(*) FROM pipeline_receipt_ownership
+                      WHERE tenant_id = $1 AND submission_id = $2",
+                    &[&tenant, &env.submission_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            tx.commit().await.unwrap();
+            count
+        };
+        assert_eq!(owner_rows, 1, "round {round}: exactly one ownership row");
+        let runs_for_submission: i64 = {
+            let mut owner = owner_client().await;
+            let tx = owner_tenant_tx(&mut owner, &tenant).await;
+            let count = tx
+                .query_one(
+                    "SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND submission_id = $2",
+                    &[&tenant, &env.submission_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            tx.commit().await.unwrap();
+            count
+        };
+        let ownership = activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap()
+            .expect("the id has an owner");
+        match (claimed, &received) {
+            (ReceiptOwner::Legacy, PipelineReceiptResult::LegacyOwned) => {
+                assert_eq!(
+                    runs_for_submission, 0,
+                    "round {round}: a legacy id has no run"
+                );
+                assert_eq!(ownership.owner, ReceiptOwner::Legacy);
+            }
+            (ReceiptOwner::Pipeline, PipelineReceiptResult::Created(run)) => {
+                created += 1;
+                assert_eq!(runs_for_submission, 1, "round {round}");
+                assert_eq!(ownership.owner, ReceiptOwner::Pipeline);
+                assert_eq!(ownership.run_id, Some(run.run_id));
+            }
+            other => panic!("round {round}: two owners for one submission id: {other:?}"),
+        }
+    }
+
+    // Every refused attempt removed its own staging row and object; only the
+    // runs that were created keep theirs.
+    let rows = receipt_artifact_rows(&backend, &tenant).await;
+    assert_eq!(rows.len(), created);
+    assert!(rows.iter().all(|row| row.state == "committed"));
+    assert_eq!(count_files_under(dir.path()), created);
+}
+
+/// A service built without `with_unqualified_routing` serves a tenant only
+/// through a committed routing row: a tenant with no row is treated as a
+/// legacy tenant, and nothing is stored. The same receipt goes through once
+/// the operator routes the tenant to the pipeline.
+#[tokio::test]
+async fn a_service_without_unqualified_routing_refuses_a_tenant_with_no_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = service_with_default_routing(backend.clone(), artifact_store(&dir));
+    assert!(
+        !service.unqualified_routing(),
+        "the default of unqualified routing is false"
+    );
+    let (qualified_free, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    assert!(
+        qualified_free.unqualified_routing(),
+        "the test harness builds services that allow unqualified routing"
+    );
+
+    let tenant = routing_tenant("no-row");
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            result,
+            PipelineReceiptResult::NotRouted(RoutingState::Legacy)
+        ),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(receipt_rows(&tenant).await, ReceiptRows::default());
+    assert_eq!(count_files_under(dir.path()), 0);
+
+    write_routing_as_operator(&tenant, "pipeline").await;
+    let PipelineReceiptResult::Created(run) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("a tenant routed to the pipeline gets a run")
+    };
+    assert_eq!(count_runs(&backend, &tenant).await, 1);
+    assert_eq!(
+        PipelineActivationStore::new(backend)
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap()
+            .and_then(|ownership| ownership.run_id),
+        Some(run.run_id)
+    );
+}
+
+/// A tenant whose routing row is `contained` or `legacy` gets no new run:
+/// the receipt returns `NotRouted` and stores nothing (no staging row and no
+/// usage row for its key). A retry of a receipt that already has a run is
+/// still answered from that run in every routing state, and the row beats the
+/// service's flag (this harness service allows unqualified routing).
+#[tokio::test]
+async fn a_contained_or_legacy_tenant_gets_no_new_run_and_keeps_its_replays() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = routing_tenant("refused-states");
+    write_routing_as_operator(&tenant, "pipeline").await;
+
+    let env_a = envelope(uuid::Uuid::new_v4()).await;
+    let raw_a = serde_json::to_vec(&env_a).unwrap();
+    let key_a = env_a.submission_id.to_string();
+    let PipelineReceiptResult::Created(run_a) = submit_registered(
+        &service,
+        receipt(&tenant, &key_a, &raw_a, &env_a, NO_LIMITS),
+    )
+    .await
+    .unwrap() else {
+        panic!("a tenant routed to the pipeline gets a run")
+    };
+    let rows_after_a = receipt_rows(&tenant).await;
+    assert_eq!(rows_after_a.runs, 1);
+    assert_eq!(rows_after_a.ownership, 1);
+    let files_after_a = count_files_under(dir.path());
+
+    let mut changed_a = raw_a.clone();
+    changed_a.push(b' ');
+    for (state, expected) in [
+        ("contained", RoutingState::Contained),
+        ("legacy", RoutingState::Legacy),
+    ] {
+        write_routing_as_operator(&tenant, state).await;
+
+        // A new receipt is refused and stores nothing.
+        let env_new = envelope(uuid::Uuid::new_v4()).await;
+        let raw_new = serde_json::to_vec(&env_new).unwrap();
+        let key_new = env_new.submission_id.to_string();
+        let refused = submit_registered(
+            &service,
+            receipt(&tenant, &key_new, &raw_new, &env_new, NO_LIMITS),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(&refused, PipelineReceiptResult::NotRouted(state) if *state == expected),
+            "{state}: unexpected result {refused:?}"
+        );
+        assert_eq!(
+            receipt_rows(&tenant).await,
+            rows_after_a,
+            "{state}: the refused receipt stored nothing"
+        );
+        assert_eq!(count_files_under(dir.path()), files_after_a);
+        let new_key_usage: i64 = {
+            let mut owner = owner_client().await;
+            let tx = owner_tenant_tx(&mut owner, &tenant).await;
+            let count = tx
+                .query_one(
+                    "SELECT COUNT(*) FROM pipeline_admission_usage
+                      WHERE tenant_id = $1 AND request_idempotency_key = $2",
+                    &[&tenant, &sha256_prefixed(key_new.as_bytes())],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            tx.commit().await.unwrap();
+            count
+        };
+        assert_eq!(
+            new_key_usage, 0,
+            "{state}: no usage row for the refused key"
+        );
+
+        // A retry of the receipt that has a run is still answered.
+        let PipelineReceiptResult::Replayed(replayed) = submit_registered(
+            &service,
+            receipt(&tenant, &key_a, &raw_a, &env_a, NO_LIMITS),
+        )
+        .await
+        .unwrap() else {
+            panic!("{state}: a retry of an existing receipt replays")
+        };
+        assert_eq!(replayed.run_id, run_a.run_id);
+        let conflict = submit_registered(
+            &service,
+            receipt(&tenant, &key_a, &changed_a, &env_a, NO_LIMITS),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(conflict, PipelineReceiptResult::ContentConflict),
+            "{state}: unexpected result {conflict:?}"
+        );
+        assert_eq!(receipt_rows(&tenant).await, rows_after_a);
+    }
+}
+
+/// Review Focus 2: a receipt between its staging transaction and its commit
+/// transaction cannot commit after containment. Both transactions take the
+/// tenant's routing lock shared, and containment takes it exclusively, so the
+/// commit transaction (which starts after containment committed) reads the
+/// new routing state and refuses. The refused attempt's object and staging
+/// row are discarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_receipt_in_flight_cannot_commit_after_containment() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(PausingArtifactStore {
+        inner: artifact_store(&dir),
+        reached: std::sync::Mutex::new(Some(reached_tx)),
+        release: std::sync::Mutex::new(Some(release_rx)),
+    });
+    let (service, _, _) = test_service(backend.clone(), store, minimal_config(false), None).await;
+    let activation = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("in-flight");
+    write_routing_as_operator(&tenant, "pipeline").await;
+    service.register_default_bundle(&tenant).await.unwrap();
+
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let in_flight = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+        }
+    });
+    tokio::task::spawn_blocking(move || {
+        reached_rx.recv_timeout(std::time::Duration::from_secs(10))
+    })
+    .await
+    .unwrap()
+    .expect("the receipt's object write began");
+
+    // The receipt is past its staging transaction and not yet in its commit
+    // transaction: its staging row is committed, and it holds no lock.
+    let staged = receipt_artifact_rows(&backend, &tenant).await;
+    assert_eq!(staged.len(), 1);
+    assert_eq!(staged[0].state, "staged");
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+
+    // Containment commits in that window and does not wait for the receipt.
+    let contained = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        activation.contain(&tenant, &routing_actor(), "contain_during_receipt"),
+    )
+    .await
+    .expect("containment does not wait for a receipt that holds no lock")
+    .expect("contain the tenant");
+    assert_eq!(contained.routing_state, RoutingState::Contained);
+
+    release_tx.send(()).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), in_flight)
+        .await
+        .expect("the receipt finishes once its write is released")
+        .expect("the receipt task does not panic")
+        .expect("the receipt is refused, not an error");
+    assert!(
+        matches!(
+            result,
+            PipelineReceiptResult::NotRouted(RoutingState::Contained)
+        ),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        receipt_rows(&tenant).await,
+        ReceiptRows {
+            // The staging transaction counted the key before containment.
+            usage: 1,
+            ..ReceiptRows::default()
+        },
+        "no run, outcome, submission, object ref, ownership row, or staging row"
+    );
+    assert!(receipt_artifact_rows(&backend, &tenant).await.is_empty());
+    assert_eq!(
+        count_files_under(dir.path()),
+        0,
+        "the refused attempt deleted its own object"
+    );
+}
+
+/// Both commit-time conflicts end as `LegacyOwned` with the transaction rolled
+/// back and the attempt discarded: (i) the ownership row exists for the id
+/// (a pipeline run owns it under another key), and (ii) the submission row
+/// exists (a pipeline run from before ownership rows). The ownership row of
+/// (ii), inserted first in the transaction, does not outlive the rollback.
+#[tokio::test]
+async fn a_commit_conflict_on_ownership_or_submission_stores_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+
+    // (i) The ownership row exists: a second key for the same submission id.
+    let tenant = routing_tenant("conflict-ownership");
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let first_key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(first) = submit_registered(
+        &service,
+        receipt(&tenant, &first_key, &raw, &env, NO_LIMITS),
+    )
+    .await
+    .unwrap() else {
+        panic!("the first receipt creates a run")
+    };
+    let rows_after_first = receipt_rows(&tenant).await;
+    assert_eq!((rows_after_first.runs, rows_after_first.ownership), (1, 1));
+    let second_key = format!("{first_key}-again");
+    let result = submit_registered(
+        &service,
+        receipt(&tenant, &second_key, &raw, &env, NO_LIMITS),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(result, PipelineReceiptResult::LegacyOwned),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        receipt_rows(&tenant).await,
+        ReceiptRows {
+            // The staging transaction counted the second key.
+            usage: rows_after_first.usage + 1,
+            ..rows_after_first
+        }
+    );
+    assert_eq!(
+        PipelineActivationStore::new(backend.clone())
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap()
+            .and_then(|ownership| ownership.run_id),
+        Some(first.run_id),
+        "the id keeps its first run"
+    );
+    assert_eq!(
+        receipt_artifact_rows(&backend, &tenant).await.len(),
+        1,
+        "the refused attempt removed its staging row"
+    );
+    assert_eq!(count_files_under(dir.path()), 1);
+
+    // (ii) The submission row exists, with a run and no ownership row.
+    let tenant = routing_tenant("conflict-submission");
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let env = envelope(seeded.submission_id).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = format!("conflict-submission-{}", uuid::Uuid::new_v4());
+    let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, PipelineReceiptResult::LegacyOwned),
+        "unexpected result: {result:?}"
+    );
+    let rows = receipt_rows(&tenant).await;
+    assert_eq!(rows.runs, 1, "only the seeded run");
+    assert_eq!(rows.ownership, 0, "the ownership insert rolled back");
+    assert_eq!(rows.submissions, 1, "only the seeded submission");
+    assert_eq!(
+        rows.staging, 0,
+        "the refused attempt removed its staging row"
+    );
+    assert_eq!(count_files_under(dir.path()), 1, "and its object");
+}
+
+/// A routing change takes the tenant's routing lock exclusively. While a
+/// receipt transaction holds it shared, containment waits and writes nothing;
+/// a receipt transaction that starts after containment began queues behind it
+/// (the lock manager does not let a stream of shared holders starve the
+/// exclusive request); and once the holder commits, containment finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn containment_waits_for_a_receipt_transaction_and_is_not_starved() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let activation = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("not-starved");
+    // The key and the seed `PipelineService` binds (`pipeline_routing_lock`,
+    // `PIPELINE_ROUTING_LOCK_SEED`).
+    let lock_key = format!("pipeline-routing:{tenant}");
+
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let held = holder.transaction().await.unwrap();
+    held.execute(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 2))",
+        &[&lock_key],
+    )
+    .await
+    .unwrap();
+
+    let mut contain = tokio::spawn({
+        let activation = activation.clone();
+        let tenant = tenant.clone();
+        async move {
+            activation
+                .contain(&tenant, &routing_actor(), "contain_first_rollout")
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut contain)
+            .await
+            .is_err(),
+        "containment must wait for the shared holder"
+    );
+    assert_eq!(activation.routing(&tenant).await.unwrap(), None);
+
+    // Once containment queues for the lock, a later shared request does not
+    // get ahead of it. Until then the try succeeds and is released at once.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut later = backend.trace_pool_for_test().get().await.unwrap();
+        let later_tx = later.transaction().await.unwrap();
+        let granted: bool = later_tx
+            .query_one(
+                "SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1, 2))",
+                &[&lock_key],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        later_tx.rollback().await.unwrap();
+        if !granted {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a later shared request must queue behind the waiting containment"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    held.commit().await.unwrap();
+    let contained = tokio::time::timeout(std::time::Duration::from_secs(2), contain)
+        .await
+        .expect("containment returns within 2 s of the holder's commit")
+        .expect("the containment task ends")
+        .expect("containment completes once the lock is free");
+    assert_eq!(contained.routing_state, RoutingState::Contained);
+    assert_eq!(activation.events(&tenant, 10).await.unwrap().len(), 1);
+}
+
+/// Opens a transaction of the runtime login that holds `tenant_id`'s routing
+/// lock exclusively, as a routing change in progress does. The key and the
+/// seed are the ones `PipelineActivationStore` and `PipelineService` bind
+/// (`pipeline_routing_lock`, `PIPELINE_ROUTING_LOCK_SEED`).
+async fn begin_routing_change<'a>(
+    client: &'a mut deadpool_postgres::Client,
+    tenant_id: &str,
+) -> deadpool_postgres::Transaction<'a> {
+    let tx = tenant_tx(client, tenant_id).await;
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 2))",
+        &[&format!("pipeline-routing:{tenant_id}")],
+    )
+    .await
+    .expect("take the routing lock exclusively");
+    tx
+}
+
+/// Writes `state` into the routing row inside `change` and commits it.
+async fn commit_routing_change(
+    change: deadpool_postgres::Transaction<'_>,
+    tenant_id: &str,
+    state: &str,
+) {
+    change
+        .execute(
+            "UPDATE pipeline_tenant_routing SET routing_state = $2 WHERE tenant_id = $1",
+            &[&tenant_id, &state],
+        )
+        .await
+        .expect("write the routing state");
+    change.commit().await.expect("commit the routing change");
+}
+
+/// Both of a receipt's own transactions take the routing lock shared, so a
+/// receipt waits for a routing change that is in progress and reads the
+/// state the change committed. The change holds the lock exclusively and
+/// commits `contained` after the receipt started: (a) a receipt whose staging
+/// transaction meets the change waits, then is refused and stored nothing;
+/// (b) a receipt whose commit transaction meets the change (its object write
+/// is held until the change begins) waits, then is refused and its attempt is
+/// discarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receipt_waits_for_a_routing_change_in_progress() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+
+    // (a) The staging transaction.
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = routing_tenant("change-staging");
+    write_routing_as_operator(&tenant, "pipeline").await;
+    service.register_default_bundle(&tenant).await.unwrap();
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let change = begin_routing_change(&mut holder, &tenant).await;
+    let mut waiting = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut waiting)
+            .await
+            .is_err(),
+        "the staging transaction must wait for the routing change"
+    );
+    assert_eq!(
+        receipt_rows(&tenant).await,
+        ReceiptRows::default(),
+        "the waiting receipt has stored nothing"
+    );
+    commit_routing_change(change, &tenant, "contained").await;
+    drop(holder);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .expect("the receipt finishes once the routing change commits")
+        .expect("the receipt task does not panic")
+        .expect("the receipt is refused, not an error");
+    assert!(
+        matches!(
+            result,
+            PipelineReceiptResult::NotRouted(RoutingState::Contained)
+        ),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(receipt_rows(&tenant).await, ReceiptRows::default());
+    assert_eq!(count_files_under(dir.path()), 0);
+
+    // (b) The commit transaction.
+    let dir = tempfile::tempdir().unwrap();
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(PausingArtifactStore {
+        inner: artifact_store(&dir),
+        reached: std::sync::Mutex::new(Some(reached_tx)),
+        release: std::sync::Mutex::new(Some(release_rx)),
+    });
+    let (service, _, _) = test_service(backend.clone(), store, minimal_config(false), None).await;
+    let tenant = routing_tenant("change-commit");
+    write_routing_as_operator(&tenant, "pipeline").await;
+    service.register_default_bundle(&tenant).await.unwrap();
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let mut waiting = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+        }
+    });
+    tokio::task::spawn_blocking(move || {
+        reached_rx.recv_timeout(std::time::Duration::from_secs(10))
+    })
+    .await
+    .unwrap()
+    .expect("the receipt's object write began");
+
+    // The routing change begins while the receipt is between its transactions
+    // and holds nothing; the receipt then goes on to its commit transaction.
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let change = begin_routing_change(&mut holder, &tenant).await;
+    release_tx.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut waiting)
+            .await
+            .is_err(),
+        "the commit transaction must wait for the routing change"
+    );
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+    commit_routing_change(change, &tenant, "contained").await;
+    drop(holder);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .expect("the receipt finishes once the routing change commits")
+        .expect("the receipt task does not panic")
+        .expect("the receipt is refused, not an error");
+    assert!(
+        matches!(
+            result,
+            PipelineReceiptResult::NotRouted(RoutingState::Contained)
+        ),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        receipt_rows(&tenant).await,
+        ReceiptRows {
+            // The staging transaction counted the key before the change.
+            usage: 1,
+            ..ReceiptRows::default()
+        }
+    );
+    assert_eq!(count_files_under(dir.path()), 0);
 }

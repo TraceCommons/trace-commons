@@ -48,6 +48,7 @@ use crate::trace_corpus_storage::{
     TraceCreditSettlementNearStatus, TraceObjectArtifactKind, TraceObjectRefWrite,
     TraceSubmissionWrite, TraceWitnessProvenanceClass, safe_residual_risk_basis_labels,
 };
+use crate::versioned_pipeline_activation::RoutingState;
 use crate::versioned_pipeline_authority::{
     PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
     PIPELINE_PRIVACY_CONTROL_MISSING_LABEL, PipelineAuthorityProvider, PipelinePrivacyBoundary,
@@ -142,6 +143,12 @@ pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
 /// there: the commit is refused, and a phase records it as a charged retry
 /// under this label (wave 2, fix round 1; review I2, I3).
 pub const PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL: &str = "pipeline_attempt_artifact_missing";
+/// Safe label of a receipt for a submission id that the legacy path owns
+/// (`PipelineReceiptResult::LegacyOwned`): the ownership row names the legacy
+/// path, or a legacy submission row holds the id. A conflict at the receipt's
+/// own inserts (`insert_receipt_records`) carries this label to
+/// `commit_receipt_attempt`, which turns it into the result.
+pub const PIPELINE_LEGACY_RECEIPT_OWNED_LABEL: &str = "legacy_receipt_owned";
 /// A bundle whose own configuration is not qualifiable
 /// (`PipelineBundleQualification::configuration_qualifiable`).
 pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
@@ -1194,7 +1201,8 @@ enum ReceiptStage {
 enum ReceiptCommit {
     Created(PipelineRunRecord),
     /// A refusal found by the final re-checks (a run another attempt
-    /// created, or a tombstone). This attempt's object is not referenced.
+    /// created, a legacy owner, a routing that no longer serves the tenant,
+    /// or a tombstone). This attempt's object is not referenced.
     Refused(PipelineReceiptResult),
     /// This attempt's row is no longer `staged` (the sweeper removed it) or
     /// is due (a sweep that failed may have deleted its object), so it
@@ -4895,6 +4903,75 @@ async fn receipt_key_refusal(
     Ok(staged_with_other_content.then_some(PipelineReceiptResult::ContentConflict))
 }
 
+/// Why a new receipt may not start a run for `tenant_id` now, read inside
+/// `tx`: the legacy path owns the submission id, or the tenant's routing does
+/// not send new receipts to the pipeline. `None` when the receipt may go on.
+/// With `lock`, the tenant's routing lock is held shared for the rest of
+/// `tx`, so a routing change waits for this transaction and no later one
+/// misses the change. The lock is the one `PipelineActivationStore` takes
+/// exclusively: the same key (`pipeline_routing_lock`) and the same seed
+/// (`PIPELINE_ROUTING_LOCK_SEED`).
+///
+/// A caller asks only after it found no run for the receipt's key, so a retry
+/// of an existing receipt is answered from its run in every routing state.
+/// Two single-row reads by primary key, and one lock request with `lock`.
+async fn new_receipt_refusal_in(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    unqualified_routing: bool,
+    lock: bool,
+) -> Result<Option<PipelineReceiptResult>, DatabaseError> {
+    if lock {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, $2))",
+            &[
+                &pipeline_routing_lock(tenant_id),
+                &PIPELINE_ROUTING_LOCK_SEED,
+            ],
+        )
+        .await?;
+    }
+    // The legacy path owns the id when its ownership row says so, or when a
+    // submission row holds the id and no pipeline run does (a legacy receipt
+    // from before ownership rows). A pipeline-owned id has a run.
+    let legacy_owned: bool = tx
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pipeline_receipt_ownership
+                  WHERE tenant_id = $1 AND submission_id = $2 AND owner = 'legacy'
+             ) OR EXISTS (
+                 SELECT 1 FROM trace_submissions s
+                  WHERE s.tenant_id = $1 AND s.submission_id = $2
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pipeline_runs r
+                         WHERE r.tenant_id = s.tenant_id
+                           AND r.submission_id = s.submission_id
+                    )
+             )",
+            &[&tenant_id, &submission_id],
+        )
+        .await?
+        .get(0);
+    if legacy_owned {
+        return Ok(Some(PipelineReceiptResult::LegacyOwned));
+    }
+    let state = tx
+        .query_opt(
+            "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await?
+        .map(|row| RoutingState::from_db(row.get::<_, String>(0).as_str()))
+        .transpose()?;
+    Ok(match state {
+        Some(RoutingState::Pipeline) => None,
+        Some(other) => Some(PipelineReceiptResult::NotRouted(other)),
+        None if unqualified_routing => None,
+        None => Some(PipelineReceiptResult::NotRouted(RoutingState::Legacy)),
+    })
+}
+
 /// The quota a receipt that counts would exceed, if any. A key that already
 /// has a usage row was counted by an earlier attempt, so it is never refused
 /// for its own count.
@@ -5178,12 +5255,21 @@ async fn insert_outcome(
 }
 
 /// Commits the receipt's durable records inside the caller's tenant
-/// transaction: the submission, its source object ref, the run itself, the
-/// Admission outcome, and the attempt's staging row's transition to
-/// `committed` -- which requires the row to be `staged` and to name exactly
-/// the object the object ref records. Unlike the port, this does not insert
-/// a `pipeline_receipt_ownership` row (PR 5 / cross-pipeline ownership is
-/// deferred).
+/// transaction: the pipeline's ownership row for the submission id, the
+/// submission, its source object ref, the run itself, the Admission outcome,
+/// and the attempt's staging row's transition to `committed` -- which
+/// requires the row to be `staged` and to name exactly the object the object
+/// ref records.
+///
+/// The ownership row is the first statement. Its primary key is the one place
+/// where the legacy path's claim (`PipelineActivationStore::claim_legacy_receipt`)
+/// and this insert meet, so exactly one of them succeeds for a submission id:
+/// a concurrent claim makes this insert wait for its outcome. A conflict, here
+/// or at the submission row (a legacy receipt from before ownership rows),
+/// ends in `DatabaseError::Constraint(PIPELINE_LEGACY_RECEIPT_OWNED_LABEL)`,
+/// and the caller rolls the transaction back. The row names a run that does
+/// not exist yet; its foreign key is deferred, so it is checked when the
+/// transaction commits.
 async fn insert_receipt_records(
     tx: &Transaction<'_>,
     run: &NewPipelineRun,
@@ -5210,6 +5296,19 @@ async fn insert_receipt_records(
         .map_err(|_| {
             DatabaseError::Serialization("trace residual risk basis encode failed".to_string())
         })?;
+    let owned = tx
+        .execute(
+            "INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner, run_id)
+             VALUES ($1, $2, 'pipeline', $3)
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+            &[&run.tenant_id, &run.submission_id, &run.run_id],
+        )
+        .await?;
+    if owned != 1 {
+        return Err(DatabaseError::Constraint(
+            PIPELINE_LEGACY_RECEIPT_OWNED_LABEL.to_string(),
+        ));
+    }
     let (submission_status, admission_decision, admission_reason, next_phase, run_state) =
         match admission {
             AdmissionDecision::Admit => ("received", "admit", None, "review", "pending"),
@@ -5271,7 +5370,7 @@ async fn insert_receipt_records(
         .await?;
     if inserted != 1 {
         return Err(DatabaseError::Constraint(
-            "submission identity is already bound to another receipt".to_string(),
+            PIPELINE_LEGACY_RECEIPT_OWNED_LABEL.to_string(),
         ));
     }
     tx.execute(
@@ -6382,6 +6481,19 @@ pub enum PipelineReceiptResult {
     /// committed: nothing is recorded, as `main`'s receipt refuses it
     /// (`source_session_withdrawn`).
     SourceSessionWithdrawn,
+    /// The legacy path owns the submission id: its ownership row says so, or
+    /// a legacy submission row holds the id. The pipeline never gives such an
+    /// id a run, and the receipt stored nothing
+    /// (`PIPELINE_LEGACY_RECEIPT_OWNED_LABEL`).
+    LegacyOwned,
+    /// The tenant's routing does not send new receipts to the pipeline: its
+    /// committed routing row is `legacy` or `contained`, or it has no row and
+    /// the service does not allow unqualified routing
+    /// (`PipelineServiceBuilder::with_unqualified_routing`), which reads as
+    /// `Legacy`. The receipt stored nothing. A retry of a receipt that
+    /// already has a run is never answered this way: it replays in every
+    /// routing state.
+    NotRouted(RoutingState),
 }
 
 /// `PipelineService::replay_receipt`'s result: the outcome for the retried
@@ -6455,6 +6567,7 @@ pub struct PipelineServiceBuilder {
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
     payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
     novelty_utility_checks: PipelineNoveltyUtilityChecks,
+    unqualified_routing: bool,
 }
 
 impl PipelineServiceBuilder {
@@ -6485,6 +6598,7 @@ impl PipelineServiceBuilder {
             privacy: None,
             payout: None,
             novelty_utility_checks: PipelineNoveltyUtilityChecks::default(),
+            unqualified_routing: false,
         }
     }
 
@@ -6562,6 +6676,18 @@ impl PipelineServiceBuilder {
     /// requirement when not called.
     pub fn with_novelty_utility_checks(mut self, checks: PipelineNoveltyUtilityChecks) -> Self {
         self.novelty_utility_checks = checks;
+        self
+    }
+
+    /// Whether a new receipt of a tenant that has no committed routing row
+    /// may start a run. Defaults to `false`: a tenant with no row is a legacy
+    /// tenant until an operator activates it, and its receipt is
+    /// `PipelineReceiptResult::NotRouted`. A committed row always decides
+    /// first, whatever this says. This is for tests (decision P5-D5): test
+    /// bundles cannot be qualified, so the harnesses set it to route a tenant
+    /// they invent without a row.
+    pub fn with_unqualified_routing(mut self, allowed: bool) -> Self {
+        self.unqualified_routing = allowed;
         self
     }
 
@@ -6666,6 +6792,7 @@ impl PipelineServiceBuilder {
             privacy: self.privacy,
             payout: self.payout,
             novelty_utility_checks: self.novelty_utility_checks,
+            unqualified_routing: self.unqualified_routing,
             follow_ups: std::sync::Mutex::new(BTreeMap::new()),
         };
         service
@@ -6787,6 +6914,9 @@ pub struct PipelineService {
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
     payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
     novelty_utility_checks: PipelineNoveltyUtilityChecks,
+    /// Whether a tenant with no committed routing row may start new runs
+    /// (`PipelineServiceBuilder::with_unqualified_routing`).
+    unqualified_routing: bool,
     /// The follow-up steps this service queued work for, per tenant, since
     /// the worker last took them (`take_follow_ups`).
     follow_ups: std::sync::Mutex<BTreeMap<String, PipelineFollowUps>>,
@@ -6815,6 +6945,12 @@ impl PipelineService {
     /// use.
     pub fn lease_config(&self) -> PipelineLeaseConfig {
         self.lease_config
+    }
+
+    /// Whether a tenant with no committed routing row may start new runs
+    /// (`PipelineServiceBuilder::with_unqualified_routing`).
+    pub fn unqualified_routing(&self) -> bool {
+        self.unqualified_routing
     }
 
     /// How many times the Settle policy actually ran for this service. A
@@ -7508,10 +7644,11 @@ impl PipelineService {
     ///    boundary fails closed with `privacy_control_missing`. Neither
     ///    creates a run or a staging row.
     /// 2. A read-only check with no advisory lock (`precheck_receipt`)
-    ///    refuses the common cases -- replay, content conflict, tombstone,
-    ///    quota -- before any encryption. The staging transaction repeats
-    ///    every check, so this one only saves work. A replayed key returns
-    ///    here, so a replay never calls the privacy boundary again.
+    ///    refuses the common cases -- replay, content conflict, a legacy-owned
+    ///    submission id, a tenant that is not routed to the pipeline,
+    ///    tombstone, quota -- before any encryption. The staging transaction
+    ///    repeats every check, so this one only saves work. A replayed key
+    ///    returns here, so a replay never calls the privacy boundary again.
     /// 3. The rescrub: the privacy boundary transforms a clone of the
     ///    server envelope and returns any residual-risk conditions it found,
     ///    merged into the caller's own basis. From here on the transformed
@@ -7527,9 +7664,10 @@ impl PipelineService {
     ///    id), which fixes its object key and ciphertext hash. Nothing is
     ///    stored.
     /// 5. The staging transaction (`stage_receipt_attempt`) checks replay, an
-    ///    attempt for the key staged with other content, the bound bundle,
-    ///    tombstones, and the quota -- in that order -- counts the quota,
-    ///    and inserts the attempt's `staged` row naming the object. It
+    ///    attempt for the key staged with other content, the legacy owner and
+    ///    the tenant's routing (under the routing lock, shared), the bound
+    ///    bundle, tombstones, and the quota -- in that order -- counts the
+    ///    quota, and inserts the attempt's `staged` row naming the object. It
     ///    commits before anything is stored, so every refusal there stores
     ///    nothing.
     /// 6. The object is written and Admission runs, with no transaction
@@ -7537,11 +7675,14 @@ impl PipelineService {
     ///    `staged` row naming the object; `sweep_staged_receipts` deletes
     ///    both once the row's `cleanup_after` passes.
     /// 7. The final transaction (`commit_receipt_attempt`) re-checks an
-    ///    existing run for the key and the tombstones, requires the
-    ///    attempt's row to be still `staged` and not yet due, and commits
-    ///    the records and the row's move to `committed` together. On a
-    ///    refusal there, the attempt deletes its own object and row
-    ///    (`discard_receipt_attempt`).
+    ///    existing run for the key, the legacy owner and the tenant's routing
+    ///    (under the routing lock, shared, so a containment that committed
+    ///    during the write is seen and one that is waiting waits for this
+    ///    transaction), and the tombstones, requires the attempt's row to be
+    ///    still `staged` and not yet due, and commits the records, the
+    ///    pipeline's ownership row among them, and the row's move to
+    ///    `committed` together. On a refusal there, the attempt deletes its
+    ///    own object and row (`discard_receipt_attempt`).
     ///
     /// Each attempt writes its own object, so two concurrent receipts for
     /// one key never overwrite each other's object: the one that commits
@@ -7870,16 +8011,18 @@ impl PipelineService {
         }))
     }
 
-    /// The receipt's early refusal check (`submit` step 1): one short
+    /// The receipt's early refusal check (`submit` step 2): one short
     /// tenant transaction that only reads and takes no
     /// advisory lock. It refuses the common cases -- an existing run for
-    /// the key, an attempt staged with other content, a tombstone, and the
-    /// quota (for a key not yet counted) -- before the attempt's object is
-    /// encrypted, so a refused receipt costs no encryption and, on a remote
-    /// store, no key-wrap call. It decides nothing on its own: the staging
-    /// transaction repeats every check under its locks, since the state can
-    /// change in between. Its connection returns to the pool before the
-    /// next step checks one out.
+    /// the key, an attempt staged with other content, a legacy-owned
+    /// submission id or a tenant that is not routed to the pipeline (after
+    /// the check for an existing run, so a retry is answered in every
+    /// routing state), a tombstone, and the quota (for a key not yet
+    /// counted) -- before the attempt's object is encrypted, so a refused
+    /// receipt costs no encryption and, on a remote store, no key-wrap call.
+    /// It decides nothing on its own: the staging transaction repeats every
+    /// check under its locks, since the state can change in between. Its
+    /// connection returns to the pool before the next step checks one out.
     async fn precheck_receipt(
         &self,
         request: &PipelineReceiptRequest<'_>,
@@ -7897,6 +8040,18 @@ impl PipelineService {
         )
         .await?
         {
+            Some(refused)
+        } else if let Some(refused) = new_receipt_refusal_in(
+            &tx,
+            tenant_id,
+            request.server_envelope.submission_id,
+            self.unqualified_routing,
+            false,
+        )
+        .await?
+        {
+            // A legacy-owned id or a tenant that is not routed here is
+            // refused before the rescrub, so it costs no classifier call.
             Some(refused)
         } else if receipt_is_tombstoned(
             &tx,
@@ -7919,19 +8074,26 @@ impl PipelineService {
         Ok(refused)
     }
 
-    /// The receipt's staging transaction (`submit` step 3). It takes the
+    /// The receipt's staging transaction (`submit` step 5). It takes the
     /// receipt lock and then the tenant quota lock -- transaction-scoped
     /// advisory locks that serialize concurrent receipts for one key (or
     /// one tenant's quota) without a row lock that would block other
     /// tenants -- and releases both when it commits, before the object is
     /// written. In order: an existing run for the key (`Replayed` or
     /// `ContentConflict`); an attempt for the key staged with other content
-    /// (`ContentConflict`); the bound bundle; tombstones (`Tombstoned`); the
-    /// quota (`QuotaExceeded`). The quota is counted here
+    /// (`ContentConflict`); the tenant's routing lock, taken shared, and the
+    /// refusal of a new receipt (`LegacyOwned` when the legacy path owns the
+    /// submission id, `NotRouted` when the tenant's routing does not send new
+    /// receipts to the pipeline: `new_receipt_refusal_in`); the bound bundle;
+    /// tombstones (`Tombstoned`); the quota (`QuotaExceeded`). The routing
+    /// lock is the last lock this transaction takes, after the receipt lock
+    /// and the quota lock, and it is held to the commit: a routing change
+    /// (`PipelineActivationStore`, exclusive) waits for this transaction, and
+    /// a receipt staged after the change reads it. The quota is counted here
     /// (`pipeline_admission_usage`, once per key), so a receipt that fails
     /// after its write stays counted, and a retry of that key is neither
-    /// counted again nor refused for its own earlier count. Last, the
-    /// attempt's `staged` row.
+    /// counted again nor refused for its own earlier count; a receipt the
+    /// routing refuses is not counted. Last, the attempt's `staged` row.
     async fn stage_receipt_attempt(
         &self,
         request: &PipelineReceiptRequest<'_>,
@@ -7967,8 +8129,26 @@ impl PipelineService {
             return Ok(ReceiptStage::Refused(refused));
         }
 
+        // The routing lock, shared, and the refusal of a new receipt. After
+        // the key's own refusal, so a retry of an existing receipt is
+        // answered in every routing state, and before anything is read or
+        // written for this key, so a refusal stores nothing.
+        if let Some(refused) = new_receipt_refusal_in(
+            &tx,
+            tenant_id,
+            request.server_envelope.submission_id,
+            self.unqualified_routing,
+            true,
+        )
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ReceiptStage::Refused(refused));
+        }
+
         // Bound bundle: the active bundle id (from pipeline_active_bundles
-        // only -- routing-table lookups are PR 5), then construct it.
+        // only -- the routing row decides whether a new receipt may start,
+        // above, and selects no bundle), then construct it.
         let bundle_id: String = tx
             .query_opt(
                 "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
@@ -8043,14 +8223,22 @@ impl PipelineService {
         Ok(ReceiptStage::Staged { bundle_id, bundle })
     }
 
-    /// The receipt's final transaction (`submit` step 5). It takes the
-    /// receipt lock again -- its only advisory lock -- so it commits one
-    /// attempt for the key at a time: the attempt that comes second finds
-    /// the first one's run and returns `Replayed` rather than failing on
-    /// the run's unique key or the submission id. With a source session
+    /// The receipt's final transaction (`submit` step 7). It takes the
+    /// receipt lock again, so it commits one attempt for the key at a time:
+    /// the attempt that comes second finds the first one's run and returns
+    /// `Replayed` rather than failing on the run's unique key or the
+    /// submission id. With a source session
     /// (`PipelineReceiptRequest::source_session`), it then locks the
     /// session row and refuses a withdrawn session
-    /// (`SourceSessionWithdrawn`). Then it re-checks the
+    /// (`SourceSessionWithdrawn`). After the check for an existing run it
+    /// takes the tenant's routing lock, shared, and repeats the refusal of a
+    /// new receipt (`LegacyOwned`, `NotRouted`: `new_receipt_refusal_in`):
+    /// the routing can change, and the legacy path can claim the id, while
+    /// the object is written, and a routing change (`PipelineActivationStore`,
+    /// exclusive) waits for this transaction, so no receipt commits after it.
+    /// The routing lock comes after the receipt lock and the session row
+    /// lock, and it is held to the commit. A refusal commits nothing, and
+    /// `submit` discards the attempt's object and row. Then it re-checks the
     /// tombstones (one can arrive while the object is written), locks the
     /// attempt's row, which must still be `staged` and not due
     /// (`lock_committable_receipt_artifact`), and inserts the records and
@@ -8061,8 +8249,14 @@ impl PipelineService {
     /// consent; expiry `received_at + max_age_days`), never taken from the
     /// envelope's own `trace_card.retention_policy`. `received_at` is the
     /// column default, this transaction's `NOW()`, read here so the expiry
-    /// is anchored to the exact stored receipt time. No
-    /// `pipeline_receipt_ownership` row is inserted (PR 5).
+    /// is anchored to the exact stored receipt time.
+    ///
+    /// The records include the pipeline's `pipeline_receipt_ownership` row
+    /// (`insert_receipt_records` inserts it first). When the legacy path
+    /// claimed or recorded the id after the checks above (a conflict on the
+    /// ownership row or the submission row), the transaction rolls back --
+    /// its deferred foreign key to the run is never checked -- and the
+    /// result is `LegacyOwned`.
     async fn commit_receipt_attempt(
         &self,
         request: &PipelineReceiptRequest<'_>,
@@ -8117,6 +8311,22 @@ impl PipelineService {
                 &attempt.request_content_hash,
             )));
         }
+        // The routing lock, shared, and the refusal of a new receipt, again:
+        // containment, a deactivation, or a legacy claim may have committed
+        // since the staging transaction. After the existing-run check, so a
+        // replay is answered in every routing state.
+        if let Some(refused) = new_receipt_refusal_in(
+            &tx,
+            tenant_id,
+            envelope.submission_id,
+            self.unqualified_routing,
+            true,
+        )
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ReceiptCommit::Refused(refused));
+        }
         if receipt_is_tombstoned(&tx, tenant_id, envelope, &attempt.request_content_hash).await? {
             tx.commit().await?;
             return Ok(ReceiptCommit::Refused(PipelineReceiptResult::Tombstoned));
@@ -8169,7 +8379,7 @@ impl PipelineService {
             compression: None,
             created_by_job_id: None,
         };
-        insert_receipt_records(
+        match insert_receipt_records(
             &tx,
             run,
             attempt,
@@ -8178,7 +8388,20 @@ impl PipelineService {
             stored,
             admission,
         )
-        .await?;
+        .await
+        {
+            Ok(()) => {}
+            Err(DatabaseError::Constraint(label))
+                if label == PIPELINE_LEGACY_RECEIPT_OWNED_LABEL =>
+            {
+                // Another owner took the id since the check above. Dropping
+                // the transaction rolls it back, ownership row included, and
+                // the deferred run foreign key is never checked.
+                drop(tx);
+                return Ok(ReceiptCommit::Refused(PipelineReceiptResult::LegacyOwned));
+            }
+            Err(error) => return Err(error.into()),
+        }
         let row = tx
             .query_one(
                 "SELECT * FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
