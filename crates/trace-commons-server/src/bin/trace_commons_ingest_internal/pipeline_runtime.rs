@@ -362,8 +362,9 @@ pub(crate) async fn pipeline_readiness_handler(
 /// holds, and the audit row is still appended. That task is not tracked: the
 /// graceful shutdown drains open connections only, so it does not wait for a
 /// rebuild whose client has gone, and the runtime drops that task when the
-/// process exits. That exit can still stop a run between its writes and its
-/// commit; see `PipelineService::rebuild_index_run`.
+/// process exits. That exit, or a lost database session, can still release
+/// a run's locks while its writes go on; see
+/// `PipelineService::rebuild_index_run`.
 pub(crate) async fn pipeline_index_rebuild_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

@@ -8904,10 +8904,25 @@ impl PipelineService {
     /// before the last write lands, leaving those entries in the index. The
     /// rebuild route therefore runs the rebuild in a task of its own, so a
     /// client disconnect does not drop it (review of the follow-up wave,
-    /// m1). The window that remains is the process exit: the graceful
-    /// shutdown drains open connections only and does not wait for a rebuild
-    /// whose client has gone, and the runtime drops that task when the
-    /// process exits.
+    /// m1), as Settle's index dispatch runs in a task that owns its
+    /// transaction (PR 3, b14d25e9). The windows that remain are the ones
+    /// that release the locks while the writes go on: a lost database
+    /// session, and the process exit (the graceful shutdown drains open
+    /// connections only and does not wait for a rebuild whose client has
+    /// gone, and the runtime drops that task when the process exits).
+    ///
+    /// Settle's dispatch covers those two windows, and this rebuild does
+    /// not. Settle writes under a lease: it starts no write past the lease's
+    /// end or its 30-second dispatch budget (PR 3, b14d25e9 and 82d276c1),
+    /// and a withdrawal of a run still leased queues the invalidation no
+    /// earlier than that lease's end plus
+    /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`. The rebuild writes the
+    /// entries of `complete` runs, which hold no lease, so its writes have
+    /// no deadline and a withdrawal queues their invalidation at once. In
+    /// either window, that invalidation can complete before the rebuild's
+    /// last write lands and leave that write's entries in the index. The
+    /// same lack of a deadline means a slow index holds the run and
+    /// submission rows for as long as its calls take.
     pub async fn rebuild_index_run(
         &self,
         run: &PipelineRunRecord,

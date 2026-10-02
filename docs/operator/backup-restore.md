@@ -171,7 +171,12 @@ answers `404` there. Do these steps in this order:
    unchanged. A withdrawal during the rebuild is safe too: a run withdrawn
    before its entries are written is skipped, and a withdrawal of a run
    whose entries are being written waits for them and then queues their
-   removal.
+   removal. The exception is a rebuild whose database session is lost, or
+   whose process exits, while it writes a run's entries: the withdrawal no
+   longer waits, and its removal can run before the last entry lands.
+   Settle's own index writes stop at their lease for this reason; a rebuild
+   writes complete runs, which have no lease. Keeping client traffic away
+   (step 3) keeps withdrawals away too.
 5. Restart every `trace-commons-ingest` process with both lists set back to
    their values before the restore. The worker then resumes the pending
    runs, and processes the queued invalidations and payouts, against the
