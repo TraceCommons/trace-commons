@@ -72,6 +72,13 @@ struct TracesTreeView: View {
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
+            // Why approved sessions are not moving, beside the tree and
+            // before Contribute is reached, in the words the main window uses.
+            ForEach(store.safeguards, id: \.title) { safeguard in
+                GlassNotice(tone: .ask, title: safeguard.title) {
+                    if let body = safeguard.body { Text(body) }
+                }
+            }
             if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
                 // The core's line for a core that does not answer, or for a
                 // refused request; never the error's fixed label. The last
@@ -605,10 +612,14 @@ struct SessionInspectorView: View {
     @ViewBuilder
     private func review(_ entry: DaemonData.QueueEntry) -> some View {
         let busy = store.acting.contains(entry.entryId)
+        // The scrubbing caveat, repeated at the commit as the review sheet
+        // repeats it, then the gate statement, at reading weight: they sit
+        // directly above an irreversible button.
+        ScrubbingCaveatAtCommit()
         if let consent {
             Text(consent.gateStatement)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
+                .glassType(GlassTokens.TypeScale.label)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         // Why this session cannot be contributed, beside the disarmed
@@ -634,6 +645,9 @@ struct SessionInspectorView: View {
                 Button(words.contribute) { act(.contribute, entry) }
                     .buttonStyle(GlassButtonStyle(.primary, small: true))
                     .disabled(!armed(entry))
+                    // Why it is armed or not, in the core's words, as the
+                    // review sheet's Contribute says it.
+                    .help(consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")
             }
             .disabled(busy)
         }
@@ -705,6 +719,14 @@ struct SessionInspectorView: View {
         // sentences; left out when the core has nothing to say.
         if let eligibility { rows.append(.init(words.eligibility, eligibility)) }
         if let attestation { rows.append(.init(words.attestation, attestation)) }
+        // Only the full preview carries these. Categories only: the matched
+        // text is never reported. The risk is the core's label.
+        if let labels = summary?.piiLabelsPresent, !labels.isEmpty {
+            rows.append(.init(words.personalInformation, labels.joined(separator: ", ")))
+        }
+        if let risk = summary?.residualRisk, !risk.isEmpty {
+            rows.append(.init(words.residualRisk, risk.replacingOccurrences(of: "_", with: " ")))
+        }
         return rows
     }
 }

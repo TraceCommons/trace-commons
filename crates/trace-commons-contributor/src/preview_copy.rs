@@ -138,6 +138,13 @@ pub struct MonitorTracesCopy {
     pub held: &'static str,
     /// The marker a debug build shows over sample data.
     pub sample: &'static str,
+    /// The inspector's rows for the full preview's residual-risk label and
+    /// the personal-information categories it saw (categories only).
+    pub residual_risk: &'static str,
+    pub personal_information: &'static str,
+    /// Added to the Traces badge's text equivalent when a waiting session
+    /// is worth a second look (nothing matched, or trimmed to fit).
+    pub second_look_waiting: &'static str,
     /// The review's actions.
     pub contribute: &'static str,
     pub keep: &'static str,
@@ -171,6 +178,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         attestation: "Attestation",
         held: "Held",
         sample: "Sample",
+        residual_risk: "Residual risk",
+        personal_information: "Personal information",
+        second_look_waiting: "some worth a second look",
         contribute: "Contribute",
         keep: customize.keep,
         dismiss: "Not this one",

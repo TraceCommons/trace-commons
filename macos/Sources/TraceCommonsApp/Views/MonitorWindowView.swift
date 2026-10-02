@@ -89,7 +89,9 @@ struct MonitorWindowView: View {
                     model.daemonSettings?.privateInferenceState?.surfaceState,
                     calls: model.privateInferenceCalls),
                 tracesBadge: tracesBadge,
-                tracesDescription: Self.tracesDescription(traces.decisionsOwed),
+                tracesDot: traces.shield == .attention ? .ask : nil,
+                tracesDescription: Self.tracesDescription(
+                    traces.decisionsOwed, shield: traces.shield, secondLook: traces.words?.secondLookWaiting),
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() }
             ) {
@@ -126,9 +128,15 @@ struct MonitorWindowView: View {
 
     /// The Traces badge's text equivalent, from the core: "unavailable" for
     /// an unknown count, never zero; nil at zero, where there is no badge.
-    static func tracesDescription(_ decisionsOwed: Int?) -> String? {
-        guard let text = TCCoreCopy.decisionsOwedText(decisionsOwed), !text.isEmpty else { return nil }
-        return text
+    /// When something waiting is worth a second look, the core's words for
+    /// that follow, as the badge's amber dot shows it.
+    static func tracesDescription(
+        _ decisionsOwed: Int?, shield: QueueShieldState = .clear, secondLook: String? = nil
+    ) -> String? {
+        let count = TCCoreCopy.decisionsOwedText(decisionsOwed).flatMap { $0.isEmpty ? nil : $0 }
+        let flagged = shield == .attention ? secondLook : nil
+        let parts = [count, flagged].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
     /// The selected session, while it is still in the tree.
@@ -184,6 +192,8 @@ private struct MonitorMainPane<Content: View>: View {
     let inferenceDot: GlassStatus?
     let inferenceDescription: String?
     let tracesBadge: GlassBadgeValue?
+    /// Amber when something waiting is worth a second look.
+    let tracesDot: GlassStatus?
     let tracesDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
@@ -230,7 +240,7 @@ private struct MonitorMainPane<Content: View>: View {
                         GlassSegment(
                             item.title, value: item,
                             badgeValue: item == .traces ? tracesBadge : nil,
-                            dot: item == .inference ? inferenceDot : nil,
+                            dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
                             accessibilityValue: item == .inference
                                 ? inferenceDescription : item == .traces ? tracesDescription : nil)
                     })

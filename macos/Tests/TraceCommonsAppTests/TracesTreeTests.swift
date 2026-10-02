@@ -424,3 +424,109 @@ final class TracesRowWordsTests: XCTestCase {
         XCTAssertTrue(MonitorWindowView.sampleChoice("busyqueue").unknown)
     }
 }
+
+/// The #1184 review's open findings: a count kept after the core went
+/// away, the queue's safeguards, and the badge's second-look pairing.
+@MainActor
+final class TracesQueueStateTests: XCTestCase {
+    /// Answers every call as a daemon that has gone away.
+    private final class GoneTransport: DaemonTransport {
+        func call(_ method: String, params paramsJSON: String) -> String {
+            #"{"error":{"code":"unavailable","message":"daemon-disconnected"}}"#
+        }
+    }
+
+    /// A disconnect finishes every open stream, so nothing keeps waiting on
+    /// a daemon that is not there.
+    func test_aDisconnectEndsTheEventStreams() async {
+        let live = LiveDaemonClient(transport: GoneTransport())
+        let stream = live.events()
+        let ended = Task { for await _ in stream {}; return true }
+        live.disconnected()
+        let finished = await ended.value
+        XCTAssertTrue(finished)
+    }
+
+    /// The badge reads unknown once the core has gone, never its last count.
+    func test_aLostCoreLeavesNoCount() async {
+        let store = TracesStore(client: SampleDaemonClient(.armedFolder))
+        await store.load()
+        XCTAssertEqual(store.decisionsOwed, 1)
+        store.lost()
+        XCTAssertNil(store.decisionsOwed)
+        XCTAssertEqual(store.phase, .failed(.unreachable))
+    }
+
+    /// Following a live client, the stream ending is a lost core.
+    func test_theStreamEndingIsALostCore() async {
+        let live = LiveDaemonClient(transport: GoneTransport())
+        let store = TracesStore(client: live)
+        let running = Task { await store.run() }
+        // Let `run` load and open its stream before the daemon goes.
+        while store.phase == .loading { await Task.yield() }
+        for _ in 0..<50 { await Task.yield() }
+        live.disconnected()
+        await running.value
+        XCTAssertNil(store.status)
+        XCTAssertEqual(store.phase, .failed(.unreachable))
+    }
+
+    /// The sample day's status, with `edit` applied to its JSON object.
+    private func status(_ edit: (inout [String: Any]) -> Void = { _ in }) async throws -> DaemonData.Status {
+        let read = try await SampleDaemonClient(.normalDay).status()
+        let wire = try XCTUnwrap(TracesStore.wire(read))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(wire.utf8)) as? [String: Any])
+        edit(&object)
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: data)
+    }
+
+    private static func spend(_ object: inout [String: Any]) {
+        var budget = object["daily_budget"] as? [String: Any] ?? [:]
+        budget["blocked"] = true
+        budget["blocked_entries"] = 2
+        object["daily_budget"] = budget
+    }
+
+    /// A spent budget says so, in the words the main window uses for it; a
+    /// healthy queue says nothing.
+    func test_aSpentBudgetIsSaid() async throws {
+        let healthy = try await status()
+        XCTAssertTrue(TracesStore.safeguards(healthy).isEmpty)
+        let spent = try await status(Self.spend)
+        XCTAssertEqual(TracesStore.safeguards(spent).map(\.title), [DailyBudgetCopy.title])
+        XCTAssertTrue(TracesStore.safeguards(nil).isEmpty)
+    }
+
+    /// The health label is said when nothing more specific already says it,
+    /// and not twice when the budget does.
+    func test_theHealthLabelIsNotSaidTwice() async throws {
+        let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
+        XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.forLabel("queue-full").title])
+        let capped = try await status {
+            $0["health"] = ["last_error_label": "daily-cap-reached"]
+            Self.spend(&$0)
+        }
+        XCTAssertEqual(TracesStore.safeguards(capped).map(\.title), [DailyBudgetCopy.title])
+    }
+
+    /// The badge pairs with the queue shield: something waiting that is
+    /// worth a second look adds the core's words to its text equivalent.
+    func test_theBadgeSaysWhenSomethingIsWorthASecondLook() throws {
+        let decode = { (json: String) in
+            try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: Data(json.utf8))
+        }
+        let plain = try decode(SampleDaemonData.entry(1, SampleDaemonData.api))
+        let flagged = try decode(SampleDaemonData.entry(2, SampleDaemonData.api, secondLook: ["nothing-matched"]))
+        XCTAssertEqual(TracesStore.shield([]), .clear)
+        XCTAssertEqual(TracesStore.shield([plain]), .waiting)
+        XCTAssertEqual(TracesStore.shield([plain, flagged]), .attention)
+
+        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        let said = try XCTUnwrap(MonitorWindowView.tracesDescription(2, shield: .attention, secondLook: words.secondLookWaiting))
+        XCTAssertTrue(said.hasSuffix(words.secondLookWaiting), said)
+        XCTAssertEqual(
+            MonitorWindowView.tracesDescription(2, shield: .waiting, secondLook: words.secondLookWaiting),
+            TCCoreCopy.decisionsOwedText(2))
+    }
+}

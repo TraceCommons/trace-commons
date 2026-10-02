@@ -182,7 +182,7 @@ final class TracesStore {
     func run() async {
         await load()
         for await event in client.events() {
-            if Task.isCancelled { break }
+            if Task.isCancelled { return }
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
                 await load()
@@ -190,6 +190,18 @@ final class TracesStore {
                 break
             }
         }
+        guard !Task.isCancelled else { return }
+        lost()
+    }
+
+    /// The event stream ended without this view going: the core went away
+    /// (`LiveDaemonClient.disconnected()`). The badge reads unknown rather
+    /// than keeping its last count, and the tab says the core is not
+    /// answering over the last tree it reported.
+    func lost() {
+        generation += 1
+        status = nil
+        phase = .failed(.unreachable)
     }
 
     func load() async {
@@ -263,6 +275,8 @@ final class TracesStore {
                 // `notApproved` and is said as a refusal, never as success.
                 let response = try await client.approve(entryId: entryId)
                 lastContributed = Contributed(entryId: entryId, toast: response.toast)
+                // A newer decision ends the older Keep's undo.
+                lastKept = nil
             case .undoContribute:
                 try await client.cancel(entryId: entryId)
                 lastContributed = nil
@@ -274,12 +288,84 @@ final class TracesStore {
                 lastKept = nil
             case .dismiss:
                 try await client.dismiss(entryId: entryId)
+                lastKept = nil
             }
         } catch {
-            actionError = (entryId, error as? DaemonDataError ?? .undecodable(method: "\(action)"))
+            let error = error as? DaemonDataError ?? .undecodable(method: "\(action)")
+            // A core that did not answer is the tab's state, and its last
+            // count is no longer known.
+            if case .unreachable = error { lost() }
+            actionError = (entryId, error)
             return
         }
         await load()
+    }
+
+    // MARK: Queue safeguards
+
+    /// A reason approved sessions are not moving, in the words the main
+    /// window shows for the same status.
+    struct Safeguard: Equatable {
+        let title: String
+        let body: String?
+    }
+
+    /// What the queue's safeguards say right now: a spent daily budget, a
+    /// busy privacy witness, folders the automatic gate is holding, and the
+    /// daemon's health label when none of those already says it. Each is
+    /// drawn independently, as the main window draws them, because the
+    /// daemon's one health slot can hide the others.
+    var safeguards: [Safeguard] { Self.safeguards(status) }
+
+    static func safeguards(_ status: DaemonData.Status?) -> [Safeguard] {
+        guard let status else { return [] }
+        var out: [Safeguard] = []
+        var said: Set<String> = []
+        if let budget = status.dailyBudget, budget.blocked == true {
+            out.append(Safeguard(
+                title: DailyBudgetCopy.title,
+                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt)))
+            said.insert("daily-cap-reached")
+        }
+        if let capacity = status.witnessCapacity, (capacity.waitingSessions ?? 0) > 0,
+            let wire = Self.wire(capacity),
+            let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire).flatMap(WitnessCapacityNotice.decode(fromJSON:))
+        {
+            out.append(Safeguard(title: notice.title, body: notice.body))
+            said.insert("witness-saturated")
+        }
+        if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
+            let wire = Self.wire(held),
+            let notice = TCConsentCopy.gateHeldNoticeJSON(forHeld: wire).flatMap(GateHeldNotice.decode(fromJSON:))
+        {
+            out.append(Safeguard(title: notice.title, body: notice.body))
+            said.insert(GateHeld.label)
+        }
+        if let label = status.health?.lastErrorLabel, !said.contains(label) {
+            let health = HealthCopy.forLabel(label)
+            out.insert(Safeguard(title: health.title, body: health.detail), at: 0)
+        }
+        return out
+    }
+
+    /// A status part as the wire JSON the core's notice functions read.
+    static func wire(_ value: some Encodable) -> String? {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// Whether something waiting is worth a second look (nothing matched, or
+    /// trimmed to fit), as the main window's queue shield reads it. The
+    /// badge pairs with it, so it never says only a count.
+    var shield: QueueShieldState { Self.shield(tree.allSessions) }
+
+    static func shield(_ sessions: [DaemonData.QueueEntry]) -> QueueShieldState {
+        let reasons = sessions.map { Set($0.secondLook ?? []) }
+        return QueueShieldState.state(
+            waiting: sessions.count,
+            nothingMatched: reasons.filter { $0.contains("nothing-matched") }.count,
+            trimmed: reasons.filter { $0.contains("trimmed-to-fit") }.count)
     }
 
     /// A tool's source declaration, from its switch after the core's
