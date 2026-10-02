@@ -21,6 +21,7 @@
     "sceneBase": { "hex": "#0f1219" },
     "sceneWarm": { "hex": "#1d2430" },
     "paneBase": { "hex": "#161a22", "alpha": 0.96, "note": "The neutral dark a pane's glass sits on where there is no native material." },
+    "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec)." },
     "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast." },
     "wellFill": { "hex": "#000000", "alpha": 0.22 },
     "controlHover": { "hex": "#ffffff", "alpha": 0.16 },
@@ -172,8 +173,9 @@
     "s9": 20,
     "s10": 24,
     "paneGap": 10,
+    "windowPadding": 10,
     "windowControlsInset": 30,
-    "windowControlsWidth": 76,
+    "windowControlsWidth": 78,
     "panePadding": 12,
     "cardPaddingVertical": 12,
     "cardPaddingHorizontal": 14,
@@ -201,7 +203,13 @@
     "paneLeftWidth": 400,
     "mapWidth": 600,
     "inspectorWidth": 300,
+    "windowWidth": 1320,
     "windowHeight": 760,
+    "paneLeftMinWidth": 320,
+    "paneLeftWindowShare": 0.34,
+    "mapBreakpoint": 1100,
+    "windowMinWidth": 760,
+    "windowMinHeight": 560,
     "nodeCardWidth": 260
   },
   "opacity": {
@@ -210,7 +218,7 @@
   },
   "type": {
     "micro": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 13 },
-    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
+    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "semibold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
     "caption": { "textStyle": "subheadline", "size": 11, "weight": "regular", "lineHeight": 16 },
     "label": { "textStyle": "callout", "size": 12, "weight": "medium", "lineHeight": 16 },
     "body": { "textStyle": "body", "size": 13, "weight": "regular", "lineHeight": 18 },
@@ -224,6 +232,10 @@
   "motion": {
     "fast": 0.15,
     "standard": 0.22,
-    "slow": 0.3
+    "slow": 0.3,
+    "easeX1": 0.2,
+    "easeY1": 0.8,
+    "easeX2": 0.2,
+    "easeY2": 1
   }
 }

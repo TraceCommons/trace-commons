@@ -61,7 +61,7 @@ private struct GlassButtonBody: View {
                 .glassType(small ? GlassTokens.TypeScale.label.weight(.bold) : GlassTokens.TypeScale.bodyStrong.weight(.bold))
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
                 .padding(.horizontal, small ? 14 : 16)
-                .frame(height: small ? 30 : GlassTokens.Size.cta)
+                .frame(minHeight: small ? 30 : GlassTokens.Size.cta)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaFill.linear))
                 .glassEdge(isEnabled ? GlassTokens.Shadow.ctaEdge : Array(GlassTokens.Shadow.ctaEdge.prefix(2)), in: Capsule())
         case .secondary:
@@ -69,7 +69,7 @@ private struct GlassButtonBody: View {
                 .glassType(small ? GlassTokens.TypeScale.label.weight(.bold) : GlassTokens.TypeScale.bodyStrong.weight(.bold))
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
                 .padding(.horizontal, 14)
-                .frame(height: small ? 30 : GlassTokens.Size.cta)
+                .frame(minHeight: small ? 30 : GlassTokens.Size.cta)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaSecondaryFill.linear))
                 .glassEdge(GlassTokens.Shadow.ctaSecondaryEdge, in: Capsule())
         case .glass:
@@ -77,14 +77,14 @@ private struct GlassButtonBody: View {
                 .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                 .foregroundStyle(GlassColor.textPrimary)
                 .padding(.horizontal, 12)
-                .frame(height: GlassTokens.Size.controlLarge)
+                .frame(minHeight: GlassTokens.Size.controlLarge)
                 .glassSurface(.control)
         case let .submit(done):
             configuration.label
                 .glassType(GlassTokens.TypeScale.caption.weight(.bold))
                 .foregroundStyle(done ? GlassTokens.Color.statusOn.color : GlassColor.textPrimary)
                 .padding(.horizontal, 10)
-                .frame(height: GlassTokens.Size.submitPill)
+                .frame(minHeight: GlassTokens.Size.submitPill)
                 .glassSurface(.control)
         case .link:
             configuration.label
@@ -263,7 +263,7 @@ public struct GlassExpander: View {
 
     public var body: some View {
         Button {
-            withAnimation(.easeOut(duration: GlassTokens.Motion.fast)) { isOpen.toggle() }
+            withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { isOpen.toggle() }
         } label: {
             HStack(spacing: GlassTokens.Space.s4) {
                 Text("›")
@@ -342,7 +342,7 @@ public struct GlassPicker<Value: Hashable>: View {
             .foregroundStyle(GlassColor.textPrimary)
             .padding(.leading, 10)
             .padding(.trailing, 8)
-            .frame(height: GlassTokens.Size.controlLarge)
+            .frame(minHeight: GlassTokens.Size.controlLarge)
             .glassSurface(.control)
         }
         .menuStyle(.borderlessButton)
@@ -391,7 +391,7 @@ public struct GlassToggleStyle: ToggleStyle {
                 configuration.label
             }
             Button {
-                withAnimation(.easeOut(duration: GlassTokens.Motion.fast)) { configuration.isOn.toggle() }
+                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { configuration.isOn.toggle() }
             } label: {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
                     Capsule()
@@ -499,7 +499,7 @@ public struct GlassTextField: View {
                 .glassType(GlassTokens.TypeScale.label.weight(.regular))
                 .foregroundStyle(GlassColor.textPrimary)
                 .padding(.horizontal, 10)
-                .frame(height: GlassTokens.Size.controlLarge)
+                .frame(minHeight: GlassTokens.Size.controlLarge)
                 .background(
                     RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
                         .fill(GlassTokens.Color.fieldFill.color)

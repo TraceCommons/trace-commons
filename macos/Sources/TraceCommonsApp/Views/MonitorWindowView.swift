@@ -4,9 +4,9 @@ import TCDesign
 import TCShellCore
 
 /// The glass monitor window (R5 of #1173): the three-pane shell the native
-/// screens are built into. The leading pane holds the tabs, the center the
-/// map, the trailing pane the inspector; the leading pane and the inspector
-/// hide independently, and the tab and both columns are restored per window.
+/// screens are built into. The main pane holds the tabs and is always shown;
+/// the map and the inspector hide independently (and the map below 1100pt),
+/// and the tab and both preferences are restored per window.
 ///
 /// Debug builds only, until the screens it frames (R6 onward) match the
 /// design. The shipping window stays `MainWindowView` until then (R15).
@@ -31,7 +31,9 @@ struct MonitorWindowView: View {
 
     @SceneStorage("monitor.tab") private var tab: Tab = .home
     @SceneStorage("monitor.mapTab") private var mapTab: MapTab = .traces
-    @SceneStorage("monitor.showsLeading") private var showsLeading = true
+    /// The person's preferences. The map is also hidden below 1100pt
+    /// without touching this, so widening the window brings it back.
+    @SceneStorage("monitor.showsMap") private var showsMap = true
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
     /// The selected session's entry id; empty for none.
     @SceneStorage("monitor.selectedSession") private var selectedSession = ""
@@ -47,29 +49,26 @@ struct MonitorWindowView: View {
     }
 
     var body: some View {
-        GlassThreePane(showsLeading: showsLeading, showsTrailing: showsInspector) {
-            MonitorLeadingPane(
-                tab: $tab, inferenceDot: inferenceDot, tracesBadge: tracesBadge, onSettings: { openSettings() }
+        GlassThreePane(showsMap: showsMap, showsInspector: showsInspector) {
+            MonitorMainPane(
+                tab: $tab, inferenceDot: inferenceDot, tracesBadge: tracesBadge,
+                showsMap: $showsMap, showsInspector: $showsInspector,
+                onSettings: { openSettings() }
             ) {
                 switch tab {
                 case .traces: TracesTreeView(store: traces, selection: $selectedSession)
                 case .home, .inference: Spacer(minLength: 0)
                 }
             }
-        } center: {
-            MonitorMapPane(
-                mapTab: $mapTab,
-                privateAILabel: model.privateInferenceCopy?.destination,
-                showsLeading: $showsLeading,
-                showsInspector: $showsInspector)
-        } trailing: {
+        } map: {
+            MonitorMapPane(mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination)
+        } inspector: {
             GlassPane {
                 if tab == .traces {
                     SessionInspectorView(store: traces, entry: selectedEntry)
                 }
             }
         }
-        .frame(minWidth: GlassTokens.Size.mapWidth, minHeight: GlassTokens.Size.windowHeight * 0.7)
         .glassWindow()
         .task { traces.start() }
     }
@@ -93,25 +92,43 @@ struct MonitorWindowView: View {
     }
 }
 
-/// The leading pane: the window's controls and Settings on the top row,
-/// then the tabs. The tabs' screens are R6 (Traces), R8 (Inference) and R9
-/// (Home).
-private struct MonitorLeadingPane<Content: View>: View {
+/// The main pane, always shown: clearance for the traffic lights, the
+/// toolbar capsule (map and inspector toggles) and the round Settings
+/// button on the top row, then the tabs. The tabs' screens are R6 (Traces),
+/// R8 (Inference) and R9 (Home).
+private struct MonitorMainPane<Content: View>: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
     let tracesBadge: GlassBadgeValue?
+    @Binding var showsMap: Bool
+    @Binding var showsInspector: Bool
     let onSettings: () -> Void
     @ViewBuilder let content: () -> Content
-    @Environment(\.glassWindowControlsInset) private var controlsInset
+    /// Half the unified title bar's 52pt height.
+    static var lightsCentre: CGFloat { 26 }
 
     var body: some View {
         GlassPane {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                HStack {
-                    Spacer()
+                HStack(spacing: GlassTokens.Space.s4) {
+                    Spacer(minLength: 0)
+                    GlassToolbarGroup {
+                        GlassToolbarButton("Map", systemImage: "map", pressed: showsMap) {
+                            showsMap.toggle()
+                        }
+                        GlassToolbarButton("Inspector", systemImage: "sidebar.right", pressed: showsInspector) {
+                            showsInspector.toggle()
+                        }
+                    }
                     GlassRoundButton("Settings", systemImage: "gearshape", small: true, action: onSettings)
                 }
-                .frame(height: max(controlsInset - GlassTokens.Space.panePadding / 2, GlassTokens.Size.control))
+                // Clearance for the real traffic lights, not an origin.
+                .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
+                .frame(height: GlassTokens.Size.controlLarge)
+                // Centre the row on the traffic lights, which the unified
+                // title bar centres 26pt below the window's top edge.
+                .padding(.top, Self.lightsCentre - GlassTokens.Space.windowPadding - GlassTokens.Space.panePadding
+                    - GlassTokens.Size.controlLarge / 2)
                 GlassSegmentedTabs(
                     "Monitor",
                     selection: $tab,
@@ -128,36 +145,20 @@ private struct MonitorLeadingPane<Content: View>: View {
     }
 }
 
-/// The center: the map field, with its tabs and the column toggles floating
-/// on it. The map itself is R8.
+/// The map: the field, with its tabs floating on it. The map itself is R8.
 private struct MonitorMapPane: View {
     @Binding var mapTab: MonitorWindowView.MapTab
     let privateAILabel: String?
-    @Binding var showsLeading: Bool
-    @Binding var showsInspector: Bool
-    @Environment(\.glassWindowControlsInset) private var controlsInset
 
     var body: some View {
         GlassPane(padding: 0) {
-            ZStack(alignment: .top) {
+            ZStack(alignment: .topLeading) {
                 RadialGradient(
                     colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
                     center: .center, startRadius: 20, endRadius: 520)
                 GlassFloatingGroup {
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        GlassSegmentedTabs("Map", selection: $mapTab, segments: segments, floating: true)
-                        Spacer()
-                        GlassToolbarGroup {
-                            GlassToolbarButton("Sidebar", systemImage: "sidebar.left", pressed: showsLeading) {
-                                showsLeading.toggle()
-                            }
-                            GlassToolbarButton("Inspector", systemImage: "sidebar.right", pressed: showsInspector) {
-                                showsInspector.toggle()
-                            }
-                        }
-                    }
-                    .padding(.leading, controlsInset > 0 ? GlassTokens.Space.windowControlsWidth : GlassTokens.Space.panePadding)
-                    .padding([.top, .trailing], GlassTokens.Space.panePadding)
+                    GlassSegmentedTabs("Map", selection: $mapTab, segments: segments, floating: true)
+                        .padding(GlassTokens.Space.panePadding)
                 }
             }
         }

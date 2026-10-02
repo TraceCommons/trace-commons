@@ -1,65 +1,141 @@
+import AppKit
 import SwiftUI
 
 public extension EnvironmentValues {
-    /// Room a pane leaves at its top for the window's controls (the traffic
-    /// lights). Set on whichever pane is leading, zero on the others.
+    /// Room the main pane leaves at its top for the window's controls (the
+    /// traffic lights): this tall, and `windowControlsWidth` wide.
     @Entry var glassWindowControlsInset: CGFloat = 0
 }
 
-/// The window: a leading pane, the center, and an inspector, floating with
-/// a gap between them and no chrome around them (D9 as decided on #1173:
-/// #1146's floating layout). The leading pane and the inspector hide
-/// independently; the center always stays. Whichever pane is leading takes
-/// the window's controls, through `glassWindowControlsInset`.
-public struct GlassThreePane<Leading: View, Center: View, Trailing: View>: View {
-    private let showsLeading: Bool
-    private let showsTrailing: Bool
-    private let leading: Leading
-    private let center: Center
-    private let trailing: Trailing
+/// The widths of the window's panes for one window width (spec, "Panes").
+///
+/// - The main pane is `min(400, max(320, 0.34 × width))`, and fills the
+///   window when the map is hidden, less the inspector and its gap.
+/// - The map takes what remains. Below 1100pt it is hidden whatever the
+///   preference (a compact-layout rule): the preference is kept, so
+///   widening the window brings it back.
+/// - The inspector is 300pt.
+/// - 10pt window padding, 10pt gaps; a hidden pane reserves no space.
+public struct GlassPaneLayout: Equatable, Sendable {
+    public let main: CGFloat
+    /// `nil` when the map is not drawn.
+    public let map: CGFloat?
+    /// `nil` when the inspector is not drawn.
+    public let inspector: CGFloat?
 
+    public init(windowWidth width: CGFloat, showsMap: Bool, showsInspector: Bool) {
+        let padding = GlassTokens.Space.windowPadding
+        let gap = GlassTokens.Space.paneGap
+        let inner = max(0, width - padding * 2)
+        let inspector = showsInspector ? GlassTokens.Size.inspectorWidth : nil
+        let besideMain = inspector.map { $0 + gap } ?? 0
+        if showsMap && width >= GlassTokens.Size.mapBreakpoint {
+            let main = min(
+                GlassTokens.Size.paneLeftWidth,
+                max(GlassTokens.Size.paneLeftMinWidth, GlassTokens.Size.paneLeftWindowShare * width))
+            self.main = main
+            self.map = max(0, inner - main - gap - besideMain)
+        } else {
+            self.main = max(0, inner - besideMain)
+            self.map = nil
+        }
+        self.inspector = inspector
+    }
+
+    /// The smallest window every composition fits: the main pane at its
+    /// minimum beside the inspector (the map hides below 1100pt).
+    public static var minimumWindowWidth: CGFloat {
+        max(
+            GlassTokens.Size.windowMinWidth,
+            GlassTokens.Size.paneLeftMinWidth + GlassTokens.Space.paneGap + GlassTokens.Size.inspectorWidth
+                + GlassTokens.Space.windowPadding * 2)
+    }
+}
+
+/// The window: the main pane (the tabs), the map, and the inspector,
+/// floating with a gap between them and no chrome around them (D9 as decided
+/// on #1173: #1146's floating layout). The map and the inspector hide
+/// independently; the main pane always stays and takes the window's
+/// controls through `glassWindowControlsInset`.
+public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
+    private let showsMap: Bool
+    private let showsInspector: Bool
+    private let main: Main
+    private let map: Map
+    private let inspector: Inspector
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// `showsMap` and `showsInspector` are the person's preferences; the map
+    /// is also hidden below the compact breakpoint without changing them.
     public init(
-        showsLeading: Bool,
-        showsTrailing: Bool,
-        @ViewBuilder leading: () -> Leading,
-        @ViewBuilder center: () -> Center,
-        @ViewBuilder trailing: () -> Trailing
+        showsMap: Bool,
+        showsInspector: Bool,
+        @ViewBuilder main: () -> Main,
+        @ViewBuilder map: () -> Map,
+        @ViewBuilder inspector: () -> Inspector
     ) {
-        self.showsLeading = showsLeading
-        self.showsTrailing = showsTrailing
-        self.leading = leading()
-        self.center = center()
-        self.trailing = trailing()
+        self.showsMap = showsMap
+        self.showsInspector = showsInspector
+        self.main = main()
+        self.map = map()
+        self.inspector = inspector()
     }
 
     public var body: some View {
-        HStack(spacing: GlassTokens.Space.paneGap) {
-            if showsLeading {
-                leading
-                    .frame(width: GlassTokens.Size.paneLeftWidth)
+        GeometryReader { proxy in
+            let layout = GlassPaneLayout(
+                windowWidth: proxy.size.width, showsMap: showsMap, showsInspector: showsInspector)
+            HStack(spacing: GlassTokens.Space.paneGap) {
+                main
+                    .frame(width: layout.main)
                     .environment(\.glassWindowControlsInset, GlassTokens.Space.windowControlsInset)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
+                if let width = layout.map {
+                    map
+                        .frame(width: width)
+                        .transition(reduceMotion ? .identity : .opacity)
+                }
+                if let width = layout.inspector {
+                    inspector
+                        .frame(width: width)
+                        .transition(reduceMotion ? .identity : .move(edge: .trailing).combined(with: .opacity))
+                }
             }
-            center
-                .frame(minWidth: GlassTokens.Size.mapWidth * 0.6, maxWidth: .infinity)
-                .environment(\.glassWindowControlsInset, showsLeading ? 0 : GlassTokens.Space.windowControlsInset)
-            if showsTrailing {
-                trailing
-                    .frame(width: GlassTokens.Size.inspectorWidth)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
+            .padding(GlassTokens.Space.windowPadding)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+            .animation(GlassMotion.standard(reduceMotion), value: layout)
         }
-        .frame(maxHeight: .infinity)
         // The panes run to the window's top edge; the title bar's controls
-        // sit inside the leading pane rather than in a strip above it.
+        // sit inside the main pane rather than in a strip above it.
         .ignoresSafeArea(.container, edges: .top)
-        .animation(.easeInOut(duration: GlassTokens.Motion.standard), value: showsLeading)
-        .animation(.easeInOut(duration: GlassTokens.Motion.standard), value: showsTrailing)
+        .frame(minWidth: GlassPaneLayout.minimumWindowWidth, minHeight: GlassTokens.Size.windowMinHeight)
     }
 
-    /// The window's default width with every pane showing.
-    public static var defaultWidth: CGFloat {
-        GlassTokens.Size.paneLeftWidth + GlassTokens.Size.mapWidth + GlassTokens.Size.inspectorWidth
-            + GlassTokens.Space.paneGap * 2
+    /// The window's default width (1320, as in #1146).
+    public static var defaultWidth: CGFloat { GlassTokens.Size.windowWidth }
+}
+
+/// The one motion curve (spec, "Motion"): `timingCurve(0.2, 0.8, 0.2, 1)`
+/// at the token durations, and none under Reduce Motion.
+public enum GlassMotion {
+    public static func curve(_ duration: Double) -> Animation {
+        .timingCurve(
+            GlassTokens.Motion.easeX1, GlassTokens.Motion.easeY1,
+            GlassTokens.Motion.easeX2, GlassTokens.Motion.easeY2,
+            duration: duration)
+    }
+
+    /// The system's Reduce Motion, for places with no environment to read
+    /// (a style's action closure).
+    @MainActor
+    public static var systemReducesMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    public static func fast(_ reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : curve(GlassTokens.Motion.fast)
+    }
+
+    public static func standard(_ reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : curve(GlassTokens.Motion.standard)
     }
 }

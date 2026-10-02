@@ -137,7 +137,7 @@ public struct GlassListRow: View {
         .foregroundStyle(selected ? Color.white : GlassColor.textPrimary)
         .padding(.leading, 8 + CGFloat(depth.rawValue) * 18)
         .padding(.trailing, 6)
-        .frame(height: GlassTokens.Size.listRow)
+        .frame(minHeight: GlassTokens.Size.listRow)
         .background(
             RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
                 .fill(selected ? GlassTokens.Color.selection.color : Color.clear)

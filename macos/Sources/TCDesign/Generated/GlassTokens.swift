@@ -38,6 +38,8 @@ public enum GlassTokens {
         public static let sceneWarm: GlassRGBA = GlassRGBA(0x1D2430, alpha: 1)
         /// The neutral dark a pane's glass sits on where there is no native material.
         public static let paneBase: GlassRGBA = GlassRGBA(0x161A22, alpha: 0.96)
+        /// A pane under Reduce Transparency: solid, no material (spec).
+        public static let paneOpaque: GlassRGBA = GlassRGBA(0x1C1E24, alpha: 1)
         /// Over native glass, the thin dark veil kept for text contrast.
         public static let glassVeil: GlassRGBA = GlassRGBA(0x0C0E14, alpha: 0.28)
         public static let wellFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.22)
@@ -96,6 +98,7 @@ public enum GlassTokens {
             "sceneBase": sceneBase,
             "sceneWarm": sceneWarm,
             "paneBase": paneBase,
+            "paneOpaque": paneOpaque,
             "glassVeil": glassVeil,
             "wellFill": wellFill,
             "controlHover": controlHover,
@@ -224,8 +227,9 @@ public enum GlassTokens {
         public static let s9: CGFloat = 20
         public static let s10: CGFloat = 24
         public static let paneGap: CGFloat = 10
+        public static let windowPadding: CGFloat = 10
         public static let windowControlsInset: CGFloat = 30
-        public static let windowControlsWidth: CGFloat = 76
+        public static let windowControlsWidth: CGFloat = 78
         public static let panePadding: CGFloat = 12
         public static let cardPaddingVertical: CGFloat = 12
         public static let cardPaddingHorizontal: CGFloat = 14
@@ -245,6 +249,7 @@ public enum GlassTokens {
             "s9": s9,
             "s10": s10,
             "paneGap": paneGap,
+            "windowPadding": windowPadding,
             "windowControlsInset": windowControlsInset,
             "windowControlsWidth": windowControlsWidth,
             "panePadding": panePadding,
@@ -276,7 +281,13 @@ public enum GlassTokens {
         public static let paneLeftWidth: CGFloat = 400
         public static let mapWidth: CGFloat = 600
         public static let inspectorWidth: CGFloat = 300
+        public static let windowWidth: CGFloat = 1320
         public static let windowHeight: CGFloat = 760
+        public static let paneLeftMinWidth: CGFloat = 320
+        public static let paneLeftWindowShare: CGFloat = 0.34
+        public static let mapBreakpoint: CGFloat = 1100
+        public static let windowMinWidth: CGFloat = 760
+        public static let windowMinHeight: CGFloat = 560
         public static let nodeCardWidth: CGFloat = 260
 
         /// Every size token by its JSON name.
@@ -301,7 +312,13 @@ public enum GlassTokens {
             "paneLeftWidth": paneLeftWidth,
             "mapWidth": mapWidth,
             "inspectorWidth": inspectorWidth,
+            "windowWidth": windowWidth,
             "windowHeight": windowHeight,
+            "paneLeftMinWidth": paneLeftMinWidth,
+            "paneLeftWindowShare": paneLeftWindowShare,
+            "mapBreakpoint": mapBreakpoint,
+            "windowMinWidth": windowMinWidth,
+            "windowMinHeight": windowMinHeight,
             "nodeCardWidth": nodeCardWidth,
         ]
     }
@@ -321,18 +338,26 @@ public enum GlassTokens {
         public static let fast: Double = 0.15
         public static let standard: Double = 0.22
         public static let slow: Double = 0.3
+        public static let easeX1: Double = 0.2
+        public static let easeY1: Double = 0.8
+        public static let easeX2: Double = 0.2
+        public static let easeY2: Double = 1
 
         /// Every motion token by its JSON name.
         public static let all: [String: Double] = [
             "fast": fast,
             "standard": standard,
             "slow": slow,
+            "easeX1": easeX1,
+            "easeY1": easeY1,
+            "easeX2": easeX2,
+            "easeY2": easeY2,
         ]
     }
 
     public enum TypeScale {
         public static let micro: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .bold, lineHeight: 13, tracking: 0, design: .default, uppercase: false, tabular: false)
-        public static let eyebrow: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .bold, lineHeight: 14, tracking: 0.8, design: .default, uppercase: true, tabular: false)
+        public static let eyebrow: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .semibold, lineHeight: 14, tracking: 0.8, design: .default, uppercase: true, tabular: false)
         public static let caption: GlassTypeStyle = GlassTypeStyle(textStyle: .subheadline, size: 11, weight: .regular, lineHeight: 16, tracking: 0, design: .default, uppercase: false, tabular: false)
         public static let label: GlassTypeStyle = GlassTypeStyle(textStyle: .callout, size: 12, weight: .medium, lineHeight: 16, tracking: 0, design: .default, uppercase: false, tabular: false)
         public static let body: GlassTypeStyle = GlassTypeStyle(textStyle: .body, size: 13, weight: .regular, lineHeight: 18, tracking: 0, design: .default, uppercase: false, tabular: false)

@@ -86,6 +86,7 @@ struct TraceCommonsShell: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                      height: GlassTokens.Size.windowHeight)
+        .windowResizability(.contentMinSize)
 
         Settings {
             MonitorSettingsWindow(navigation: navigation)
