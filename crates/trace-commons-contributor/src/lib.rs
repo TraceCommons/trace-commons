@@ -17,6 +17,7 @@ pub mod daemon;
 pub mod deep_link;
 pub mod disclosure;
 pub mod envelope;
+pub mod external_url;
 pub mod harness_state;
 pub mod history_copy;
 pub mod identity;

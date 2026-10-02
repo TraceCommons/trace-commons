@@ -5624,6 +5624,30 @@ pub unsafe extern "C" fn tc_parse_deep_link_json(
     })
 }
 
+/// Whether `url` is one of the fixed external destinations the app may hand
+/// to the OS to open (`external_url::is_allowed`): the near.ai credits
+/// dashboard, a tracecommons.ai public run, the CI fixture commit on
+/// GitHub, and a loopback OAuth callback. The list is exactly Tauri's
+/// `open_external_url` allowlist, unchanged, and every shell opens only
+/// these.
+///
+/// Returns `1` for allowed, `0` for refused -- including a NULL or
+/// non-UTF-8 `url`, and on a caught panic. Refusal is the safe sentinel.
+///
+/// # Safety
+/// `url`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_external_url_is_allowed(url: *const c_char) -> i32 {
+    guarded_scalar_no_err(0, || {
+        let Some(url) = (unsafe { borrow_optional_str(url) }) else {
+            return Ok(0);
+        };
+        Ok(i32::from(
+            trace_commons_contributor::external_url::is_allowed(url),
+        ))
+    })
+}
+
 /// Can this process reach the Cloud credential store?
 ///
 /// Exists so a release pipeline can ask a *signed bundle* the question, which

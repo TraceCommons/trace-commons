@@ -10,48 +10,11 @@ use trace_commons_contributor::quit_copy::{self, QuitRole};
 
 use crate::state::AppState;
 
+/// The fixed allowlist lives in the core (K7, #1173:
+/// `trace_commons_contributor::external_url::is_allowed`), unchanged, so
+/// every shell opens only the same allowed hosts.
 fn external_url_is_allowed(url: &str) -> bool {
-    let allowed_origin = near_credits_url_is_allowed(url)
-        || tracecommons_run_url_is_allowed(url)
-        || tracecommons_fixture_url_is_allowed(url)
-        || loopback_callback_url_is_allowed(url);
-    allowed_origin
-        && url.len() <= 2048
-        && url.is_ascii()
-        && !url
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-}
-
-fn loopback_callback_url_is_allowed(url: &str) -> bool {
-    let Some(authority_and_path) = url.strip_prefix("http://") else {
-        return false;
-    };
-    let authority_end = authority_and_path
-        .find(['/', '?', '#'])
-        .unwrap_or(authority_and_path.len());
-    let authority = &authority_and_path[..authority_end];
-    let Some(port) = authority.strip_prefix("127.0.0.1:") else {
-        return false;
-    };
-    !port.is_empty()
-        && port.bytes().all(|byte| byte.is_ascii_digit())
-        && port.parse::<u16>().is_ok_and(|port| port > 0)
-}
-
-fn near_credits_url_is_allowed(url: &str) -> bool {
-    let prefix = "https://cloud.near.ai/dashboard/organizations/";
-    let Some(rest) = url.strip_prefix(prefix) else {
-        return false;
-    };
-    let Some(organization_id) = rest.strip_suffix("/credits") else {
-        return false;
-    };
-    !organization_id.is_empty()
-        && organization_id.len() <= 128
-        && organization_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    trace_commons_contributor::external_url::is_allowed(url)
 }
 
 #[tauri::command]
@@ -295,25 +258,6 @@ pub(crate) fn consume_deep_link(
         .map_err(str::to_owned)
 }
 
-fn tracecommons_run_url_is_allowed(url: &str) -> bool {
-    let prefix = "https://tracecommons.ai/runs/";
-    let Some(slug) = url.strip_prefix(prefix) else {
-        return false;
-    };
-    !slug.is_empty()
-        && slug.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        })
-}
-
-fn tracecommons_fixture_url_is_allowed(url: &str) -> bool {
-    let prefix = "https://github.com/TraceCommons/trace-commons/commit/";
-    let Some(commit) = url.strip_prefix(prefix) else {
-        return false;
-    };
-    commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 pub(crate) fn existing_directory(path: &str, error: &'static str) -> Result<PathBuf, String> {
     let candidate = path.trim();
     if candidate.is_empty() {
@@ -415,9 +359,7 @@ mod tests {
 
     use super::{
         REVIEW_DEEP_LINK, existing_directory, external_url_is_allowed, git_repository,
-        installed_by_homebrew, is_tracecommons_deep_link, near_credits_url_is_allowed,
-        quit_prompt_value, tracecommons_fixture_url_is_allowed, tracecommons_run_url_is_allowed,
-        wallet_url_is_valid,
+        installed_by_homebrew, is_tracecommons_deep_link, quit_prompt_value, wallet_url_is_valid,
     };
     use trace_commons_contributor::quit_copy::{self, QuitRole};
 
@@ -445,48 +387,32 @@ mod tests {
         }
     }
 
+    // The allowlist itself moved to the contributor core (K7, #1173:
+    // `trace_commons_contributor::external_url`), which has its own
+    // exhaustive test module, including the negative cases (lookalike
+    // hosts, `javascript:`/`data:` schemes, over-long and garbage input,
+    // embedded control characters). This is only the wiring check:
+    // `external_url_is_allowed` is a thin call-through, unchanged for a
+    // representative allowed and refused URL.
     #[test]
-    fn external_urls_are_limited_to_rust_owned_destinations() {
+    fn external_url_allowlist_is_the_cores_reached_through_the_wrapper() {
         assert!(external_url_is_allowed(
             "http://127.0.0.1:49152/near-ai/callback?state=abc"
         ));
-        assert!(!external_url_is_allowed(
-            "http://127.0.0.1:49152@attacker.example/near-ai/callback"
-        ));
-        assert!(!external_url_is_allowed(
-            "http://127.0.0.1:99999/near-ai/callback"
-        ));
         assert!(external_url_is_allowed(
             "https://cloud.near.ai/dashboard/organizations/example/credits"
         ));
-        assert!(near_credits_url_is_allowed(
-            "https://cloud.near.ai/dashboard/organizations/example/credits"
-        ));
-        assert!(!near_credits_url_is_allowed(
-            "https://cloud.near.ai/dashboard/organizations/example/credits?next=https://example.com"
-        ));
-        assert!(!near_credits_url_is_allowed(
-            "https://cloud.near.ai/dashboard/organizations/../other/credits"
-        ));
-        assert!(tracecommons_run_url_is_allowed(
-            "https://tracecommons.ai/runs/repair-a-stalled-upload"
-        ));
-        assert!(!tracecommons_run_url_is_allowed(
-            "https://tracecommons.ai/runs/repair-a-stalled-upload?next=https://example.com"
-        ));
-        assert!(tracecommons_fixture_url_is_allowed(
-            "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5"
-        ));
-        assert!(!tracecommons_fixture_url_is_allowed(
-            "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5?next=https://example.com"
-        ));
-        assert!(!tracecommons_fixture_url_is_allowed(
-            "https://github.com/tracecommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5"
-        ));
         assert!(!external_url_is_allowed("https://example.com/redirect"));
         assert!(!external_url_is_allowed(
-            "https://cloud.near.ai/dashboard/organizations/example/credits\nopen"
+            "http://127.0.0.1:49152@attacker.example/near-ai/callback"
         ));
+    }
+
+    // Unrelated to the allowlist above: the wallet/account-sign-in URL
+    // checker validates against a nonce the shell itself minted, not a
+    // fixed host list, and was not moved.
+    #[test]
+    fn wallet_urls_check_origin_shape_only_here() {
         assert!(wallet_url_is_valid(
             "https://commons.example/wallet/start?state=1"
         ));

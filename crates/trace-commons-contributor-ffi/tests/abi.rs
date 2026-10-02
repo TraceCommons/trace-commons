@@ -5299,6 +5299,42 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
 }
 
 #[test]
+fn the_external_url_allowlist_crosses_the_abi() {
+    use trace_commons_contributor::external_url::is_allowed;
+    use trace_commons_contributor_ffi::tc_external_url_is_allowed;
+
+    for url in [
+        "http://127.0.0.1:49152/near-ai/callback?state=abc",
+        "https://cloud.near.ai/dashboard/organizations/example/credits",
+        "https://tracecommons.ai/runs/repair-a-stalled-upload",
+        "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5",
+    ] {
+        assert!(is_allowed(url), "{url}");
+        let c = cstr_str(url);
+        assert_eq!(
+            unsafe { tc_external_url_is_allowed(c.as_ptr()) },
+            1,
+            "{url}"
+        );
+    }
+    for url in [
+        "https://example.com/redirect",
+        "javascript:alert(1)",
+        "https://cloud.near.ai.evil.example/dashboard/organizations/example/credits",
+    ] {
+        assert!(!is_allowed(url), "{url}");
+        let c = cstr_str(url);
+        assert_eq!(
+            unsafe { tc_external_url_is_allowed(c.as_ptr()) },
+            0,
+            "{url}"
+        );
+    }
+    // A NULL/non-UTF-8 url refuses, the safe sentinel, rather than crashing.
+    assert_eq!(unsafe { tc_external_url_is_allowed(std::ptr::null()) }, 0);
+}
+
+#[test]
 fn the_quit_prompt_is_chosen_from_the_handle() {
     use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
     use trace_commons_contributor_ffi::tc_quit_prompt_json;
