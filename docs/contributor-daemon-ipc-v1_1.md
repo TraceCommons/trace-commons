@@ -1010,6 +1010,16 @@ direction, only that `would_send_bytes` is the number that governs consent.
 in the response ever contains the actual matched text, only counts and
 category labels.
 
+`redactions_distinct` (R7, #1173) is distinct values removed per label,
+beside the occurrence counts in `redactions`: a client renders "185 local
+path (12 distinct)" rather than just the total. It was previously only on
+the full summary (a certificate entry's `preview`, and `tc_preview_summary_json`
+across the C ABI); it is now on the card shape too -- `preview` for every
+other entry, `preview_request`'s cache hit, and the `preview_ready` event --
+since the review screen needs it on a card exactly as much as on the full
+sheet. A count only, like every other field here: no value removed is ever
+named.
+
 **`preview` does not require an enrollment.** It performs no network I/O and
 needs neither the daemon's file lock nor its running loop, so an app can
 show a contributor what would be sent *before* they decide to enrol -- which
