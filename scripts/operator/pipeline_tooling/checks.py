@@ -21,7 +21,10 @@ required check is a mechanics check that carries none, and
 package. The Rust tests emit the same split: a mechanics test passes no
 package to `PipelineCheckEmitter`, and the four candidate tests pass the
 candidate (`qualification_candidate_package` in `pipeline_http_pg_tests.rs`,
-repeated in `versioned_pipeline_runtime_pg.rs`).
+repeated in `versioned_pipeline_runtime_pg.rs`). `evaluate_promotion`
+enforces the split on the evidence itself, from the Rust list
+`PROMOTION_PACKAGE_CHECKS` (a self-test requires that list to equal the
+checks with `digests_required` here).
 """
 
 from __future__ import annotations

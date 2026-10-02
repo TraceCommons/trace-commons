@@ -48,6 +48,15 @@ pub const QUALIFICATION_EVIDENCE_INVALID_LABEL: &str = "qualification_evidence_i
 pub const QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL: &str =
     "qualification_evidence_mixed_revision";
 pub const QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL: &str = "qualification_evidence_mixed_package";
+/// A check that tests the candidate ([`PROMOTION_PACKAGE_CHECKS`]) whose
+/// result does not name all three package digests; blocks as
+/// `<label>:<check_id>`.
+pub const QUALIFICATION_EVIDENCE_PACKAGE_MISSING_LABEL: &str =
+    "qualification_evidence_package_missing";
+/// A mechanics check (one outside [`PROMOTION_PACKAGE_CHECKS`]) whose result
+/// carries a package digest; blocks as `<label>:<check_id>`.
+pub const QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL: &str =
+    "qualification_evidence_package_unexpected";
 /// The longest maximum age `PipelineQualificationStore::qualify_bundle`
 /// accepts for a check result: seven days. A result's maximum age is the
 /// caller's input until PR 5 signs results, so the server bounds it.
@@ -55,6 +64,11 @@ pub const QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL: &str =
     "bundle_qualification_evidence_age_above_ceiling";
 
+/// The checks that must pass for promotion: one current result for each
+/// (see [`evaluate_promotion`]). Exactly the ids in
+/// [`PROMOTION_PACKAGE_CHECKS`] test the candidate package and name it; every
+/// other id is a mechanics check (or a promotion-only check) and names no
+/// package.
 pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
     "pipeline_storage_upgrade_rls",
     "pipeline_http_corpus_minimal",
@@ -76,6 +90,19 @@ pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
     "pipeline_production_adapters",
     "pipeline_remote_restore",
     "pipeline_hf_network_canary",
+];
+
+/// The checks, among [`PROMOTION_REQUIRED_CHECKS`], that test the candidate
+/// package and so carry its three digests (P5-D15): the bundle qualification,
+/// the compatibility and HF-local corpus runs, and the restore drill. Every
+/// other required check is a mechanics check whose result names no package.
+/// `scripts/operator/pipeline_tooling/checks.py` holds the same four as
+/// `digests_required` (a self-test requires the two lists to agree).
+pub const PROMOTION_PACKAGE_CHECKS: &[&str] = &[
+    "pipeline_bundle_qualification",
+    "pipeline_http_corpus_compatibility",
+    "pipeline_http_corpus_hf_local",
+    "pipeline_restore_drill",
 ];
 
 pub(crate) fn is_safe_label(value: &str) -> bool {
@@ -404,7 +431,10 @@ pub struct PromotionDecision {
     /// evidence carries none or more than one.
     pub code_revision_hash: Option<String>,
     /// The one package the results that name a package name; `None` when
-    /// none names one or they name more than one.
+    /// none names one, they name more than one, or a result breaks the
+    /// package rule of [`PROMOTION_PACKAGE_CHECKS`] (a candidate check
+    /// without the package, a mechanics check with one): the decision then
+    /// names no package, whatever else it says.
     pub package: Option<PromotionPackage>,
 }
 
@@ -417,19 +447,21 @@ pub struct PromotionDecision {
 /// and each safe blocker a result carries, including a passing one. Evidence
 /// from more than one revision adds `qualification_evidence_mixed_revision`,
 /// and from more than one package `qualification_evidence_mixed_package`
-/// (a package is its three digests together). A result that names no
-/// package does not count: one result that names a package binds the
-/// decision to it, and a decision can be ready with no package at all when
-/// no result names one (only `qualify_bundle` refuses that). A qualification
-/// run names exactly one package (P5-D15): the four checks that test the
-/// candidate (`pipeline_bundle_qualification`,
-/// `pipeline_http_corpus_compatibility`, `pipeline_http_corpus_hf_local`,
-/// and `pipeline_restore_drill`) carry its three digests, and every
-/// mechanics check names none, so its result does not count here. The list
-/// of the four is `digests_required` in
-/// `scripts/operator/pipeline_tooling/checks.py`, which also refuses a
-/// mechanics result that carries a digest; this function only counts the
-/// packages the results name.
+/// (a package is its three digests together).
+///
+/// A qualification run names exactly one package (P5-D15), and this
+/// function enforces which results name it, in both directions, because the
+/// decision gates `qualify_bundle` and so activation, for evidence that did
+/// not pass through `pipeline.py`. Each check in [`PROMOTION_PACKAGE_CHECKS`]
+/// (the four that test the candidate) must carry all three package digests:
+/// one that carries fewer, none included, adds
+/// `qualification_evidence_package_missing:<check_id>`. Every other check
+/// (a mechanics check, or a promotion-only one) must carry none: one that
+/// carries any digest adds `qualification_evidence_package_unexpected:<check_id>`.
+/// With either blocker the decision is not ready and `package` is `None`: no
+/// package is the one the candidate checks tested. A decision is therefore
+/// ready only when the four candidate checks name one package and no other
+/// result names any, and then `package` is that package.
 ///
 /// `evidence_hash` covers, for each check id, the result's run id, code
 /// revision, package digests and evidence hash, with the blockers, as
@@ -470,6 +502,7 @@ pub fn evaluate_promotion(
         }
     }
     let mut blockers = Vec::new();
+    let mut package_rule_broken = false;
     for check_id in PROMOTION_REQUIRED_CHECKS {
         let Some(item) = by_id.get(check_id) else {
             blockers.push(format!("{QUALIFICATION_EVIDENCE_MISSING_LABEL}:{check_id}"));
@@ -488,6 +521,27 @@ pub fn evaluate_promotion(
                 .iter()
                 .map(|label| format!("{label}:{check_id}")),
         );
+        // Which results name the package (P5-D15): the candidate checks all
+        // three digests, every other check none.
+        let digests_named = [
+            &item.check.package_hash,
+            &item.check.configuration_digest,
+            &item.check.dependency_digest,
+        ]
+        .map(|digest| digest.is_some());
+        if PROMOTION_PACKAGE_CHECKS.contains(check_id) {
+            if !digests_named.iter().all(|named| *named) {
+                blockers.push(format!(
+                    "{QUALIFICATION_EVIDENCE_PACKAGE_MISSING_LABEL}:{check_id}"
+                ));
+                package_rule_broken = true;
+            }
+        } else if digests_named.iter().any(|named| *named) {
+            blockers.push(format!(
+                "{QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL}:{check_id}"
+            ));
+            package_rule_broken = true;
+        }
         let maximum_age = maximum_age(item)
             .ok_or_else(|| format!("{QUALIFICATION_EVIDENCE_INVALID_LABEL}:{check_id}"))?;
         if item.check.observed_at > now || now - item.check.observed_at > maximum_age {
@@ -540,7 +594,7 @@ pub fn evaluate_promotion(
         code_revision_hash: (revisions.len() == 1)
             .then(|| revisions.first().map(|revision| revision.to_string()))
             .flatten(),
-        package: (packages.len() == 1)
+        package: (packages.len() == 1 && !package_rule_broken)
             .then(|| packages.first().cloned())
             .flatten(),
     })
@@ -1545,16 +1599,25 @@ mod tests {
         }
     }
 
+    /// `sample_check` in the shape a real qualification run has (P5-D15): a
+    /// check in [`PROMOTION_PACKAGE_CHECKS`] names the one candidate package,
+    /// every other check names none.
+    fn promotion_check(
+        check_id: &str,
+        status: PipelineCheckStatus,
+        observed_at: DateTime<Utc>,
+    ) -> PipelineCheckResult {
+        let mut check = sample_check(check_id, status, observed_at);
+        if PROMOTION_PACKAGE_CHECKS.contains(&check_id) {
+            name_package(&mut check, "candidate");
+        }
+        check
+    }
+
     #[test]
     fn promotion_requires_current_passing_evidence_for_every_check() {
         let now = Utc::now();
-        let evidence = PROMOTION_REQUIRED_CHECKS
-            .iter()
-            .map(|check_id| DrillEvidence {
-                check: sample_check(check_id, PipelineCheckStatus::Pass, now),
-                maximum_age_seconds: 3_600,
-            })
-            .collect::<Vec<_>>();
+        let evidence = passing_evidence(now);
         assert!(evaluate_promotion(&evidence, now).unwrap().ready);
 
         let reversed = evidence.iter().rev().cloned().collect::<Vec<_>>();
@@ -1655,7 +1718,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, check_id)| {
-                let mut check = sample_check(check_id, PipelineCheckStatus::Pass, now);
+                let mut check = promotion_check(check_id, PipelineCheckStatus::Pass, now);
                 check.run_id = format!("q{index:08x}");
                 check.code_revision_hash = sha256_prefixed(format!("revision-{index}").as_bytes());
                 DrillEvidence {
@@ -1732,14 +1795,38 @@ mod tests {
         }
     }
 
+    /// One passing result for each promotion check, in the shape a real
+    /// qualification run has: the four checks of [`PROMOTION_PACKAGE_CHECKS`]
+    /// name the one candidate package, every other check names none.
     fn passing_evidence(now: DateTime<Utc>) -> Vec<DrillEvidence> {
         PROMOTION_REQUIRED_CHECKS
             .iter()
             .map(|check_id| DrillEvidence {
-                check: sample_check(check_id, PipelineCheckStatus::Pass, now),
+                check: promotion_check(check_id, PipelineCheckStatus::Pass, now),
                 maximum_age_seconds: 3_600,
             })
             .collect()
+    }
+
+    /// `evidence` with every check of [`PROMOTION_PACKAGE_CHECKS`] naming
+    /// the package `name` (and no other result changed).
+    fn name_package_on_candidate_checks(evidence: &mut [DrillEvidence], name: &str) {
+        for item in evidence.iter_mut() {
+            if PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str()) {
+                name_package(&mut item.check, name);
+            }
+        }
+    }
+
+    fn check_mut<'a>(
+        evidence: &'a mut [DrillEvidence],
+        check_id: &str,
+    ) -> &'a mut PipelineCheckResult {
+        &mut evidence
+            .iter_mut()
+            .find(|item| item.check.check_id == check_id)
+            .unwrap_or_else(|| panic!("{check_id} is a promotion check"))
+            .check
     }
 
     fn name_package(check: &mut PipelineCheckResult, name: &str) {
@@ -1776,18 +1863,16 @@ mod tests {
     }
 
     /// Wave 2: among the results that name a package, every one must name
-    /// the same package (all three digests). A result that names none does
-    /// not count. Two packages, or one that differs only in its
-    /// configuration digest, is not ready, under
+    /// the same package (all three digests). Two packages, or one that
+    /// differs only in its configuration digest, is not ready, under
     /// `qualification_evidence_mixed_package`, and the decision names no
-    /// package; one package is named by the decision.
+    /// package; one package is named by the decision. (Since P5-D15 the
+    /// results that name a package are exactly the four candidate checks,
+    /// so these cases change a candidate check.)
     #[test]
     fn promotion_binds_one_package() {
         let now = Utc::now();
-        let mut evidence = passing_evidence(now);
-        for item in evidence.iter_mut().step_by(2) {
-            name_package(&mut item.check, "candidate");
-        }
+        let evidence = passing_evidence(now);
         let decision = evaluate_promotion(&evidence, now).unwrap();
         assert!(decision.ready, "{:?}", decision.safe_blockers);
         let package = decision.package.expect("the decision names its package");
@@ -1798,9 +1883,12 @@ mod tests {
         }));
 
         let mut other_package = evidence.clone();
-        name_package(&mut other_package[1].check, "other");
+        name_package(
+            check_mut(&mut other_package, "pipeline_http_corpus_compatibility"),
+            "other",
+        );
         let mut other_configuration = evidence.clone();
-        other_configuration[2].check.configuration_digest =
+        check_mut(&mut other_configuration, "pipeline_restore_drill").configuration_digest =
             Some(sha256_prefixed(b"other-configuration"));
         for mixed in [other_package, other_configuration] {
             let decision = evaluate_promotion(&mixed, now).unwrap();
@@ -1812,44 +1900,54 @@ mod tests {
             assert_eq!(decision.package, None);
         }
 
-        let unnamed = passing_evidence(now);
+        // The rule of P5-D15 reversed the old reading, "a decision can be
+        // ready with no package at all when no result names one": the
+        // candidate checks then name none, each blocks, and the decision
+        // names no package.
+        let mut unnamed = passing_evidence(now);
+        for item in &mut unnamed {
+            item.check.package_hash = None;
+            item.check.configuration_digest = None;
+            item.check.dependency_digest = None;
+        }
         let decision = evaluate_promotion(&unnamed, now).unwrap();
-        assert!(decision.ready);
+        assert!(!decision.ready);
+        assert_eq!(
+            decision.safe_blockers,
+            PROMOTION_PACKAGE_CHECKS
+                .iter()
+                .map(|check_id| format!(
+                    "{QUALIFICATION_EVIDENCE_PACKAGE_MISSING_LABEL}:{check_id}"
+                ))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
         assert_eq!(decision.package, None, "no result names a package");
     }
 
-    /// P5-D15: a qualification run names exactly one package. The four
-    /// checks that test the candidate (the bundle qualification, the
-    /// compatibility and HF-local corpus checks, and the restore drill)
-    /// carry its three digests, and every mechanics check carries none, so a
-    /// result for each required check promotes the one candidate. A
-    /// mechanics result that names another package (a test bundle, the
-    /// state before PR 5) is a mixed package again. The list of those four
-    /// ids lives in `scripts/operator/pipeline_tooling/checks.py`
-    /// (`digests_required`), which refuses a result that disagrees; the
-    /// rule here is only that results naming no package do not count.
+    /// P5-D15 (a) and (e): a qualification run names exactly one package.
+    /// The four checks that test the candidate ([`PROMOTION_PACKAGE_CHECKS`])
+    /// carry its three digests and every other check carries none: a result
+    /// for each required check then promotes the one candidate. The crash
+    /// matrix, a mechanics check, naming another package (a test bundle, the
+    /// state before PR 5) is a mixed package, and is also a result that
+    /// names a package it must not.
     #[test]
     fn mechanics_results_without_a_package_do_not_mix_a_promotion() {
-        const CANDIDATE_CHECKS: [&str; 4] = [
-            "pipeline_bundle_qualification",
-            "pipeline_http_corpus_compatibility",
-            "pipeline_http_corpus_hf_local",
-            "pipeline_restore_drill",
-        ];
         let now = Utc::now();
-        let mut evidence = passing_evidence(now);
-        for item in evidence.iter_mut() {
-            if CANDIDATE_CHECKS.contains(&item.check.check_id.as_str()) {
-                name_package(&mut item.check, "candidate");
-            }
-        }
+        let evidence = passing_evidence(now);
         assert_eq!(
             evidence
                 .iter()
                 .filter(|item| item.check.package_hash.is_some())
-                .count(),
-            CANDIDATE_CHECKS.len(),
-            "exactly the four candidate checks name a package"
+                .map(|item| item.check.check_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            PROMOTION_PACKAGE_CHECKS
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            "exactly the candidate checks name a package"
         );
         assert_eq!(
             evidence.len(),
@@ -1858,11 +1956,6 @@ mod tests {
         );
         let decision = evaluate_promotion(&evidence, now).unwrap();
         assert!(decision.ready, "{:?}", decision.safe_blockers);
-        assert!(
-            !decision
-                .safe_blockers
-                .contains(&QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string())
-        );
         let candidate = PipelinePackageDigests {
             package_hash: sha256_prefixed(b"candidate-package"),
             configuration_digest: sha256_prefixed(b"candidate-configuration"),
@@ -1876,20 +1969,187 @@ mod tests {
                 .is(&candidate)
         );
 
-        // The crash matrix, a mechanics check, naming another package (a
-        // test bundle) is the mixed package the rule exists to prevent.
         let mut mixed = evidence.clone();
-        let crash_matrix = mixed
+        name_package(
+            check_mut(&mut mixed, "pipeline_crash_matrix"),
+            "test-bundle",
+        );
+        let decision = evaluate_promotion(&mixed, now).unwrap();
+        assert!(!decision.ready);
+        assert_eq!(
+            decision.safe_blockers,
+            vec![
+                QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string(),
+                format!("{QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL}:pipeline_crash_matrix"),
+            ]
+        );
+        assert_eq!(decision.package, None);
+    }
+
+    /// P5-D15 (b): a check that tests the candidate must name it. Each of
+    /// the four, left without its package in turn, blocks promotion under
+    /// `qualification_evidence_package_missing:<check_id>`, and the decision
+    /// names no package.
+    #[test]
+    fn a_candidate_check_that_names_no_package_blocks_promotion() {
+        let now = Utc::now();
+        for check_id in PROMOTION_PACKAGE_CHECKS {
+            let mut evidence = passing_evidence(now);
+            let check = check_mut(&mut evidence, check_id);
+            check.package_hash = None;
+            check.configuration_digest = None;
+            check.dependency_digest = None;
+            let decision = evaluate_promotion(&evidence, now).unwrap();
+            assert!(!decision.ready, "{check_id}");
+            assert_eq!(
+                decision.safe_blockers,
+                vec![format!(
+                    "{QUALIFICATION_EVIDENCE_PACKAGE_MISSING_LABEL}:{check_id}"
+                )],
+                "{check_id}"
+            );
+            assert_eq!(decision.package, None, "{check_id}");
+        }
+    }
+
+    /// P5-D15 (d): a mechanics check names no package, even the candidate.
+    /// With the four candidate checks naming the candidate, a mechanics
+    /// result that names the same package still blocks promotion under
+    /// `qualification_evidence_package_unexpected:<check_id>` (the packages
+    /// agree, so this is not a mixed package), and the decision names no
+    /// package. A promotion-only check (its result comes from a production
+    /// run, not a local one) is a mechanics check in this rule.
+    #[test]
+    fn a_mechanics_result_that_names_the_candidate_blocks_promotion() {
+        let now = Utc::now();
+        for check_id in PROMOTION_REQUIRED_CHECKS
+            .iter()
+            .filter(|check_id| !PROMOTION_PACKAGE_CHECKS.contains(check_id))
+        {
+            let mut evidence = passing_evidence(now);
+            name_package(check_mut(&mut evidence, check_id), "candidate");
+            let decision = evaluate_promotion(&evidence, now).unwrap();
+            assert!(!decision.ready, "{check_id}");
+            assert_eq!(
+                decision.safe_blockers,
+                vec![format!(
+                    "{QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL}:{check_id}"
+                )],
+                "{check_id}: the same package is not a mixed package"
+            );
+            assert_eq!(decision.package, None, "{check_id}");
+        }
+
+        // One digest alone is a digest: a mechanics result that carries only
+        // a dependency digest blocks too.
+        let mut partial = passing_evidence(now);
+        check_mut(&mut partial, "pipeline_lease_renewal").dependency_digest =
+            Some(sha256_prefixed(b"candidate-dependency"));
+        let decision = evaluate_promotion(&partial, now).unwrap();
+        assert!(!decision.ready);
+        assert!(
+            decision.safe_blockers.contains(&format!(
+                "{QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL}:pipeline_lease_renewal"
+            )),
+            "{:?}",
+            decision.safe_blockers
+        );
+    }
+
+    /// A package is its three digests together. A check that tests the
+    /// candidate and carries only some of them is not ready, whichever
+    /// digest it lacks, even when every candidate check carries the same
+    /// partial set (one package among the results, so no mixed-package
+    /// blocker), and the decision names no package.
+    #[test]
+    fn a_candidate_check_with_a_partial_digest_set_blocks_promotion() {
+        let now = Utc::now();
+        let digests: [fn(&mut PipelineCheckResult) -> &mut Option<String>; 3] = [
+            |check| &mut check.package_hash,
+            |check| &mut check.configuration_digest,
+            |check| &mut check.dependency_digest,
+        ];
+        for lacking in digests {
+            // Every candidate check lacks the same digest: one (partial)
+            // package among the results.
+            let mut evidence = passing_evidence(now);
+            for item in &mut evidence {
+                if PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str()) {
+                    *lacking(&mut item.check) = None;
+                }
+            }
+            let decision = evaluate_promotion(&evidence, now).unwrap();
+            assert!(!decision.ready, "{:?}", decision.safe_blockers);
+            assert_eq!(
+                decision.safe_blockers,
+                PROMOTION_PACKAGE_CHECKS
+                    .iter()
+                    .map(|check_id| format!(
+                        "{QUALIFICATION_EVIDENCE_PACKAGE_MISSING_LABEL}:{check_id}"
+                    ))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(decision.package, None);
+        }
+    }
+
+    /// The list of checks that name the package is a part of the list of
+    /// checks promotion requires, with no repeat.
+    #[test]
+    fn package_checks_are_required_promotion_checks() {
+        assert_eq!(PROMOTION_PACKAGE_CHECKS.len(), 4);
+        assert_eq!(
+            PROMOTION_PACKAGE_CHECKS
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len(),
+            PROMOTION_PACKAGE_CHECKS.len()
+        );
+        for check_id in PROMOTION_PACKAGE_CHECKS {
+            assert!(
+                PROMOTION_REQUIRED_CHECKS.contains(check_id),
+                "{check_id} is not a required promotion check"
+            );
+        }
+    }
+
+    /// The hole (task 7 review): the evidence is ready when one mechanics
+    /// result names the candidate and the four checks that test the
+    /// candidate name none, so the decision names a package that no
+    /// candidate check tested. `evaluate_promotion` gates `qualify_bundle`,
+    /// so the rule must hold for evidence that did not pass through
+    /// `pipeline.py`.
+    #[test]
+    fn a_package_named_only_by_a_mechanics_result_is_not_ready() {
+        let now = Utc::now();
+        let mut evidence = passing_evidence(now);
+        for item in evidence.iter_mut() {
+            item.check.package_hash = None;
+            item.check.configuration_digest = None;
+            item.check.dependency_digest = None;
+        }
+        let crash_matrix = evidence
             .iter_mut()
             .find(|item| item.check.check_id == "pipeline_crash_matrix")
             .expect("the crash matrix is a promotion check");
-        name_package(&mut crash_matrix.check, "test-bundle");
-        let decision = evaluate_promotion(&mixed, now).unwrap();
-        assert!(!decision.ready);
+        name_package(&mut crash_matrix.check, "candidate");
+        let decision = evaluate_promotion(&evidence, now).unwrap();
+        assert!(!decision.ready, "{:?}", decision.safe_blockers);
+        for check_id in PROMOTION_PACKAGE_CHECKS {
+            assert!(
+                decision.safe_blockers.contains(&format!(
+                    "{QUALIFICATION_EVIDENCE_PACKAGE_MISSING_LABEL}:{check_id}"
+                )),
+                "{check_id}: {:?}",
+                decision.safe_blockers
+            );
+        }
         assert!(
-            decision
-                .safe_blockers
-                .contains(&QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string()),
+            decision.safe_blockers.contains(&format!(
+                "{QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL}:pipeline_crash_matrix"
+            )),
             "{:?}",
             decision.safe_blockers
         );
@@ -1911,17 +2171,35 @@ mod tests {
         for item in &mut revision {
             item.check.code_revision_hash = sha256_prefixed(b"another-revision");
         }
+        // Another package, named by all four candidate checks: still ready,
+        // so the hash differs by the digests themselves, not by a blocker.
         let mut package = evidence.clone();
-        name_package(&mut package[0].check, "candidate");
+        name_package_on_candidate_checks(&mut package, "other");
         // Each digest alone, against the same named package (fix round 1,
-        // review M5): a hash that left out any one of them would repeat
-        // `package`'s.
-        let mut package_hash = package.clone();
-        package_hash[0].check.package_hash = Some(sha256_prefixed(b"other-package"));
-        let mut configuration = package.clone();
-        configuration[0].check.configuration_digest = Some(sha256_prefixed(b"other-configuration"));
-        let mut dependency = package.clone();
-        dependency[0].check.dependency_digest = Some(sha256_prefixed(b"other-dependency"));
+        // review M5), again on all four candidate checks so the evidence
+        // stays ready: a hash that left out any one of them would repeat
+        // the base evidence's.
+        let change_on_candidate_checks = |change: fn(&mut PipelineCheckResult)| {
+            let mut changed = evidence.clone();
+            for item in &mut changed {
+                if PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str()) {
+                    change(&mut item.check);
+                }
+            }
+            changed
+        };
+        let package_hash = change_on_candidate_checks(|check| {
+            check.package_hash = Some(sha256_prefixed(b"other-package"));
+        });
+        let configuration = change_on_candidate_checks(|check| {
+            check.configuration_digest = Some(sha256_prefixed(b"other-configuration"));
+        });
+        let dependency = change_on_candidate_checks(|check| {
+            check.dependency_digest = Some(sha256_prefixed(b"other-dependency"));
+        });
+        for named in [&package, &package_hash, &configuration, &dependency] {
+            assert!(evaluate_promotion(named, now).unwrap().ready);
+        }
         let mut observed = evidence.clone();
         observed[0].check.evidence_hash = sha256_prefixed(b"other-evidence");
 
@@ -1950,10 +2228,7 @@ mod tests {
     #[test]
     fn qualification_requires_a_ready_promotion_for_its_metadata_and_package() {
         let now = Utc::now();
-        let mut evidence = passing_evidence(now);
-        for item in evidence.iter_mut().step_by(3) {
-            name_package(&mut item.check, "candidate");
-        }
+        let evidence = passing_evidence(now);
         let ready = evaluate_promotion(&evidence, now).unwrap();
         assert!(ready.ready);
         let candidate = PipelinePackageDigests {
@@ -1986,7 +2261,12 @@ mod tests {
             configuration_digest: candidate.configuration_digest.clone(),
             dependency_digest: candidate.dependency_digest.clone(),
         };
-        let unnamed = evaluate_promotion(&passing_evidence(now), now).unwrap();
+        // `evaluate_promotion` no longer calls such a decision ready (the
+        // candidate checks must name the package), but the function takes a
+        // decision value, so it still refuses one that is ready and names no
+        // package.
+        let mut unnamed = ready.clone();
+        unnamed.package = None;
         let mut unnamed_metadata = metadata.clone();
         unnamed_metadata.evidence_hash = unnamed.evidence_hash.clone();
         for (promotion, metadata, digests, label) in [

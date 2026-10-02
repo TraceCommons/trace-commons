@@ -243,7 +243,7 @@ def require_current_pass_results(run, results, required):
     must have a passing, current result from this exact run, against this
     exact code revision. A check whose spec asks for digests must carry all
     three; one whose spec does not (a mechanics check) must carry none
-    (`pipeline_check_digests_unexpected`), so no check names a test bundle.
+    (`pipeline_check_digests_unexpected:<id>`), so no check names a test bundle.
     Last, the results given name at most one package
     (`require_one_package`)."""
     now = datetime.now(timezone.utc)
@@ -272,5 +272,5 @@ def require_current_pass_results(run, results, required):
             or result.configuration_digest is not None
             or result.dependency_digest is not None
         ):
-            raise ToolingError("pipeline_check_digests_unexpected")
+            raise ToolingError(f"pipeline_check_digests_unexpected:{check_id}")
     require_one_package(results)

@@ -1385,7 +1385,7 @@ async fn pipeline_restore_resume() {
     // drill is one of the four checks that test the qualification
     // candidate (P5-D15), so its result names that package: the service the
     // drill resumed on serves exactly it.
-    let package = qualification_candidate_package().expect("build the qualification candidate");
+    let package = qualification_candidate_package().expect("restore_candidate_package_invalid");
     assert!(
         *service.default_package() == package,
         "restore_service_not_the_candidate"

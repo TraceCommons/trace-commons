@@ -476,7 +476,6 @@ class OnePackageTests(unittest.TestCase):
     names none."""
 
     def _result(self, check_id, *, package=None, **overrides):
-        digests = {}
         if package is not None:
             digests = {
                 "package_hash": _fake_hash(f"{package}-package"),
@@ -561,7 +560,7 @@ class OnePackageTests(unittest.TestCase):
                 required = {"pipeline_crash_matrix": checks.CheckSpec("pipeline_crash_matrix", digests_required=False)}
                 with self.assertRaises(errors.ToolingError) as ctx:
                     results.require_current_pass_results(run, loaded, required)
-                self.assertEqual(str(ctx.exception), "pipeline_check_digests_unexpected")
+                self.assertEqual(str(ctx.exception), "pipeline_check_digests_unexpected:pipeline_crash_matrix")
 
         with self.subTest("none carried passes"), tempfile.TemporaryDirectory() as tmp:
             run = _make_run(Path(tmp))
@@ -1485,13 +1484,14 @@ def _resigned(report):
     return {**unsigned, "report_digest": _digest(results.canonical(unsigned))}
 
 
-def _write_harness_outputs(env, fixtures_by_partition=None, emit=True, digests=None):
+def _write_harness_outputs(env, fixtures_by_partition=None, emit=True, digests=None, result_overrides=None):
     """What `pipeline_corpus_run` leaves behind: the report at
     `TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH` and, when every fixture
     passed, one check result and its evidence in the result directory. The
     result names the corpus report's package (`digests=True`) or none
     (`digests=False`); by default only `pipeline_http_corpus_minimal`, which
-    serves a test bundle, names none (P5-D15)."""
+    serves a test bundle, names none (P5-D15). `result_overrides` replaces
+    fields of the result (a digest that differs from the report's)."""
     paths = [("corpus", env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"])]
     if "TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH" in env:
         paths = [
@@ -1534,6 +1534,7 @@ def _write_harness_outputs(env, fixtures_by_partition=None, emit=True, digests=N
         "evidence_hash": _digest(results.canonical(evidence)),
         "safe_blockers": [],
     }
+    raw.update(result_overrides or {})
     (result_dir / f"{check_id}.result.json").write_text(json.dumps(raw))
     (result_dir / f"{check_id}.evidence.json").write_text(json.dumps(evidence))
     return report
@@ -1835,11 +1836,30 @@ class CorpusRunTests(_CorpusRunCase):
                     else (None, None, None),
                 )
 
+    def test_run_refuses_a_result_whose_package_differs_from_its_report(self):
+        """A check that names the package must name the one its corpus
+        report says the run served: a result with another digest (one,
+        whichever) fails with `corpus_report_package_mismatch`."""
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        for key in ("package_hash", "configuration_digest", "dependency_digest"):
+            with self.subTest(key):
+                shutil.rmtree(self.run.run_dir)
+                self.run = _scratch_run("corpus")
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                argv = [
+                    "run", "--bundle", "compatibility", "--corpus", str(corpus_path),
+                    "--postgres-admin-url", _ADMIN_URL,
+                ]
+                cargo = self._fake_cargo(result_overrides={key: _fake_hash(f"another-{key}")})
+                self.assertEqual(self._main(argv, cargo=cargo), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: corpus_report_package_mismatch")
+
     def test_run_refuses_digests_on_the_minimal_check_and_their_absence_elsewhere(self):
         corpus_path = self.tmp / "corpus.json"
         corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
         for bundle, digests, label in (
-            ("minimal", True, "pipeline_check_digests_unexpected"),
+            ("minimal", True, "pipeline_check_digests_unexpected:pipeline_http_corpus_minimal"),
             ("compatibility", False, "check_result_digest_missing:pipeline_http_corpus_compatibility"),
         ):
             with self.subTest(bundle=bundle):
@@ -2431,13 +2451,18 @@ _CANDIDATE_CHECKS = (
 )
 
 
+def _rust_check_list(name):
+    """The check ids of the Rust constant `name`, read out of the source."""
+    source = _PROMOTION_SOURCE.read_text()
+    match = re.search(rf"pub const {name}: &\[&str\] = &\[(.*?)\];", source, re.S)
+    if match is None:
+        raise AssertionError(f"{name} not found")
+    return re.findall(r'"([a-z0-9_]+)"', match.group(1))
+
+
 def _promotion_required_checks():
     """`PROMOTION_REQUIRED_CHECKS`, read out of the Rust source."""
-    source = _PROMOTION_SOURCE.read_text()
-    match = re.search(r"pub const PROMOTION_REQUIRED_CHECKS: &\[&str\] = &\[(.*?)\];", source, re.S)
-    if match is None:
-        raise AssertionError("PROMOTION_REQUIRED_CHECKS not found")
-    return re.findall(r'"([a-z0-9_]+)"', match.group(1))
+    return _rust_check_list("PROMOTION_REQUIRED_CHECKS")
 
 
 def _emit_check(env, check_id, *, digests=True, evidence=None, **overrides):
@@ -2520,6 +2545,19 @@ class RequiredCheckTests(unittest.TestCase):
                 self.assertRegex(check.check_id, r"^[a-z0-9_]{1,64}$")
                 self.assertIn(check.database, ("upgrade", "runtime", "pilot"))
                 self.assertEqual(check.digests, check.check_id in _CANDIDATE_CHECKS)
+
+    def test_rust_package_checks_are_the_checks_that_require_digests(self):
+        """`evaluate_promotion` enforces which checks name the package
+        (`PROMOTION_PACKAGE_CHECKS`) and this tooling enforces the same
+        (`digests_required`): the two lists are one set."""
+        rust = _rust_check_list("PROMOTION_PACKAGE_CHECKS")
+        self.assertEqual(len(rust), len(set(rust)), "no duplicate package check id")
+        self.assertEqual(set(rust), set(_CANDIDATE_CHECKS))
+        self.assertTrue(set(rust).issubset(_promotion_required_checks()))
+        self.assertEqual(
+            set(rust),
+            {spec.check_id for spec in checks.required_specs().values() if spec.digests_required},
+        )
 
     def test_only_candidate_checks_require_package_digests(self):
         """P5-D15: a qualification run names exactly one package. The four
@@ -2722,16 +2760,20 @@ class QualifyTests(_QualifyCase):
     def test_qualify_refuses_a_mechanics_check_that_names_a_package(self):
         self.digest_override = {"pipeline_crash_matrix": True}
         self.assertEqual(self._qualify(), 1)
-        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: pipeline_check_digests_unexpected")
+        label = "pipeline_check_digests_unexpected:pipeline_crash_matrix"
+        self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
         value = json.loads(self.report_path.read_text())
-        self.assertEqual((value["status"], value["failure"]), ("fail", "pipeline_check_digests_unexpected"))
+        self.assertEqual((value["status"], value["failure"]), ("fail", label))
 
         with self.subTest("the minimal corpus check names no package either"):
             self._fresh_run()
             self.digest_override = {}
             self.harness_digests = {"pipeline_http_corpus_minimal": True}
             self.assertEqual(self._qualify(), 1)
-            self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: pipeline_check_digests_unexpected")
+            self.assertEqual(
+                self.stderr.getvalue().strip(),
+                "PipelineFailure: pipeline_check_digests_unexpected:pipeline_http_corpus_minimal",
+            )
 
     def test_qualify_refuses_a_candidate_check_without_its_digests(self):
         self.digest_override = {"pipeline_bundle_qualification": False}
@@ -2966,6 +3008,59 @@ class QualifyTests(_QualifyCase):
             with self.subTest(label=label):
                 with self.assertRaises(errors.ToolingError):
                     report_module.validate_qualification_report(tampered)
+
+    def test_a_pass_report_names_one_package_on_the_candidate_checks_only(self):
+        """The pass branch of the report validator applies the rules of the
+        results (P5-D15), for a report that `catalog.py` reads from disk:
+        one package among the checks, digests exactly on the four candidate
+        checks. Each direction is refused, and the correct report passes."""
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        value = json.loads(self.report_path.read_text())
+        report_module.validate_qualification_report(value)  # the correct one passes
+        named = {
+            item["check_id"] for item in value["checks"] if item["package_hash"] is not None
+        }
+        self.assertEqual(named, set(_CANDIDATE_CHECKS))
+
+        def changed(check_id, **fields):
+            checks_ = [
+                {**item, **fields} if item["check_id"] == check_id else item for item in value["checks"]
+            ]
+            report = {**value, "checks": checks_}
+            report["evidence_hash"] = _digest(
+                results.canonical({"inputs": report["inputs"], "checks": report["checks"]})
+            )
+            return report
+
+        cases = (
+            (
+                "two packages",
+                changed("pipeline_http_corpus_hf_local", package_hash=_fake_hash("another-package")),
+                "qualification_evidence_mixed_package",
+            ),
+            (
+                "a mechanics check with a digest",
+                changed("pipeline_crash_matrix", **_candidate_digests()),
+                "pipeline_check_digests_unexpected:pipeline_crash_matrix",
+            ),
+            (
+                "a candidate check without its digests",
+                changed("pipeline_restore_drill", **_NO_DIGESTS),
+                "check_result_digest_missing:pipeline_restore_drill",
+            ),
+        )
+        for label, report, expected in cases:
+            with self.subTest(label):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    report_module.validate_qualification_report(report)
+                self.assertEqual(str(ctx.exception), expected)
+
+        with self.subTest("the catalog refuses a pass report that breaks a rule"):
+            self.report_path.write_text(json.dumps(cases[1][1]))
+            with self.assertRaises(errors.ToolingError) as ctx:
+                catalog.update_catalog(self.catalog_path, self.report_path)
+            self.assertEqual(str(ctx.exception), cases[1][2])
+            self.assertFalse(self.catalog_path.exists())
 
     def test_qualify_reports_an_empty_result_file_with_a_label(self):
         """Final review M1: an empty (or malformed) result file fails with

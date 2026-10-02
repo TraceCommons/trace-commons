@@ -335,9 +335,9 @@ pub(super) fn compatibility_reference_package(
 /// repeats this construction (`qualification_candidate_config` there, which
 /// `compatibility_test_service` builds with the same scorer and embedder; a
 /// suite in `tests/` cannot import this module). Every other check is a
-/// mechanics check and names no package. `pipeline.py qualify` refuses a run
-/// whose results name more than one package, so the two constructions
-/// cannot drift apart unseen.
+/// mechanics check and names no package. Nothing in-process compares the two
+/// constructions; a drift between them is seen by a `pipeline.py qualify`
+/// run, whose `require_one_package` refuses results that name two packages.
 pub(super) fn qualification_candidate_package()
 -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
     compatibility_reference_package(

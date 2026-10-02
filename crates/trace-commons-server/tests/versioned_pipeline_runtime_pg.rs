@@ -80,12 +80,12 @@ use trace_commons_server::versioned_pipeline_product::{
 use trace_commons_server::versioned_pipeline_qualification::{
     BundlePackageTrustStore, BundleQualificationMetadata, DrillEvidence,
     PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL, PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL,
-    PACKAGE_SIGNATURE_INVALID_LABEL, PACKAGE_SIGNER_UNTRUSTED_LABEL, PROMOTION_REQUIRED_CHECKS,
-    PipelineCheckEmitter, PipelineCheckResult, PipelineCheckStatus, PipelineQualificationStore,
-    ProductionAdapterKind, ProductionDependencyProfile, ProductionInfrastructureProfile,
-    PromotionDecision, QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL,
-    QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS, evaluate_promotion, package_digests,
-    sign_bundle_package, trusted_key_for_pkcs8,
+    PACKAGE_SIGNATURE_INVALID_LABEL, PACKAGE_SIGNER_UNTRUSTED_LABEL, PROMOTION_PACKAGE_CHECKS,
+    PROMOTION_REQUIRED_CHECKS, PipelineCheckEmitter, PipelineCheckResult, PipelineCheckStatus,
+    PipelineQualificationStore, ProductionAdapterKind, ProductionDependencyProfile,
+    ProductionInfrastructureProfile, PromotionDecision,
+    QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL, QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS,
+    evaluate_promotion, package_digests, sign_bundle_package, trusted_key_for_pkcs8,
 };
 
 use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
@@ -2691,9 +2691,11 @@ impl trace_commons_gate_api::IdentifiedPerplexityScorer for CountingScorer {
 /// reference scorer and embedder (`compatibility_test_service`). The bin's
 /// `qualification_candidate_package` (`pipeline_http_pg_tests.rs`) builds
 /// the same package for the corpus runs and the restore drill; a suite in
-/// `tests/` cannot import it, so this repeats the configuration, and
-/// `pipeline.py qualify` shows whether the two agree: the four checks that
-/// test the candidate must carry one `package_hash`.
+/// `tests/` cannot import it, so this repeats the configuration. Nothing
+/// in-process compares the two; a drift between them is seen by a
+/// `pipeline.py qualify` run, whose `require_one_package` refuses results
+/// that name two packages (the four checks that test the candidate must
+/// carry one `package_hash`).
 fn qualification_candidate_config() -> CompatibilityBundleConfig {
     let mut config = CompatibilityBundleConfig::local_reference();
     config.novelty_utility_microcredits = 2_500_000;
@@ -2773,9 +2775,11 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
     let qualification = service
         .bundle_qualification(&package)
         .expect("the package resolves cleanly against the held dependencies");
-    assert_eq!(qualification.scorer.identity, "counting_scorer_q_test_only");
+    let scorer_identity_is_q = qualification.scorer.identity == "counting_scorer_q_test_only";
+    let scorer_identity_u_absent = qualification.scorer.identity != "counting_scorer_u_test_only";
+    assert!(scorer_identity_is_q);
     assert!(qualification.scorer.production_qualified);
-    assert_ne!(qualification.scorer.identity, "counting_scorer_u_test_only");
+    assert!(scorer_identity_u_absent);
 
     let tenant = format!("qualification-inspects-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
@@ -2803,7 +2807,8 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
         q.calls.load(Ordering::SeqCst) > 0,
         "Q is called at least once for the one run through Score"
     );
-    assert_eq!(u.calls.load(Ordering::SeqCst), 0, "U is never called");
+    let score_calls_u = u.calls.load(Ordering::SeqCst);
+    assert_eq!(score_calls_u, 0, "U is never called");
 
     // The qualification candidate (P5-D15). The Q and U doubles above prove
     // that qualification reads the objects the constructor received; the
@@ -2817,32 +2822,45 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
     )
     .await;
     let candidate = candidate_service.default_package().clone();
-    let candidate_qualification = candidate_service
-        .bundle_qualification(&candidate)
-        .expect("the candidate resolves against the dependencies its service was built with");
-    assert_eq!(candidate_qualification.bundle_id, candidate.bundle_id);
-    assert_eq!(
-        candidate_qualification.scorer.identity,
-        "reference_perplexity_test_only"
+    let candidate_qualification = candidate_service.bundle_qualification(&candidate);
+    let candidate_resolved = candidate_qualification.is_ok();
+    assert!(
+        candidate_resolved,
+        "the candidate resolves against the dependencies its service was built with"
     );
-    assert_eq!(
-        candidate_qualification.embedder.identity,
-        "reference_embedder_test_only"
-    );
+    let candidate_qualification = candidate_qualification.expect("resolved above");
+    let candidate_scorer_is_reference =
+        candidate_qualification.scorer.identity == "reference_perplexity_test_only";
+    let candidate_embedder_is_reference =
+        candidate_qualification.embedder.identity == "reference_embedder_test_only";
+    assert!(candidate_scorer_is_reference);
+    assert!(candidate_embedder_is_reference);
     assert!(!candidate_qualification.scorer.production_qualified);
     assert!(!candidate_qualification.embedder.production_qualified);
+    // Computed from the package's own configuration: the candidate is the
+    // local reference configuration, which no production run can qualify.
+    assert!(!candidate_qualification.configuration_qualifiable);
     assert_ne!(
         candidate.bundle_id, package.bundle_id,
         "the candidate is not the Q package above: that one names the counting scorer"
     );
 
+    // The evidence is about the package the result names. The facts about the
+    // Q package (the constructor proof) are kept apart from the candidate's.
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_bundle_qualification",
         Some(&candidate),
         serde_json::json!({
-            "scorer_identity_is_q": true,
-            "scorer_identity_u_absent": true,
-            "score_calls_u": 0,
+            "candidate_resolved": candidate_resolved,
+            "candidate_scorer_identity_is_reference": candidate_scorer_is_reference,
+            "candidate_embedder_identity_is_reference": candidate_embedder_is_reference,
+            "candidate_scorer_production_qualified": candidate_qualification.scorer.production_qualified,
+            "candidate_embedder_production_qualified": candidate_qualification.embedder.production_qualified,
+            "constructor_object_proof": {
+                "scorer_identity_is_q": scorer_identity_is_q,
+                "scorer_identity_u_absent": scorer_identity_u_absent,
+                "score_calls_u": score_calls_u,
+            },
         }),
     );
 }
@@ -27671,9 +27689,11 @@ fn all_production_infrastructure() -> ProductionInfrastructureProfile {
 /// evaluates them itself. No check run emits results for these tests'
 /// package, so this builds them as real check results:
 /// `PipelineCheckEmitter` writes one passing result for each of
-/// `PROMOTION_REQUIRED_CHECKS`, under one run id and `code_revision_hash` and
-/// naming `package`, and each is read back from its file. `required` limits
-/// the checks written (all of them when `None`), for evidence that is not
+/// `PROMOTION_REQUIRED_CHECKS`, under one run id and `code_revision_hash`,
+/// and each is read back from its file. The result has the shape a real
+/// qualification run has (P5-D15): each check of `PROMOTION_PACKAGE_CHECKS`
+/// names `package`, and every other check names none. `required` limits the
+/// checks written (all of them when `None`), for evidence that is not
 /// ready.
 fn evidence_from_check_results(
     package: &BundlePackage,
@@ -27693,7 +27713,9 @@ fn evidence_from_check_results(
                 .emit(
                     check_id,
                     PipelineCheckStatus::Pass,
-                    Some(package),
+                    PROMOTION_PACKAGE_CHECKS
+                        .contains(check_id)
+                        .then_some(package),
                     &[],
                     serde_json::json!({ "check": check_id }),
                 )

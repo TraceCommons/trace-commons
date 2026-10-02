@@ -33,7 +33,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .checks import REQUIRED_CHECK_IDS, REQUIRED_CORPUS_CHECK_IDS
+from .checks import REQUIRED_CHECK_IDS, REQUIRED_CORPUS_CHECK_IDS, required_specs
 from .environment import ROOT
 from .errors import ToolingError, require
 from .files import atomic_write, sha256_digest
@@ -283,6 +283,29 @@ def _validate(report):
             and all(status.get(check_id) == "pass" for check_id in REQUIRED_CHECK_IDS),
             "qualification_report_incomplete",
         )
+        _require_one_package(checks)
+
+
+def _require_one_package(checks):
+    """A pass report names exactly one package (P5-D15), the rules of the
+    results themselves (`results.require_current_pass_results`,
+    `results.require_one_package`) applied to the report's `checks`, which
+    `catalog.py` also reads from disk: a check whose spec asks for digests
+    carries all three, any other required check carries none, and the
+    digests present are one set."""
+    specs = required_specs()
+    packages = set()
+    for item in checks:
+        check_id = item["check_id"]
+        digests = tuple(item[key] for key in _CHECK_DIGESTS)
+        spec = specs.get(check_id)
+        if spec is not None and spec.digests_required:
+            require(None not in digests, f"check_result_digest_missing:{check_id}")
+        elif spec is not None:
+            require(digests == (None, None, None), f"pipeline_check_digests_unexpected:{check_id}")
+        if digests != (None, None, None):
+            packages.add(digests)
+    require(len(packages) <= 1, "qualification_evidence_mixed_package")
 
 
 def write_report(run, results, inputs, *, failure=None, local_dir=None):
