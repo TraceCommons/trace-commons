@@ -4116,6 +4116,112 @@ async fn quarantined_pipeline_run(
     created
 }
 
+/// Zaki review 3, Z3-L8 (ruling RB-32): with `main`'s database reviewer
+/// reads, which reach a quarantined pipeline submission, `main`'s legacy
+/// review queue, active-learning queue and next-lease claim leave it out,
+/// and its decision and lease routes refuse it with
+/// `409 pipeline_run_owns_submission`: the pipeline reviews it through its
+/// own routes (`/v1/review/pipeline/...`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_legacy_review_routes_leave_pipeline_submissions_out() {
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| {
+            assemble_test_pipeline_service(
+                runtime,
+                artifacts,
+                IsolatedPipelineIndex::new(),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_legacy_review_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let reviewer = format!("token-legacy-review-{suffix}");
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    {
+        let state = Arc::make_mut(&mut fixture.state);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+    let state = fixture.state.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+    let submission = serde_json::json!(run.submission_id);
+
+    let (status, queue) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/review/quarantine",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    assert!(
+        queue
+            .as_array()
+            .expect("the queue")
+            .iter()
+            .all(|item| item["submission_id"] != submission),
+        "{queue}"
+    );
+    let (status, active) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/review/active-learning",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{active}");
+    assert!(
+        !active.to_string().contains(&run.submission_id.to_string()),
+        "{active}"
+    );
+
+    let (status, claimed) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/review/leases/claim-next",
+        auth_headers(&reviewer),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{claimed}");
+
+    for (path, body) in [
+        (
+            format!("/v1/review/{}/decision", run.submission_id),
+            serde_json::json!({"decision": "approve", "reason": "legacy route"}),
+        ),
+        (
+            format!("/v1/review/{}/lease", run.submission_id),
+            serde_json::json!({}),
+        ),
+    ] {
+        let (status, refused) = route_request(
+            state.clone(),
+            "POST",
+            &path,
+            auth_headers(&reviewer),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}: {refused}");
+        assert_eq!(refused["error"], "pipeline_run_owns_submission", "{path}");
+    }
+}
+
 /// The review routes through the router, against a real runtime:
 ///
 /// - Another reviewer's live claim answers a second reviewer's claim `409`.

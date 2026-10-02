@@ -7479,8 +7479,11 @@ impl PgBackend {
             })
             .transpose()?;
 
+        // Zaki review 3, Z3-L8: the update arm leaves a submission a pipeline
+        // run owns alone (a database backstop behind ingest's own refusal),
+        // so a legacy write of one returns no row and is refused.
         let row = tx
-            .query_one(
+            .query_opt(
                 "INSERT INTO trace_submissions (
                     tenant_id, submission_id, trace_id, auth_principal_ref, contributor_pseudonym,
                     submitted_tenant_scope_ref, schema_version, consent_policy_version,
@@ -7514,6 +7517,11 @@ impl PgBackend {
                     expires_at = excluded.expires_at,
                     residual_risk_basis = excluded.residual_risk_basis,
                     updated_at = NOW()
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM pipeline_runs r
+                     WHERE r.tenant_id = excluded.tenant_id
+                       AND r.submission_id = excluded.submission_id
+                 )
                  RETURNING
                     tenant_id, submission_id, trace_id, status, auth_principal_ref,
                     contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
@@ -7549,7 +7557,10 @@ impl PgBackend {
                 ],
             )
             .await
-            .map_err(DatabaseError::Postgres)?;
+            .map_err(DatabaseError::Postgres)?
+            .ok_or_else(|| {
+                DatabaseError::Constraint("submission_owned_by_pipeline_run".to_string())
+            })?;
         let record = row_to_submission(&row)?;
         if let Some(evidence) = evidence {
             let class = match evidence.inference_class {
