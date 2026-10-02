@@ -82,8 +82,9 @@ public struct GlassListRow: View {
                             .glassGlyph(14)
                             .foregroundStyle(selected ? Color.white : GlassTokens.Color.statusOff.color)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .glassPressedFill()
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(GlassPressStyle())
                     // A native disclosure for assistive tech, so the system
                     // says expanded or collapsed in the person's language.
                     .accessibilityRepresentation {
@@ -145,15 +146,12 @@ public struct GlassListRow: View {
         )
         .opacity(off ? GlassTokens.Opacity.rowOff : 1)
         .contentShape(Rectangle())
+        // A click selects the row. The keyboard does not stop on each row:
+        // the list holding the rows is one tab stop and the arrow keys move
+        // its selection (spec, "Components": one list, not a tab stop per
+        // row), as the Traces tree does. VoiceOver selects with the row's
+        // default action.
         .onTapGesture { onSelect?() }
-        // Full Keyboard Access and VoiceOver reach the row too: focusable,
-        // Return or Space selects it, and its default action is the same.
-        .focusable(onSelect != nil)
-        .onKeyPress(keys: [.return, .space]) { _ in
-            guard let onSelect else { return .ignored }
-            onSelect()
-            return .handled
-        }
         .accessibilityAction { onSelect?() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
