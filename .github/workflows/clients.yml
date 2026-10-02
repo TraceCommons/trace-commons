@@ -19,6 +19,10 @@ on:
   pull_request:
     paths:
       - "macos/**"
+      # The glass design tokens and their generator: a JSON-only change has
+      # to run the drift guard below and TokenDriftTests.
+      - "design-tokens/**"
+      - "scripts/design-tokens/**"
       - "windows/**"
       - "installer/**"
       - "scripts/windows/**"
@@ -105,6 +109,11 @@ jobs:
       # trap the cargo-test-default job records.
       - name: Verify compute signature tools with the system verifier
         run: python3 -m unittest discover -s macos/scripts -p 'test_*.py'
+      # The generated Swift tokens must match design-tokens/glass.tokens.json.
+      # TokenDriftTests compares values; this also catches a hand edit to the
+      # generated file's layout and a generator change nobody re-ran.
+      - name: Glass tokens are generated from their source
+        run: python3 scripts/design-tokens/generate.py --check
       - name: swift test
         working-directory: macos
         run: swift test
