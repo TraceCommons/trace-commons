@@ -47,6 +47,14 @@ struct SettingsView: View {
 struct SettingsContent: View {
     /// See `SettingsView.navigation`.
     var navigation: MainWindowNavigation?
+    /// One section alone, for the Settings window's section list (R11 of
+    /// #1173); nil draws every section in order, as the main window does.
+    var section: SettingsSection?
+
+    /// Section headings the section list shows too. Held once here so the
+    /// list and the section say the same words.
+    static let consentHeading = "How may your traces be used?"
+    static let auditHeading = "What has been changed on this machine"
 
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var updates = UpdateController.shared
@@ -130,20 +138,24 @@ struct SettingsContent: View {
         // Spec §5.4 gap: 18 between sections (`TC.Space.lg`), not the
         // 28 this screen used before.
         VStack(alignment: .leading, spacing: TC.Space.lg) {
-            connection
-            loginItem
-            notifications
-            updatesSection
-            consent
-            publicProfile
-            watching
-            watchedFolders
-            routing
-            privateInference
-            RouteDisclosureSection()
-            witness
-            projects
-            audit
+            if shows(.connection) { connection }
+            if shows(.startup) {
+                loginItem
+                notifications
+                updatesSection
+            }
+            if shows(.consent) { consent }
+            if shows(.publicProfile) { publicProfile }
+            if shows(.watching) { watching }
+            if shows(.watchedFolders) { watchedFolders }
+            if shows(.tools) { routing }
+            if shows(.privateAI) {
+                privateInference
+                RouteDisclosureSection()
+            }
+            if shows(.witness) { witness }
+            if shows(.projects) { projects }
+            if shows(.changes) { audit }
         }
         .padding(.top, TC.Space.Content.top)
         .padding(.horizontal, TC.Space.Content.horizontal)
@@ -168,6 +180,10 @@ struct SettingsContent: View {
             GoPublicDialog(onDismiss: { showingGoPublic = false })
                 .environmentObject(model)
         }
+    }
+
+    private func shows(_ candidate: SettingsSection) -> Bool {
+        section == nil || section == candidate
     }
 
     // MARK: - Connection (spec §5.4)
@@ -441,7 +457,7 @@ struct SettingsContent: View {
 
     private var consent: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: "How may your traces be used?")
+            TCSectionHeader(title: Self.consentHeading)
             Text("Applies to traces you send from now on.")
                 .font(TC.Font_.meta)
                 .foregroundStyle(.secondary)
@@ -1725,7 +1741,7 @@ struct SettingsContent: View {
     /// decides anything on the strength of what is listed here.
     private var audit: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: "What has been changed on this machine")
+            TCSectionHeader(title: Self.auditHeading)
             if model.audit.isEmpty {
                 Text("Nothing has been changed.")
                     .font(TC.Font_.meta)
