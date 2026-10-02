@@ -114,7 +114,7 @@ final class DaemonNetworkContractTests: XCTestCase {
                 XCTAssertEqual(object["_sample"] as? String, "SAMPLE", "\(set): \(method)")
             }
             let spend = try await client.modelSpend()
-            XCTAssertFalse(spend.known, "no per-model billing source exists")
+            XCTAssertFalse(spend.known, "default previews make no provider billing claim")
             XCTAssertTrue(spend.models.isEmpty)
             XCTAssertEqual(spend.reasonLabel, "billed-model-spend-unavailable")
         }
@@ -154,7 +154,7 @@ final class DaemonNetworkContractTests: XCTestCase {
         XCTAssertTrue(summary.receipts)
         XCTAssertEqual(summary.groups.count, 2)
         XCTAssertEqual(summary.groups.map(\.model), ["example-model", "example-model"])
-        XCTAssertEqual(summary.groups.map(\.backend), ["nearai", "api_key"])
+        XCTAssertEqual(summary.groups.map(\.backend), ["nearai", "sha256:" + String(repeating: "c", count: 64)])
         XCTAssertEqual(summary.groups.map(\.route), ["routed", "outside"])
         XCTAssertEqual(Set(summary.groups.map(\.id)).count, 2)
         XCTAssertNil(summary.groups[0].workKind)
@@ -198,6 +198,45 @@ final class DaemonNetworkContractTests: XCTestCase {
         XCTAssertEqual(entry.publishedAt, DaemonDataDecoding.parseDate("2026-10-01T00:00:00Z"))
         XCTAssertNil(try wire(entry)["credit_range"])
         XCTAssertNil(result.catalogue.nextCursor)
+    }
+
+    func testSourceGroupIDPreventsSanitizedTupleCollisions() throws {
+        let base = #"{"model":"sanitized-model","backend":"nearai","route":"routed","work_kind":null,"calls":1,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":0,"outside":0,"unrecorded":0},"group_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#
+        let second = base.replacingOccurrences(of: String(repeating: "a", count: 64), with: String(repeating: "b", count: 64))
+        let renamed = base.replacingOccurrences(of: "sanitized-model", with: "new-display-label")
+        let groups = try [base, second, renamed].map {
+            try DaemonDataDecoding.decoder().decode(DaemonData.InferenceSummaryGroup.self, from: Data($0.utf8))
+        }
+        XCTAssertNotEqual(groups[0].id, groups[1].id)
+        XCTAssertEqual(groups[0].id, groups[2].id)
+        XCTAssertEqual(try wire(groups[0])["group_id"] as? String, "sha256:" + String(repeating: "a", count: 64))
+        let malformed = base.replacingOccurrences(of: "sha256:" + String(repeating: "a", count: 64), with: "invalid")
+        XCTAssertThrowsError(try DaemonDataDecoding.decoder().decode(DaemonData.InferenceSummaryGroup.self, from: Data(malformed.utf8)))
+    }
+
+    func testFullLiveSummaryPathKeepsUnsignedCountersAboveInt64() async throws {
+        let proof = #"{"verified":18446744073709551615,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}"#
+        let total = #"{"calls":18446744073709551615,"priced_calls":0,"cost_usd":0.0,"proof":\#(proof)}"#
+        let zero = #"{"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}"#
+        let group = #"{"model":null,"backend":"nearai","route":"routed","work_kind":null,"calls":18446744073709551615,"priced_calls":0,"cost_usd":0.0,"proof":\#(proof)}"#
+        let reply = #"{"readable":true,"window_hours":24,"observed_at":"2026-10-02T00:00:00Z","summary":{"enabled":true,"receipts":true,"since":"2026-10-01T00:00:00Z","groups":[\#(group)],"routed":\#(total),"outside":\#(zero),"unknown":\#(zero)}}"#
+        let result = try await LiveDaemonClient(transport: NetworkTransport(reply)).inferenceSummary()
+        let summary = try XCTUnwrap(result.summary)
+        let object = try wire(summary)
+        let routed = try XCTUnwrap(object["routed"] as? [String: Any])
+        XCTAssertEqual(routed["calls"] as? UInt64, UInt64.max)
+        let counts = try XCTUnwrap(routed["proof"] as? [String: Any])
+        XCTAssertEqual(counts["verified"] as? UInt64, UInt64.max)
+    }
+
+    func testFreedTransportHandleIsCoreDownForLiveNetworkReads() async {
+        let transport = NetworkTransport(error: #"{"code":"unavailable","message":"handle-freed"}"#)
+        do {
+            _ = try await LiveDaemonClient(transport: transport).modelSpend()
+            XCTFail("freed transport answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .unreachable)
+        }
     }
 
     private func wire<T: Encodable>(_ value: T) throws -> [String: Any] {

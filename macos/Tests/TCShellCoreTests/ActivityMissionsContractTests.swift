@@ -167,9 +167,11 @@ final class ActivityMissionsContractTests: XCTestCase {
         XCTAssertThrowsError(try decodeCatalogue(serialized(catalogue)))
     }
 
-    func testProgressKeepsExactUInt64CountsAndRefusesNegativeValues() throws {
+    func testProgressKeepsExactUInt64CountsAndRefusesNegativeValues() async throws {
         let maximum = progress.replacingOccurrences(of: #""monthly_contributions":3"#, with: #""monthly_contributions":18446744073709551615"#)
         XCTAssertEqual(try decodeStatus(maximum).status.monthlyContributions, UInt64.max)
+        let live = try await LiveDaemonClient(transport: ActivityTransport(result: #"{"status":\#(maximum),"disclosure":"SAMPLE"}"#)).activityMissionsStatus()
+        XCTAssertEqual(live.status.monthlyContributions, UInt64.max)
         let negative = progress.replacingOccurrences(of: #""monthly_contributions":3"#, with: #""monthly_contributions":-1"#)
         XCTAssertThrowsError(try decodeStatus(negative))
     }

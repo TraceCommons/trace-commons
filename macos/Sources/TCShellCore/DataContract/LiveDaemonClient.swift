@@ -236,7 +236,7 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 public enum DaemonFrame {
     /// The fixed labels that mean the core is not there to answer.
     static let unreachableMessages: Set<String> = [
-        "daemon-stopped", "attached-transport-failed", "null-handle", "invalid-handle-pointer",
+        "daemon-stopped", "attached-transport-failed", "null-handle", "invalid-handle-pointer", "handle-freed",
     ]
 
     public static func result(of response: String, method: String) throws -> Data {

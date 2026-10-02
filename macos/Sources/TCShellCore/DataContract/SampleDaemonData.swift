@@ -371,7 +371,7 @@ enum SampleDaemonData {
             return #"{"readable":false,"window_hours":24,"observed_at":null,"summary":null}"#
         }
         // SAMPLE: registry-priced cost is incomplete and never billed spend.
-        return #"{"readable":true,"window_hours":24,"observed_at":"2026-10-01T00:00:00Z","summary":{"enabled":true,"receipts":true,"since":"2026-09-30T00:00:00Z","groups":[{"model":"example-model","backend":"nearai","route":"routed","work_kind":null,"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":1,"outside":0,"unrecorded":0}},{"model":"example-model","backend":"api_key","route":"outside","work_kind":null,"calls":1,"priced_calls":1,"cost_usd":0.01,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":1,"unrecorded":0}}],"routed":{"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":1,"outside":0,"unrecorded":0}},"outside":{"calls":1,"priced_calls":1,"cost_usd":0.01,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":1,"unrecorded":0}},"unknown":{"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}}}"#
+        return #"{"readable":true,"window_hours":24,"observed_at":"2026-10-01T00:00:00Z","summary":{"enabled":true,"receipts":true,"since":"2026-09-30T00:00:00Z","groups":[{"group_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model":"example-model","backend":"nearai","route":"routed","work_kind":null,"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":1,"outside":0,"unrecorded":0}},{"group_id":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","model":"example-model","backend":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","route":"outside","work_kind":null,"calls":1,"priced_calls":1,"cost_usd":0.01,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":1,"unrecorded":0}}],"routed":{"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":1,"outside":0,"unrecorded":0}},"outside":{"calls":1,"priced_calls":1,"cost_usd":0.01,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":1,"unrecorded":0}},"unknown":{"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}}}"#
     }
 
     static func proofDetail(_ set: Sample) -> String {
@@ -381,7 +381,7 @@ enum SampleDaemonData {
     }
 
     static func modelSpend(_ set: Sample) -> String {
-        // SAMPLE: no authoritative billed-per-model source exists in any state.
+        // SAMPLE: default previews have no authoritative organization billing recording.
         #"{"known":false,"since":null,"models":[],"reason_label":"billed-model-spend-unavailable"}"#
     }
 

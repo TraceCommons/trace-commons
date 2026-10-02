@@ -850,31 +850,52 @@ extension DaemonData {
     }
 
     public struct InferenceSummaryGroup: Codable, Equatable, Sendable, Identifiable {
+        /// Digest of the original source grouping tuple, before label sanitization.
+        /// Absent only for older C3 daemon replies.
+        public let groupId: String?
         public let model: String?
         /// A backend label, not verified provider identity.
         public let backend: String
         public let route: String
         /// No classification source exists today; this remains nil.
         public let workKind: String?
-        public let calls: Int64
-        public let pricedCalls: Int64
+        public let calls: UInt64
+        public let pricedCalls: UInt64
         /// Registry-priced USD over priced calls only, never billed spend.
         public let costUSD: Double
         public let proof: InferenceProofCounts
 
-        public struct GroupID: Hashable, Sendable {
-            public let model: String?
-            public let backend: String
-            public let route: String
-            public let workKind: String?
+        public enum GroupID: Hashable, Sendable {
+            case source(String)
+            case legacy(model: String?, backend: String, route: String, workKind: String?)
         }
 
         public var id: GroupID {
-            GroupID(model: model, backend: backend, route: route, workKind: workKind)
+            if let groupId { return .source(groupId) }
+            return .legacy(model: model, backend: backend, route: route, workKind: workKind)
+        }
+
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            groupId = try values.decodeIfPresent(String.self, forKey: .groupId)
+            if let groupId {
+                guard groupId.hasPrefix("sha256:"), groupId.utf8.count == 71,
+                      groupId.dropFirst(7).utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+                else { throw DecodingError.dataCorruptedError(forKey: .groupId, in: values, debugDescription: "summary-group-id-invalid") }
+            }
+            model = try values.decodeIfPresent(String.self, forKey: .model)
+            backend = try values.decode(String.self, forKey: .backend)
+            route = try values.decode(String.self, forKey: .route)
+            workKind = try values.decodeIfPresent(String.self, forKey: .workKind)
+            calls = try values.decode(UInt64.self, forKey: .calls)
+            pricedCalls = try values.decode(UInt64.self, forKey: .pricedCalls)
+            costUSD = try values.decode(Double.self, forKey: .costUSD)
+            proof = try values.decode(InferenceProofCounts.self, forKey: .proof)
         }
 
         public enum CodingKeys: String, CodingKey {
             case model, backend, route, calls, proof
+            case groupId = "group_id"
             case workKind = "work_kind"
             case pricedCalls = "priced_calls"
             case costUSD = "cost_usd"
@@ -882,8 +903,8 @@ extension DaemonData {
     }
 
     public struct InferenceRouteTotal: Codable, Equatable, Sendable {
-        public let calls: Int64
-        public let pricedCalls: Int64
+        public let calls: UInt64
+        public let pricedCalls: UInt64
         /// Registry-priced, not billed. `pricedCalls < calls` is incomplete pricing.
         public let costUSD: Double
         public let proof: InferenceProofCounts
@@ -897,14 +918,14 @@ extension DaemonData {
 
     /// Only `verified` is model proof; failed and gateway-only remain distinct.
     public struct InferenceProofCounts: Codable, Equatable, Sendable {
-        public let verified: Int64
-        public let gatewayOnly: Int64
-        public let unattested: Int64
-        public let pending: Int64
-        public let unavailable: Int64
-        public let failed: Int64
-        public let outside: Int64
-        public let unrecorded: Int64
+        public let verified: UInt64
+        public let gatewayOnly: UInt64
+        public let unattested: UInt64
+        public let pending: UInt64
+        public let unavailable: UInt64
+        public let failed: UInt64
+        public let outside: UInt64
+        public let unrecorded: UInt64
 
         public enum CodingKeys: String, CodingKey {
             case verified, unattested, pending, unavailable, failed, outside, unrecorded
@@ -929,28 +950,69 @@ extension DaemonData {
         }
     }
 
-    /// `model_spend`: unknown until an authoritative per-model debit source exists.
+    /// Provider-reported usage cost for the entire NEAR AI organization, including
+    /// other devices. It is never this Mac's registry-priced inference cost.
     public struct ModelSpend: Codable, Equatable, Sendable {
-        /// `false` is not zero.
         public let known: Bool
+        public let scope: String?
+        public let source: String?
+        public let currency: String?
+        public let scale: Int?
+        public let windowHours: Int?
         public let since: Date?
-        /// Empty while unknown; this does not imply a zero balance.
+        public let observedAt: Date?
         public let models: [ModelBilled]
-        public let reasonLabel: String
+        public let reasonLabel: String?
+        public let state: String?
 
         public enum CodingKeys: String, CodingKey {
-            case known, since, models
+            case known, scope, source, currency, scale, since, models, state
+            case windowHours = "window_hours"
+            case observedAt = "observed_at"
             case reasonLabel = "reason_label"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            known = try values.decode(Bool.self, forKey: .known)
+            scope = try values.decodeIfPresent(String.self, forKey: .scope)
+            source = try values.decodeIfPresent(String.self, forKey: .source)
+            currency = try values.decodeIfPresent(String.self, forKey: .currency)
+            scale = try values.decodeIfPresent(Int.self, forKey: .scale)
+            windowHours = try values.decodeIfPresent(Int.self, forKey: .windowHours)
+            since = try values.decodeIfPresent(Date.self, forKey: .since)
+            observedAt = try values.decodeIfPresent(Date.self, forKey: .observedAt)
+            models = try values.decode([ModelBilled].self, forKey: .models)
+            reasonLabel = try values.decodeIfPresent(String.self, forKey: .reasonLabel)
+            state = try values.decodeIfPresent(String.self, forKey: .state)
+            if known {
+                guard scope == "near_ai_organization", source == "near_ai_usage_by_model",
+                      currency == "USD", scale == 9, windowHours == 24,
+                      let since, let observedAt, since <= observedAt,
+                      models.allSatisfy({ row in
+                          row.billedNanos >= 0 && row.billedMicros >= 0 && row.calls >= 0
+                              && row.rounding == "nearest_micro_half_up"
+                              && row.billedMicros == row.billedNanos / 1_000 + (row.billedNanos % 1_000 >= 500 ? 1 : 0)
+                      })
+                else { throw DecodingError.dataCorruptedError(forKey: .known, in: values, debugDescription: "model-spend-source-invalid") }
+            } else if !models.isEmpty {
+                throw DecodingError.dataCorruptedError(forKey: .models, in: values, debugDescription: "unknown-model-spend-has-rows")
+            }
         }
     }
 
-    /// Reserved for a future source; the current contract never emits billed rows.
     public struct ModelBilled: Codable, Equatable, Sendable {
         public let model: String
-        public let billedMicros: Int64?
+        /// Exact nonnegative USD nanos from the provider, not a registry estimate.
+        public let billedNanos: Int64
+        /// Explicit nearest-micro half-up projection for display only.
+        public let billedMicros: Int64
+        public let calls: Int64
+        public let rounding: String
 
         public enum CodingKeys: String, CodingKey {
-            case model
+            case model, calls, rounding
+            case billedNanos = "billed_nanos"
             case billedMicros = "billed_micros"
         }
     }

@@ -83,7 +83,7 @@ public protocol DaemonDataClient: Sendable {
     func inferenceSummary() async throws -> DaemonData.InferenceSummary
     /// Z1.2, `inference_call_proof`.
     func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail
-    /// Z1.3, billed spend per model.
+    /// Z1.3, billed spend by model for the entire NEAR AI organization, not this Mac.
     func modelSpend() async throws -> DaemonData.ModelSpend
     /// Z1.5, the Private AI switch's state and disclosure.
     func privateAI() async throws -> DaemonData.PrivateAISwitch
