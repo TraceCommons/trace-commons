@@ -127,6 +127,15 @@ old behaviour, because no application has shipped against `v1` yet. See
   run. Neither is the raw session size on disk (`size_bytes`), which was the
   only figure either surface could report before this. See
   ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
+- **K12 (withdrawal dates on revoked rows).** `list_history` rows now carry
+  `revoked_at`: when a server `revoked` read-back -- a withdrawal made on the
+  web, which this daemon never drove -- was first observed, so a revoked row
+  can show a date the way a locally `withdrawn` one already does from
+  `withdrawn_at`. The server's read-back itself carries no timestamp, so this
+  is the moment of first discovery rather than the moment of the web
+  withdrawal; it does not move on a later poll that only re-confirms the same
+  status. See
+  ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -520,7 +529,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `title`, and `uploaded_bytes` | see "History provenance (K7)", "A session's title on history rows (K9)" and "Sizes in history, and the would-send size (K10)" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `title`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "A session's title on history rows (K9)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -3963,6 +3972,43 @@ field:
 Both `uploaded_bytes` and `would_send_bytes` are `Option<u64>`,
 `#[serde(default)]` on the wire, so a cached row or a queue line written
 before either field existed still loads, reading `null`.
+
+### Withdrawal dates on revoked rows (K12)
+
+A locally driven withdrawal (`withdraw`, `withdraw_bulk`) stamps
+`withdrawn_at` the moment it runs, so a `withdrawn` row has always been able
+to show a date. A withdrawal made on the web instead, which this daemon only
+learns about the next time it polls submission status and gets back
+`revoked`, had no equivalent: the server's status read-back
+(`TraceSubmissionStatusUpdate`) carries a status and credit figures, never a
+timestamp, so a `revoked` row had no date to show at all.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "status": "revoked",
+  "revoked_at": "2026-08-09T12:00:00Z"
+}
+```
+
+- **`revoked_at`** -- when this row was first seen carrying status
+  `revoked`, or `null` for a row that is not (or not yet) revoked, or one
+  written before this field existed. **Not** the moment of the web
+  withdrawal itself, which this daemon has no way to learn -- the moment
+  this device first discovered it, the same honest compromise
+  `observed_modified_at` and `review_started_at` already make elsewhere on
+  this contract for a fact only discoverable by polling. Stamped once, by
+  the history join that first sees `revoked`, from that poll's own
+  `last_refreshed_at`, and carried forward on every later refresh exactly
+  the way a local `withdrawn_at` already is -- a later poll that merely
+  re-confirms the same `revoked` status must not push the date forward.
+
+`#[serde(default)]` on the wire, like every other field on this row, so a
+cached row written before this field existed still loads, reading `null`
+until the next poll re-observes the revocation and dates it.
 
 ### `history_rollup`
 
