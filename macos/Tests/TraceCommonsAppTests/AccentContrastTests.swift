@@ -16,6 +16,28 @@ final class AccentContrastTests: XCTestCase {
         }
     }
 
+    /// The accent is also a fill drawn straight on the ground: an on-switch
+    /// track, the checked read-gate box, a prominent button's edge. As a UI
+    /// component it must clear 3:1 against the grounds it sits on, in both
+    /// schemes. The brand purple #6D14F3 is 2.25:1 on the dark ground.
+    func test_theAccentClearsTheFillFloorOnTheGround() {
+        for scheme in [NSAppearance.Name.aqua, .darkAqua] {
+            for (name, ground) in [("ground", TC.ground), ("surface", TC.surface)] {
+                let ratio = Self.contrast(TC.accent, on: ground, in: scheme)
+                XCTAssertGreaterThanOrEqual(ratio, 3, "\(scheme.rawValue) on \(name): \(ratio)")
+            }
+        }
+    }
+
+    /// Text drawn in the window tint (a `Link`, a `.borderless` button)
+    /// would take the accent; the accent is not a text colour, which is why
+    /// those sites take `accentText`. This pins that the accent alone does
+    /// not clear text contrast in dark, so the override stays necessary.
+    func test_theAccentIsNotATextColourInDark() {
+        let ratio = Self.contrast(TC.accent, on: TC.ground, in: .darkAqua)
+        XCTAssertLessThan(ratio, 4.5, "dark accent on ground: \(ratio)")
+    }
+
     func test_thePrimaryLabelOnThePrimaryFillClearsTextContrast() {
         for scheme in [NSAppearance.Name.aqua, .darkAqua] {
             let ratio = Self.contrast(TC.primaryLabel, on: TC.primaryFill, in: scheme)

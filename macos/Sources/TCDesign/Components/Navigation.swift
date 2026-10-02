@@ -56,16 +56,19 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                     .frame(maxWidth: floating ? nil : .infinity)
                     .frame(minHeight: floating ? 24 : GlassTokens.Size.tab)
                     .background {
+                        // The press darkens the selected fill, or a wash
+                        // behind an unselected label; never the label.
                         if selected {
                             if floating {
-                                Capsule().fill(Color.white.opacity(0.18))
+                                Capsule().fill(Color.white.opacity(0.18)).glassPressedFill()
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
+                                    .glassPressedFill()
                                     .glassEdge(GlassTokens.Shadow.controlSelectedEdge, in: Capsule())
                             }
                         }
                     }
-                    .glassPressedFill()
+                    .glassPressedWash(Capsule())
                     .contentShape(Capsule())
                 }
                 .buttonStyle(GlassPressStyle())
@@ -159,7 +162,8 @@ public struct GlassStepProgress: View {
         self.stateValues = stateValues
     }
 
-    private func value(at index: Int) -> String {
+    /// The accessibility value of the step at `index`.
+    func value(at index: Int) -> String {
         guard let stateValues else { return "" }
         return index < current ? stateValues.done : index == current ? stateValues.current : stateValues.pending
     }
