@@ -9,12 +9,11 @@ import TCShellCore
 /// `DaemonDataWiring.sample(.normalDay)` to `DaemonDataWiring.live(daemon)`;
 /// no screen code changes.
 enum DaemonDataWiring {
-    /// The real client, over the same `tc_call` path `DaemonClient` uses,
-    /// with the unsure-span export for `previewUnsureSpans`. Returned as the
-    /// concrete type because its owner (`AppModel`) also feeds it events and
+    /// The real client, over the same `tc_call` path `DaemonClient` uses
+    /// (`preview_unsure_spans` included). Returned as the concrete type because its owner (`AppModel`) also feeds it events and
     /// ends them at teardown; screens still receive `any DaemonDataClient`.
     static func live(_ daemon: TCDaemon) -> LiveDaemonClient {
-        LiveDaemonClient(transport: daemon, previewIndex: daemon)
+        LiveDaemonClient(transport: daemon)
     }
 
     #if DEBUG

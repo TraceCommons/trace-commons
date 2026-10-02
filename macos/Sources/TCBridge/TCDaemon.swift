@@ -355,58 +355,6 @@ public final class TCDaemon {
         return Int(count)
     }
 
-    /// The unsure-span index over `entryID`'s redacted preview body, from
-    /// `tc_preview_unsure_spans_json`, answered in `tc_call`'s frame:
-    /// `{"result": <index>}` on success, `{"error": {"code": "unavailable",
-    /// "message": <label>}}` on failure. Never throws, like `call`.
-    ///
-    /// Framed rather than thrown so one reader handles both paths: the
-    /// ABI's failure labels (`daemon-stopped`, `invalid-handle-pointer`,
-    /// `preview-body-changed`, `preview-requires-embedded`, ...) are the
-    /// same fixed labels a `tc_call` error frame carries. Offsets and
-    /// labels only; the index never repeats body text.
-    ///
-    /// Blocks for the redaction pass behind it; call it off the main thread.
-    public func previewUnsureSpans(entryID: String, bodyDigest: String) -> String {
-        var errPtr: UnsafeMutablePointer<CChar>?
-        let result: UnsafeMutablePointer<CChar>?? = withHandle { h in
-            entryID.withCString { cEntry in
-                bodyDigest.withCString { cDigest in
-                    withUnsafeMutablePointer(to: &errPtr) { errOut in
-                        tc_preview_unsure_spans_json(h, cEntry, cDigest, errOut)
-                    }
-                }
-            }
-        }
-        guard let inner = result else {
-            return Self.errorFrame("handle-freed")
-        }
-        guard let jsonPtr = inner else {
-            let label: String
-            if let e = errPtr {
-                label = String(cString: e)
-                tc_string_free(e)
-            } else {
-                label = "unknown error"
-            }
-            return Self.errorFrame(label)
-        }
-        if let e = errPtr { tc_string_free(e) }
-        defer { tc_string_free(jsonPtr) }
-        // The export returns one JSON object, so wrapping it is exact.
-        return "{\"result\":" + String(cString: jsonPtr) + "}"
-    }
-
-    /// An `unavailable` error frame carrying `label`, JSON-encoded rather
-    /// than spliced, so a label can never break the frame.
-    private static func errorFrame(_ label: String) -> String {
-        let frame = ["error": ["code": "unavailable", "message": label]]
-        guard let data = try? JSONSerialization.data(withJSONObject: frame) else {
-            return "{\"error\":{\"code\":\"unavailable\",\"message\":\"unknown error\"}}"
-        }
-        return String(decoding: data, as: UTF8.self)
-    }
-
     // MARK: - Subscription
 
     /// Registers `handler`, invoked with each JSON event frame the daemon

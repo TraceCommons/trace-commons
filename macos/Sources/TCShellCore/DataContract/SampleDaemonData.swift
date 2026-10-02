@@ -30,8 +30,7 @@ enum SampleDaemonData {
         case "commons_credit_summary": return credit(set)
         case "tool_destinations": return toolDestinations(set)
         case "inference_calls": return inferenceCalls(set)
-        case "approve":
-            return #"{"approved":1,"hold_secs":10,"hold_until":"2026-09-30T09:20:10Z","flagged":0,"redactions":{},"skipped":[]}"#
+        case "approve": return approved
         case "keep": return #"{"kept":true}"#
         case "undo_keep": return #"{"kept":false}"#
         case "set_project_mode": return #"{"ok":true,"purged":0,"retracted":0,"from_now":true}"#
@@ -46,6 +45,23 @@ enum SampleDaemonData {
         case "account_session_status": return accountState(set)
         default: return nil
         }
+    }
+
+    // MARK: - approve
+
+    /// One entry approved: what the scrub removed, nothing skipped.
+    static let approved =
+        #"{"approved":1,"hold_secs":10,"hold_until":"2026-09-30T09:20:10Z","flagged":1,"redactions":{"email":2,"local_path":3},"skipped":[]}"#
+
+    /// A folder approve: a group call always carries `excluded_held`.
+    static func approvedGroup(approved: Int, excludedHeld: Int) -> String {
+        let holdUntil = approved > 0 ? #""2026-09-30T09:20:10Z""# : "null"
+        return #"{"approved":\#(approved),"hold_secs":10,"hold_until":\#(holdUntil),"flagged":0,"redactions":{},"skipped":[],"excluded_held":\#(excludedHeld)}"#
+    }
+
+    /// The daemon's OK-but-skipped answer for a single entry it did not act on.
+    static func approveSkipped(entryId: String, reason: String) -> String {
+        #"{"approved":0,"hold_secs":10,"hold_until":null,"flagged":0,"redactions":{},"skipped":[{"entry_id":"\#(entryId)","reason_label":"\#(reason)"}]}"#
     }
 
     // MARK: - Projects used across sets
@@ -349,7 +365,7 @@ enum SampleDaemonData {
             "Settings validation refactor",
         ]
         let title = titles[entry.entryId.unicodeScalars.reduce(0) { $0 + Int($1.value) } % titles.count]
-        return #"{"entry":\#(entryJSON),"title":"\#(title)","would_send_bytes":\#((entry.sizeBytes ?? 40000) + 2545),"raw_session_bytes":\#(entry.sizeBytes ?? 40000),"event_count":\#((entry.userTurns ?? 3) * 6),"opening_prompt":"\#(title)","redactions":{"local_path":\#(marks - content),"email":\#(content)},"pii_labels_present":["email"],"consent_scopes":["debugging_evaluation"],"residual_risk":"pattern-based","envelope_digest":"sha256:sample-envelope","input_fingerprint":"sha256:sample-input","enrolled":true,"subagent_count":\#(entry.subagentCount ?? 0),"subagents_dropped":\#(entry.subagentsDropped ?? 0),"scrub":"scrubbed","marks":\#(marks),"content_marks":\#(content),"unsure_spans":\#(unsure),"second_look":[\#(reasons)]}"#
+        return #"{"entry":\#(entryJSON),"title":"\#(title)","would_send_bytes":\#((entry.sizeBytes ?? 40000) + 2545),"raw_session_bytes":\#(entry.sizeBytes ?? 40000),"event_count":\#((entry.userTurns ?? 3) * 6),"opening_prompt":"\#(title)","redactions":{"local_path":\#(marks - content),"email":\#(content)},"redactions_distinct":{"local_path":\#(min(1, marks - content)),"email":\#(min(1, content))},"pii_labels_present":["email"],"consent_scopes":["debugging_evaluation"],"residual_risk":"pattern-based","envelope_digest":"sha256:sample-envelope","input_fingerprint":"sha256:sample-input","enrolled":true,"subagent_count":\#(entry.subagentCount ?? 0),"subagents_dropped":\#(entry.subagentsDropped ?? 0),"scrub":"scrubbed","marks":\#(marks),"content_marks":\#(content),"unsure_spans":\#(unsure),"second_look":[\#(reasons)]}"#
     }
 
     static func unsureSpans(entryId: String, bodyDigest: String) -> String {

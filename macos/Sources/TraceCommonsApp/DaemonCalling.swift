@@ -29,7 +29,3 @@ protocol DaemonCalling: DaemonTransport {
 }
 
 extension TCDaemon: DaemonCalling {}
-
-/// `TCDaemon.previewUnsureSpans` is the unsure-span export the live data
-/// client routes `previewUnsureSpans` through (K1 of #1173).
-extension TCDaemon: DaemonPreviewIndexTransport {}

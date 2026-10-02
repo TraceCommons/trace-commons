@@ -93,49 +93,37 @@ final class LiveDaemonClientTests: XCTestCase {
         XCTAssertTrue(transport.calls.isEmpty)
     }
 
-    // MARK: - previewUnsureSpans goes through the export, not tc_call
+    // MARK: - previewUnsureSpans goes through tc_call
 
-    func testUnsureSpansUseTheExportAndDecode() async throws {
-        let transport = ScriptedTransport.sample(.normalDay)
-        let index = ScriptedIndex(
-            frame: #"{"result":{"entry_id":"e1","body_digest":"sha256:ab","envelope_digest":"sha256:cd","span_count":3,"spans":[{"label":"looks-like-email","byte_offset":10,"byte_len":17}],"spans_truncated":true}}"#)
-        let spans = try await LiveDaemonClient(transport: transport, previewIndex: index)
+    func testUnsureSpansGoThroughTcCallAndDecode() async throws {
+        let transport = ScriptedTransport { method, _ in
+            method == "preview_unsure_spans"
+                ? #"{"id":0,"result":{"entry_id":"e1","body_digest":"sha256:ab","envelope_digest":"sha256:cd","span_count":3,"spans":[{"label":"looks-like-email","byte_offset":10,"byte_len":17}],"spans_truncated":true}}"#
+                : nil
+        }
+        let spans = try await LiveDaemonClient(transport: transport)
             .previewUnsureSpans(entryId: "e1", bodyDigest: "sha256:ab")
         XCTAssertEqual(spans.spanCount, 3)
         XCTAssertTrue(spans.spansTruncated)
         XCTAssertEqual(spans.spans.first?.label, "looks-like-email")
-        XCTAssertEqual(index.asked.first?.0, "e1")
-        XCTAssertEqual(index.asked.first?.1, "sha256:ab")
-        XCTAssertTrue(transport.calls.isEmpty, "preview_unsure_spans must not go through tc_call")
+        XCTAssertEqual(transport.calls.map(\.method), ["preview_unsure_spans"])
+        XCTAssertEqual(transport.calls.first?.params, #"{"body_digest":"sha256:ab","entry_id":"e1"}"#)
     }
 
     func testUnsureSpansRefusalsKeepTheirLabelAndAStoppedDaemonIsUnreachable() async {
-        let changed = ScriptedIndex(frame: #"{"error":{"code":"unavailable","message":"preview-body-changed"}}"#)
-        let stopped = ScriptedIndex(frame: #"{"error":{"code":"unavailable","message":"daemon-stopped"}}"#)
-        let transport = ScriptedTransport.sample(.normalDay)
+        let changed = ScriptedTransport { _, _ in #"{"error":{"code":"unavailable","message":"preview-body-changed"}}"# }
+        let stopped = ScriptedTransport { _, _ in #"{"error":{"code":"unavailable","message":"daemon-stopped"}}"# }
         do {
-            _ = try await LiveDaemonClient(transport: transport, previewIndex: changed)
-                .previewUnsureSpans(entryId: "e", bodyDigest: "d")
+            _ = try await LiveDaemonClient(transport: changed).previewUnsureSpans(entryId: "e", bodyDigest: "d")
             XCTFail("a changed body answered")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "unavailable", message: "preview-body-changed"))
         }
         do {
-            _ = try await LiveDaemonClient(transport: transport, previewIndex: stopped)
-                .previewUnsureSpans(entryId: "e", bodyDigest: "d")
+            _ = try await LiveDaemonClient(transport: stopped).previewUnsureSpans(entryId: "e", bodyDigest: "d")
             XCTFail("a stopped daemon answered")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .unreachable)
-        }
-    }
-
-    func testUnsureSpansWithoutTheExportAreNotAvailableYet() async {
-        do {
-            _ = try await LiveDaemonClient(transport: ScriptedTransport.sample(.normalDay))
-                .previewUnsureSpans(entryId: "e", bodyDigest: "d")
-            XCTFail("answered with no export")
-        } catch {
-            XCTAssertEqual(error as? DaemonDataError, .notAvailableYet(method: "preview_unsure_spans"))
         }
     }
 
@@ -219,7 +207,7 @@ final class LiveDaemonClientTests: XCTestCase {
             _ = try await LiveDaemonClient(transport: transport).listProjects()
             XCTFail("an unreadable reply answered")
         } catch {
-            XCTAssertEqual(error as? DaemonDataError, .undecodable(method: "list_projects"))
+            XCTAssertEqual(error as? DaemonDataError, .undecodable(method: "list_projects", codingPath: "projects"))
         }
     }
 
@@ -269,8 +257,8 @@ final class LiveDaemonClientTests: XCTestCase {
         XCTAssertEqual(Array(received.dropFirst()), [
             .statusChanged,
             .queueChanged,
-            .digestDue(pending: 2, text: "2 sessions are waiting"),
-            .previewReady(entryId: "e7"),
+            .digestDue(DaemonData.DigestDue(pending: 2, text: "2 sessions are waiting")),
+            .previewReady(PreviewRequestResult(entryID: "e7", state: .ready)),
             .resyncRequired,
             .resyncRequired,
         ])
@@ -365,28 +353,5 @@ private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
         lock.unlock()
         return answer(method, paramsJSON)
             ?? #"{"id":0,"error":{"code":"bad_params","message":"unknown-method"}}"#
-    }
-}
-
-private final class ScriptedIndex: DaemonPreviewIndexTransport, @unchecked Sendable {
-    let frame: String
-    private let lock = NSLock()
-    private var recorded: [(String, String)] = []
-
-    var asked: [(String, String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
-    }
-
-    init(frame: String) {
-        self.frame = frame
-    }
-
-    func previewUnsureSpans(entryID: String, bodyDigest: String) -> String {
-        lock.lock()
-        recorded.append((entryID, bodyDigest))
-        lock.unlock()
-        return frame
     }
 }

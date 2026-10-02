@@ -12,32 +12,20 @@ public protocol DaemonTransport: AnyObject {
     func call(_ method: String, params paramsJSON: String) -> String
 }
 
-/// The C ABI's `tc_preview_unsure_spans_json`, framed like `tc_call`.
-///
-/// Kept apart from `DaemonTransport` because it is not a `tc_call` method:
-/// the unsure-span index is an overlay on the in-process redacted body, so
-/// it has its own export. `TCDaemon.previewUnsureSpans` wraps that export
-/// and answers in `tc_call`'s frame (`{"result": ...}` or
-/// `{"error": {code, message}}`), so `DaemonFrame` reads both the same way
-/// and a stopped daemon is `unreachable` on either path.
-public protocol DaemonPreviewIndexTransport: AnyObject {
-    func previewUnsureSpans(entryID: String, bodyDigest: String) -> String
-}
-
 /// The real `DaemonDataClient`, over `tc_call` (K1 of #1173).
 ///
-/// Wired for every method that exists on main. The PROVISIONAL network
-/// methods (Zaki's C3) throw `notAvailableYet` until their IPC lands, and
-/// send nothing. `previewUnsureSpans` goes through
-/// `tc_preview_unsure_spans_json` (`previewIndex`), not `tc_call`: the
-/// synchronous dispatcher refuses `preview_unsure_spans`
-/// (`preview-unsure-spans-requires-async`) and the export is the ABI's
-/// own route to the same `ipc::open_preview_unsure_spans`.
+/// Wired for every method that exists on main, `preview_unsure_spans`
+/// included: `tc_call` answers through `ipc::handle_local`, which runs the
+/// async dispatcher (`handle_request_async`), and that serves it. The
+/// `*-requires-async` refusals belong to the synchronous `handle_request`
+/// path only, which `tc_call` does not use. The PROVISIONAL network methods
+/// (Zaki's C3) throw `notAvailableYet` until their IPC lands, and send
+/// nothing.
 ///
 /// Every call runs on `workQueue`, never on the caller's thread. The C ABI
-/// blocks for as long as the daemon takes (a preview index is a redaction
-/// pass), and blocking a Swift concurrency thread starves the cooperative
-/// pool -- the reason `TCDaemon` gives for not being an actor.
+/// blocks for as long as the daemon takes (a preview is a redaction pass),
+/// and blocking a Swift concurrency thread for that long starves the
+/// cooperative pool -- the reason `TCDaemon` gives for not being an actor.
 ///
 /// Events: `deliver(eventJSON:)` is fed by the app's one `tc_subscribe`
 /// callback (`AppModel.subscribe`), so the data client and the existing
@@ -47,11 +35,11 @@ public protocol DaemonPreviewIndexTransport: AnyObject {
 /// `list_pending`, as the contract promises; frames that arrive while it is
 /// being built are held and follow it in order.
 ///
-/// `@unchecked Sendable`: the state is the transports, which are safe to
-/// call from any thread, and the subscriber table, guarded by `lock`.
+/// `@unchecked Sendable`: the state is the transport, which is safe to call
+/// from any thread (`DaemonClient` already calls it off the main actor),
+/// and the subscriber table, guarded by `lock`.
 public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     private let transport: any DaemonTransport
-    private let previewIndex: (any DaemonPreviewIndexTransport)?
     private let workQueue = DispatchQueue(
         label: "trace-commons.live-daemon-client", qos: .userInitiated, attributes: .concurrent)
 
@@ -66,12 +54,8 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     private var subscribers: [UUID: Subscriber] = [:]
     private var eventsFinished = false
 
-    /// `previewIndex` is the unsure-span export; `nil` (a transport with no
-    /// in-process body, as in unit tests) makes `previewUnsureSpans` throw
-    /// `notAvailableYet`, never a guess.
-    public init(transport: any DaemonTransport, previewIndex: (any DaemonPreviewIndexTransport)? = nil) {
+    public init(transport: any DaemonTransport) {
         self.transport = transport
-        self.previewIndex = previewIndex
     }
 
     /// No client, no more frames: a stream outliving its client ends
@@ -96,21 +80,53 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("list_kept", as: DaemonData.KeptList.self).kept
     }
 
+    // MARK: Previews
+
+    public func requestPreview(entryId: String) async throws -> DaemonData.PreviewRequestOutcome {
+        try await call("preview_request", params: ["entry_id": entryId], as: DaemonData.PreviewRequestOutcome.self)
+    }
+
+    public func setVisiblePreviews(entryIds: [String]) async throws -> Int {
+        try await call("preview_visible", params: ["entry_ids": entryIds], as: DaemonData.PreviewVisibleResult.self)
+            .visible
+    }
+
+    public func cancelPreview(entryId: String) async throws -> DaemonData.PreviewCancelResult {
+        try await call("preview_cancel", params: ["entry_id": entryId], as: DaemonData.PreviewCancelResult.self)
+    }
+
     public func preview(entryId: String) async throws -> DaemonData.PreviewSummary {
         try await call("preview", params: ["entry_id": entryId], as: DaemonData.PreviewSummary.self)
     }
 
     public func previewUnsureSpans(entryId: String, bodyDigest: String) async throws -> DaemonData.UnsureSpans {
-        let method = "preview_unsure_spans"
-        guard previewIndex != nil else { throw DaemonDataError.notAvailableYet(method: method) }
-        return try await perform { [self] in
-            let frame = self.previewIndex?.previewUnsureSpans(entryID: entryId, bodyDigest: bodyDigest) ?? ""
-            return try Self.decode(frame, method: method, as: DaemonData.UnsureSpans.self)
-        }
+        try await call(
+            "preview_unsure_spans", params: ["entry_id": entryId, "body_digest": bodyDigest],
+            as: DaemonData.UnsureSpans.self)
     }
 
-    public func approve(entryId: String) async throws -> DaemonData.ApproveResult {
-        try await call("approve", params: ["entry_id": entryId], as: DaemonData.ApproveResult.self)
+    // MARK: Queue actions
+
+    public func approve(entryId: String, verdict: ContributorVerdict?, correction: String?) async throws
+        -> ApproveResponse
+    {
+        var params: [String: Any] = ["entry_id": entryId]
+        if let verdict { params["outcome"] = verdict.rawValue }
+        if let correction { params["correction"] = correction }
+        return try await call("approve", params: params, as: ApproveResponse.self)
+            .requireApproved(entryId: entryId)
+    }
+
+    public func cancel(entryId: String) async throws {
+        _ = try await call("cancel", params: ["entry_id": entryId], as: DaemonData.OkReply.self)
+    }
+
+    public func cancelFolder(projectId: String) async throws -> Int {
+        try await call("cancel", params: ["project_id": projectId], as: DaemonData.CancelFolderResult.self).canceled
+    }
+
+    public func approveFolder(projectId: String) async throws -> ApproveResponse {
+        try await call("approve", params: ["project_id": projectId], as: ApproveResponse.self)
     }
 
     public func keep(entryId: String) async throws -> DaemonData.KeepResult {
@@ -144,6 +160,11 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func harnessList() async throws -> HarnessList {
         try await call("harness_list", as: HarnessList.self)
+    }
+
+    public func setSource(_ kind: SourceKind, _ choice: SourceChoice) async throws -> DaemonData.Settings {
+        guard let params = choice.settingsParams(for: kind) else { throw DaemonData.unansweredSource }
+        return try await call("set_settings", params: params, as: DaemonData.Settings.self)
     }
 
     // MARK: Settings
@@ -348,7 +369,7 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     /// Runs one blocking daemon call on `workQueue` and resumes with its
-    /// answer.
+    /// answer, so no Swift concurrency thread waits on the daemon.
     private func perform<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             workQueue.async {
@@ -368,8 +389,19 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         do {
             return try DaemonDataDecoding.decoder().decode(T.self, from: data)
         } catch {
-            throw DaemonDataError.undecodable(method: method)
+            throw DaemonDataError.undecodable(method: method, from: error)
         }
+    }
+}
+
+extension ApproveResponse {
+    /// The single-entry rule of `DaemonDataClient.approve(entryId:)`: an OK
+    /// reply that approved nothing is a refusal, carried as
+    /// `notApproved` with the `skipped` row's fixed label.
+    func requireApproved(entryId: String) throws -> ApproveResponse {
+        guard approved == 0 else { return self }
+        let row = skipped.first { $0.entryID == entryId } ?? skipped.first
+        throw DaemonDataError.notApproved(reasonLabel: row?.reasonLabel)
     }
 }
 
@@ -377,10 +409,11 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 public enum DaemonFrame {
     /// The fixed labels that mean the core is not there to answer.
     ///
-    /// `daemon-stopped`, `daemon-disconnected` and `attached-transport-failed`
-    /// are `tc_call`'s own; `handle-freed` is `TCDaemon`'s answer once
-    /// teardown has begun; `null-handle` and `invalid-handle-pointer` mean
-    /// there is no live handle to ask.
+    /// `daemon-stopped`, `daemon-disconnected` (an attached handle whose
+    /// daemon stopped listening, disconnected or timed out) and
+    /// `attached-transport-failed` are `tc_call`'s own; `handle-freed` is
+    /// `TCDaemon`'s answer once teardown has begun; `null-handle` and
+    /// `invalid-handle-pointer` mean there is no live handle to ask.
     static let unreachableMessages: Set<String> = [
         "daemon-stopped", "daemon-disconnected", "attached-transport-failed", "handle-freed",
         "null-handle", "invalid-handle-pointer",

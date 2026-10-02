@@ -3,18 +3,15 @@ import TCBridge
 import TCShellCore
 import XCTest
 
-/// `TCDaemon` as both transports, by forwarding. The app target declares
-/// the conformances on `TCDaemon` itself (`DaemonCalling.swift`); declaring
-/// them again here would be a second conformance in the one test bundle
-/// `swift test` links, so this forwards to the same two methods instead.
-private final class Pipe: DaemonTransport, DaemonPreviewIndexTransport, @unchecked Sendable {
+/// `TCDaemon` as a transport, by forwarding. The app target declares the
+/// conformance on `TCDaemon` itself (`DaemonCalling.swift`); declaring it
+/// again here would be a second conformance in the one test bundle
+/// `swift test` links, so this forwards instead.
+private final class Pipe: DaemonTransport, @unchecked Sendable {
     let daemon: TCDaemon
     init(_ daemon: TCDaemon) { self.daemon = daemon }
     func call(_ method: String, params paramsJSON: String) -> String {
         daemon.call(method, params: paramsJSON)
-    }
-    func previewUnsureSpans(entryID: String, bodyDigest: String) -> String {
-        daemon.previewUnsureSpans(entryID: entryID, bodyDigest: bodyDigest)
     }
 }
 
@@ -26,8 +23,7 @@ private struct Owned: @unchecked Sendable {
 }
 
 private func live(_ daemon: TCDaemon) -> LiveDaemonClient {
-    let pipe = Pipe(daemon)
-    return LiveDaemonClient(transport: pipe, previewIndex: pipe)
+    LiveDaemonClient(transport: Pipe(daemon))
 }
 
 /// K1 of #1173: `LiveDaemonClient` against the real dylib and a real daemon
@@ -94,17 +90,17 @@ final class LiveDaemonClientIntegrationTests: XCTestCase {
         }
     }
 
-    /// The export answers, framed like `tc_call`: a bad entry id is the
-    /// daemon's refusal, which proves the call reached the ABI rather than
-    /// being refused on the way.
-    func testUnsureSpansReachTheExport() async throws {
+    /// `tc_call` serves it: a bad entry id is the daemon's refusal, which
+    /// proves the call reached the async dispatcher rather than being
+    /// refused on the way as `preview-unsure-spans-requires-async`.
+    func testUnsureSpansReachTheDaemonOverTcCall() async throws {
         let daemon = try startDaemon()
         let client = live(daemon)
         do {
             _ = try await client.previewUnsureSpans(entryId: "not-a-uuid", bodyDigest: "sha256:00")
             XCTFail("a bad entry id answered")
         } catch DaemonDataError.daemon(_, let message) {
-            XCTAssertEqual(message, "entry-id-invalid")
+            XCTAssertEqual(message, "entry_id-invalid")
         }
     }
 
