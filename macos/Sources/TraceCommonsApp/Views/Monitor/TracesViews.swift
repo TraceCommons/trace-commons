@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCBridge
 import TCShellCore
@@ -12,21 +13,62 @@ import TCShellCore
 struct TracesTreeView: View {
     let store: TracesStore
     @Binding var selection: String
+    /// A session's Review pill: select it and show the inspector its review
+    /// lives in, so Review is never a press that does nothing visible.
+    var onReview: (String) -> Void = { _ in }
 
     @State private var collapsed: Set<String> = []
     /// A mode change waiting on the core's confirmation: arming always,
-    /// ignoring when the folder has sessions waiting.
-    @State private var confirming: (folder: TracesTree.FolderNode, mode: ProjectMode)?
+    /// ignoring when the folder has sessions waiting. It carries the core's
+    /// words for that folder, decoded when the change was asked for.
+    @State private var confirming: Confirmation?
+    /// A tool switch change waiting on the core's explanation of what the
+    /// source declaration does.
+    @State private var sourceChange: SourceChange?
+
+    struct SourceChange {
+        let kind: SourceKind
+        /// True to watch a folder, false for "I do not use this tool".
+        let watch: Bool
+        let explanation: String
+        let action: String
+    }
+
+    struct Confirmation {
+        let folder: TracesTree.FolderNode
+        let mode: ProjectMode
+        let words: Words
+
+        enum Words {
+            case ignore(ProjectIgnoreCopy)
+            case arm(ProjectArmingCopy)
+        }
+
+        var title: String {
+            switch words {
+            case .ignore(let copy): copy.title
+            case .arm(let copy): copy.question
+            }
+        }
+
+        var body: String {
+            switch words {
+            case .ignore(let copy): copy.body
+            case .arm(let copy): copy.body
+            }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            if case .failed(let error) = store.phase {
-                // The core's own fixed label until K4 gives this state its
-                // words. The last good tree stays below it.
-                GlassNotice(tone: .outside, title: error.description) { EmptyView() }
+            if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
+                // The core's line for a core that does not answer, or for a
+                // refused request; never the error's fixed label. The last
+                // good tree stays below it.
+                GlassNotice(tone: .outside, title: line) { EmptyView() }
             }
             if store.phase == .loading && isEmpty {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity)
@@ -38,15 +80,24 @@ struct TracesTreeView: View {
                     .padding(.top, GlassTokens.Space.s10)
                     .accessibilityLabel(MonitorWindowView.Tab.traces.rawValue)
             } else {
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(store.tree.tools) { tool in
-                            toolRow(tool)
-                            if isOpen(tool.id) {
-                                ForEach(tool.folders) { folderRows($0) }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(store.tree.tools) { tool in
+                                toolRow(tool)
+                                if isOpen(tool.id) {
+                                    ForEach(tool.folders) { folderRows($0) }
+                                }
                             }
+                            ForEach(store.tree.unplaced) { folderRows($0) }
                         }
-                        ForEach(store.tree.unplaced) { folderRows($0) }
+                    }
+                    // The keyboard moves the selection; keep it on screen.
+                    .onChange(of: selection) { _, selected in
+                        guard !selected.isEmpty else { return }
+                        withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
+                            proxy.scrollTo(selected)
+                        }
                     }
                 }
                 .scrollIndicators(.never)
@@ -57,42 +108,79 @@ struct TracesTreeView: View {
             }
         }
         .confirmationDialog(
-            confirming.map(Self.confirmationTitle) ?? "",
+            confirming?.title ?? "",
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
             titleVisibility: .visible,
             presenting: confirming
         ) { pending in
-            if pending.mode == .ignore {
-                Button(ProjectIgnoreCopy.buttonLabel, role: .destructive) { apply(pending.folder, pending.mode) }
-                Button(ProjectArmingCopy.cancel, role: .cancel) { confirming = nil }
-            } else {
-                Button(ProjectArmingCopy.confirm) { apply(pending.folder, pending.mode) }
-                Button(ProjectArmingCopy.cancel, role: .cancel) { confirming = nil }
+            switch pending.words {
+            case .ignore(let copy):
+                Button(copy.button, role: .destructive) { apply(pending.folder, pending.mode) }
+                // The system's word, as the Waiting screen's ignore uses.
+                Button("Cancel", role: .cancel) { confirming = nil }
+            case .arm(let copy):
+                Button(copy.confirm) { apply(pending.folder, pending.mode) }
+                Button(copy.decline, role: .cancel) { confirming = nil }
             }
         } message: { pending in
-            if pending.mode == .ignore {
-                Text(ProjectIgnoreCopy.confirmationBody(project: pending.folder.label, pendingCount: pending.folder.sessions.count))
-            } else {
-                Text(ProjectArmingCopy.confirmationBody)
-            }
+            Text(pending.body)
+        }
+        .confirmationDialog(
+            sourceChange?.kind.displayName ?? "",
+            isPresented: Binding(get: { sourceChange != nil }, set: { if !$0 { sourceChange = nil } }),
+            titleVisibility: .visible,
+            presenting: sourceChange
+        ) { change in
+            Button(change.action) { applySource(change) }
+            Button("Cancel", role: .cancel) { sourceChange = nil }
+        } message: { change in
+            Text(change.explanation)
+        }
+    }
+
+    // MARK: Tool sources
+
+    /// A tool switch flipped. The declaration is written only after the
+    /// core's explanation of it is shown (`SourceSettingsCopy`), as Settings
+    /// shows it beside the same choice; with no copy nothing is written.
+    private func requestSource(_ tool: TracesTree.ToolNode, watch: Bool) {
+        guard let copy = TCSourceChecks.settingsCopy(), let entry = copy.tools[tool.kind.rawValue] else { return }
+        sourceChange = SourceChange(
+            kind: tool.kind,
+            watch: watch,
+            explanation: entry.explanation ?? copy.explanation,
+            action: watch ? (entry.chooseFolder ?? copy.chooseFolder) : entry.decline)
+    }
+
+    private func applySource(_ change: SourceChange) {
+        sourceChange = nil
+        if change.watch {
+            // `get_settings` never reports a path, so watching asks which
+            // folder, as Settings does.
+            guard let path = SourceRootRow.chooseFolder() else { return }
+            Task { await store.setSource(change.kind, .watch(path: path)) }
+        } else {
+            Task { await store.setSource(change.kind, .off) }
         }
     }
 
     // MARK: Folder modes
 
-    private static func confirmationTitle(_ pending: (folder: TracesTree.FolderNode, mode: ProjectMode)) -> String {
-        pending.mode == .ignore
-            ? ProjectIgnoreCopy.confirmationTitle(project: pending.folder.label)
-            : ProjectArmingCopy.confirmationTitle(project: pending.folder.label)
-    }
-
     /// The three modes, as Settings offers them. Arming always asks first,
     /// in the core's words; ignoring asks when it would clear waiting
-    /// sessions, with their count. Asking first is a direct call.
+    /// sessions, with their count. Asking first is a direct call. With no
+    /// words from the core a change that needs them is not made: the
+    /// confirmation is never shown without what it says.
     private func request(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
         guard mode != folder.mode else { return }
-        if mode == .autoUpload || (mode == .ignore && !folder.sessions.isEmpty) {
-            confirming = (folder, mode)
+        if mode == .autoUpload {
+            guard let copy = ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
+                project: folder.label, count: 0)) else { return }
+            confirming = Confirmation(folder: folder, mode: mode, words: .arm(copy))
+        } else if mode == .ignore && !folder.sessions.isEmpty {
+            guard let copy = ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(
+                project: folder.label, pending: folder.sessions.count)) else { return }
+            confirming = Confirmation(folder: folder, mode: mode, words: .ignore(copy))
         } else {
             apply(folder, mode)
         }
@@ -163,14 +251,18 @@ struct TracesTreeView: View {
             depth: .tool,
             tile: .tool(Self.glassTool(tool.kind)),
             title: tool.kind.displayName,
-            sub: tool.waiting > 0 ? String(tool.waiting) : nil,
+            // The core's sentence for the declaration (an unset Claude Code
+            // is read from its usual folder; unreadable settings say so),
+            // after the count waiting.
+            sub: Self.toolSub(tool),
             off: tool.mode == .off,
             expanded: tool.folders.isEmpty ? nil : isOpen(tool.id),
-            // The source declaration. Unset draws no switch: never off.
-            // Disabled until the contract carries a source-mode write, so it
-            // is not announced as a control that does nothing.
-            watched: tool.mode == .unset ? nil : .constant(tool.mode == .watch),
-            watchDisabled: true,
+            // The source declaration, written through `setSource` after the
+            // core's explanation. Unset and unknown draw no switch: never off.
+            watched: tool.mode == .watch || tool.mode == .off
+                ? Binding(get: { tool.mode == .watch }, set: { requestSource(tool, watch: $0) })
+                : nil,
+            watchDisabled: store.writing.contains(tool.kind.rawValue),
             watchLabel: tool.kind.displayName,
             expandLabel: tool.kind.displayName,
             onToggleExpand: { toggle(tool.id) }
@@ -207,13 +299,18 @@ struct TracesTreeView: View {
             flag: Self.flag(entry),
             selected: selection == entry.entryId,
             // D10 default: a session's pill opens its review.
-            submitTitle: Self.reviewTitle,
+            submitTitle: store.words?.review,
             onSelect: { selection = entry.entryId },
-            onSubmit: { selection = entry.entryId }
+            onSubmit: { onReview(entry.entryId) }
         )
+        .id(entry.entryId)
     }
 
-    static let reviewTitle = MonitorWords.review
+
+    static func toolSub(_ tool: TracesTree.ToolNode) -> String? {
+        let parts = [tool.waiting > 0 ? String(tool.waiting) : nil, TracesStore.sourceLine(tool)].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 
     // MARK: Formatting
 
@@ -262,15 +359,29 @@ struct TracesTreeView: View {
 struct SessionInspectorView: View {
     let store: TracesStore
     let entry: DaemonData.QueueEntry?
+    /// The tab's words, from the core, decoded once by the store.
+    private var words: MonitorTracesCopy? { store.words }
 
-    @State private var summary: DaemonData.PreviewSummary?
-    @State private var failure: DaemonDataError?
-    /// The consent gate, from the Rust core. Without it Contribute stays
-    /// disabled: the shell never words consent itself.
-    private let consent = TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
+    /// The preview, keyed by the session it was asked for. Only the
+    /// selected session's answer is ever read out of it.
+    @State private var slot = PreviewSlot()
+    private var summary: DaemonData.PreviewSummary? { slot.summary(for: entry?.entryId) }
+    private var failure: DaemonDataError? { slot.failure(for: entry?.entryId) }
+
+    /// How long a selection must rest before its preview is asked for. Each
+    /// arrow-key step cancels the wait, so stepping through the tree starts
+    /// no preview until it stops; `preview` is a full read-parse-redact pass
+    /// the daemon cannot cancel.
+    static let previewSettle: Duration = .milliseconds(300)
+    /// The consent gate, from the Rust core, decoded once by the store.
+    private var consent: ConsentCopy? { store.consent }
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // Above the selection, never inside it: selecting another
+            // session must not hide an Undo that can still take something
+            // back, and an Undo that failed is said here, beside it.
+            pendingUndo
             if let entry {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -278,8 +389,8 @@ struct SessionInspectorView: View {
                             .glassType(GlassTokens.TypeScale.title)
                             .foregroundStyle(GlassColor.textPrimary)
                             .lineLimit(3)
-                        if let failure {
-                            GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
+                        if let failure, let line = words?.line(for: failure) {
+                            GlassNotice(tone: .outside, title: line) { EmptyView() }
                         }
                         // The opening prompt in full, unless it is no more
                         // than the title above it (the title is its first line).
@@ -292,7 +403,9 @@ struct SessionInspectorView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
-                        GlassKeyValueList(Self.rows(entry, summary))
+                        if let words {
+                            GlassKeyValueList(Self.rows(entry, summary, words: words))
+                        }
                         if let summary { redactions(summary) }
                         if let reasons = entry.secondLook, !reasons.isEmpty {
                             // The core's fixed reason labels until K4 gives
@@ -306,20 +419,64 @@ struct SessionInspectorView: View {
                 }
                 .scrollIndicators(.never)
                 .task(id: entry.entryId) { await load(entry.entryId) }
-            } else if let kept = store.lastKept {
-                undoKeep(kept)
             } else {
-                Color.clear
+                Spacer(minLength: 0)
             }
         }
     }
 
-    /// What scrubbing removed, and what it found but left in, in the
-    /// core's redaction labels (`RedactionSummary`).
+    /// The contribution and the keep that can still be taken back, each
+    /// with the core's words and any refusal of its undo.
+    @ViewBuilder
+    private var pendingUndo: some View {
+        if let contributed = store.lastContributed, let words {
+            GlassNotice(tone: .ask, title: contributed.toast.line) {
+                if contributed.toast.offerUndo {
+                    Button(words.undoContribute) {
+                        Task { await store.perform(.undoContribute, on: contributed.entryId) }
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .disabled(store.acting.contains(contributed.entryId))
+                }
+            }
+            refusal(for: contributed.entryId)
+        }
+        if let kept = store.lastKept, let words {
+            Button(words.undoKeep) { Task { await store.perform(.undoKeep, on: kept) } }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .disabled(store.acting.contains(kept))
+            refusal(for: kept)
+        }
+    }
+
+    /// The core's words for a refused action on `entryId`, if there is one.
+    @ViewBuilder
+    private func refusal(for entryId: String) -> some View {
+        if let refused = store.actionError, refused.entryId == entryId, let line = store.message(for: refused.error) {
+            GlassNotice(tone: .outside, title: line) { EmptyView() }
+        }
+    }
+
+    /// What scrubbing removed, and what it found but left in, as the core
+    /// groups, splits and words it (`tc_redaction_summary_json`), the way
+    /// the review sheet renders it. No counts, or an answer that will not
+    /// parse, lists nothing rather than claiming nothing matched. Distinct
+    /// counts are sent only with a full summary; absent, the core reads them
+    /// as none.
     @ViewBuilder
     private func redactions(_ summary: DaemonData.PreviewSummary) -> some View {
-        // A label counted zero times removed nothing: it is not a row.
-        let rows = RedactionSummary.rows(occurrences: (summary.redactions ?? [:]).filter { $0.value > 0 }, distinct: [:])
+        if let occurrences = summary.redactions,
+            let rows = RedactionSummary.rows(fromJSON: TCCoreCopy.redactionSummaryJSON(
+                occurrences: occurrences, distinct: summary.redactionsDistinct ?? [:]))
+        {
+            redactionRows(rows)
+        }
+    }
+
+    @ViewBuilder
+    private func redactionRows(
+        _ rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow])
+    ) -> some View {
         if !rows.removed.isEmpty {
             GlassCard(quiet: true) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -355,52 +512,75 @@ struct SessionInspectorView: View {
                 .foregroundStyle(GlassColor.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        if let refused = store.actionError, refused.entryId == entry.entryId {
-            GlassNotice(tone: .outside, title: refused.error.description) { EmptyView() }
+        // Why this session cannot be contributed, beside the disarmed
+        // button, in the shared table's words.
+        if let eligibility = TracesStore.eligibility(entry),
+            !EligibilitySurface.offersContribute(eligibility, calls: TracesStore.eligibilityCalls),
+            let reason = eligibility.reason,
+            let line = TracesStore.eligibilityCalls.reasonLine(reason)
+        {
+            Text(line)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        HStack(spacing: GlassTokens.Space.s4) {
-            Button(Self.dismissTitle) { act(.dismiss, entry) }
-                .buttonStyle(GlassButtonStyle(.glass))
-            Button(Self.keepTitle) { act(.keep, entry) }
-                .buttonStyle(GlassButtonStyle(.glass))
-            Spacer(minLength: 0)
-            Button(Self.contributeTitle) { act(.contribute, entry) }
-                .buttonStyle(GlassButtonStyle(.primary, small: true))
-                .disabled(summary == nil || consent == nil)
+        refusal(for: entry.entryId)
+        if let words {
+            HStack(spacing: GlassTokens.Space.s4) {
+                Button(words.dismiss) { act(.dismiss, entry) }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                Button(words.keep) { act(.keep, entry) }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                Spacer(minLength: 0)
+                Button(words.contribute) { act(.contribute, entry) }
+                    .buttonStyle(GlassButtonStyle(.primary, small: true))
+                    .disabled(!armed(entry))
+            }
+            .disabled(busy)
         }
-        .disabled(busy)
     }
 
-    private func undoKeep(_ entryId: String) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            Button(Self.undoTitle) { Task { await store.perform(.undoKeep, on: entryId) } }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(store.acting.contains(entryId))
-            Spacer(minLength: 0)
-        }
+    /// Contribute's gate for `entry`, on the preview asked for it.
+    private func armed(_ entry: DaemonData.QueueEntry) -> Bool {
+        TracesStore.contributeArmed(
+            enrolled: slot.summary(for: entry.entryId)?.enrolled, consent: consent,
+            eligibility: TracesStore.eligibility(entry), calls: TracesStore.eligibilityCalls)
     }
 
     private func act(_ action: TracesStore.ReviewAction, _ entry: DaemonData.QueueEntry) {
+        if action == .contribute {
+            // Asked again at the press, on the session as the tree now has
+            // it: the summary or the eligibility may have moved since the
+            // button was drawn.
+            guard let live = store.tree.allSessions.first(where: { $0.entryId == entry.entryId }),
+                armed(live)
+            else { return }
+        }
         Task { await store.perform(action, on: entry.entryId) }
     }
 
-    static let contributeTitle = "Contribute"
-    static let keepTitle = "Keep"
-    static let dismissTitle = "Dismiss"
-    static let undoTitle = "Undo"
-
     private func load(_ entryId: String) async {
-        summary = nil
-        failure = nil
+        slot.begin(entryId)
         do {
-            summary = try await store.client.preview(entryId: entryId)
+            try await Task.sleep(for: Self.previewSettle)
         } catch {
-            failure = error as? DaemonDataError ?? .undecodable(method: "preview")
+            return
         }
+        let result: Result<DaemonData.PreviewSummary, DaemonDataError>
+        do {
+            result = .success(try await store.client.preview(entryId: entryId))
+        } catch {
+            result = .failure(error as? DaemonDataError ?? .undecodable(method: "preview"))
+        }
+        // A late answer for a session no longer selected is dropped.
+        guard !Task.isCancelled else { return }
+        slot.accept(entryId, result)
     }
 
     /// One word a row, and only what the daemon reported. Unknown is a dash.
-    static func rows(_ entry: DaemonData.QueueEntry, _ summary: DaemonData.PreviewSummary?) -> [GlassKeyValueList.Item] {
+    static func rows(
+        _ entry: DaemonData.QueueEntry, _ summary: DaemonData.PreviewSummary?, words: MonitorTracesCopy
+    ) -> [GlassKeyValueList.Item] {
         let dash = "—"
         func bytes(_ value: Int?) -> String {
             value.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? dash
@@ -408,36 +588,54 @@ struct SessionInspectorView: View {
         func number(_ value: Int?) -> String { value.map(String.init) ?? dash }
         let tool = SourceKind(rawValue: entry.declaredSource ?? entry.source)?.displayName ?? entry.source
         return [
-            .init(MonitorWords.tool, tool),
-            .init(MonitorWords.folder, entry.projectLabel),
-            .init(MonitorWords.started, entry.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? dash),
-            .init(MonitorWords.length, entry.durationSecs.map {
+            .init(words.tool, tool),
+            .init(words.folder, entry.projectLabel),
+            .init(words.started, entry.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? dash),
+            .init(words.length, entry.durationSecs.map {
                 Duration.seconds($0).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
             } ?? dash),
-            .init(MonitorWords.prompts, number(entry.userTurns)),
-            .init(MonitorWords.size, bytes(entry.sizeBytes)),
-            .init(MonitorWords.sends, bytes(summary?.wouldSendBytes)),
+            .init(words.prompts, number(entry.userTurns)),
+            .init(words.size, bytes(entry.sizeBytes)),
+            .init(words.sends, bytes(summary?.wouldSendBytes)),
             // Absent until scrubbed: a dash, never zero.
-            .init(MonitorWords.marks, number(entry.marks)),
-            .init(MonitorWords.unsure, number(entry.unsureSpans)),
+            .init(words.marks, number(entry.marks)),
+            .init(words.unsure, number(entry.unsureSpans)),
         ]
     }
 }
-/// The monitor's own words, in one place, while the core has none for
-/// them. TODO(K4): every one of these moves to the Rust core's copy and is
-/// read across the ABI, like the consent words already are; this enum is
-/// the list to move, and nothing outside it may add a label. Debug-only,
-/// with the monitor.
-enum MonitorWords {
-    static let review = "Review"
-    static let tool = "Tool"
-    static let folder = "Folder"
-    static let started = "Started"
-    static let length = "Length"
-    static let prompts = "Prompts"
-    static let size = "Size"
-    static let sends = "Sends"
-    static let marks = "Marks"
-    static let unsure = "Unsure"
+/// The inspector's one preview, keyed by the session it was asked for. A
+/// result for any other session -- one that was selected, then left before
+/// its blocking `preview` returned -- is refused, so it can never be shown,
+/// or reviewed, as the selected session's.
+struct PreviewSlot: Equatable {
+    private(set) var entryId: String?
+    private var summary: DaemonData.PreviewSummary?
+    private var failure: DaemonDataError?
+
+    mutating func begin(_ entryId: String) {
+        self.entryId = entryId
+        summary = nil
+        failure = nil
+    }
+
+    /// Takes `result` if it is for the session asked for last.
+    @discardableResult
+    mutating func accept(_ entryId: String, _ result: Result<DaemonData.PreviewSummary, DaemonDataError>) -> Bool {
+        guard entryId == self.entryId else { return false }
+        switch result {
+        case .success(let value): summary = value
+        case .failure(let error): failure = error
+        }
+        return true
+    }
+
+    func summary(for entryId: String?) -> DaemonData.PreviewSummary? {
+        entryId != nil && entryId == self.entryId ? summary : nil
+    }
+
+    func failure(for entryId: String?) -> DaemonDataError? {
+        entryId != nil && entryId == self.entryId ? failure : nil
+    }
 }
+
 #endif

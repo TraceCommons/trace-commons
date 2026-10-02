@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::trace_artifact_store::{
     EncryptedTraceArtifact, RemoteTraceArtifactProvider, RemoteTraceArtifactRecord,
-    TraceArtifactInvalidationReason, TraceArtifactObjectRef, validate_file_remote_object_ref,
+    TraceArtifactInvalidationReason, TraceArtifactKind, TraceArtifactObjectLocation,
+    TraceArtifactObjectRef, validate_file_remote_object_ref, validate_remote_object_location,
     verify_encrypted_artifact,
 };
 
@@ -161,13 +162,26 @@ impl<C: GcsObjectClient> GcsRemoteTraceArtifactProvider<C> {
     }
 
     fn object_key(&self, object_ref: &TraceArtifactObjectRef) -> String {
-        let tenant_hash = sha256_hex_text(&object_ref.tenant_storage_ref);
+        self.object_key_at(
+            &object_ref.tenant_storage_ref,
+            &object_ref.artifact_kind,
+            &object_ref.object_key,
+        )
+    }
+
+    fn object_key_at(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: &TraceArtifactKind,
+        object_key: &str,
+    ) -> String {
+        let tenant_hash = sha256_hex_text(tenant_storage_ref);
         format!(
             "{}/{}/{}/{}",
             self.object_store_alias,
             tenant_hash,
-            object_ref.artifact_kind.as_path_segment(),
-            object_ref.object_key,
+            artifact_kind.as_path_segment(),
+            object_key,
         )
     }
 }
@@ -290,6 +304,24 @@ impl<C: GcsObjectClient> RemoteTraceArtifactProvider for GcsRemoteTraceArtifactP
         self.client
             .restore_deleted_object(&key)
             .map_err(|err| anyhow::anyhow!("GcsRestoreFailed: {err}"))
+    }
+
+    fn delete_encrypted_artifact_at_key(
+        &self,
+        location: &TraceArtifactObjectLocation,
+        _deleted_at: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        validate_remote_object_location(location)?;
+        // The GCS key never carried the ciphertext hash: an ordinary delete
+        // names the same key.
+        let key = self.object_key_at(
+            &location.tenant_storage_ref,
+            &location.artifact_kind,
+            &location.object_key,
+        );
+        self.client
+            .delete_object(&key)
+            .map_err(|err| anyhow::anyhow!("GcsDeleteFailed: {err}"))
     }
 }
 
