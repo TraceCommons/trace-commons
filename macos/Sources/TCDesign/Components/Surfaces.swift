@@ -22,10 +22,16 @@ public struct GlassPane<Content: View>: View {
 }
 
 /// Popover tier: the menu-bar panel, floating menus.
+///
+/// One container for VoiceOver. Escape calls `onDismiss`; whoever presents
+/// the popover closes it there and puts focus back on the control that
+/// opened it (a SwiftUI `.popover` does both itself).
 public struct GlassPopover<Content: View>: View {
+    private let onDismiss: (() -> Void)?
     private let content: Content
 
-    public init(@ViewBuilder content: () -> Content) {
+    public init(onDismiss: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
+        self.onDismiss = onDismiss
         self.content = content()
     }
 
@@ -33,6 +39,9 @@ public struct GlassPopover<Content: View>: View {
         content
             .padding(GlassTokens.Space.s5)
             .glassSurface(.popover, floating: true)
+            .focusSection()
+            .onExitCommand { onDismiss?() }
+            .accessibilityElement(children: .contain)
     }
 }
 
@@ -65,10 +74,18 @@ public struct GlassSheet<Content: View>: View {
 }
 
 /// A floating menu (view options, a row's menu). Items are `GlassMenuItem`.
+///
+/// One container for VoiceOver, and one focus section, so Tab and Full
+/// Keyboard Access move through its items and the system focus ring shows
+/// on each; Space or Return activates the focused item (it is a button).
+/// Escape calls `onDismiss`; the presenter closes the menu there and puts
+/// focus back on the control that opened it.
 public struct GlassMenu<Content: View>: View {
+    private let onDismiss: (() -> Void)?
     private let content: Content
 
-    public init(@ViewBuilder content: () -> Content) {
+    public init(onDismiss: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
+        self.onDismiss = onDismiss
         self.content = content()
     }
 
@@ -77,6 +94,8 @@ public struct GlassMenu<Content: View>: View {
             .padding(5)
             .frame(minWidth: 220, alignment: .leading)
             .glassSurface(.menu, floating: true)
+            .focusSection()
+            .onExitCommand { onDismiss?() }
             .accessibilityElement(children: .contain)
     }
 }
@@ -111,10 +130,11 @@ public struct GlassMenuItem: View {
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(hovering && isEnabled ? GlassTokens.Color.menuHover.color : .clear)
+                    .glassPressedFill()
             )
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .accessibilityAddTraits(checked == true ? .isSelected : [])
     }

@@ -56,7 +56,8 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
 
     public var body: some View {
         if let action {
-            Button(action: action) { card }.buttonStyle(.plain)
+            // The card's tier fill darkens while pressed (`GlassPressStyle`).
+            Button(action: action) { card }.buttonStyle(GlassPressStyle())
         } else {
             card
         }

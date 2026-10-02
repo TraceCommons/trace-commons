@@ -1,10 +1,12 @@
-import AppKit
 import SwiftUI
 
 public extension EnvironmentValues {
     /// Room the main pane leaves at its top for the window's controls (the
     /// traffic lights): this tall, and `windowControlsWidth` wide.
     @Entry var glassWindowControlsInset: CGFloat = 0
+    /// True while the window is too narrow to draw the map, whatever the
+    /// preference. The map toggle reads it: it cannot show the map then.
+    @Entry var glassMapCompacted: Bool = false
 }
 
 /// The widths of the window's panes for one window width (spec, "Panes").
@@ -42,6 +44,28 @@ public struct GlassPaneLayout: Equatable, Sendable {
         self.inspector = inspector
     }
 
+    /// The panes a window opens with the first time, before the person has
+    /// chosen (spec, "Opening state and restoration"): the map from 1100pt,
+    /// the inspector from 900pt, as #1146 decides at launch. After that the
+    /// window restores the person's own choice.
+    public static func firstLaunch(windowWidth width: CGFloat) -> (showsMap: Bool, showsInspector: Bool) {
+        (width >= GlassTokens.Size.mapBreakpoint, width >= GlassTokens.Size.inspectorBreakpoint)
+    }
+
+    /// The map is wanted but the window is too narrow to draw it.
+    public static func compactsMap(windowWidth width: CGFloat, showsMap: Bool) -> Bool {
+        showsMap && width < GlassTokens.Size.mapBreakpoint
+    }
+
+    /// Which panes are drawn. Pane show and hide animate on this, not on
+    /// the widths, so dragging the window's edge resizes without easing.
+    public struct Visibility: Equatable, Sendable {
+        public let map: Bool
+        public let inspector: Bool
+    }
+
+    public var visibility: Visibility { Visibility(map: map != nil, inspector: inspector != nil) }
+
     /// The smallest window every composition fits: the main pane at its
     /// minimum beside the inspector (the map hides below 1100pt).
     public static var minimumWindowWidth: CGFloat {
@@ -63,19 +87,24 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     private let main: Main
     private let map: Map
     private let inspector: Inspector
+    private let onFirstLayout: ((CGFloat) -> Void)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// `showsMap` and `showsInspector` are the person's preferences; the map
     /// is also hidden below the compact breakpoint without changing them.
+    /// `onFirstLayout` gets the window's width once, when it first lays
+    /// out: the moment to seed preferences nobody has chosen yet.
     public init(
         showsMap: Bool,
         showsInspector: Bool,
+        onFirstLayout: ((CGFloat) -> Void)? = nil,
         @ViewBuilder main: () -> Main,
         @ViewBuilder map: () -> Map,
         @ViewBuilder inspector: () -> Inspector
     ) {
         self.showsMap = showsMap
         self.showsInspector = showsInspector
+        self.onFirstLayout = onFirstLayout
         self.main = main()
         self.map = map()
         self.inspector = inspector()
@@ -89,6 +118,9 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
                 main
                     .frame(width: layout.main)
                     .environment(\.glassWindowControlsInset, GlassTokens.Space.windowControlsInset)
+                    .environment(
+                        \.glassMapCompacted,
+                        GlassPaneLayout.compactsMap(windowWidth: proxy.size.width, showsMap: showsMap))
                 if let width = layout.map {
                     map
                         .frame(width: width)
@@ -102,7 +134,8 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
             }
             .padding(GlassTokens.Space.windowPadding)
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
-            .animation(GlassMotion.standard(reduceMotion), value: layout)
+            .animation(GlassMotion.standard(reduceMotion), value: layout.visibility)
+            .onAppear { onFirstLayout?(proxy.size.width) }
         }
         // The panes run to the window's top edge; the title bar's controls
         // sit inside the main pane rather than in a strip above it.
@@ -112,30 +145,4 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
 
     /// The window's default width (1320, as in #1146).
     public static var defaultWidth: CGFloat { GlassTokens.Size.windowWidth }
-}
-
-/// The one motion curve (spec, "Motion"): `timingCurve(0.2, 0.8, 0.2, 1)`
-/// at the token durations, and none under Reduce Motion.
-public enum GlassMotion {
-    public static func curve(_ duration: Double) -> Animation {
-        .timingCurve(
-            GlassTokens.Motion.easeX1, GlassTokens.Motion.easeY1,
-            GlassTokens.Motion.easeX2, GlassTokens.Motion.easeY2,
-            duration: duration)
-    }
-
-    /// The system's Reduce Motion, for places with no environment to read
-    /// (a style's action closure).
-    @MainActor
-    public static var systemReducesMotion: Bool {
-        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-    }
-
-    public static func fast(_ reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : curve(GlassTokens.Motion.fast)
-    }
-
-    public static func standard(_ reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : curve(GlassTokens.Motion.standard)
-    }
 }
