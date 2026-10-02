@@ -289,7 +289,7 @@ public struct GlassBarGraph: View {
                     .frame(height: 96)
                     Text(bucket.label)
                         .glassType(thin ? GlassTokens.TypeScale.micro.weight(.regular) : GlassTokens.TypeScale.caption)
-                        .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
+                        .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassColor.textTertiary)
                         .frame(minHeight: 12)
                 }
                 .onHover { hovered = $0 ? bucket.id : nil }
@@ -369,7 +369,7 @@ public struct GlassMapNodeStyle: Sendable, Equatable {
             ring = true
             radius = 11
         case .hub:
-            fill = GlassRGBA(0x8E8E96)
+            fill = GlassTokens.Color.mapHub
             ring = true
             radius = 16
         }

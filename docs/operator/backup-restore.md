@@ -106,6 +106,99 @@ persistent disk with snapshots) so the file-level restore is the
 primary recovery and `trace-commons-vector-replay` is the fallback when
 that's lost too.
 
+## Versioned pipeline
+
+`python3 scripts/operator/pipeline.py restore-drill` (also run as the last
+step of `pipeline.py qualify`) is the versioned pipeline's own restore
+check. See
+[pipeline-qualification.md](pipeline-qualification.md#pipelinepy-restore-drill---postgres-admin-url-url)
+for what it runs, step by step.
+
+**What it proves.** A `pg_dump` / `pg_restore` round trip of the pipeline's
+PostgreSQL rows, plus a byte-for-byte copy of the encrypted artifact
+directory, resumes a pending run to the same settlement legs and Trace
+Credit ledger event the original run reached, with the index's entry set
+and the pending-run set unchanged and no duplicate effect. Before the
+resume, the restored database keeps every trace table's RLS (enabled,
+forced, and the tenant policy's predicate), every RLS policy the dumped
+database had and no other, the runtime login's full privilege set, every
+tenant's rows, and every tenant's audit chain. The policy comparison is
+against the dumped database: a policy that was already too wide before the
+dump is not detected here.
+
+**What it does not prove.** The artifact "restore" is a local filesystem
+copy (`shutil.copytree`), never a restore from a remote object store; the
+drill's report always carries the `filesystem_restore_local_only` blocker.
+A remote-provider restore drill (GCS or another configured object store) is
+promotion work, not part of this release. Host client-tool versions also
+matter here: with `--postgres-admin-url`, the drill's dump and restore run
+the *host's* installed `pg_dump` / `pg_restore` against that server, not a
+version pinned in a container. A host `pg_restore` 17 emits `SET
+transaction_timeout`, which a PostgreSQL 16 server refuses -- keep the
+host's client major version equal to the target server's. The default
+container mode is unaffected: it starts and restores against its own
+digest-pinned `postgres:16` image regardless of the host's installed
+client tools.
+
+**After a real restore,** rebuild the pipeline's index before the pipeline
+worker processes any tenant. A worker that runs first scores pending runs
+against an empty or partial index, so their novelty, and their credit,
+comes out too high. The rebuild route is served only by an ingest build
+that injects a pipeline runtime; the repository binary injects none and
+answers `404` there. Do these steps in this order:
+
+1. Restore PostgreSQL (the pipeline's rows restore with everything else --
+   there is no separate pipeline backup or restore path for the database).
+2. Restore the encrypted object store.
+3. Start every `trace-commons-ingest` process with
+   `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
+   `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` both unset. The pipeline
+   runtime still starts, and the rebuild route serves every tenant (it
+   refuses a tenant on either list, `409`
+   `pipeline_index_rebuild_tenant_active`).
+   The worker reads both lists once, at start, so it drains no tenant: it
+   scores no pending run, and it pays and invalidates nothing. Keep these
+   processes out of client traffic until step 5: while a tenant is on
+   neither list, a new upload of that tenant takes the legacy path.
+4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
+   tenant's vector worker bearer token or an admin token -- the same gate
+   as `main`'s vector index worker route (see
+   [`operator-binaries.md`](operator-binaries.md) for the credential). It
+   replays every complete, included run's sealed index command through the
+   service's own index writer, returns a hash-only report
+   (`command_count`, `entry_count`, `unchanged_entry_count`,
+   `skipped_run_count`, `command_set_hash`), and appends one `vector_index`
+   audit row. It creates no outcomes and no credit. It is safe to run again
+   if it is interrupted: a repeat reports the entries it already wrote as
+   unchanged. Each process runs at most one rebuild per tenant at a time: a
+   second request for a tenant whose rebuild is running is refused (`409`
+   `pipeline_index_rebuild_in_progress`). A run's writes hold its rows for
+   at most the smaller of the Settle lease and 30 seconds; past that, the
+   rebuild stops with `503` `index_unavailable`. A rerun starts again from
+   the first run and reports the entries already written as unchanged; a
+   run whose writes take longer than that deadline fails on every rerun.
+
+   A withdrawal during the rebuild is safe because of step 3, not because
+   no withdrawal happens: withdrawals come from clients, from `main`'s
+   retention maintenance, and from the revocation-propagation reconciler,
+   and keeping client traffic away stops only the first. A run withdrawn
+   before its entries are written is skipped. A withdrawal of a run whose
+   entries are being written usually waits for them, but not always (a lost
+   database session, a stopped rebuild, a process exit), and it queues the
+   run's removal at once. With both lists unset, no worker processes that
+   removal until step 5, so it always runs after the rebuild's last write.
+   Run the rebuild only in step 3's configuration, on every process: a
+   process that drains or routes the tenant would process the removal
+   during the rebuild. A fence that closes this without step 3 (a committed
+   rebuild marker that the withdrawal's removal reads) is PR 5 work.
+5. Restart every `trace-commons-ingest` process with both lists set back to
+   their values before the restore. The worker then resumes the pending
+   runs, and processes the queued invalidations and payouts, against the
+   rebuilt index.
+
+`pipeline.py restore-drill` does not exercise this route: it rebuilds the
+index in process, before its app starts.
+
 ## Model weights
 
 Re-downloadable via `stage-models.sh`. Keep

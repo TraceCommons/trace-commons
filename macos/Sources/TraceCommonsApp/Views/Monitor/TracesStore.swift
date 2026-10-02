@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import TCBridge
 import TCShellCore
 
 /// The Traces tab's data (R6 of #1173), read through `DaemonDataClient`.
@@ -36,14 +37,36 @@ final class TracesStore {
 
     let client: any DaemonDataClient
     /// The last folder change whose result differed from what the
-    /// confirmation promised, in the core's words (`ProjectIgnoreCopy`).
+    /// confirmation promised, in the core's words
+    /// (`tc_project_ignore_reconciled_text`).
     private(set) var folderNotice: String?
     /// Each load's number; a load that finishes after a newer one started is
     /// dropped, so an older read never overwrites a newer tree.
     private var generation = 0
 
+    /// The tab's words, from the core (`tc_monitor_traces_copy_json`),
+    /// decoded once rather than on every redraw. Nil leaves a label out
+    /// rather than writing one here.
+    let words: MonitorTracesCopy? = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())
+
     init(client: any DaemonDataClient) {
         self.client = client
+    }
+
+    /// The tools the core reads from their usual folder while unset, from
+    /// its source copy. Empty if the copy is unavailable: then only tools
+    /// with a declaration or something waiting are drawn.
+    static let scansWhenUnset: Set<SourceKind> = {
+        guard let copy = TCSourceChecks.settingsCopy() else { return [] }
+        return Set(SourceKind.allCases.filter { copy.tools[$0.rawValue]?.unsetScansConventional == true })
+    }()
+
+    /// A tool row's sub-line: the core's sentence for its declaration, or
+    /// its "could not be confirmed" sentence when settings were unreadable.
+    static func sourceLine(_ tool: TracesTree.ToolNode) -> String? {
+        guard let copy = TCSourceChecks.settingsCopy(), let entry = copy.tools[tool.kind.rawValue] else { return nil }
+        guard let wire = tool.mode.wire else { return copy.unavailable }
+        return TCSourceChecks.checkLine(tool: entry.key, sourceMode: wire)
     }
 
     /// Loads, then follows the event stream for as long as the calling task
@@ -69,10 +92,12 @@ final class TracesStore {
             async let entries = client.listPending(projectId: nil)
             async let projects = client.listProjects()
             // Settings only decide the tool switches. Unreadable settings
-            // leave every tool unset, which draws no switch: never off.
+            // are unknown: no switch, never off, and the row says so.
             async let settings = try? client.settings()
             async let status = try? client.status()
-            let built = TracesTree.build(entries: try await entries, projects: try await projects.projects, settings: await settings)
+            let built = TracesTree.build(
+                entries: try await entries, projects: try await projects.projects, settings: await settings,
+                scansWhenUnset: Self.scansWhenUnset)
             let read = await status
             guard mine == generation else { return }
             tree = built
@@ -118,6 +143,22 @@ final class TracesStore {
         await load()
     }
 
+    /// A tool's source declaration, from its switch after the core's
+    /// explanation was shown: `.off` is "I do not use this tool", `.watch`
+    /// names the folder chosen for it. The core's answer is reloaded.
+    func setSource(_ kind: SourceKind, _ choice: SourceChoice) async {
+        guard !writing.contains(kind.rawValue) else { return }
+        writing.insert(kind.rawValue)
+        defer { writing.remove(kind.rawValue) }
+        do {
+            _ = try await client.setSource(kind, choice)
+        } catch {
+            phase = .failed(error as? DaemonDataError ?? .undecodable(method: "set_settings"))
+            return
+        }
+        await load()
+    }
+
     /// A folder's mode, chosen from its three-way picker after any
     /// confirmation the view showed (arming, or ignoring a folder with
     /// sessions waiting). `promised` is the waiting count that confirmation
@@ -130,7 +171,7 @@ final class TracesStore {
         do {
             let result = try await client.setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
             if mode == .ignore {
-                folderNotice = ProjectIgnoreCopy.reconciliation(
+                folderNotice = TCCoreCopy.projectIgnoreReconciled(
                     project: folder.label, promised: promised, purged: result.purged ?? promised)
             }
         } catch {

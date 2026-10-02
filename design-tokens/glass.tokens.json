@@ -37,9 +37,10 @@
     "menuSeparator": { "hex": "#ffffff", "alpha": 0.14 },
     "nodeCardFill": { "hex": "#14161c", "alpha": 0.72 },
     "scrim": { "hex": "#000000", "alpha": 0.4 },
-    "selection": { "hex": "#3a7bd5" },
+    "selection": { "hex": "#2f6ac0", "note": "Darker than blue so white row text clears 4.5:1 (5.3:1); white on #3a7bd5 was 4.22:1." },
     "mapIdle": { "hex": "#ffffff", "alpha": 0.35 },
     "mapNodeOff": { "hex": "#5d5d63" },
+    "mapHub": { "hex": "#8e8e96", "note": "The map's centre node." },
     "mapFieldInner": { "hex": "#1e2a3a" },
     "mapFieldOuter": { "hex": "#131a24" },
     "consentFill": { "hex": "#000000", "alpha": 0.25 },
@@ -217,7 +218,7 @@
   },
   "opacity": {
     "disabled": 0.45,
-    "rowOff": 0.6
+    "rowOff": 0.7
   },
   "type": {
     "micro": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 13 },
