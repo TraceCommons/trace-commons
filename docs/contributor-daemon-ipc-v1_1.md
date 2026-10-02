@@ -109,6 +109,14 @@ old behaviour, because no application has shipped against `v1` yet. See
     `GET /v1/account/credit-summary` with the account session. The daemon
     never read either before this. See
     ["`commons_credit_summary`"](#commons_credit_summary).
+- **K9 (titles on the queue).** `title` -- previously served only on a
+  `preview` summary -- is now also on every queue entry (`list_pending`, the
+  `snapshot` event). It is never written to a receipt or a history row.
+  The watcher computes it synchronously when it queues the session, from
+  the same opening prompt and the same cut/truncate rule `preview`'s own
+  `title` uses, but through the deterministic redaction pass alone rather
+  than a full preview build. See ["`title`"](#title) and
+  ["The preview content boundary"](#the-preview-content-boundary).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -353,8 +361,10 @@ something it can corroborate, rather than to a string a client invented.
   sizes. The full redacted event body is a separate call, `preview_body`,
   because it does not fit one frame and has to be paged. Both carry trace
   content under the preview boundary below. Account-authenticated session
-  detail and tested-skill extraction have their own bounded content boundary;
-  no other method returns session-derived text.
+  detail and tested-skill extraction have their own bounded content boundary.
+  The one other session-derived text is a queue entry's `title` (K9), a
+  bounded exception described under the boundary below; no other method
+  returns session-derived text.
   An earlier revision of this document said the body was deliberately
   in-process only, reachable through the crate's C ABI, on the reasoning
   that any process could compute a preview for itself. That reasoning does
@@ -386,6 +396,24 @@ and a project name is not an informed one. This content is bounded:
 - **Never onward.** It never appears in a log line, an audit entry, a
   history record, notification text, or a receipt. Not truncated, not
   summarized, not hashed-with-a-sample. Nothing copies it into any of those.
+
+**The one exception: a queue entry's `title` (K9).** Every queue entry, in
+`list_pending` and the `snapshot` event, carries `title`: the first non-empty
+line of the opening prompt, cut and truncated as `preview`'s `title` is. It
+departs from the first two rules above, deliberately, and only these ways:
+
+- **Deterministic redaction only.** The watcher builds it when it queues the
+  session, through the deterministic pass alone (secret-leak patterns, local
+  paths, private emails, PEM blocks), never a configured prose filter. So it
+  is never less redacted than an unenrolled `preview.title`, but can be less
+  redacted than an enrolled contributor's.
+- **Served in bulk.** It is on every row of the queue a client already
+  lists, without naming an entry.
+
+It keeps the third rule in full. It lives on the queue entry and goes when
+the entry goes. It is never written to a receipt, a history record, a log, an
+audit entry or a notification, and nothing copies it onward. A history list
+shows the project label, not a title.
 
 `preview_unsure_spans` is outside the exemption for the same reason as
 `preview_turns` below: it carries fixed labels and byte offsets into the body
@@ -930,12 +958,38 @@ other would be a claim this daemon cannot verify.
 above for why this one field is allowed to be, and what that permission does
 not extend to.
 
+#### `title`
+
 `title` is a short name for the session, for a row or a sheet header: the
 first non-empty line of the redacted `opening_prompt`, cut at a word boundary
 to 60 characters with an ellipsis when cut, and `null` when there is no task
-description. It is the same redacted content as `opening_prompt`, under the
-same boundary, so it is served only where `opening_prompt` is -- in a preview
-summary, never in `list_pending`. A list that wants titles schedules previews
+description.
+
+**K9**: `title` is no longer confined to a `preview` summary. It is also on
+every queue entry (`list_pending`, the `snapshot` event), as the one
+exception to the preview content boundary -- see
+["The preview content boundary"](#the-preview-content-boundary). It is never
+carried onto a receipt or a `list_history` row.
+The watcher builds it once, synchronously, at the moment it queues the
+session, from the same opening prompt and the same cut/truncate rule this
+`preview` field uses -- but through the deterministic redaction pass alone
+(secret-leak patterns, known and generic local paths, private emails, PEM
+blocks), never a configured prose privacy filter. The watcher's poll loop is
+synchronous and runs on every discovered session; it cannot pay for that
+filter's network call there the way a `preview` build can. That deterministic
+pass is the floor every `preview`'s own redaction starts from and an
+unenrolled contributor's `preview.title` never goes past, so the queued
+`title` is never LESS redacted than an equivalent `preview.title` -- an
+enrolled contributor's `preview` may additionally scrub prose PII that only a
+configured filter catches, which the queued `title` cannot. `preview.title`
+itself is unchanged: same field, same rule, independently computed on that
+path.
+
+`title` on a queue entry is `null` on an entry queued before this existed --
+it is not backfilled, exactly like `shape` (see below): the entry gets a
+title the next time its session is loaded (it grows, or is re-offered) --
+and whenever the task named no description. A client that wants the
+preview's fully-filtered title regardless of either still schedules previews
 (`preview_request`, `preview_visible`) and fills each row in as its
 `preview_ready` arrives.
 
@@ -957,6 +1011,10 @@ every event of the redacted envelope. `ended_at` spans the delegated work
 too, since it is part of the session. An entry queued before these fields
 existed has them all `null`; it is not backfilled, and gains a shape when its
 session is next loaded (it grows, or is re-offered).
+
+Every entry also carries `title` (K9) -- unlike the fields above, redacted
+*content*, not metadata, so it is documented on its own: see
+["`title`"](#title).
 
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are

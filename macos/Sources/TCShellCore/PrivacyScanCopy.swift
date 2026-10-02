@@ -19,12 +19,22 @@ public struct PrivacyScanCopy: Decodable, Equatable, Sendable {
     public let localOnly: String
     /// The choice that adds the second scanner.
     public let withNear: String
+    /// The recovery prompt's heading, while the daemon holds uploads for
+    /// `near-ai-notice-not-acknowledged`.
+    public let recoveryTitle: String
+    /// Why uploads are held, and what confirming does.
+    public let recoveryDetail: String
+    /// The button that opens the notice.
+    public let recoveryAction: String
 
     enum CodingKeys: String, CodingKey {
         case title, offer, disclosure
         case localAlways = "local_always"
         case localOnly = "local_only"
         case withNear = "with_near"
+        case recoveryTitle = "recovery_title"
+        case recoveryDetail = "recovery_detail"
+        case recoveryAction = "recovery_action"
     }
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
@@ -36,7 +46,7 @@ public struct PrivacyScanCopy: Decodable, Equatable, Sendable {
         }
         let sentences = [
             copy.title, copy.localAlways, copy.offer, copy.disclosure, copy.localOnly,
-            copy.withNear,
+            copy.withNear, copy.recoveryTitle, copy.recoveryDetail, copy.recoveryAction,
         ]
         return sentences.contains(where: \.isEmpty) ? nil : copy
     }
