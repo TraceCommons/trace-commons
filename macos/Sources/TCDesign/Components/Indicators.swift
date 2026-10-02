@@ -266,7 +266,7 @@ public struct GlassBarGraph: View {
                     Text(bucket.label)
                         .glassType(thin ? GlassTokens.TypeScale.micro.weight(.regular) : GlassTokens.TypeScale.caption)
                         .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
-                        .frame(height: 12)
+                        .frame(minHeight: 12)
                 }
                 .onHover { hovered = $0 ? bucket.id : nil }
                 .accessibilityElement(children: .ignore)

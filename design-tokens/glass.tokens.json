@@ -208,7 +208,7 @@
   },
   "type": {
     "micro": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 13 },
-    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
+    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "semibold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
     "caption": { "textStyle": "subheadline", "size": 11, "weight": "regular", "lineHeight": 16 },
     "label": { "textStyle": "callout", "size": 12, "weight": "medium", "lineHeight": 16 },
     "body": { "textStyle": "body", "size": 13, "weight": "regular", "lineHeight": 18 },
