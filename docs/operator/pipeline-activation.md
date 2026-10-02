@@ -93,6 +93,13 @@ ingest login to be a member of `trace_account_admission_runtime`, as
 V95: the pipeline tables" and "V105 and V106: review, invalidation, and export
 tables").
 
+V109 adds no table and changes no grant. It marks the payout of a Trace
+Credit leg seeded by V94-era code `disabled` (see "NEAR payout"), and adds
+four checks: an export snapshot's requester is `principal_sha256:` or
+`exporter_sha256:` and 64 lowercase hex digits, an export item's outcome and
+view schema ids are labels, and an assessment's resolved quarantine reasons
+are a JSON array. The code already writes only such values.
+
 ## Fail-closed dependency qualification
 
 `assemble_ingest_pipeline_runtime` refuses to start an injected pipeline

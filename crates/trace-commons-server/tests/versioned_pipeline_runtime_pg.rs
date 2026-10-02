@@ -13319,7 +13319,7 @@ async fn insert_export_snapshot_and_item(
             &tenant,
             &snapshot_id,
             &format!("sha256:{}", "d".repeat(64)),
-            &"exporter_sha256:testexporter",
+            &format!("exporter_sha256:{}", "a".repeat(64)),
             &"research",
             &format!("sha256:{}", "e".repeat(64)),
             &"policy-test-v1",
@@ -16789,7 +16789,7 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
             tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
             allowed_use, purpose_hash, selection_policy_id, source_list_hash,
             state, export_manifest_id, completed_at
-         ) VALUES ($1,$2,$3,'exporter_sha256:test','model_training',$4,'pipeline_export_v1',
+         ) VALUES ($1,$2,$3,$9,'model_training',$4,'pipeline_export_v1',
                    $5,$6,$7,$8)",
         &[
             &run.tenant_id,
@@ -16800,6 +16800,7 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
             &(if complete { "complete" } else { "ready" }),
             &complete.then(uuid::Uuid::new_v4),
             &complete.then(chrono::Utc::now),
+            &EXPORTER,
         ],
     )
     .await
@@ -16828,6 +16829,156 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
     .expect("insert the snapshot item");
     tx.commit().await.unwrap();
     snapshot_id
+}
+
+/// poldsam P-8 (V109): the database refuses a snapshot requester that is
+/// not `principal_sha256:` or `exporter_sha256:` and 64 lowercase hex
+/// digits, an export item whose outcome or view schema id is not a label,
+/// and an assessment whose resolved quarantine reasons are not a JSON array.
+#[tokio::test]
+async fn the_database_refuses_malformed_export_and_assessment_fields() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("schema-checks-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let hash = |seed: &str| format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())));
+    let refused = |error: tokio_postgres::Error, constraint: &str, case: &str| {
+        let db = error.as_db_error().expect("a database refusal");
+        assert_eq!(
+            db.code(),
+            &tokio_postgres::error::SqlState::CHECK_VIOLATION,
+            "{case}"
+        );
+        assert_eq!(db.constraint(), Some(constraint), "{case}");
+    };
+    let mut owner = owner_client().await;
+
+    const SNAPSHOT: &str = "INSERT INTO pipeline_export_snapshots (
+            tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash
+         ) VALUES ($1,$2,$3,$4,'model_training',$5,'pipeline_export_v1',$6)";
+    for requester in [
+        "principal_sha256:a".to_string(),
+        "exporter_sha256:exporttest".to_string(),
+        format!("principal_sha256:{}", "A".repeat(64)),
+        format!("principal_sha256:{}", "a".repeat(65)),
+        format!("reviewer_sha256:{}", "a".repeat(64)),
+    ] {
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let error = tx
+            .execute(
+                SNAPSHOT,
+                &[
+                    &tenant,
+                    &uuid::Uuid::new_v4(),
+                    &hash(&format!("key-{requester}")),
+                    &requester,
+                    &hash("purpose"),
+                    &hash("sources"),
+                ],
+            )
+            .await
+            .expect_err("the database refuses the requester");
+        refused(
+            error,
+            "pipeline_export_snapshots_requester_principal_ref_check",
+            &requester,
+        );
+        tx.rollback().await.unwrap();
+    }
+    let snapshot_id = uuid::Uuid::new_v4();
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        SNAPSHOT,
+        &[
+            &tenant,
+            &snapshot_id,
+            &hash("key-accepted"),
+            &format!("principal_sha256:{}", "a".repeat(64)),
+            &hash("purpose"),
+            &hash("sources"),
+        ],
+    )
+    .await
+    .expect("a full principal reference is accepted");
+    tx.commit().await.unwrap();
+
+    for (outcome_schema_id, view_schema_id, constraint) in [
+        (
+            "Bad Schema",
+            "pipeline_view",
+            "pipeline_export_snapshot_items_outcome_schema_id_shape",
+        ),
+        (
+            "pipeline_outcome",
+            "",
+            "pipeline_export_snapshot_items_view_schema_id_shape",
+        ),
+    ] {
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let error = tx
+            .execute(
+                "INSERT INTO pipeline_export_snapshot_items (
+                    tenant_id, snapshot_id, ordinal, run_id, submission_id, trace_id,
+                    registry_revision_id, source_object_ref_id, source_content_hash, bundle_id,
+                    outcome_schema_id, outcome_schema_version, authorized_view_schema_id,
+                    consent_scopes, allowed_uses
+                 ) VALUES ($1,$2,0,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,'[]'::jsonb,'[]'::jsonb)",
+                &[
+                    &tenant,
+                    &snapshot_id,
+                    &run.run_id,
+                    &run.submission_id,
+                    &run.trace_id,
+                    &run.approved_revision_id.expect("an approved revision"),
+                    &run.approved_object_ref_id.expect("an approved object"),
+                    &run.approved_content_hash.clone().expect("an approved hash"),
+                    &run.bundle_id,
+                    &outcome_schema_id,
+                    &view_schema_id,
+                ],
+            )
+            .await
+            .expect_err("the database refuses the schema id");
+        refused(error, constraint, constraint);
+        tx.rollback().await.unwrap();
+    }
+
+    for reasons in [serde_json::json!({}), serde_json::json!("policy_review")] {
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let error = tx
+            .execute(
+                "INSERT INTO pipeline_review_assessments (
+                    tenant_id, assessment_id, run_id, reviewer_principal_ref, recommendation,
+                    reason_code, resolved_quarantine_reasons, evidence_hash
+                 ) VALUES ($1,$2,$3,$4,'approve','review_test_assessment',$5,$6)",
+                &[
+                    &tenant,
+                    &uuid::Uuid::new_v4(),
+                    &run.run_id,
+                    &format!("reviewer_sha256:{}", "b".repeat(64)),
+                    &reasons,
+                    &hash("evidence"),
+                ],
+            )
+            .await
+            .expect_err("the database refuses reasons that are not an array");
+        refused(
+            error,
+            "pipeline_review_assessments_resolved_reasons_array",
+            &reasons.to_string(),
+        );
+        tx.rollback().await.unwrap();
+    }
 }
 
 /// The withdrawal invalidates every pipeline export snapshot and item that
@@ -18574,7 +18725,8 @@ async fn the_invalidation_pass_never_holds_two_pooled_connections() {
 
 /// The requester every export test creates snapshots as, in the shape the
 /// snapshot table requires of `requester_principal_ref`.
-const EXPORTER: &str = "exporter_sha256:exporttest";
+const EXPORTER: &str =
+    "exporter_sha256:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0";
 
 /// A `sha256:` hash of `seed`, the shape the store takes for a request key
 /// and a purpose (the route hashes the raw values).

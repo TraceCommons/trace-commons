@@ -18,3 +18,26 @@ UPDATE pipeline_run_settlements
    AND payout_state = 'pending'
    AND NOT payout_eligible;
 ALTER TABLE pipeline_run_settlements FORCE ROW LEVEL SECURITY;
+
+-- poldsam P-8: schema checks V105 and V106 left out. Each matches what the
+-- code writes, so no existing row can fail them: a requester is
+-- `principal_sha256:` or `exporter_sha256:` and 64 lowercase hex digits (the
+-- V106 check accepted `principal_sha256:a`); the resolved quarantine reasons
+-- are a JSON array; and the two schema ids are labels, as
+-- `selection_policy_id` is.
+ALTER TABLE pipeline_export_snapshots
+    DROP CONSTRAINT pipeline_export_snapshots_requester_principal_ref_check,
+    ADD CONSTRAINT pipeline_export_snapshots_requester_principal_ref_check CHECK (
+        requester_principal_ref ~ '^(principal|exporter)_sha256:[0-9a-f]{64}$'
+    );
+ALTER TABLE pipeline_review_assessments
+    ADD CONSTRAINT pipeline_review_assessments_resolved_reasons_array CHECK (
+        jsonb_typeof(resolved_quarantine_reasons) = 'array'
+    );
+ALTER TABLE pipeline_export_snapshot_items
+    ADD CONSTRAINT pipeline_export_snapshot_items_outcome_schema_id_shape CHECK (
+        outcome_schema_id ~ '^[a-z0-9_.-]{1,128}$'
+    ),
+    ADD CONSTRAINT pipeline_export_snapshot_items_view_schema_id_shape CHECK (
+        authorized_view_schema_id ~ '^[a-z0-9_.-]{1,128}$'
+    );
