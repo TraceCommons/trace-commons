@@ -1465,40 +1465,13 @@ impl PgPipelineStore {
         Ok(())
     }
 
-    /// Switches a tenant to a different, already-registered bundle. This is
-    /// an operator action: no ingest route calls it, only
-    /// `activate_bundle_if_none` (below) does, and the ingest runtime login
-    /// holds no `UPDATE` on `pipeline_active_bundles`, so this call fails
-    /// with a database permission error unless it runs through a role that
-    /// has been separately granted on the table.
-    pub async fn activate_bundle(
-        &self,
-        tenant_id: &str,
-        bundle_id: &str,
-    ) -> Result<(), DatabaseError> {
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let row_count = tx
-            .execute(
-                "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
-                 SELECT $1, bundle_id
-                 FROM pipeline_bundle_packages
-                 WHERE tenant_id = $1 AND bundle_id = $2
-                 ON CONFLICT (tenant_id) DO UPDATE
-                 SET bundle_id = EXCLUDED.bundle_id, selected_at = NOW()",
-                &[&tenant_id, &bundle_id],
-            )
-            .await?;
-        if row_count != 1 {
-            return Err(DatabaseError::NotFound {
-                entity: "pipeline_bundle".to_string(),
-                id: bundle_id.to_string(),
-            });
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
+    /// Selects `bundle_id` as the tenant's active bundle only when the tenant
+    /// has none (an `INSERT ... ON CONFLICT DO NOTHING`, which needs no
+    /// `UPDATE`): the default bundle's registration at start. It never
+    /// replaces a selection, so a start after an activation or a rollback
+    /// leaves the selected bundle. The ingest runtime switches a tenant's
+    /// bundle only through the qualified activation gate
+    /// (`PipelineQualificationStore::activate_qualified_bundle_in`, V112).
     pub async fn activate_bundle_if_none(
         &self,
         tenant_id: &str,
@@ -5883,7 +5856,7 @@ async fn insert_receipt_records(
     Ok(())
 }
 
-async fn load_bundle_from_transaction(
+pub(crate) async fn load_bundle_from_transaction(
     tx: &Transaction<'_>,
     tenant_id: &str,
     bundle_id: &str,
@@ -5974,7 +5947,7 @@ async fn ensure_current_lease(
 /// routing guards and before its first write, so the policy row is the last
 /// lock before the writes. An intervention takes only this row, so no
 /// transaction that holds it waits for a lock an intervention holds.
-async fn lock_runnable_policy(
+pub(crate) async fn lock_runnable_policy(
     tx: &Transaction<'_>,
     tenant_id: &str,
     bundle_id: &str,
@@ -7575,13 +7548,6 @@ impl PipelineService {
         Ok(())
     }
 
-    /// An operator action; see `PgPipelineStore::activate_bundle`. A service
-    /// built with the ingest runtime login cannot call this successfully.
-    pub async fn activate_bundle(&self, tenant_id: &str, bundle_id: &str) -> anyhow::Result<()> {
-        self.store.activate_bundle(tenant_id, bundle_id).await?;
-        Ok(())
-    }
-
     pub async fn inspect(
         &self,
         tenant_id: &str,
@@ -7905,8 +7871,12 @@ impl PipelineService {
         Ok(())
     }
 
-    /// `check_tenant_bundles`'s checks of one package.
-    fn check_runnable_package(
+    /// `check_tenant_bundles`'s checks of one package. The activation route
+    /// runs them for the bundle it activates, before the store's gate
+    /// (`PipelineActivationStore::activate_tenant`, `rollback_bundle`), so
+    /// the startup checks of a tenant bundle also hold for a bundle that is
+    /// activated after start: the gate itself holds no service.
+    pub fn check_runnable_package(
         &self,
         package: &BundlePackage,
         main_gate: &crate::versioned_pipeline_compat::MainGateConfig,

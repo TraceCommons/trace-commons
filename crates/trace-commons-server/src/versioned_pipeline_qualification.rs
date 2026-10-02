@@ -14,16 +14,18 @@ use std::sync::Arc;
 
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
+use deadpool_postgres::Transaction;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
-use trace_commons_gate_api::pipeline::BundlePackage;
+use trace_commons_gate_api::pipeline::{BundlePackage, Phase};
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
 use crate::error::DatabaseError;
 use crate::versioned_pipeline::{
-    PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL, PgPipelineStore,
-    PipelineBundleQualification, PipelineService, sha256_prefixed,
+    PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL, PIPELINE_BUNDLE_MISSING_LABEL,
+    PIPELINE_POLICY_NOT_RUNNABLE_LABEL, PgPipelineStore, PipelineBundleQualification,
+    PipelineService, load_bundle_from_transaction, lock_runnable_policy, sha256_prefixed,
 };
 use crate::versioned_pipeline_bundle::package_configuration_is_qualifiable;
 use crate::versioned_pipeline_compat::{
@@ -69,6 +71,32 @@ pub const QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL: &str =
 /// The maximum age `pipeline.py qualify --signing-key` gives a result it
 /// signs when `--evidence-max-age-seconds` is not given: one day.
 pub const QUALIFICATION_EVIDENCE_DEFAULT_MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
+
+/// The activation gate's refusals (`PipelineQualificationStore::activate_qualified_bundle_in`).
+/// The tenant has no qualification row for the bundle.
+pub const PACKAGE_QUALIFICATION_MISSING_LABEL: &str = "bundle_qualification_missing";
+/// The deployed code revision is not the revision of the promotion, or the
+/// bundle has no qualification on it.
+pub const PACKAGE_RUNTIME_REVISION_MISMATCH_LABEL: &str = "bundle_runtime_revision_mismatch";
+/// The deployed code revision is not a `sha256:` digest (a binary built
+/// without `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` has none).
+pub const PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL: &str = "bundle_runtime_revision_unknown";
+/// The promotion decision is not ready, or carries a blocker.
+pub const ACTIVATION_PROMOTION_NOT_READY_LABEL: &str = "bundle_activation_promotion_not_ready";
+/// The promotion decision was evaluated more than
+/// [`ACTIVATION_PROMOTION_MAX_AGE_SECONDS`] ago, or in the future.
+pub const ACTIVATION_PROMOTION_STALE_LABEL: &str = "bundle_activation_promotion_stale";
+/// The promotion decision does not name exactly the activated package.
+pub const ACTIVATION_PACKAGE_MISMATCH_LABEL: &str = "bundle_activation_package_mismatch";
+/// How long a promotion decision stays usable for an activation: 15 minutes.
+pub const ACTIVATION_PROMOTION_MAX_AGE_SECONDS: i64 = 15 * 60;
+/// The code revision this binary was built from (P5-D17): the value of
+/// `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` at build time, which a release
+/// build sets to `pipeline.py revision`'s output on the same checkout.
+/// `None` for a binary built without it; such a binary refuses every
+/// qualification and activation (`bundle_runtime_revision_unknown`).
+pub const DEPLOYED_CODE_REVISION_HASH: Option<&str> =
+    option_env!("TRACE_COMMONS_BUILD_CODE_REVISION_HASH");
 
 /// The schema of the envelope that signs a check result (P5-D13). The result
 /// inside stays exactly [`PIPELINE_CHECK_RESULT_SCHEMA`].
@@ -1244,10 +1272,13 @@ pub struct BundleQualificationRecord {
 }
 
 /// Records a production package's qualification once per `(tenant_id,
-/// bundle_id)`. `pipeline_bundle_qualifications` is append-only in the
-/// database (V107): a repeat call with the exact same inputs answers the
-/// existing row; a repeat call with different metadata for the same bundle
-/// is refused as a conflict, never silently overwritten.
+/// bundle_id, code_revision_hash)` (V112, P5-D10).
+/// `pipeline_bundle_qualifications` is append-only in the database (V107): a
+/// repeat call with the exact same inputs answers the existing row; a repeat
+/// call with different metadata for the same bundle and revision is refused
+/// as a conflict, never silently overwritten. The same bundle on another
+/// revision records another row. The activation gate reads them
+/// (`activate_qualified_bundle_in`).
 pub struct PipelineQualificationStore {
     backend: Arc<PgBackend>,
     packages: PgPipelineStore,
@@ -1277,7 +1308,7 @@ impl PipelineQualificationStore {
     /// (`runtime_dependency_identity_mismatch`), any blocked dependency or
     /// infrastructure control (`dependencies.blockers()`'s first label),
     /// evidence that does not back this qualification (below), or a second
-    /// call for the same bundle with different metadata
+    /// call for the same bundle and code revision with different metadata
     /// (`bundle_qualification_identity_conflict`). No row is left behind by a
     /// failed call.
     ///
@@ -1427,7 +1458,7 @@ impl PipelineQualificationStore {
                 configuration_digest, code_revision_hash,
                 runtime_dependency_digest, evidence_hash
              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-             ON CONFLICT (tenant_id, bundle_id) DO NOTHING",
+             ON CONFLICT (tenant_id, bundle_id, code_revision_hash) DO NOTHING",
             &[
                 &tenant_id,
                 &signed.package.bundle_id,
@@ -1450,8 +1481,12 @@ impl PipelineQualificationStore {
                         code_revision_hash, runtime_dependency_digest,
                         evidence_hash, qualified_at
                    FROM pipeline_bundle_qualifications
-                  WHERE tenant_id = $1 AND bundle_id = $2",
-                &[&tenant_id, &signed.package.bundle_id],
+                  WHERE tenant_id = $1 AND bundle_id = $2 AND code_revision_hash = $3",
+                &[
+                    &tenant_id,
+                    &signed.package.bundle_id,
+                    &metadata.code_revision_hash,
+                ],
             )
             .await?;
         let record = qualification_from_row(&row);
@@ -1524,6 +1559,182 @@ impl PipelineQualificationStore {
             Some((&verified.corpus_digest, &verified.input_digest)),
         )
         .await
+    }
+
+    /// The tenant's qualification of `bundle_id` on `code_revision_hash`
+    /// (one row of the key `(tenant_id, bundle_id, code_revision_hash)`);
+    /// `None` when there is none.
+    pub async fn qualification(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+        code_revision_hash: &str,
+    ) -> Result<Option<BundleQualificationRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = client.transaction().await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await?;
+        let row = tx
+            .query_opt(
+                "SELECT bundle_id, package_hash, signing_key_id, signature_hash,
+                        corpus_digest, input_digest, configuration_digest,
+                        code_revision_hash, runtime_dependency_digest,
+                        evidence_hash, qualified_at
+                   FROM pipeline_bundle_qualifications
+                  WHERE tenant_id = $1 AND bundle_id = $2 AND code_revision_hash = $3",
+                &[&tenant_id, &bundle_id, &code_revision_hash],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.as_ref().map(qualification_from_row))
+    }
+
+    /// Selects `bundle_id` as the tenant's active bundle inside `tx`, when
+    /// every term of the activation gate holds (P5-D9); returns the bundle
+    /// that was active before. Fails closed with the first failing term's
+    /// label and writes nothing. The caller holds the tenant's routing lock
+    /// and writes the routing row and the event in the same transaction.
+    ///
+    /// The terms, in order, each with its refusal:
+    ///
+    /// 1. `promotion` is ready and carries no blocker
+    ///    (`bundle_activation_promotion_not_ready`), and was evaluated at most
+    ///    [`ACTIVATION_PROMOTION_MAX_AGE_SECONDS`] before `now` and not after
+    ///    it (`bundle_activation_promotion_stale`).
+    /// 2. `runtime_code_revision_hash` is a `sha256:` digest
+    ///    (`bundle_runtime_revision_unknown`) and is the promotion's one code
+    ///    revision (`bundle_runtime_revision_mismatch`).
+    /// 3. The tenant has a qualification of the bundle
+    ///    (`bundle_qualification_missing`), on that revision
+    ///    (`bundle_runtime_revision_mismatch`).
+    /// 4. The stored package loads and validates (`bundle_package_missing`,
+    ///    which is also the label of a tampered package), and the promotion
+    ///    names exactly its three digests
+    ///    (`bundle_activation_package_mismatch`).
+    /// 5. `dependencies` was built for this bundle
+    ///    (`bundle_qualification_profile_mismatch`), has no blocker (its
+    ///    first blocker's label), and its runtime identity is the one the
+    ///    qualification recorded (`runtime_dependency_identity_mismatch`).
+    /// 6. The bundle's four policies are runnable (`bundle_policy_not_runnable`),
+    ///    by `lock_runnable_policy`, the definition every phase commit uses:
+    ///    each status row is held `FOR SHARE` to the end of `tx`, so a
+    ///    suspension waits for this activation or is seen by it.
+    ///
+    /// Then the active bundle row is locked `FOR UPDATE` and set to the
+    /// bundle (V112's grant; the only statement of the ingest runtime that
+    /// updates it). Lock order inside `tx`, after the caller's exclusive
+    /// routing lock: the four policy rows (`FOR SHARE`), then the active
+    /// bundle row.
+    ///
+    /// The promotion is the caller's: an activation route evaluates it over
+    /// verified check results just before the call. This function reads no
+    /// other tenant and takes nothing from the promotion but the terms above.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn activate_qualified_bundle_in(
+        &self,
+        tx: &Transaction<'_>,
+        tenant_id: &str,
+        bundle_id: &str,
+        promotion: &PromotionDecision,
+        runtime_code_revision_hash: &str,
+        dependencies: &ProductionDependencyProfile,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>, DatabaseError> {
+        let refuse = |label: &str| Err(DatabaseError::Constraint(label.to_string()));
+        if !promotion.ready || !promotion.safe_blockers.is_empty() {
+            return refuse(ACTIVATION_PROMOTION_NOT_READY_LABEL);
+        }
+        if promotion.evaluated_at > now
+            || now - promotion.evaluated_at
+                > Duration::seconds(ACTIVATION_PROMOTION_MAX_AGE_SECONDS)
+        {
+            return refuse(ACTIVATION_PROMOTION_STALE_LABEL);
+        }
+        if !is_sha256(runtime_code_revision_hash) {
+            return refuse(PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL);
+        }
+        if promotion.code_revision_hash.as_deref() != Some(runtime_code_revision_hash) {
+            return refuse(PACKAGE_RUNTIME_REVISION_MISMATCH_LABEL);
+        }
+        let qualified = tx
+            .query(
+                "SELECT code_revision_hash, runtime_dependency_digest
+                   FROM pipeline_bundle_qualifications
+                  WHERE tenant_id = $1 AND bundle_id = $2",
+                &[&tenant_id, &bundle_id],
+            )
+            .await?;
+        if qualified.is_empty() {
+            return refuse(PACKAGE_QUALIFICATION_MISSING_LABEL);
+        }
+        let Some(row) = qualified
+            .iter()
+            .find(|row| row.get::<_, String>("code_revision_hash") == runtime_code_revision_hash)
+        else {
+            return refuse(PACKAGE_RUNTIME_REVISION_MISMATCH_LABEL);
+        };
+        let package = load_bundle_from_transaction(tx, tenant_id, bundle_id)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| DatabaseError::Constraint(PIPELINE_BUNDLE_MISSING_LABEL.to_string()))?;
+        let digests = package_digests(&package).map_err(DatabaseError::Constraint)?;
+        if !promotion
+            .package
+            .as_ref()
+            .is_some_and(|named| named.is(&digests))
+        {
+            return refuse(ACTIVATION_PACKAGE_MISMATCH_LABEL);
+        }
+        if dependencies.bundle.bundle_id != bundle_id
+            || dependencies.bundle.dependency_digest != digests.dependency_digest
+        {
+            return refuse("bundle_qualification_profile_mismatch");
+        }
+        if let Some(blocker) = dependencies.blockers().into_iter().next() {
+            return Err(DatabaseError::Constraint(blocker));
+        }
+        if row.get::<_, String>("runtime_dependency_digest")
+            != dependencies
+                .runtime_identity_digest()
+                .map_err(DatabaseError::Constraint)?
+        {
+            return refuse("runtime_dependency_identity_mismatch");
+        }
+        // Four runnable policies, each row held FOR SHARE to the end of the
+        // transaction, so a suspension waits for this activation or is seen
+        // by it (Task 5's guard).
+        for phase in [Phase::Admission, Phase::Review, Phase::Score, Phase::Settle] {
+            if !lock_runnable_policy(tx, tenant_id, bundle_id, phase).await? {
+                return refuse(PIPELINE_POLICY_NOT_RUNNABLE_LABEL);
+            }
+        }
+        let previous: Option<String> = tx
+            .query_opt(
+                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1 FOR UPDATE",
+                &[&tenant_id],
+            )
+            .await?
+            .map(|row| row.get(0));
+        let selected = tx
+            .execute(
+                "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
+                 SELECT $1, bundle_id FROM pipeline_bundle_packages
+                  WHERE tenant_id = $1 AND bundle_id = $2
+                 ON CONFLICT (tenant_id) DO UPDATE
+                    SET bundle_id = EXCLUDED.bundle_id, selected_at = NOW()",
+                &[&tenant_id, &bundle_id],
+            )
+            .await?;
+        // The package was loaded above in this transaction, and a package is
+        // never deleted on its own; a count other than one fails closed.
+        if selected != 1 {
+            return refuse(PIPELINE_BUNDLE_MISSING_LABEL);
+        }
+        Ok(previous)
     }
 }
 

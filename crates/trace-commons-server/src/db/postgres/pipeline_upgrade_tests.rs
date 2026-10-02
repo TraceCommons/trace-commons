@@ -108,7 +108,7 @@ const PIPELINE_TABLES: [&str; 19] = [
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95, V105 to V108, V110, and V111 have run, as
+/// the pipeline tables once V92 to V95, V105 to V108, and V110 to V112 have run, as
 /// `(table, privilege, columns)`; no columns means the whole table. It holds
 /// what the pipeline code reads and writes and nothing broader. The only
 /// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
@@ -286,6 +286,13 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ),
     ("pipeline_policy_interventions", "SELECT", &[]),
     ("pipeline_policy_interventions", "INSERT", &[]),
+    // V112: the qualified activation gate switches the tenant's active
+    // bundle (the two columns it sets; `SELECT ... FOR UPDATE` needs one).
+    (
+        "pipeline_active_bundles",
+        "UPDATE",
+        &["bundle_id", "selected_at"],
+    ),
 ];
 
 /// What `main`'s gate driver role, `trace_gate_driver`, holds on the pipeline
@@ -359,7 +366,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 110, 111] {
+    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 110, 111, 112] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
@@ -875,6 +882,88 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
             "deleting the tenant removes its {table} rows"
         );
     }
+
+    // V112: a bundle is qualified once for each code revision. The key is
+    // (tenant_id, bundle_id, code_revision_hash): two rows for one bundle on
+    // two revisions are accepted, and a second row for one revision is a
+    // unique violation.
+    let primary_key: String = admin
+        .query_one(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint
+              WHERE conrelid = 'pipeline_bundle_qualifications'::regclass AND contype = 'p'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        primary_key,
+        "PRIMARY KEY (tenant_id, bundle_id, code_revision_hash)"
+    );
+    let qualified_tenant = "upgrade-v112";
+    let qualified_bundle = format!("sha256:{}", "f".repeat(64));
+    admin
+        .batch_execute(&format!(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ('{qualified_tenant}')
+                 ON CONFLICT DO NOTHING;
+             INSERT INTO pipeline_bundle_packages
+                 (tenant_id, bundle_id, manifest_format_version, package)
+                 VALUES ('{qualified_tenant}', '{qualified_bundle}', 1, '{{}}'::jsonb);"
+        ))
+        .await
+        .expect("insert a package to qualify");
+    set_tenant(&admin, qualified_tenant).await;
+    let qualify_on = |revision_digit: &'static str| {
+        let admin = &admin;
+        let qualified_bundle = &qualified_bundle;
+        async move {
+            let digest = format!("sha256:{}", "1".repeat(64));
+            let revision = format!("sha256:{}", revision_digit.repeat(64));
+            admin
+                .batch_execute(&format!(
+                    "INSERT INTO pipeline_bundle_qualifications
+                         (tenant_id, bundle_id, package_hash, signing_key_id,
+                          signature_hash, corpus_digest, input_digest,
+                          configuration_digest, code_revision_hash,
+                          runtime_dependency_digest, evidence_hash)
+                         VALUES ('{qualified_tenant}', '{qualified_bundle}', '{digest}',
+                                 'upgrade-key', '{digest}', '{digest}', '{digest}',
+                                 '{digest}', '{revision}', '{digest}', '{digest}');"
+                ))
+                .await
+        }
+    };
+    qualify_on("2")
+        .await
+        .expect("a qualification on the first revision");
+    qualify_on("3")
+        .await
+        .expect("a qualification of the same bundle on a second revision");
+    let duplicate = qualify_on("3")
+        .await
+        .expect_err("a second qualification on one revision must fail");
+    assert_eq!(
+        duplicate.code(),
+        Some(&SqlState::UNIQUE_VIOLATION),
+        "a second row for one (tenant_id, bundle_id, code_revision_hash) is a unique \
+         violation: {duplicate}"
+    );
+    let qualified_rows: i64 = admin
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_bundle_qualifications WHERE tenant_id = $1",
+            &[&qualified_tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(qualified_rows, 2, "one row for each revision");
+    admin
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&qualified_tenant],
+        )
+        .await
+        .expect("deleting the tenant cascades through its qualifications");
 
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_storage_upgrade_rls",

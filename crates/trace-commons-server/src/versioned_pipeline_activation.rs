@@ -25,6 +25,9 @@ use crate::versioned_pipeline::{
     PIPELINE_ROUTING_LOCK_SEED, pipeline_routing_lock, sha256_prefixed, validate_actor,
 };
 use crate::versioned_pipeline_product::PipelineOperationalSummary;
+use crate::versioned_pipeline_qualification::{
+    PipelineQualificationStore, ProductionDependencyProfile, PromotionDecision,
+};
 
 pub const PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL: &str = "pipeline_receipt_intake_contained";
 pub const PIPELINE_TENANT_NOT_SERVED_LABEL: &str = "pipeline_tenant_not_served";
@@ -722,10 +725,39 @@ pub fn evaluate_activation_readiness(
     }
 }
 
+/// An operator's request to select a qualified bundle for one tenant's new
+/// runs (`PipelineActivationStore::activate_tenant`, `rollback_bundle`).
+/// `tenant_id` is the credential's tenant, never a second tenant; the actor
+/// is the credential's `principal_ref`. `promotion` is the decision over the
+/// bundle's verified check results, evaluated just before the call;
+/// `runtime_code_revision_hash` is the revision the deployed code was built
+/// from (`DEPLOYED_CODE_REVISION_HASH`); `dependencies` is the bundle's
+/// profile on the running service.
+#[derive(Debug, Clone, Copy)]
+pub struct ActivationRequest<'a> {
+    pub tenant_id: &'a str,
+    pub bundle_id: &'a str,
+    pub actor_principal_ref: &'a str,
+    pub reason_code: &'a str,
+    pub promotion: &'a PromotionDecision,
+    pub runtime_code_revision_hash: &'a str,
+    pub dependencies: &'a ProductionDependencyProfile,
+}
+
 /// Takes the tenant's routing lock exclusively for the rest of `tx`. A
 /// receipt's staging and commit transactions take it shared
 /// (`PipelineService`), so a routing change waits for the receipts in those
 /// transactions and no later one misses it.
+///
+/// Lock order. A receipt takes its receipt lock, its quota lock or its
+/// source session row, then this lock shared, then its attempt row and its
+/// Admission policy row `FOR SHARE`. A routing change takes this lock first,
+/// before any read, and after it only the tenant's routing row and events,
+/// the activated bundle's four policy rows `FOR SHARE`, and the active
+/// bundle row `FOR UPDATE` (`activate_qualified_bundle_in`): never a receipt
+/// lock, a quota lock, or a session row. A policy intervention takes only its
+/// policy row (`FOR UPDATE`). So no two of these wait for each other in
+/// opposite orders.
 async fn lock_routing(tx: &Transaction<'_>, tenant_id: &str) -> Result<(), DatabaseError> {
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, $2))",
@@ -736,6 +768,21 @@ async fn lock_routing(tx: &Transaction<'_>, tenant_id: &str) -> Result<(), Datab
     )
     .await?;
     Ok(())
+}
+
+/// The tenant's routing state in `tx`; `None` for a tenant with no row. A
+/// stored state that does not decode is an error, never `None`.
+async fn routing_state_in(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+) -> Result<Option<RoutingState>, DatabaseError> {
+    tx.query_opt(
+        "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
+        &[&tenant_id],
+    )
+    .await?
+    .map(|row| RoutingState::from_db(row.get::<_, String>("routing_state").as_str()))
+    .transpose()
 }
 
 /// Writes the routing row and its event in the caller's transaction. The
@@ -1015,6 +1062,148 @@ impl PipelineActivationStore {
             RoutingState::Legacy,
         )
         .await
+    }
+
+    /// Routes the tenant's new receipts to the pipeline with
+    /// `request.bundle_id` (P5-D9), from any routing state, when the tenant's
+    /// readiness passes (`evaluate_activation_readiness`,
+    /// `activation_readiness_failed`) and every term of the qualified
+    /// activation gate holds (`activate_qualified_bundle_in`, which names
+    /// each term and its label). Runs that already exist keep their bundle.
+    /// One transaction: the exclusive routing lock first, before any read;
+    /// the routing row read (an unreadable row refuses); the readiness; the
+    /// gate, which locks the bundle's four policy rows `FOR SHARE` and the
+    /// active bundle row `FOR UPDATE` and switches the active bundle; then
+    /// the routing row and an `activate` event whose evidence hash is the
+    /// readiness hash. A refusal writes nothing. An actor or a reason that
+    /// is not a label is `activation_actor_invalid`, before any read.
+    pub async fn activate_tenant(
+        &self,
+        request: ActivationRequest<'_>,
+        readiness: &ActivationReadiness,
+    ) -> Result<TenantRouting, DatabaseError> {
+        validate_actor(
+            request.actor_principal_ref,
+            request.reason_code,
+            ACTIVATION_ACTOR_INVALID_LABEL,
+        )?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, request.tenant_id).await?;
+        lock_routing(&tx, request.tenant_id).await?;
+        // Any state may be activated; the read only refuses a row it cannot
+        // decode, before the gate.
+        routing_state_in(&tx, request.tenant_id).await?;
+        let now = Utc::now();
+        evaluate_activation_readiness(readiness, now).map_err(DatabaseError::Constraint)?;
+        let previous_bundle_id = PipelineQualificationStore::new(self.backend.clone())
+            .activate_qualified_bundle_in(
+                &tx,
+                request.tenant_id,
+                request.bundle_id,
+                request.promotion,
+                request.runtime_code_revision_hash,
+                request.dependencies,
+                now,
+            )
+            .await?;
+        let routing = write_routing_in(
+            &tx,
+            request.tenant_id,
+            RoutingState::Pipeline,
+            ActivationAction::Activate,
+            previous_bundle_id.as_deref(),
+            Some(request.bundle_id),
+            request.actor_principal_ref,
+            request.reason_code,
+            &readiness.evidence_hash,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(routing)
+    }
+
+    /// Routes a `pipeline` or `contained` tenant's new receipts to the
+    /// pipeline with an earlier bundle (P5-D6): one that an `activate` or a
+    /// `rollback` event of this tenant selected before, and that is not the
+    /// active bundle now (else `earlier_qualified_bundle_required`). A
+    /// tenant routed to `legacy`, or with no routing row, is
+    /// `activation_state_invalid`. The bundle passes the same gate as an
+    /// activation (`activate_qualified_bundle_in`); the tenant's readiness is
+    /// not read, so a rollback is open while the readiness fails. Runs that
+    /// already exist keep their bundle. The same transaction and lock order
+    /// as `activate_tenant`; the event is `rollback`, and its evidence hash
+    /// is the promotion's. A refusal writes nothing.
+    pub async fn rollback_bundle(
+        &self,
+        request: ActivationRequest<'_>,
+    ) -> Result<TenantRouting, DatabaseError> {
+        validate_actor(
+            request.actor_principal_ref,
+            request.reason_code,
+            ACTIVATION_ACTOR_INVALID_LABEL,
+        )?;
+        let tenant_id = request.tenant_id;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        lock_routing(&tx, tenant_id).await?;
+        if !matches!(
+            routing_state_in(&tx, tenant_id).await?,
+            Some(RoutingState::Pipeline | RoutingState::Contained)
+        ) {
+            return Err(DatabaseError::Constraint(
+                ACTIVATION_STATE_INVALID_LABEL.to_string(),
+            ));
+        }
+        // The active bundle changes only under the routing lock, which this
+        // transaction holds; the gate locks the row before it switches it.
+        let active_bundle_id: Option<String> = tx
+            .query_opt(
+                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?
+            .map(|row| row.get("bundle_id"));
+        let selected_before: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pipeline_activation_events
+                      WHERE tenant_id = $1 AND resulting_bundle_id = $2
+                        AND action IN ('activate', 'rollback')
+                 )",
+                &[&tenant_id, &request.bundle_id],
+            )
+            .await?
+            .get(0);
+        if active_bundle_id.as_deref() == Some(request.bundle_id) || !selected_before {
+            return Err(DatabaseError::Constraint(
+                EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL.to_string(),
+            ));
+        }
+        let previous_bundle_id = PipelineQualificationStore::new(self.backend.clone())
+            .activate_qualified_bundle_in(
+                &tx,
+                tenant_id,
+                request.bundle_id,
+                request.promotion,
+                request.runtime_code_revision_hash,
+                request.dependencies,
+                Utc::now(),
+            )
+            .await?;
+        let routing = write_routing_in(
+            &tx,
+            tenant_id,
+            RoutingState::Pipeline,
+            ActivationAction::Rollback,
+            previous_bundle_id.as_deref(),
+            Some(request.bundle_id),
+            request.actor_principal_ref,
+            request.reason_code,
+            &request.promotion.evidence_hash,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(routing)
     }
 
     /// What the legacy path still owes `tenant_id`, as ten counts in `pending`

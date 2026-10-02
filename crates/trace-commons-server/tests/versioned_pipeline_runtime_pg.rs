@@ -52,8 +52,10 @@ use trace_commons_server::trace_corpus_storage::{
 };
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_activation::{
-    ACTIVATION_ACTOR_INVALID_LABEL, ACTIVATION_STATE_INVALID_LABEL, ActivationAction,
-    PipelineActivationStore, ReceiptOwner, ReceiptOwnership, RoutingState,
+    ACTIVATION_ACTOR_INVALID_LABEL, ACTIVATION_READINESS_FAILED_LABEL,
+    ACTIVATION_STATE_INVALID_LABEL, ActivationAction, ActivationReadiness, ActivationRequest,
+    EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL, PipelineActivationStore, ReceiptOwner,
+    ReceiptOwnership, RoutingState, TenantRouting, evaluate_activation_readiness,
 };
 use trace_commons_server::versioned_pipeline_authority::{
     PipelineAuthorityProvider, PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
@@ -78,14 +80,17 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineProductStore, pipeline_control_health,
 };
 use trace_commons_server::versioned_pipeline_qualification::{
-    BundlePackageTrustStore, BundleQualificationMetadata, BundleQualificationRecord,
-    CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL, CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
-    CheckResultTrustStore, DrillEvidence, PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL,
-    PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL, PACKAGE_SIGNATURE_INVALID_LABEL,
+    ACTIVATION_PACKAGE_MISMATCH_LABEL, ACTIVATION_PROMOTION_NOT_READY_LABEL,
+    ACTIVATION_PROMOTION_STALE_LABEL, BundlePackageTrustStore, BundleQualificationMetadata,
+    BundleQualificationRecord, CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL,
+    CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL, CheckResultTrustStore, DrillEvidence,
+    PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL, PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL,
+    PACKAGE_QUALIFICATION_MISSING_LABEL, PACKAGE_RUNTIME_REVISION_MISMATCH_LABEL,
+    PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL, PACKAGE_SIGNATURE_INVALID_LABEL,
     PACKAGE_SIGNER_UNTRUSTED_LABEL, PROMOTION_PACKAGE_CHECKS, PROMOTION_REQUIRED_CHECKS,
     PipelineCheckAttestation, PipelineCheckEmitter, PipelineCheckResult, PipelineCheckStatus,
     PipelineQualificationStore, ProductionAdapterKind, ProductionDependencyProfile,
-    ProductionInfrastructureProfile, PromotionDecision,
+    ProductionInfrastructureProfile, PromotionDecision, PromotionPackage,
     QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL, QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS,
     SignedBundlePackage, evaluate_promotion, package_digests, sign_bundle_package,
     sign_check_result, trusted_key_for_pkcs8,
@@ -13117,11 +13122,11 @@ async fn activation_does_not_rebind_an_existing_run() {
         .await
         .expect("register bundle B");
 
-    // Switching a tenant's active bundle is an operator action, not
-    // something the runtime login does: it holds no UPDATE on
-    // pipeline_active_bundles. Activate bundle B through an owner
-    // connection instead, reproducing PgPipelineStore::activate_bundle's own
-    // statement directly.
+    // The runtime login switches a tenant's bundle only through the
+    // qualified activation gate (`PipelineActivationStore::activate_tenant`,
+    // V112), which needs a qualification, a promotion, and a readiness this
+    // minimal bundle does not have. Activate bundle B through an owner
+    // connection instead, with the gate's own upsert of the active bundle.
     let mut owner = owner_client().await;
     let tx = owner
         .transaction()
@@ -17478,11 +17483,12 @@ async fn count_near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> i6
 }
 
 /// Activates `bundle_id`, already registered for `tenant_id`, as the
-/// tenant's bundle. Switching a tenant's active bundle is an operator
-/// action: the runtime login holds no UPDATE on `pipeline_active_bundles`,
-/// so this runs `PgPipelineStore::activate_bundle`'s own statement through
-/// an owner connection, as `activation_does_not_rebind_an_existing_run`
-/// does.
+/// tenant's bundle. The runtime login switches a tenant's bundle only
+/// through the qualified activation gate
+/// (`PipelineActivationStore::activate_tenant`, V112), and the bundles of the
+/// tests that call this are not qualified, so this runs the gate's upsert of
+/// the active bundle through an owner connection, as
+/// `activation_does_not_rebind_an_existing_run` does.
 async fn activate_bundle_as_operator(tenant_id: &str, bundle_id: &str) {
     let mut owner = owner_client().await;
     let tx = owner
@@ -25961,8 +25967,9 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
     )
     .await;
     new.register_default_bundle(&tenant).await.unwrap();
-    // The bundle switch, as an operator makes it (the runtime login has no
-    // UPDATE on the selection).
+    // The bundle switch, as an operator makes it (the runtime login switches
+    // a bundle only through the qualified activation gate, and these bundles
+    // are not qualified).
     let mut owner = owner_client().await;
     let tx = owner_tenant_tx(&mut owner, &tenant).await;
     tx.execute(
@@ -36301,4 +36308,1383 @@ async fn held_payouts_do_not_block_other_payouts_or_confirmations() {
         );
     }
     assert_eq!(near_outbox_rows(&backend, &tenant).await.len(), 4);
+}
+
+// The qualified activation gate and rollback (delivery PR 5, Task 9). Each
+// test uses fresh tenants, so the tests do not share rows.
+
+/// The code revision the gate tests qualify their bundles on, and the one
+/// they give as the deployed revision.
+fn gate_revision() -> String {
+    sha256_prefixed(b"pr5-activation-gate-revision")
+}
+
+/// Another code revision, a different one for each `tag`.
+fn other_revision(tag: &str) -> String {
+    sha256_prefixed(format!("pr5-activation-gate-revision-{tag}").as_bytes())
+}
+
+const GATE_SIGNING_KEY_ID: &str = "activation-gate-release-key";
+
+/// The fully qualified production service of `qualified_production_service`
+/// and two production-compatible packages that it runs with the dependencies
+/// it holds: A, its default package, and B, the same configuration with
+/// another index id. The index id is a configuration value outside `main`'s
+/// gate configuration, so B has another bundle id and configuration digest,
+/// A's dependency digest (the same scorer and embedder), and still matches
+/// the gate configuration that A holds. `qualify` records a qualification of
+/// either package for a tenant on one revision, with a full set of passing
+/// check results that names it (`evidence_from_check_results`: the four
+/// package checks name it, every other check names none).
+struct QualifiedBundles {
+    backend: Arc<PgBackend>,
+    service: Arc<PipelineService>,
+    a: BundlePackage,
+    b: BundlePackage,
+    pkcs8: Vec<u8>,
+    trust: BundlePackageTrustStore,
+}
+
+async fn two_qualified_bundles(
+    backend: Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+) -> QualifiedBundles {
+    let (service, a) = qualified_production_service(backend.clone(), dir).await;
+    let mut config_b = production_compatible_config();
+    config_b.index_id = "qualified_production_index_b.v1".to_string();
+    let b = MinimalPolicyBundle::compatibility_package(
+        &config_b,
+        &QualifiedProductionScorer(ReferencePerplexityScorer::new()),
+        &QualifiedProductionEmbedder(ReferenceEmbedder::new()),
+    )
+    .expect("bundle B builds");
+    assert_ne!(a.bundle_id, b.bundle_id, "B is another bundle");
+    assert_eq!(
+        package_digests(&a).unwrap().dependency_digest,
+        package_digests(&b).unwrap().dependency_digest,
+        "B names the dependencies that A names"
+    );
+    for package in [&a, &b] {
+        assert!(
+            service
+                .bundle_qualification(package)
+                .is_ok_and(|qualification| qualification.is_production_qualified()),
+            "the service runs both packages with production-qualified dependencies"
+        );
+    }
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    let trust = BundlePackageTrustStore::new([
+        trusted_key_for_pkcs8(GATE_SIGNING_KEY_ID, &pkcs8).expect("the trusted key builds")
+    ])
+    .unwrap();
+    QualifiedBundles {
+        backend,
+        service,
+        a,
+        b,
+        pkcs8,
+        trust,
+    }
+}
+
+impl QualifiedBundles {
+    fn activation_store(&self) -> PipelineActivationStore {
+        PipelineActivationStore::new(self.backend.clone())
+    }
+
+    /// The dependency profile of `package` on this service, with production
+    /// infrastructure: no blockers.
+    fn profile(&self, package: &BundlePackage) -> ProductionDependencyProfile {
+        let profile = ProductionDependencyProfile::for_bundle(
+            &self.service,
+            package,
+            all_production_infrastructure(),
+        )
+        .expect("the service resolves the package");
+        assert!(profile.blockers().is_empty(), "{:?}", profile.blockers());
+        profile
+    }
+
+    /// A ready promotion decision for `package` on `revision`, evaluated now.
+    fn promotion(&self, package: &BundlePackage, revision: &str) -> PromotionDecision {
+        let promotion = promotion_now(&evidence_from_check_results(package, revision, None));
+        assert!(promotion.ready, "{:?}", promotion.safe_blockers);
+        promotion
+    }
+
+    /// What `qualify_bundle` takes to qualify `package` on `revision`.
+    fn qualification_inputs(
+        &self,
+        package: &BundlePackage,
+        revision: &str,
+    ) -> (
+        SignedBundlePackage,
+        BundleQualificationMetadata,
+        ProductionDependencyProfile,
+        Vec<DrillEvidence>,
+    ) {
+        let signed = sign_bundle_package(package.clone(), GATE_SIGNING_KEY_ID, &self.pkcs8)
+            .expect("the package signs");
+        let evidence = evidence_from_check_results(package, revision, None);
+        let profile = self.profile(package);
+        let metadata = BundleQualificationMetadata {
+            corpus_digest: sha256_prefixed(b"pr5-activation-gate-corpus"),
+            input_digest: sha256_prefixed(b"pr5-activation-gate-input"),
+            configuration_digest: package_digests(package).unwrap().configuration_digest,
+            code_revision_hash: revision.to_string(),
+            runtime_dependency_digest: profile.runtime_identity_digest().unwrap(),
+            evidence_hash: promotion_now(&evidence).evidence_hash,
+        };
+        (signed, metadata, profile, evidence)
+    }
+
+    /// Qualifies `package` for `tenant` on `revision`; this also registers
+    /// the package for the tenant.
+    async fn qualify(
+        &self,
+        tenant: &str,
+        package: &BundlePackage,
+        revision: &str,
+    ) -> BundleQualificationRecord {
+        let (signed, metadata, profile, evidence) = self.qualification_inputs(package, revision);
+        PipelineQualificationStore::new(self.backend.clone())
+            .qualify_bundle(
+                tenant,
+                &signed,
+                &self.trust,
+                &metadata,
+                &profile,
+                &evidence,
+                None,
+            )
+            .await
+            .expect("the package qualifies")
+    }
+
+    /// The tenant's readiness now, from its operational summary.
+    async fn readiness(&self, tenant: &str) -> ActivationReadiness {
+        let summary = PipelineProductStore::new(self.backend.clone())
+            .operational_summary(tenant)
+            .await
+            .expect("the summary reads");
+        ActivationReadiness::from_operational_summary(&summary)
+    }
+
+    /// Activates `package` for `tenant` with every term of the gate holding:
+    /// a ready promotion for it on `gate_revision`, that revision as the
+    /// deployed one, its production profile, and the tenant's readiness now.
+    async fn activate(&self, tenant: &str, package: &BundlePackage) -> TenantRouting {
+        let readiness = self.readiness(tenant).await;
+        evaluate_activation_readiness(&readiness, chrono::Utc::now()).expect("the tenant is ready");
+        let revision = gate_revision();
+        let promotion = self.promotion(package, &revision);
+        let profile = self.profile(package);
+        let actor = routing_actor();
+        self.activation_store()
+            .activate_tenant(
+                gate_request(
+                    tenant,
+                    package,
+                    &actor,
+                    "activate_qualified_bundle",
+                    &promotion,
+                    &revision,
+                    &profile,
+                ),
+                &readiness,
+            )
+            .await
+            .expect("every term of the gate holds")
+    }
+
+    /// Rolls `tenant` back to `package`, with a ready promotion for it on
+    /// `gate_revision`, that revision as the deployed one, and its
+    /// production profile.
+    async fn roll_back(
+        &self,
+        tenant: &str,
+        package: &BundlePackage,
+    ) -> Result<TenantRouting, DatabaseError> {
+        let revision = gate_revision();
+        let promotion = self.promotion(package, &revision);
+        let profile = self.profile(package);
+        let actor = routing_actor();
+        self.activation_store()
+            .rollback_bundle(gate_request(
+                tenant,
+                package,
+                &actor,
+                "roll_back_to_earlier_bundle",
+                &promotion,
+                &revision,
+                &profile,
+            ))
+            .await
+    }
+}
+
+fn gate_request<'a>(
+    tenant: &'a str,
+    package: &'a BundlePackage,
+    actor: &'a str,
+    reason: &'a str,
+    promotion: &'a PromotionDecision,
+    revision: &'a str,
+    profile: &'a ProductionDependencyProfile,
+) -> ActivationRequest<'a> {
+    ActivationRequest {
+        tenant_id: tenant,
+        bundle_id: &package.bundle_id,
+        actor_principal_ref: actor,
+        reason_code: reason,
+        promotion,
+        runtime_code_revision_hash: revision,
+        dependencies: profile,
+    }
+}
+
+fn assert_gate_refused(
+    result: Result<TenantRouting, DatabaseError>,
+    label: &str,
+    case: impl std::fmt::Debug,
+) {
+    match result {
+        Err(DatabaseError::Constraint(ref refused)) if refused == label => {}
+        other => panic!("{case:?}: expected the refusal {label}, got {other:?}"),
+    }
+}
+
+/// One term of the activation gate that does not hold, with every other
+/// term holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateBreak {
+    /// A decision over evidence that misses one check: not ready, with a
+    /// blocker.
+    PromotionNotReady,
+    /// A ready decision with `ready` set to false and no blocker.
+    PromotionReadyFlagFalse,
+    /// A ready decision with one blocker added and `ready` still true.
+    PromotionWithBlocker,
+    /// A decision evaluated 16 minutes ago.
+    PromotionStale,
+    /// A decision evaluated one minute in the future.
+    PromotionInTheFuture,
+    /// No qualification row for the bundle.
+    QualificationMissing,
+    /// A decision and a deployed revision that agree, on a revision that the
+    /// bundle is not qualified on.
+    RuntimeRevisionNotQualified,
+    /// A deployed revision that is not a `sha256:` digest.
+    RuntimeRevisionNotADigest,
+    /// A decision that names another revision than the deployed one.
+    DecisionOtherRevision,
+    /// A decision that names the other package's digests.
+    DecisionOtherPackage,
+    /// A decision that names no package.
+    DecisionNoPackage,
+    /// A profile built for the other bundle.
+    ProfileForOtherBundle,
+    /// A profile with the local test infrastructure.
+    LocalTestInfrastructure,
+    /// A profile whose runtime identity is not the qualified one.
+    OtherRuntimeIdentity,
+    /// The bundle's Score policy suspended.
+    ScorePolicySuspended,
+    /// The stored package tampered.
+    StoredPackageTampered,
+    /// A readiness that fails (one failed index invalidation).
+    ReadinessFailed,
+}
+
+impl GateBreak {
+    const ALL: [Self; 17] = [
+        Self::PromotionNotReady,
+        Self::PromotionReadyFlagFalse,
+        Self::PromotionWithBlocker,
+        Self::PromotionStale,
+        Self::PromotionInTheFuture,
+        Self::QualificationMissing,
+        Self::RuntimeRevisionNotQualified,
+        Self::RuntimeRevisionNotADigest,
+        Self::DecisionOtherRevision,
+        Self::DecisionOtherPackage,
+        Self::DecisionNoPackage,
+        Self::ProfileForOtherBundle,
+        Self::LocalTestInfrastructure,
+        Self::OtherRuntimeIdentity,
+        Self::ScorePolicySuspended,
+        Self::StoredPackageTampered,
+        Self::ReadinessFailed,
+    ];
+
+    /// The label of the refusal.
+    fn label(self) -> &'static str {
+        match self {
+            Self::PromotionNotReady
+            | Self::PromotionReadyFlagFalse
+            | Self::PromotionWithBlocker => ACTIVATION_PROMOTION_NOT_READY_LABEL,
+            Self::PromotionStale | Self::PromotionInTheFuture => ACTIVATION_PROMOTION_STALE_LABEL,
+            Self::QualificationMissing => PACKAGE_QUALIFICATION_MISSING_LABEL,
+            Self::RuntimeRevisionNotQualified | Self::DecisionOtherRevision => {
+                PACKAGE_RUNTIME_REVISION_MISMATCH_LABEL
+            }
+            Self::RuntimeRevisionNotADigest => PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
+            Self::DecisionOtherPackage | Self::DecisionNoPackage => {
+                ACTIVATION_PACKAGE_MISMATCH_LABEL
+            }
+            Self::ProfileForOtherBundle => "bundle_qualification_profile_mismatch",
+            // `ProductionInfrastructureProfile::local_test`'s first blocker.
+            Self::LocalTestInfrastructure => "artifact_store_not_production",
+            Self::OtherRuntimeIdentity => "runtime_dependency_identity_mismatch",
+            Self::ScorePolicySuspended => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+            Self::StoredPackageTampered => PIPELINE_BUNDLE_MISSING_LABEL,
+            Self::ReadinessFailed => ACTIVATION_READINESS_FAILED_LABEL,
+        }
+    }
+}
+
+/// Activates `target` for `tenant` with `gate_break` the one term that does
+/// not hold. `other` is the second package, whose digests and profile some
+/// cases give. The caller qualified `target` for the tenant on
+/// `gate_revision`, except for `QualificationMissing`.
+async fn activate_with_break(
+    fixture: &QualifiedBundles,
+    tenant: &str,
+    target: &BundlePackage,
+    other: &BundlePackage,
+    gate_break: GateBreak,
+) -> Result<TenantRouting, DatabaseError> {
+    let mut revision = gate_revision();
+    let mut promotion = fixture.promotion(target, &revision);
+    let mut profile = fixture.profile(target);
+    let mut summary = PipelineProductStore::new(fixture.backend.clone())
+        .operational_summary(tenant)
+        .await
+        .expect("the summary reads");
+    match gate_break {
+        GateBreak::PromotionNotReady => {
+            promotion = promotion_now(&evidence_from_check_results(
+                target,
+                &revision,
+                Some(PROMOTION_REQUIRED_CHECKS.len() - 1),
+            ));
+            assert!(!promotion.ready && !promotion.safe_blockers.is_empty());
+        }
+        GateBreak::PromotionReadyFlagFalse => promotion.ready = false,
+        GateBreak::PromotionWithBlocker => promotion
+            .safe_blockers
+            .push("qualification_evidence_stale:pipeline_restore_drill".to_string()),
+        GateBreak::PromotionStale => {
+            promotion.evaluated_at = chrono::Utc::now() - chrono::Duration::minutes(16)
+        }
+        GateBreak::PromotionInTheFuture => {
+            promotion.evaluated_at = chrono::Utc::now() + chrono::Duration::minutes(1)
+        }
+        GateBreak::QualificationMissing => {}
+        GateBreak::RuntimeRevisionNotQualified => {
+            revision = other_revision("not-qualified");
+            promotion = fixture.promotion(target, &revision);
+        }
+        GateBreak::RuntimeRevisionNotADigest => {
+            revision = "a-code-revision-that-is-no-digest".to_string()
+        }
+        GateBreak::DecisionOtherRevision => {
+            promotion.code_revision_hash = Some(other_revision("decision"))
+        }
+        GateBreak::DecisionOtherPackage => {
+            let digests = package_digests(other).unwrap();
+            promotion.package = Some(PromotionPackage {
+                package_hash: Some(digests.package_hash),
+                configuration_digest: Some(digests.configuration_digest),
+                dependency_digest: Some(digests.dependency_digest),
+            });
+        }
+        GateBreak::DecisionNoPackage => promotion.package = None,
+        GateBreak::ProfileForOtherBundle => profile = fixture.profile(other),
+        GateBreak::LocalTestInfrastructure => {
+            profile = ProductionDependencyProfile::for_bundle(
+                &fixture.service,
+                target,
+                ProductionInfrastructureProfile::local_test(),
+            )
+            .expect("the service resolves the package");
+        }
+        GateBreak::OtherRuntimeIdentity => {
+            let mut qualification = fixture.service.bundle_qualification(target).unwrap();
+            qualification.index_reader.identity =
+                "qualified_production_index_reader_v2_test_only".to_string();
+            profile =
+                ProductionDependencyProfile::new(qualification, all_production_infrastructure());
+            assert!(profile.blockers().is_empty(), "only the identity differs");
+        }
+        GateBreak::ScorePolicySuspended => {
+            fixture
+                .service
+                .intervene_policy(
+                    tenant,
+                    &target.bundle_id,
+                    Phase::Score,
+                    "suspend",
+                    &policy_actor(),
+                    "activation_gate_test",
+                )
+                .await
+                .expect("the Score policy is suspended");
+        }
+        GateBreak::StoredPackageTampered => {
+            tamper_stored_bundle_package(tenant, &target.bundle_id).await
+        }
+        GateBreak::ReadinessFailed => summary.failed_invalidation_count = 1,
+    }
+    let readiness = ActivationReadiness::from_operational_summary(&summary);
+    let actor = routing_actor();
+    fixture
+        .activation_store()
+        .activate_tenant(
+            gate_request(
+                tenant,
+                target,
+                &actor,
+                "activate_qualified_bundle",
+                &promotion,
+                &revision,
+                &profile,
+            ),
+            &readiness,
+        )
+        .await
+}
+
+/// The routing row (its six columns), the active bundle row, and the number
+/// of event rows, as they are stored for the tenant.
+type RoutingRowColumns = (
+    String,
+    uuid::Uuid,
+    String,
+    String,
+    String,
+    chrono::DateTime<chrono::Utc>,
+);
+
+/// What an activation writes for a tenant: the routing row (all six
+/// columns), the active bundle row (`bundle_id`, `selected_at`), and the
+/// number of event rows, read through an owner connection.
+#[derive(Debug, PartialEq)]
+struct ActivationRows {
+    routing: Option<RoutingRowColumns>,
+    active_bundle: Option<(String, chrono::DateTime<chrono::Utc>)>,
+    events: i64,
+}
+
+async fn activation_rows(tenant_id: &str) -> ActivationRows {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let routing = tx
+        .query_opt(
+            "SELECT routing_state, activation_record_id, actor_principal_ref,
+                    reason_code, evidence_hash, recorded_at
+               FROM pipeline_tenant_routing WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("read the routing row")
+        .map(|row| {
+            (
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+                row.get(4),
+                row.get(5),
+            )
+        });
+    let active_bundle = tx
+        .query_opt(
+            "SELECT bundle_id, selected_at FROM pipeline_active_bundles WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("read the active bundle")
+        .map(|row| (row.get(0), row.get(1)));
+    let events: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_activation_events WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count the events")
+        .get(0);
+    tx.commit().await.expect("commit activation_rows");
+    ActivationRows {
+        routing,
+        active_bundle,
+        events,
+    }
+}
+
+/// The reason code the test constraint of `RefusedEventReason` refuses.
+const REFUSED_EVENT_REASON: &str = "force_event_failure";
+
+/// A check constraint on `pipeline_activation_events` that refuses one
+/// reason code, `REFUSED_EVENT_REASON`, so an activation that passed the
+/// gate fails at its event insert. Added through the owner connection.
+/// `Drop` removes it, also when an assertion fails, on a thread of its own
+/// (a runtime cannot block inside another). It refuses only that reason
+/// code, so the tests that run at the same time are not affected.
+struct RefusedEventReason;
+
+impl RefusedEventReason {
+    async fn install() -> Self {
+        owner_client()
+            .await
+            .batch_execute(
+                "ALTER TABLE pipeline_activation_events
+                     ADD CONSTRAINT pr5_test_refuse_reason
+                     CHECK (reason_code <> 'force_event_failure') NOT VALID",
+            )
+            .await
+            .expect("add the test constraint");
+        Self
+    }
+}
+
+impl Drop for RefusedEventReason {
+    fn drop(&mut self) {
+        let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+            .expect("TRACE_COMMONS_PG_TEST_DATABASE_URL is set while the constraint exists");
+        let dropped = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the drop")
+                .block_on(async move {
+                    let (client, connection) = tokio_postgres::connect(&url, NoTls).await?;
+                    tokio::spawn(async move {
+                        let _ = connection.await;
+                    });
+                    client
+                        .batch_execute(
+                            "ALTER TABLE pipeline_activation_events
+                                 DROP CONSTRAINT IF EXISTS pr5_test_refuse_reason",
+                        )
+                        .await
+                })
+        })
+        .join();
+        if !std::thread::panicking() {
+            dropped
+                .expect("the drop thread does not panic")
+                .expect("drop the test constraint");
+        }
+    }
+}
+
+/// A receipt of a fresh envelope for `tenant`, without a registration of the
+/// service's default bundle: the run binds to the bundle that the gate
+/// selected.
+async fn gate_receipt(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    match service
+        .submit(receipt(tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect("the receipt succeeds")
+    {
+        PipelineReceiptResult::Created(run) => run,
+        other => panic!("the receipt creates a run: {other:?}"),
+    }
+}
+
+/// Runs the run's remaining phases to completion.
+async fn complete_gate_run(service: &PipelineService, tenant: &str, run_id: uuid::Uuid) {
+    for _ in 0..4 {
+        let run = service
+            .process_run(tenant, run_id)
+            .await
+            .expect("the phase runs")
+            .expect("the run is due");
+        if run.state == PipelineRunState::Complete {
+            return;
+        }
+        assert_eq!(run.state, PipelineRunState::Pending, "{run:?}");
+    }
+    panic!("the run did not complete");
+}
+
+/// `(phase, bundle_id, decision, evidence, evaluation)` of each of the
+/// run's outcomes, in phase order.
+type GateOutcomeRow = (
+    Phase,
+    String,
+    serde_json::Value,
+    serde_json::Value,
+    serde_json::Value,
+);
+
+async fn gate_outcome_rows(
+    service: &PipelineService,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> Vec<GateOutcomeRow> {
+    service
+        .store()
+        .list_outcomes(tenant, run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|outcome| {
+            (
+                outcome.phase,
+                outcome.bundle_id,
+                outcome.decision,
+                outcome.evidence,
+                outcome.evaluation,
+            )
+        })
+        .collect()
+}
+
+/// Review Focus 3 (P5-D9): an activation passes only when every term of the
+/// gate holds, and each term on its own refuses it with its label: the
+/// promotion (ready and without a blocker, at most 15 minutes old and not in
+/// the future, on the deployed revision, for the activated package), a
+/// qualification of the bundle on the deployed revision, the stored package,
+/// a profile built for the bundle with production infrastructure and the
+/// qualified runtime identity, four runnable policies, and the tenant's
+/// readiness. A refused activation leaves the fresh tenant without a routing
+/// row, an event, or an active bundle.
+#[tokio::test]
+async fn activation_requires_every_term_of_the_gate() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let runs = PgPipelineStore::new(backend.clone());
+    let revision = gate_revision();
+    let actor = routing_actor();
+
+    let tenant = routing_tenant("gate");
+    fixture.qualify(&tenant, &fixture.a, &revision).await;
+    let readiness = fixture.readiness(&tenant).await;
+    let promotion = fixture.promotion(&fixture.a, &revision);
+    let profile = fixture.profile(&fixture.a);
+
+    // An actor or a reason that is not a label is refused first.
+    assert_gate_refused(
+        store
+            .activate_tenant(
+                gate_request(
+                    &tenant,
+                    &fixture.a,
+                    &actor,
+                    "Not A Label",
+                    &promotion,
+                    &revision,
+                    &profile,
+                ),
+                &readiness,
+            )
+            .await,
+        ACTIVATION_ACTOR_INVALID_LABEL,
+        "reason",
+    );
+
+    let routing = store
+        .activate_tenant(
+            gate_request(
+                &tenant,
+                &fixture.a,
+                &actor,
+                "activate_qualified_bundle",
+                &promotion,
+                &revision,
+                &profile,
+            ),
+            &readiness,
+        )
+        .await
+        .expect("every term of the gate holds");
+    assert_eq!(routing.routing_state, RoutingState::Pipeline);
+    assert_eq!(routing.evidence_hash, readiness.evidence_hash);
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(routing.clone()));
+    assert_eq!(
+        runs.active_bundle_id(&tenant).await.unwrap().as_deref(),
+        Some(fixture.a.bundle_id.as_str())
+    );
+    let events = store.events(&tenant, 10).await.unwrap();
+    assert_eq!(events.len(), 1, "one event: {events:?}");
+    let event = &events[0];
+    assert_eq!(event.action, ActivationAction::Activate);
+    assert_eq!(event.previous_state, None);
+    assert_eq!(event.resulting_state, RoutingState::Pipeline);
+    assert_eq!(event.previous_bundle_id, None);
+    assert_eq!(
+        event.resulting_bundle_id.as_deref(),
+        Some(fixture.a.bundle_id.as_str())
+    );
+    assert_eq!(event.evidence_hash, readiness.evidence_hash);
+    assert_eq!(event.actor_principal_ref, actor);
+    assert_eq!(event.reason_code, "activate_qualified_bundle");
+
+    for gate_break in GateBreak::ALL {
+        let tenant = routing_tenant("gate-term");
+        if gate_break != GateBreak::QualificationMissing {
+            fixture.qualify(&tenant, &fixture.a, &revision).await;
+        }
+        assert_gate_refused(
+            activate_with_break(&fixture, &tenant, &fixture.a, &fixture.b, gate_break).await,
+            gate_break.label(),
+            gate_break,
+        );
+        assert_eq!(
+            store.routing(&tenant).await.unwrap(),
+            None,
+            "{gate_break:?}: no routing row"
+        );
+        assert!(
+            store.events(&tenant, 10).await.unwrap().is_empty(),
+            "{gate_break:?}: no event"
+        );
+        assert_eq!(
+            runs.active_bundle_id(&tenant).await.unwrap(),
+            None,
+            "{gate_break:?}: no active bundle"
+        );
+    }
+}
+
+/// Review Focus 3, a failed activation: each refusal of
+/// `activation_requires_every_term_of_the_gate`, on a tenant already routed
+/// with bundle A and asked to switch to B, leaves the routing row (all six
+/// columns), the active bundle row (`bundle_id` and `selected_at`), and the
+/// number of event rows as they were. An activation whose event insert
+/// fails after the gate passed leaves them as they were too: the gate's
+/// switch of the active bundle, the routing row, and the event are one
+/// transaction.
+#[tokio::test]
+async fn a_refused_activation_changes_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let revision = gate_revision();
+    let actor = routing_actor();
+
+    for gate_break in GateBreak::ALL {
+        let tenant = routing_tenant("gate-unchanged");
+        fixture.qualify(&tenant, &fixture.a, &revision).await;
+        fixture.activate(&tenant, &fixture.a).await;
+        if gate_break != GateBreak::QualificationMissing {
+            fixture.qualify(&tenant, &fixture.b, &revision).await;
+        }
+        let before = activation_rows(&tenant).await;
+        assert_eq!(
+            before
+                .active_bundle
+                .as_ref()
+                .map(|(bundle_id, _)| bundle_id.as_str()),
+            Some(fixture.a.bundle_id.as_str())
+        );
+        assert_eq!(before.events, 1);
+        assert_gate_refused(
+            activate_with_break(&fixture, &tenant, &fixture.b, &fixture.a, gate_break).await,
+            gate_break.label(),
+            gate_break,
+        );
+        assert_eq!(
+            activation_rows(&tenant).await,
+            before,
+            "{gate_break:?}: a refused activation changes nothing"
+        );
+    }
+
+    // The gate passes and the event insert fails: nothing is left.
+    let tenant = routing_tenant("gate-event-failure");
+    fixture.qualify(&tenant, &fixture.a, &revision).await;
+    fixture.activate(&tenant, &fixture.a).await;
+    fixture.qualify(&tenant, &fixture.b, &revision).await;
+    let readiness = fixture.readiness(&tenant).await;
+    let promotion = fixture.promotion(&fixture.b, &revision);
+    let profile = fixture.profile(&fixture.b);
+    let before = activation_rows(&tenant).await;
+    {
+        let _refused_reason = RefusedEventReason::install().await;
+        let failed = store
+            .activate_tenant(
+                gate_request(
+                    &tenant,
+                    &fixture.b,
+                    &actor,
+                    REFUSED_EVENT_REASON,
+                    &promotion,
+                    &revision,
+                    &profile,
+                ),
+                &readiness,
+            )
+            .await
+            .expect_err("the event insert fails");
+        assert!(
+            matches!(
+                &failed,
+                DatabaseError::Postgres(error)
+                    if error.code() == Some(&tokio_postgres::error::SqlState::CHECK_VIOLATION)
+            ),
+            "the event's check refused it: {failed:?}"
+        );
+        assert_eq!(
+            activation_rows(&tenant).await,
+            before,
+            "the active bundle and the routing row roll back with the event"
+        );
+    }
+    store
+        .activate_tenant(
+            gate_request(
+                &tenant,
+                &fixture.b,
+                &actor,
+                "activate_after_event_failure",
+                &promotion,
+                &revision,
+                &profile,
+            ),
+            &readiness,
+        )
+        .await
+        .expect("the same activation passes once its event can be written");
+    let after = activation_rows(&tenant).await;
+    assert_eq!(
+        after
+            .active_bundle
+            .as_ref()
+            .map(|(bundle_id, _)| bundle_id.as_str()),
+        Some(fixture.b.bundle_id.as_str())
+    );
+    assert_eq!(after.events, before.events + 1);
+}
+
+/// P5-D10: a bundle is qualified once for each code revision. The same
+/// bundle and revision with other metadata is a conflict; the same bundle on
+/// a second revision records a second row; `qualification` reads the row of
+/// one revision; and the gate passes with the second revision as the
+/// deployed one and refuses a third revision that has no row.
+#[tokio::test]
+async fn a_bundle_is_qualified_once_for_each_code_revision() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let qualifications = PipelineQualificationStore::new(backend.clone());
+    let store = fixture.activation_store();
+    let tenant = routing_tenant("qualified-revision");
+    let (first, second, third) = (
+        gate_revision(),
+        other_revision("second"),
+        other_revision("third"),
+    );
+    let a = &fixture.a;
+
+    let first_record = fixture.qualify(&tenant, a, &first).await;
+    let (signed, mut metadata, profile, evidence) = fixture.qualification_inputs(a, &first);
+    metadata.corpus_digest = sha256_prefixed(b"another-corpus");
+    assert_refused(
+        qualifications
+            .qualify_bundle(
+                &tenant,
+                &signed,
+                &fixture.trust,
+                &metadata,
+                &profile,
+                &evidence,
+                None,
+            )
+            .await,
+        "bundle_qualification_identity_conflict",
+    );
+    let second_record = fixture.qualify(&tenant, a, &second).await;
+    assert_eq!(second_record.metadata.code_revision_hash, second);
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
+        2,
+        "one row for each revision"
+    );
+    assert_eq!(
+        qualifications
+            .qualification(&tenant, &a.bundle_id, &first)
+            .await
+            .unwrap(),
+        Some(first_record)
+    );
+    assert_eq!(
+        qualifications
+            .qualification(&tenant, &a.bundle_id, &second)
+            .await
+            .unwrap(),
+        Some(second_record.clone())
+    );
+    assert_eq!(
+        qualifications
+            .qualification(&tenant, &a.bundle_id, &third)
+            .await
+            .unwrap(),
+        None
+    );
+    // A repeat on the second revision with the same inputs answers its row.
+    assert_eq!(fixture.qualify(&tenant, a, &second).await, second_record);
+
+    let readiness = fixture.readiness(&tenant).await;
+    let profile = fixture.profile(a);
+    let actor = routing_actor();
+    let on_third = fixture.promotion(a, &third);
+    assert_gate_refused(
+        store
+            .activate_tenant(
+                gate_request(
+                    &tenant,
+                    a,
+                    &actor,
+                    "activate_qualified_bundle",
+                    &on_third,
+                    &third,
+                    &profile,
+                ),
+                &readiness,
+            )
+            .await,
+        PACKAGE_RUNTIME_REVISION_MISMATCH_LABEL,
+        "a third revision",
+    );
+    let on_second = fixture.promotion(a, &second);
+    store
+        .activate_tenant(
+            gate_request(
+                &tenant,
+                a,
+                &actor,
+                "activate_qualified_bundle",
+                &on_second,
+                &second,
+                &profile,
+            ),
+            &readiness,
+        )
+        .await
+        .expect("the qualification on the second revision passes the gate");
+    assert_eq!(
+        PgPipelineStore::new(backend.clone())
+            .active_bundle_id(&tenant)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(a.bundle_id.as_str())
+    );
+}
+
+/// Review Focus 4 (LAB-003, SCN-007): a rollback selects an earlier qualified
+/// bundle for new runs only. R1 is bound to A and stops before Score; B is
+/// activated and R2 binds to it; the rollback to A routes the tenant to the
+/// pipeline with A, R3 binds to A, R1 and R2 keep their bundles, and R1's
+/// outcomes stay byte for byte as they were. Each completed run's four
+/// outcomes carry its own bundle. A registration of the default bundle at
+/// start does not undo an activation. A rollback to the active bundle, or
+/// to a bundle that was never active for the tenant, is
+/// `earlier_qualified_bundle_required`; a tenant routed to `legacy`, or with
+/// no routing row, is `activation_state_invalid`; a contained tenant rolls
+/// back to the pipeline. The runtime login cannot rebind a run, and the
+/// V93 trigger refuses even the owner.
+#[tokio::test]
+async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let service = fixture.service.clone();
+    let store = fixture.activation_store();
+    let runs = PgPipelineStore::new(backend.clone());
+    let (a, b) = (fixture.a.bundle_id.clone(), fixture.b.bundle_id.clone());
+    let revision = gate_revision();
+    let active = |tenant: String| {
+        let runs = runs.clone();
+        async move { runs.active_bundle_id(&tenant).await.unwrap() }
+    };
+
+    let tenant = routing_tenant("rollback");
+    fixture.qualify(&tenant, &fixture.a, &revision).await;
+    fixture.qualify(&tenant, &fixture.b, &revision).await;
+    fixture.activate(&tenant, &fixture.a).await;
+    let r1 = gate_receipt(&service, &tenant).await;
+    assert_eq!(r1.bundle_id, a);
+    service
+        .process_run(&tenant, r1.run_id)
+        .await
+        .unwrap()
+        .expect("R1's Review runs");
+
+    fixture.activate(&tenant, &fixture.b).await;
+    assert_eq!(
+        runs.get_run(&tenant, r1.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundle_id,
+        a,
+        "the activation of B leaves R1 on A"
+    );
+    // Ingest registers the default bundle (A) at every start; with B active,
+    // the registration leaves B (`activate_bundle_if_none`).
+    service.register_default_bundle(&tenant).await.unwrap();
+    assert_eq!(active(tenant.clone()).await, Some(b.clone()));
+    let r2 = gate_receipt(&service, &tenant).await;
+    assert_eq!(r2.bundle_id, b);
+    let r1_before = gate_outcome_rows(&service, &tenant, r1.run_id).await;
+    assert_eq!(
+        r1_before.iter().map(|row| row.0).collect::<Vec<_>>(),
+        vec![Phase::Admission, Phase::Review],
+        "R1 stopped before Score"
+    );
+
+    let rolled_back = fixture
+        .roll_back(&tenant, &fixture.a)
+        .await
+        .expect("A was active before B");
+    assert_eq!(rolled_back.routing_state, RoutingState::Pipeline);
+    assert_eq!(active(tenant.clone()).await, Some(a.clone()));
+    let event = store.events(&tenant, 1).await.unwrap().remove(0);
+    assert_eq!(event.action, ActivationAction::Rollback);
+    assert_eq!(event.previous_state, Some(RoutingState::Pipeline));
+    assert_eq!(event.resulting_state, RoutingState::Pipeline);
+    assert_eq!(event.previous_bundle_id.as_deref(), Some(b.as_str()));
+    assert_eq!(event.resulting_bundle_id.as_deref(), Some(a.as_str()));
+    assert_eq!(event.evidence_hash, rolled_back.evidence_hash);
+    service.register_default_bundle(&tenant).await.unwrap();
+    assert_eq!(
+        active(tenant.clone()).await,
+        Some(a.clone()),
+        "a registration at start does not undo the rollback"
+    );
+
+    let r3 = gate_receipt(&service, &tenant).await;
+    assert_eq!(r3.bundle_id, a);
+    let mut runs_before_rollback_rebound = 0;
+    for (run, bundle) in [(&r1, &a), (&r2, &b)] {
+        let stored = runs.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+        if stored.bundle_id != *bundle {
+            runs_before_rollback_rebound += 1;
+        }
+    }
+    assert_eq!(runs_before_rollback_rebound, 0, "no earlier run is rebound");
+    assert_eq!(
+        gate_outcome_rows(&service, &tenant, r1.run_id).await,
+        r1_before,
+        "the rollback changes no outcome of R1"
+    );
+
+    for run in [&r1, &r2, &r3] {
+        complete_gate_run(&service, &tenant, run.run_id).await;
+        let outcomes = gate_outcome_rows(&service, &tenant, run.run_id).await;
+        assert_eq!(
+            outcomes.iter().map(|row| row.0).collect::<Vec<_>>(),
+            vec![Phase::Admission, Phase::Review, Phase::Score, Phase::Settle]
+        );
+        assert!(
+            outcomes.iter().all(|row| row.1 == run.bundle_id),
+            "each outcome carries its run's bundle"
+        );
+    }
+    let outcomes_changed =
+        usize::from(gate_outcome_rows(&service, &tenant, r1.run_id).await[..2] != r1_before[..]);
+    assert_eq!(outcomes_changed, 0, "R1's earlier outcomes are unchanged");
+    let runs_after_rollback_on_earlier_bundle =
+        [&r3].into_iter().filter(|run| run.bundle_id == a).count();
+
+    // A rollback to the bundle that is active now.
+    let before = activation_rows(&tenant).await;
+    assert_gate_refused(
+        fixture.roll_back(&tenant, &fixture.a).await,
+        EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL,
+        "the active bundle",
+    );
+    assert_eq!(activation_rows(&tenant).await, before);
+    let mut refused_rollbacks = 1;
+
+    // A rollback to a qualified bundle that was never active for the tenant.
+    let other = routing_tenant("rollback-other");
+    fixture.qualify(&other, &fixture.a, &revision).await;
+    fixture.qualify(&other, &fixture.b, &revision).await;
+    fixture.activate(&other, &fixture.a).await;
+    let before = activation_rows(&other).await;
+    assert_gate_refused(
+        fixture.roll_back(&other, &fixture.b).await,
+        EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL,
+        "a bundle never active",
+    );
+    assert_eq!(activation_rows(&other).await, before);
+    refused_rollbacks += 1;
+
+    // A contained tenant rolls back to the pipeline.
+    fixture.activate(&other, &fixture.b).await;
+    store
+        .contain(&other, &routing_actor(), "contain_before_rollback")
+        .await
+        .unwrap();
+    let from_contained = fixture
+        .roll_back(&other, &fixture.a)
+        .await
+        .expect("a contained tenant rolls back");
+    assert_eq!(from_contained.routing_state, RoutingState::Pipeline);
+    assert_eq!(active(other.clone()).await, Some(a.clone()));
+    let event = store.events(&other, 1).await.unwrap().remove(0);
+    assert_eq!(event.action, ActivationAction::Rollback);
+    assert_eq!(event.previous_state, Some(RoutingState::Contained));
+    assert_eq!(event.previous_bundle_id.as_deref(), Some(b.as_str()));
+    assert_eq!(event.resulting_bundle_id.as_deref(), Some(a.as_str()));
+
+    // A tenant routed to the legacy path, and one with no routing row.
+    store
+        .deactivate(&other, &routing_actor(), "return_to_legacy")
+        .await
+        .unwrap();
+    let before = activation_rows(&other).await;
+    assert_gate_refused(
+        fixture.roll_back(&other, &fixture.b).await,
+        ACTIVATION_STATE_INVALID_LABEL,
+        "a legacy tenant",
+    );
+    assert_eq!(activation_rows(&other).await, before);
+    let unrouted = routing_tenant("rollback-unrouted");
+    fixture.qualify(&unrouted, &fixture.a, &revision).await;
+    assert_gate_refused(
+        fixture.roll_back(&unrouted, &fixture.a).await,
+        ACTIVATION_STATE_INVALID_LABEL,
+        "a tenant with no routing row",
+    );
+    assert_eq!(
+        activation_rows(&unrouted).await,
+        ActivationRows {
+            routing: None,
+            active_bundle: None,
+            events: 0,
+        }
+    );
+    refused_rollbacks += 1;
+
+    // The runtime login cannot rebind a run, and the V93 trigger refuses even
+    // the owner.
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let refused = tx
+            .execute(
+                "UPDATE pipeline_runs SET bundle_id = $3 WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant, &r1.run_id, &b],
+            )
+            .await
+            .expect_err("the runtime login cannot rebind a run");
+        assert_eq!(
+            refused.code(),
+            Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+            "{refused:?}"
+        );
+    }
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let refused = tx
+            .execute(
+                "UPDATE pipeline_runs SET bundle_id = $3 WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant, &r1.run_id, &b],
+            )
+            .await
+            .expect_err("the trigger refuses a rebind");
+        assert!(
+            db_error_message(&refused).contains("pipeline run identity is immutable"),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        runs.get_run(&tenant, r1.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundle_id,
+        a
+    );
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_activation_rollback",
+        None,
+        serde_json::json!({
+            "runs_before_rollback_rebound": runs_before_rollback_rebound,
+            "runs_after_rollback_on_earlier_bundle": runs_after_rollback_on_earlier_bundle,
+            "outcomes_changed": outcomes_changed,
+            "refused_rollbacks": refused_rollbacks,
+        }),
+    );
+}
+
+/// BND-003: an activation of B races a receipt on a tenant routed with A,
+/// twenty times. Every receipt creates its run, bound to A or to B, and its
+/// Admission outcome carries the run's bundle; every activation completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_activation_races_a_receipt_without_rebinding_it() {
+    let Some(backend) = runtime_backend(8).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let (a, b) = (fixture.a.bundle_id.clone(), fixture.b.bundle_id.clone());
+    let revision = gate_revision();
+    let actor = routing_actor();
+    let tenant = routing_tenant("activation-race");
+    fixture.qualify(&tenant, &fixture.a, &revision).await;
+    fixture.qualify(&tenant, &fixture.b, &revision).await;
+    let promotion = fixture.promotion(&fixture.b, &revision);
+    let profile = fixture.profile(&fixture.b);
+
+    let mut bound = BTreeMap::<String, usize>::new();
+    for round in 0..20u64 {
+        fixture.activate(&tenant, &fixture.a).await;
+        let readiness = fixture.readiness(&tenant).await;
+        let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        // The activation starts a little later in each round, so the rounds
+        // meet the receipt at different points: before its staging
+        // transaction, between its two transactions, and after its commit.
+        let delay = std::time::Duration::from_millis(3 * round);
+        let (received, activated) = tokio::join!(
+            fixture
+                .service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS)),
+            async {
+                tokio::time::sleep(delay).await;
+                store
+                    .activate_tenant(
+                        gate_request(
+                            &tenant,
+                            &fixture.b,
+                            &actor,
+                            "activate_during_receipt",
+                            &promotion,
+                            &revision,
+                            &profile,
+                        ),
+                        &readiness,
+                    )
+                    .await
+            },
+        );
+        let run = match received {
+            Ok(PipelineReceiptResult::Created(run)) => run,
+            other => panic!("round {round}: the receipt creates a run: {other:?}"),
+        };
+        activated.unwrap_or_else(|error| panic!("round {round}: the activation fails: {error}"));
+        assert!(
+            run.bundle_id == a || run.bundle_id == b,
+            "round {round}: the run is bound to A or B"
+        );
+        let admission = fixture
+            .service
+            .store()
+            .list_outcomes(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|outcome| outcome.phase == Phase::Admission)
+            .expect("the receipt records its Admission outcome");
+        assert_eq!(
+            admission.bundle_id, run.bundle_id,
+            "round {round}: the Admission outcome carries the run's bundle"
+        );
+        *bound.entry(run.bundle_id).or_default() += 1;
+    }
+    assert_eq!(count_runs(&backend, &tenant).await, 20, "{bound:?}");
+    eprintln!(
+        "runs bound to A: {}, to B: {}",
+        bound.get(&a).copied().unwrap_or(0),
+        bound.get(&b).copied().unwrap_or(0)
+    );
+}
+
+/// An activation reads the tenant's readiness and a rollback does not: with
+/// one failed index invalidation in the tenant's summary (seeded as
+/// `the_operator_route_requeues_the_tenants_failed_invalidations` seeds it:
+/// a completed run withdrawn and its invalidation failed), the activation is
+/// refused and writes nothing, and the rollback succeeds.
+#[tokio::test]
+async fn a_rollback_needs_no_readiness_and_an_activation_does() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let revision = gate_revision();
+    let tenant = routing_tenant("rollback-readiness");
+    fixture.qualify(&tenant, &fixture.a, &revision).await;
+    fixture.qualify(&tenant, &fixture.b, &revision).await;
+    fixture.activate(&tenant, &fixture.a).await;
+    fixture.activate(&tenant, &fixture.b).await;
+
+    let run = gate_receipt(&fixture.service, &tenant).await;
+    complete_gate_run(&fixture.service, &tenant, run.run_id).await;
+    withdraw(&fixture.service, &tenant, run.submission_id).await;
+    fail_invalidation_as_owner(&tenant, run.run_id).await;
+    let summary = PipelineProductStore::new(backend.clone())
+        .operational_summary(&tenant)
+        .await
+        .unwrap();
+    assert_eq!(summary.failed_invalidation_count, 1);
+    let readiness = ActivationReadiness::from_operational_summary(&summary);
+    assert!(!readiness.invalidation_clear);
+
+    let promotion = fixture.promotion(&fixture.a, &revision);
+    let profile = fixture.profile(&fixture.a);
+    let actor = routing_actor();
+    let before = activation_rows(&tenant).await;
+    assert_gate_refused(
+        store
+            .activate_tenant(
+                gate_request(
+                    &tenant,
+                    &fixture.a,
+                    &actor,
+                    "activate_qualified_bundle",
+                    &promotion,
+                    &revision,
+                    &profile,
+                ),
+                &readiness,
+            )
+            .await,
+        ACTIVATION_READINESS_FAILED_LABEL,
+        "an activation with a failed invalidation",
+    );
+    assert_eq!(activation_rows(&tenant).await, before);
+
+    let rolled_back = fixture
+        .roll_back(&tenant, &fixture.a)
+        .await
+        .expect("a rollback reads no readiness");
+    assert_eq!(rolled_back.routing_state, RoutingState::Pipeline);
+    assert_eq!(
+        PgPipelineStore::new(backend.clone())
+            .active_bundle_id(&tenant)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(fixture.a.bundle_id.as_str())
+    );
 }

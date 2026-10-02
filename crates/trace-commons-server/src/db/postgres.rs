@@ -1663,8 +1663,10 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
     ),
     // V107 (PR 4) adds the immutable production-qualification table the
-    // qualification store writes once per bundle; PR 5's activation gate
-    // reads it. No cross-tenant claim function, same as V105/V106.
+    // qualification store writes; the qualified activation gate
+    // (`PipelineQualificationStore::activate_qualified_bundle_in`, PR 5)
+    // reads it, and V112 widens its key to one row for each bundle and code
+    // revision. No cross-tenant claim function, same as V105/V106.
     (
         107,
         "versioned_pipeline_qualification",
@@ -1701,6 +1703,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         111,
         "versioned_pipeline_policy_interventions",
         include_str!("../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"),
+    ),
+    // V112 (PR 5) is the qualified activation gate's migration: V107's
+    // qualification key gains the code revision (one qualification for each
+    // bundle and revision), and the runtime gets the one UPDATE the gate
+    // needs on the active bundle. It adds no table. No cross-tenant claim
+    // function, same as V105/V106/V107/V108/V110/V111.
+    (
+        112,
+        "versioned_pipeline_activation_gate",
+        include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
     ),
 ];
 
@@ -7061,6 +7073,7 @@ mod tests {
         (108, 4),
         (110, 4),
         (111, 4),
+        (112, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7808,6 +7821,7 @@ mod tests {
             include_str!(
                 "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
             ),
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7847,6 +7861,7 @@ mod tests {
             include_str!(
                 "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
             ),
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -8257,6 +8272,54 @@ mod tests {
                 "V111 grants something the pins do not list: `{grant}`"
             );
         }
+    }
+
+    /// V112 (delivery PR 5) is the activation gate's migration: it widens
+    /// the qualification key to one row for each bundle and code revision
+    /// (P5-D10) and grants the runtime the one UPDATE the gate needs on the
+    /// active bundle (P5-D11). It creates no table, holds no `SECURITY
+    /// DEFINER` function and no role attribute change, and grants nothing
+    /// else.
+    #[test]
+    fn v112_widens_the_qualification_key_and_grants_the_bundle_switch() {
+        let gate =
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql");
+        for required in [
+            "ALTER TABLE pipeline_bundle_qualifications",
+            "DROP CONSTRAINT pipeline_bundle_qualifications_pkey,",
+            "ADD PRIMARY KEY (tenant_id, bundle_id, code_revision_hash);",
+            "GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;",
+        ] {
+            assert!(gate.contains(required), "V112 is missing `{required}`");
+        }
+        for forbidden in [
+            "CREATE TABLE",
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SUPERUSER",
+            "SET search_path",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
+            "DISABLE TRIGGER",
+            "pipeline_index_rebuild_fences",
+        ] {
+            assert!(
+                !gate.contains(forbidden),
+                "V112 must not contain `{forbidden}`"
+            );
+        }
+        let grants: Vec<&str> = gate
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+            .collect();
+        assert_eq!(
+            grants,
+            vec![
+                "GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;"
+            ],
+            "V112 grants the bundle switch and nothing else"
+        );
     }
 
     /// The eviction drain is the one write path on
