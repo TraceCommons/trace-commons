@@ -17,6 +17,9 @@ import TCShellCore
 ///   does, a folder with no waiting session cannot be placed and is listed
 ///   on its own after the tools.
 /// - Ignored folders are left out.
+/// - The unresolvable bucket (sessions whose folder the core cannot name) is
+///   drawn under its shared name, never its `unknown-project` slug, and is
+///   never offered automatic.
 struct TracesTree: Equatable {
     var tools: [ToolNode]
     /// Folders no session places under a tool yet (K11).
@@ -40,6 +43,11 @@ struct TracesTree: Equatable {
         /// a folder that cannot be armed is never offered automatic.
         var offerableModes: [ProjectMode] = []
         var sessions: [DaemonData.QueueEntry]
+        /// The disclosure the daemon chose for an armed folder
+        /// (`automatic_disclosure`), worded by the core; nil when not armed.
+        var disclosure: String? = nil
+        /// The unresolvable bucket, which says why it can never be armed.
+        var isBucket = false
     }
 
     /// A tool's source declaration in `get_settings`. `unknown` is settings
@@ -87,16 +95,22 @@ struct TracesTree: Equatable {
     ) -> TracesTree {
         var folders: [String: FolderNode] = [:]
         var order: [String] = []
-        func folder(_ id: String, _ label: String, _ mode: ProjectMode?, _ modes: [ProjectMode]) {
-            guard folders[id] == nil else { return }
-            folders[id] = FolderNode(id: id, label: label, mode: mode, offerableModes: modes, sessions: [])
-            order.append(id)
+        func add(_ node: FolderNode) {
+            guard folders[node.id] == nil else { return }
+            folders[node.id] = node
+            order.append(node.id)
         }
-        for project in projects where !project.isUnresolvedBucket {
-            folder(project.projectId, project.displayLabel, project.mode, project.offerableModes)
+        // The core's rows first, so a folder takes its listed name and mode;
+        // the bucket's `displayLabel` is the shared name, not the slug.
+        for project in projects {
+            add(FolderNode(
+                id: project.projectId, label: project.displayLabel, mode: project.mode,
+                offerableModes: project.offerableModes, sessions: [],
+                disclosure: project.mode == .autoUpload ? project.automaticDisclosure : nil,
+                isBucket: project.isUnresolvedBucket))
         }
         for entry in entries {
-            folder(entry.projectId, entry.projectLabel, nil, [])
+            add(FolderNode(id: entry.projectId, label: entry.projectLabel, mode: nil, sessions: []))
             folders[entry.projectId]?.sessions.append(entry)
         }
 
