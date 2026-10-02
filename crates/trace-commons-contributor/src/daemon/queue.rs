@@ -4392,6 +4392,54 @@ mod tests {
         assert_eq!(decisions_owed(&fresh, &policy, ScrubCheck::Manual), 1);
     }
 
+    /// Automatic re-approves entries left by a Manual spell. Counting that
+    /// label as a review hold would incorrectly inflate the badge.
+    #[test]
+    fn decisions_owed_leaves_out_armed_entries_that_go_unattended_under_automatic() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let settling = entry_in("/w/armed", QueueState::Pending);
+        let mut left_by_manual = entry_in("/w/armed", QueueState::Pending);
+        left_by_manual.session_hash = "sha256:left-by-manual".into();
+        left_by_manual.path = PathBuf::from("/w/armed/left-by-manual.jsonl");
+        left_by_manual.reason_label =
+            Some(super::super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string());
+        assert!(!left_by_manual.held_for_review());
+        let q = queue_of(vec![settling, left_by_manual]);
+        assert_eq!(q.pending().len(), 2);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 0);
+    }
+
+    /// An Automatic Scrub check hold needs a person even in an armed folder.
+    #[test]
+    fn decisions_owed_counts_a_second_look_hold_in_an_armed_folder() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let held = entry_in("/w/armed", QueueState::Pending);
+        let id = held.entry_id;
+        let mut q = queue_of(vec![held]);
+        assert!(q.approve_unattended(id, &[], None));
+        assert!(q.hold_with_scrub_pin(
+            id,
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            None
+        ));
+        assert_eq!(q.get(id).unwrap().state, QueueState::Pending);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
+    }
+
     /// A mixed queue, each entry a different reason to count or not: an
     /// Ask-me `Pending` (counts), an Ask-me entry already `Approved` (no
     /// decision left), an armed `Pending` that is settling (goes out
