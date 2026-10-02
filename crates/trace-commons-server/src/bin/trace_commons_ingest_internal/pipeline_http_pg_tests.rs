@@ -4315,8 +4315,7 @@ async fn boot_refuses_a_tenant_bundle_the_runtime_cannot_run() {
             true,
         )
         .await
-        .err()
-        .expect("boot is refused");
+        .expect_err("boot is refused");
         assert_eq!(
             error.to_string(),
             "pipeline_tenant_bundle_dependency_missing"
