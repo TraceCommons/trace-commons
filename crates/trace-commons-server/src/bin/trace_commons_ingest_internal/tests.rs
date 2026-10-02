@@ -40160,14 +40160,14 @@ async fn pipeline_index_rebuilds_run_one_per_tenant_and_drain_at_shutdown() {
     let again = tokio::time::timeout(StdDuration::from_secs(5), async {
         loop {
             match rebuilds.start("tenant-a", async { "again" }) {
-                Ok(receiver) => break receiver,
+                Ok(receiver) => break receiver.await.unwrap(),
                 Err(_) => tokio::task::yield_now().await,
             }
         }
     })
     .await
     .expect("the ended rebuild frees its tenant");
-    assert_eq!(again.await.unwrap(), "again");
+    assert_eq!(again, "again");
 
     // The shutdown waits for a rebuild that ends within the grace period.
     let (release_c, held_c) = tokio::sync::oneshot::channel::<()>();
