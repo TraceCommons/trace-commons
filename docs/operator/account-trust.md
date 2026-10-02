@@ -235,7 +235,10 @@ facts or directly modify evaluations, accounts, admission rows, or budgets.
 
 Inside a `REPEATABLE READ` transaction, read
 `trace_account_trust_input_generation(TEXT tenant, UUID account)` and the
-account's fact inputs from the same snapshot. The generation is a `BIGINT`,
+account's fact inputs from the same snapshot. Cluster selection and membership
+exclude nonfinite decisions and decisions later than `transaction_timestamp()`.
+This remains a current projection; it does not offer historical replay for an
+arbitrary earlier timestamp. The generation is a `BIGINT`,
 or `NULL` for missing/wrong-scope input. Obtain `as_of` from the database's
 `transaction_timestamp()`. Then write through:
 

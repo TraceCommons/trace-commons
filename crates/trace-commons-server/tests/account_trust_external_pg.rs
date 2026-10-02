@@ -48,6 +48,24 @@ async fn publish_current(evaluator: &mut tokio_postgres::Client, tenant: &str, a
     tx.commit().await.unwrap();
 }
 
+async fn cluster_first(
+    evaluator: &mut tokio_postgres::Client,
+    tenant: &str,
+    account: Uuid,
+    gate: Uuid,
+) -> bool {
+    let tx = evaluator.transaction().await.unwrap();
+    tx.query_one(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let first=tx.query_one("SELECT first_in_cluster FROM trace_account_trust_evaluation_inputs($1,$2) WHERE source_id=$3",&[&tenant,&account,&gate]).await.unwrap().get(0);
+    tx.commit().await.unwrap();
+    first
+}
+
 async fn seed_dependency_gate(
     admin: &deadpool_postgres::Object,
     tenant: &str,
@@ -711,6 +729,42 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
     let local_input=tx.query_one("SELECT first_in_cluster FROM trace_account_trust_evaluation_inputs($1,$2) WHERE source_id=$3",&[&tenant,&account_id,&gate]).await.unwrap();
     assert_eq!(local_input.get::<_, Option<bool>>(0), Some(false));
     tx.commit().await.unwrap();
+    // Future decisions for the same submission cannot redirect an old fact
+    // to a singleton cluster before those decisions enter the current clock.
+    let future_cluster = Uuid::new_v4();
+    let future_gate =
+        seed_dependency_gate(&admin, &tenant, submission, future_cluster, false).await;
+    admin.execute("UPDATE trace_gate_decisions SET decided_at=transaction_timestamp()+interval '1 day' WHERE tenant_id=$1 AND decision_id=$2",&[&tenant,&future_gate]).await.unwrap();
+    assert!(
+        !cluster_first(&mut evaluator, &tenant, account_id, gate).await,
+        "future singleton decision cannot qualify the existing nonfirst fact"
+    );
+    let nonfinite_gate =
+        seed_dependency_gate(&admin, &tenant, submission, Uuid::new_v4(), false).await;
+    admin.execute("UPDATE trace_gate_decisions SET decided_at='infinity' WHERE tenant_id=$1 AND decision_id=$2",&[&tenant,&nonfinite_gate]).await.unwrap();
+    assert!(
+        !cluster_first(&mut evaluator, &tenant, account_id, gate).await,
+        "nonfinite decision cannot redirect the current projection"
+    );
+    // A later finite current decision still selects its new current cluster.
+    admin.execute("UPDATE trace_gate_decisions SET decided_at=clock_timestamp() WHERE tenant_id=$1 AND decision_id=$2",&[&tenant,&future_gate]).await.unwrap();
+    assert!(
+        cluster_first(&mut evaluator, &tenant, account_id, gate).await,
+        "later current gate continues to define the current cluster"
+    );
+    let nonfinite_member = seed_dependency_gate(
+        &admin,
+        &remote_tenant,
+        Uuid::new_v4(),
+        future_cluster,
+        false,
+    )
+    .await;
+    admin.execute("UPDATE trace_gate_decisions SET decided_at='-infinity' WHERE tenant_id=$1 AND decision_id=$2",&[&remote_tenant,&nonfinite_member]).await.unwrap();
+    assert!(
+        cluster_first(&mut evaluator, &tenant, account_id, gate).await,
+        "nonfinite member is excluded from current cluster membership"
+    );
     publish_current(&mut evaluator, &tenant, account_id).await;
     gate_writer
         .update_trace_gate_decision_dedup_cluster(&remote_tenant, remote_gate, Uuid::new_v4(), 1)

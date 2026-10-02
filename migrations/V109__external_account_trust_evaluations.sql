@@ -289,3 +289,38 @@ REVOKE ALL ON FUNCTION trace_account_trust_lock_dependencies(TEXT[]),
 GRANT EXECUTE ON FUNCTION trace_account_trust_lock_fact_dependencies(TEXT,UUID,TEXT,UUID)
     TO trace_account_trust_evaluation_guard;
 REVOKE trace_account_trust_input_guard,trace_account_trust_evaluation_guard FROM CURRENT_USER;
+
+-- Current cluster projection is bounded by the same transaction clock used
+-- by external batch snapshots. This is not a historical replay interface.
+GRANT trace_account_trust_cluster_guard TO CURRENT_USER;
+GRANT CREATE ON SCHEMA public TO trace_account_trust_cluster_guard;
+CREATE OR REPLACE FUNCTION trace_account_trust_first_in_cluster(p_tenant TEXT, p_submission UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_cluster UUID; v_first_tenant TEXT; v_first_submission UUID;
+BEGIN
+    IF p_tenant IS NULL OR p_submission IS NULL
+       OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
+        RETURN FALSE;
+    END IF;
+    SELECT g.dedup_cluster_id INTO v_cluster FROM public.trace_gate_decisions g
+     WHERE g.tenant_id=p_tenant AND g.submission_id=p_submission
+       AND g.dedup_cluster_id IS NOT NULL
+       AND pg_catalog.isfinite(g.decided_at)
+       AND g.decided_at <= pg_catalog.transaction_timestamp()
+     ORDER BY g.decided_at DESC, g.decision_id DESC
+     LIMIT 1;
+    IF v_cluster IS NULL THEN RETURN FALSE; END IF;
+    SELECT m.tenant_id, m.submission_id INTO v_first_tenant, v_first_submission
+      FROM (SELECT g.tenant_id, g.submission_id, min(g.decided_at) AS first_at
+              FROM public.trace_gate_decisions g
+             WHERE g.dedup_cluster_id=v_cluster
+               AND pg_catalog.isfinite(g.decided_at)
+               AND g.decided_at <= pg_catalog.transaction_timestamp()
+             GROUP BY g.tenant_id, g.submission_id) m
+     ORDER BY m.first_at, m.tenant_id COLLATE "C", m.submission_id
+     LIMIT 1;
+    RETURN v_first_tenant=p_tenant AND v_first_submission=p_submission;
+END $$;
+REVOKE CREATE ON SCHEMA public FROM trace_account_trust_cluster_guard;
+REVOKE trace_account_trust_cluster_guard FROM CURRENT_USER;
