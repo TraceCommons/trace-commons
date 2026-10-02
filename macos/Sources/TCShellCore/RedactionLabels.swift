@@ -119,18 +119,8 @@ public enum RedactionLabels {
         counts.filter { !isRemoval($0.key) }.values.reduce(0, +)
     }
 
-    /// The line shown when a session carries survivors, in the attention
-    /// tone. Nil when there are none.
-    ///
-    /// Never names a number of secrets. The count is of detection SITES, and
-    /// one site can hold more than one value, so "2 secrets" would understate
-    /// what survived. The plural says "found in N places" instead, which is
-    /// what the number actually counts; the singular drops it entirely.
-    public static func survivorLine(_ counts: [String: Int]) -> String? {
-        let total = survivorTotal(counts)
-        guard total > 0 else { return nil }
-        return total == 1
-            ? "A secret found here is still in what would be sent"
-            : "Secrets found in \(total) places are still in what would be sent"
-    }
+    // The line shown when a session carries survivors is the core's
+    // `preview_copy::residual_secret_line`, through
+    // `TCCoreCopy.residualSecretLine(count:sites:)` (K3, #1173): fed
+    // `survivorTotal` and the sites from `survivors`.
 }

@@ -93,14 +93,17 @@ struct HealthCopy: Equatable {
                 actionTitle: "Reconnect"
             )
         case "near-ai-notice-not-acknowledged":
+            // The recovery prompt's words are the core's
+            // (`privacy_scan_copy`), the same ones onboarding's scan screen
+            // reads; without them this is the on-hold line, never a
+            // sentence of this shell's own.
+            guard let copy = PrivacyScanCopy.decode(fromJSON: TCCoreCopy.privacyScanCopyJSON())
+            else { return forLabel("") }
             return HealthCopy(
-                title: "One thing to confirm.",
-                detail: """
-                You chose the extra privacy scan, which sends message text to \
-                NEAR AI. Confirm you're OK with that and contributions resume.
-                """,
+                title: copy.recoveryTitle,
+                detail: copy.recoveryDetail,
                 severity: .actionable,
-                actionTitle: "Review and confirm"
+                actionTitle: copy.recoveryAction
             )
         case "privacy-filter-canary-failed":
             return HealthCopy(
