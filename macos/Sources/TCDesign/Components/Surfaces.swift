@@ -152,3 +152,37 @@ public struct GlassMenuSeparator: View {
             .accessibilityHidden(true)
     }
 }
+
+/// A row in a menu-like panel whose rows are ordinary buttons (the
+/// menu-bar panel): full width, the menu hover fill, and the pressed fill
+/// 8% darker. The button's own label is drawn; this style authors no words.
+public struct GlassMenuRowStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        GlassMenuRowBody(configuration: configuration)
+    }
+}
+
+private struct GlassMenuRowBody: View {
+    let configuration: ButtonStyleConfiguration
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        configuration.label
+            .glassType(GlassTokens.TypeScale.body)
+            .foregroundStyle(isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, GlassTokens.Space.s5)
+            .padding(.vertical, GlassTokens.Space.s2)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(hovering && isEnabled ? GlassTokens.Color.menuHover.color : .clear)
+                    .glassPressedFill()
+            )
+            .environment(\.glassPressed, configuration.isPressed && isEnabled)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+    }
+}

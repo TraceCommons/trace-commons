@@ -35,8 +35,21 @@ struct TraceCommonsShell: App {
         RecentSearches.purgeLegacyStore()
     }
 
+    /// Whether the glass menu-bar panel (R13) stands in for the shipping
+    /// menu. Debug builds only, on `TRACE_COMMONS_GLASS_MENU=1`; a release
+    /// build always has the shipping menu.
+    private static let glassMenu: Bool = {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["TRACE_COMMONS_GLASS_MENU"] == "1"
+        #else
+        false
+        #endif
+    }()
+
     var body: some Scene {
-        MenuBarExtra {
+        // Exactly one of the two menu-bar items is inserted, so exactly one
+        // `Launcher` (which starts the app's services) runs.
+        MenuBarExtra(isInserted: .constant(!Self.glassMenu)) {
             MenuBarContent(navigation: navigation)
                 .environmentObject(model)
                 .tint(TC.accent)
@@ -44,6 +57,20 @@ struct TraceCommonsShell: App {
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts)
         }
+
+        #if DEBUG
+        // The glass menu-bar panel (R13 of #1173), in place of the shipping
+        // menu when TRACE_COMMONS_GLASS_MENU=1, until R15.
+        MenuBarExtra(isInserted: .constant(Self.glassMenu)) {
+            MenuBarGlassPanel(navigation: navigation)
+                .environmentObject(model)
+                .tint(TC.accent)
+        } label: {
+            Launcher(model: model, compute: compute, navigation: navigation,
+                     appDelegate: appDelegate, missionDrafts: missionDrafts)
+        }
+        .menuBarExtraStyle(.window)
+        #endif
 
         Window("Trace Commons", id: WindowID.main) {
             MainWindowView(navigation: navigation, missionDrafts: missionDrafts,
