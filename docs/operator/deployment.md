@@ -755,6 +755,66 @@ table. Check before deploying:
 SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
 ```
 
+### V105 and V106: review, invalidation, and export tables
+
+V105 adds the human review claims and assessments, the index invalidation
+queue, two columns on `pipeline_run_settlements`
+(`payout_eligible`, set when Score inserts a leg, which the runtime's
+table-wide `INSERT` from V94 covers; and `credit_audited_at`, set when
+ingest's worker has appended `main`'s `CreditMutate` audit event for the
+leg's credit event), and indexes for the payout pass and the audit work
+list. It
+also widens V94's `pipeline_run_settlements_dispatch_shape` check to allow a
+Trace Credit leg that `main`'s `NoveltyUtility` credit checks withheld before
+its adapter was called: complete, never dispatched, no credit event, with its
+withholding label. V106
+adds the export snapshots and their items. Like V92 to V95, each grants
+`trace_ingest_runtime` what the pipeline code reads and writes there, and
+nothing broader, and each refuses to apply if the group does not exist. V105
+also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
+`pipeline_runs`, and refuses to apply if that role (V36) does not exist:
+
+| Object | Grant | Why |
+|---|---|---|
+| `pipeline_review_claims` | `SELECT, INSERT, DELETE`; `UPDATE` on `reviewer_principal_ref`, `lease_token`, `lease_expires_at`, `claimed_at` | a reviewer's claim inserts the row, or takes over an expired claim or renews its own; the assessment deletes the spent claim |
+| `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
+| `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
+| `pipeline_run_settlements` | `UPDATE (credit_audited_at)`, the column V105 adds | the worker marks a leg's credit event audited once it appended the `CreditMutate` audit event |
+| `pipeline_runs` (to `trace_gate_driver`) | `SELECT (tenant_id, submission_id)`, and a cross-tenant `SELECT` policy for that role only, as V36 gives it on `main`'s tables | `main`'s gate driver leaves every submission with a pipeline run out of its work list and backlog count; the pipeline's own Score scores it |
+| `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
+| `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
+
+No grant allows `DELETE` on assessments, snapshots, or items. A trigger
+refuses a direct `DELETE` and an `UPDATE` of their identity; they go only with
+their submission or tenant, through foreign-key cascades.
+
+These routes also write tables older than V62, which no pipeline migration
+grants anything on. The pilot's V62-era table-wide grants cover them:
+
+| Table | What the pipeline needs |
+|---|---|
+| `trace_export_manifests` | `INSERT` when a snapshot is delivered; `UPDATE` on `invalidated_at`, `updated_at` when a submission in it is withdrawn |
+| `trace_export_manifest_items` | `INSERT` when a snapshot is delivered; `UPDATE` on `source_invalidated_at`, `source_invalidation_reason`, `updated_at` on withdrawal |
+| `trace_tombstones` | `INSERT` on withdrawal |
+| `trace_object_refs` | `UPDATE` on `invalidated_at`, `updated_at` on withdrawal |
+| `trace_derived_records` | `UPDATE` on `status`, `updated_at` on withdrawal |
+| `trace_vector_entries` | `UPDATE` on `status`, `invalidated_at`, `updated_at` on withdrawal |
+| `trace_revocation_propagation_items` | `SELECT, INSERT` on withdrawal, one item per object to delete |
+| `trace_near_credit_outbox` | `SELECT, INSERT`; `UPDATE` on `status`, `near_transaction_hash`, `submitted_at`, `confirmed_at`, `last_error_hash`, `near_call_json` -- only when the runtime enables NEAR payout |
+
+The withdrawal routes -- the pipeline's and `main`'s -- read
+`trace_account_admission_submissions` (V77) when the submission belongs to a
+source session. V77 grants that table only to
+`trace_account_admission_runtime`, and no pipeline migration grants it
+again. The ingest login therefore needs membership in that role, which
+`main`'s withdrawal route already needs. Without it, withdrawing a
+submission of a source session fails with `permission denied` on either
+route:
+
+```sql
+GRANT trace_account_admission_runtime TO <ingest runtime login>;
+```
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and

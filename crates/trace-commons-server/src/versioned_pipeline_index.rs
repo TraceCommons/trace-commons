@@ -4,7 +4,7 @@
 //! Test-only isolated index. It is never production qualified.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
@@ -37,10 +37,26 @@ struct IsolatedIndexState {
     fault: IndexFault,
 }
 
+/// Whether the calling thread is a Tokio runtime worker driving async tasks,
+/// where a synchronous dependency call would park the worker: `Handle::
+/// block_on` refuses to run there, and runs on a blocking-pool thread or
+/// outside a runtime. Test support for Zaki review 1, round 2, N-6: a test
+/// double that answers an error when this is true shows a synchronous call
+/// that was not moved to the blocking pool.
+pub fn called_on_a_runtime_worker() -> bool {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return false;
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.block_on(async {}))).is_err()
+}
+
 #[derive(Debug)]
 pub struct IsolatedPipelineIndex {
     state: Mutex<IsolatedIndexState>,
     writer_calls: AtomicUsize,
+    /// When set, every read and write called on a runtime worker answers a
+    /// failure (`called_on_a_runtime_worker`).
+    refuse_on_runtime_workers: AtomicBool,
 }
 
 impl IsolatedPipelineIndex {
@@ -51,7 +67,18 @@ impl IsolatedPipelineIndex {
                 fault: IndexFault::None,
             }),
             writer_calls: AtomicUsize::new(0),
+            refuse_on_runtime_workers: AtomicBool::new(false),
         })
+    }
+
+    /// From now on, every read and write called on a Tokio runtime worker
+    /// fails (N-6 test support).
+    pub fn refuse_calls_on_runtime_workers(&self) {
+        self.refuse_on_runtime_workers.store(true, Ordering::SeqCst);
+    }
+
+    fn refuses_this_thread(&self) -> bool {
+        self.refuse_on_runtime_workers.load(Ordering::SeqCst) && called_on_a_runtime_worker()
     }
 
     pub fn writer_calls(&self) -> usize {
@@ -72,6 +99,22 @@ impl IsolatedPipelineIndex {
                 stored_tenant == tenant_storage_ref && stored_index == index_id
             })
             .count()
+    }
+
+    /// The number of distinct revisions with at least one entry under
+    /// `tenant_storage_ref` and `index_id`.
+    pub fn revision_count(&self, tenant_storage_ref: &TenantStorageRef, index_id: &str) -> usize {
+        self.state
+            .lock()
+            .expect("index mutex")
+            .entries
+            .iter()
+            .filter(|((stored_tenant, stored_index, _), _)| {
+                stored_tenant == tenant_storage_ref && stored_index == index_id
+            })
+            .map(|(_, entry)| entry.revision_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
     }
 }
 
@@ -99,6 +142,7 @@ impl VectorIndexReader for IsolatedPipelineIndex {
         tenant_storage_ref: &TenantStorageRef,
         index_id: &str,
     ) -> anyhow::Result<IndexSnapshot> {
+        anyhow::ensure!(!self.refuses_this_thread(), "called on a runtime worker");
         let state = self.state.lock().expect("index mutex");
         let mut hasher = Sha256::new();
         let mut cardinality = 0_u64;
@@ -125,6 +169,7 @@ impl VectorIndexReader for IsolatedPipelineIndex {
         k: usize,
         exclude_revision: Option<Uuid>,
     ) -> anyhow::Result<Vec<NearestNeighbor>> {
+        anyhow::ensure!(!self.refuses_this_thread(), "called on a runtime worker");
         let state = self.state.lock().expect("index mutex");
         let mut neighbors = state
             .entries
@@ -159,6 +204,9 @@ impl VectorIndexWriter for IsolatedPipelineIndex {
         content_hash: &str,
     ) -> Result<IndexUpsertResult, IndexWriteError> {
         self.writer_calls.fetch_add(1, Ordering::SeqCst);
+        if self.refuses_this_thread() {
+            return Err(IndexWriteError::Failed);
+        }
         let mut state = self.state.lock().expect("index mutex");
         match state.fault {
             IndexFault::FailBeforeApply => {
@@ -210,6 +258,9 @@ impl VectorIndexWriter for IsolatedPipelineIndex {
         index_id: &str,
         revision_id: Uuid,
     ) -> Result<bool, IndexWriteError> {
+        if self.refuses_this_thread() {
+            return Err(IndexWriteError::Failed);
+        }
         let mut state = self.state.lock().expect("index mutex");
         if state.fault == IndexFault::FailBeforeApply {
             state.fault = IndexFault::None;
