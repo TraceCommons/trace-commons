@@ -50,6 +50,19 @@ final class GlassMaterialTests: XCTestCase {
         }
     }
 
+    /// `.opaque` is no material: the backdrop must not quietly build a
+    /// vibrancy view for it.
+    @MainActor
+    func test_theOpaqueBackdropIsASolidViewNotVibrancy() {
+        let view = GlassBackdrop.makeView(.opaque, cornerRadius: 16)
+        XCTAssertFalse(view is NSVisualEffectView)
+        let fill = view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0)?.usingColorSpace(.sRGB) }
+        let opaque = NSColor(GlassTokens.Color.paneOpaque.color).usingColorSpace(.sRGB)
+        XCTAssertEqual(fill?.alphaComponent, 1)
+        XCTAssertEqual(fill?.redComponent ?? -1, opaque?.redComponent ?? -2, accuracy: 0.002)
+        XCTAssertEqual(fill?.blueComponent ?? -1, opaque?.blueComponent ?? -2, accuracy: 0.002)
+    }
+
     private static func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }

@@ -80,6 +80,9 @@ struct TraceCommonsShell: App {
         Window("Monitor", id: WindowID.monitor) {
             MonitorWindowView()
                 .environmentObject(model)
+                // The monitor reads the daemon whatever the main window
+                // shows (Insights defers services).
+                .onAppear { navigation.activateServicesForWindow() }
                 .environment(compute)
                 .tint(TC.accent)
         }
@@ -91,6 +94,10 @@ struct TraceCommonsShell: App {
         Settings {
             MonitorSettingsWindow(navigation: navigation)
                 .environmentObject(model)
+                // Settings loads and saves through the daemon; opened with
+                // ⌘, while the main window rests on Insights it would
+                // otherwise show nothing and drop edits.
+                .onAppear { navigation.activateServicesForWindow() }
                 .environment(compute)
                 .tint(TC.accent)
         }
@@ -136,18 +143,24 @@ private struct Launcher: View {
 
     @MainActor
     private func activateServices() {
-        navigation.activateServicesIfNeeded {
-            model.start()
-            Task {
-                await compute.start()
-                compute.startMonitoring()
-            }
-            // Update checks begin here and nowhere else. UpdateController itself
-            // decides whether Sparkle runs at all: under a Homebrew install this
-            // call constructs no updater and schedules nothing.
-            UpdateController.shared.start()
-            Notifier.shared.configure()
+        navigation.activateServicesIfNeeded { startServices() }
+    }
+
+    /// The service start, once, from whichever comes first: the main
+    /// window leaving Insights, or a window that needs services (Settings,
+    /// the monitor) opening.
+    @MainActor
+    private func startServices() {
+        model.start()
+        Task {
+            await compute.start()
+            compute.startMonitoring()
         }
+        // Update checks begin here and nowhere else. UpdateController itself
+        // decides whether Sparkle runs at all: under a Homebrew install this
+        // call constructs no updater and schedules nothing.
+        UpdateController.shared.start()
+        Notifier.shared.configure()
     }
 
     @MainActor
@@ -160,6 +173,7 @@ private struct Launcher: View {
         appDelegate.compute = compute
         appDelegate.navigation = navigation
         appDelegate.model = model
+        navigation.registerServiceStart { startServices() }
         activateServices()
         // The only thing a notification action may do is open this window.
         Notifier.shared.onReview = { OpenMainWindow.request() }
