@@ -144,6 +144,10 @@ extension DaemonData {
         public let projectPath: String?
         public let sessionPath: String?
         public let sizeBytes: Int?
+        /// The pinned preview's measured envelope size (K10), or `nil` when
+        /// nothing is pinned. Measured before scope stamping, so it can be a
+        /// few bytes short of what an upload sends.
+        public let wouldSendBytes: Int?
         public let discoveredAt: Date?
         /// `pending`, `approved`, `uploading`, `uploaded`, `refused`,
         /// `failed`, `expired`, `superseded`. See `queueState`.
@@ -198,6 +202,7 @@ extension DaemonData {
             case projectPath = "project_path"
             case sessionPath = "session_path"
             case sizeBytes = "size_bytes"
+            case wouldSendBytes = "would_send_bytes"
             case discoveredAt = "discovered_at"
             case state
             case reasonLabel = "reason_label"
@@ -787,6 +792,11 @@ extension DaemonData {
         public let explanations: [String]?
         public let lastRefreshedAt: Date?
         public let withdrawnAt: Date?
+        /// When a web withdrawal was first seen (K12). `nil` when not revoked,
+        /// revoked before the field existed, or withdrawn from this device.
+        public let revokedAt: Date?
+        /// The bytes this submission actually sent (K10), or `nil`.
+        public let uploadedBytes: Int?
         /// Provenance: `true` armed, `false` a person, `nil` NOT RECORDED.
         public let approvedUnattended: Bool?
         /// `worked` / `partly` / `failed`, or `nil` when none was given.
@@ -805,6 +815,8 @@ extension DaemonData {
             case creditPointsFinal = "credit_points_final"
             case lastRefreshedAt = "last_refreshed_at"
             case withdrawnAt = "withdrawn_at"
+            case revokedAt = "revoked_at"
+            case uploadedBytes = "uploaded_bytes"
             case approvedUnattended = "approved_unattended"
             case approvedVerdict = "approved_verdict"
         }
