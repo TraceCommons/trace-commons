@@ -5369,3 +5369,61 @@ per folder, `legacy-invite-migrated`), and
 through its copy commands, macOS and Windows through
 `tc_legacy_migration_notice`, GTK directly; each passes the `notice` object
 through unread and acknowledges with `acknowledge_legacy_invite_migration`.
+
+## Zaki network addendum: provider model spend and summary identity (#1173)
+
+This addendum supersedes the initial `model_spend` unavailable-only contract.
+`model_spend {}` is asynchronous and uses the existing connected NEAR AI session,
+selected inference-key organization (or the existing first-active-organization
+fallback for a legacy session), and the fixed trusted management origin
+`https://cloud-api.near.ai`. It requests
+`GET /v1/organizations/{organization}/usage/by-model?period=day`. The deployed
+[provider OpenAPI](https://cloud-api.near.ai/api-docs/openapi.json) defines this
+session-authenticated rolling 24-hour report. No registry price estimate is
+converted into an actual cost, and no additional reporting token is minted.
+
+A known reply has the following fields; all metadata shown is mandatory:
+
+```json
+{"known":true,"scope":"near_ai_organization","source":"near_ai_usage_by_model","currency":"USD","scale":9,"window_hours":24,"since":"2026-10-01T12:00:00Z","observed_at":"2026-10-02T12:00:00Z","models":[{"model":"example-model","billed_nanos":1501,"billed_micros":2,"rounding":"nearest_micro_half_up","calls":3}]}
+```
+
+This is a SAMPLE, not a release fallback. `since` is the provider's `start_date`,
+validated as an RFC3339 UTC timestamp no later than the daemon observation time;
+`observed_at` is the daemon's completion time. `billed_nanos` retains the exact
+provider usage cost in nanoUSD (the official [usage source](https://github.com/nearai/cloud-api/blob/88989203c8172fd19c46c2b0082c71b024925f49/crates/api/src/routes/usage.rs#L1624) specifies scale 9). `billed_micros` is a compatibility amount rounded
+to the nearest microUSD, half upward; `rounding` makes that conversion explicit.
+Counts and native costs must be nonnegative signed 64-bit integers. Model labels
+use the existing content-free label sanitizer. Provider display prose, organization
+identifiers, access tokens, inference credentials, and refresh tokens are omitted.
+
+The scope is the connected NEAR AI organization's usage across its callers. It is
+not a sum attributed to this machine, its local proxy, a tool, or its local ledger;
+it is not a payment, invoice, settlement, or cryptographic receipt. Empty provider
+`data` is a readable known report with `models: []`, rather than an unavailable
+report. Readable zero-cost rows retain their zero.
+
+No session, expired session, no organization, unavailable transport, or malformed
+source data returns `known:false`, `since:null`, `observed_at:null`, `models:[]`,
+`reason_label:"billed-model-spend-unavailable"`, and `state` equal to respectively
+`no_session`, `session_expired`, `no_organization`, or `unavailable`. Scope, source,
+currency, scale, and window remain present with the values above. Unknown never
+means known zero and never serves the last successful amount after a failed read.
+The balance and model-spend reads share the existing session rotation lock,
+conservative access-token reuse, single 401 retry, and stored-connection completion
+check. A forgotten or replaced account cannot receive an in-flight old account's
+cost report. Successful readings have the same 60-second cache policy as balance.
+The synchronous dispatcher returns `model-spend-requires-async`; socket and local
+CLI callers use the asynchronous dispatcher.
+
+Each newly returned `inference_summary.summary.groups` row also carries mandatory
+`group_id`, formatted `sha256:<64 lowercase hexadecimal digits>`. This is SHA-256
+of the canonical JSON array `[original_model, original_backend, original_route,
+original_work_kind]` before content-free label normalization. It is an opaque row
+identity, not a verified provider identity. Backend labels continue to retain only
+the vetted `nearai` label or an opaque digest. Original model labels that normalize
+to the same display value therefore remain separate rows with separate stable IDs;
+no group counts, costs, or proof totals are merged or lost. Older daemons may omit
+`group_id`; clients may retain their existing tuple fallback for those versions.
+The summary wrapper preserves the validated upstream groups and totals, with these
+explicit identity and privacy normalizations.

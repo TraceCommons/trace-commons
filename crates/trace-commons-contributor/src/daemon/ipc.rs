@@ -2365,6 +2365,7 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("inference_summary", "inference-summary-requires-async"),
+    ("model_spend", "model-spend-requires-async"),
     ("set_private_ai", "private-ai-requires-async"),
     ("invite_lookup", "invite-lookup-requires-async"),
     ("account_bind", "identity-requires-async"),
@@ -2486,7 +2487,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
         "inference_call_proof" => super::network_data::handle_proof(shared, req),
-        "model_spend" => super::network_data::handle_model_spend(req),
         "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_kept" => handle_list_kept(shared, req),
@@ -4088,6 +4088,7 @@ pub(crate) async fn handle_set_settings_async(shared: &DaemonShared, req: &Reque
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
         "inference_summary" => super::network_data::handle_summary(shared, req).await,
+        "model_spend" => super::network_data::handle_model_spend(shared, req).await,
         "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
         "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
         "account_bind" => super::native_identity::handle(shared, req).await,
@@ -13355,7 +13356,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 53);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 54);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -13796,8 +13797,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 58, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 60, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 57, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 61, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

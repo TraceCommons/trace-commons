@@ -63,6 +63,9 @@ pub(crate) struct SummaryView {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct SummaryGroup {
+    /// Opaque identity assigned by the daemon before sanitizing display labels.
+    #[serde(skip_deserializing, default)]
+    pub group_id: String,
     pub model: Option<String>,
     pub backend: String,
     pub route: String,

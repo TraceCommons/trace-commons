@@ -29,16 +29,7 @@ pub(crate) async fn handle_summary(shared: &DaemonShared, req: &Request) -> Resp
         None => None,
     };
     if let Some(summary) = summary.as_mut() {
-        for group in &mut summary.groups {
-            group.model = group
-                .model
-                .as_deref()
-                .map(|model| super::inference_map::model_label(Some(model)));
-            // Arbitrary registry ids are neither public labels nor proof of provider identity.
-            if group.backend != "nearai" {
-                group.backend = format!("sha256:{:x}", Sha256::digest(group.backend.as_bytes()));
-            }
-        }
+        normalize_summary(summary);
     }
     Response::ok(
         req.id,
@@ -48,6 +39,24 @@ pub(crate) async fn handle_summary(shared: &DaemonShared, req: &Request) -> Resp
             "summary": summary,
         }),
     )
+}
+
+fn normalize_summary(summary: &mut crate::routing::ironwire::SummaryView) {
+    for group in &mut summary.groups {
+        // JSON array boundaries distinguish tuples even when display labels
+        // sanitize to the same value. Only the digest crosses the socket.
+        let key =
+            serde_json::to_vec(&(&group.model, &group.backend, &group.route, &group.work_kind))
+                .expect("summary tuple serializes");
+        group.group_id = format!("sha256:{:x}", Sha256::digest(key));
+        group.model = group
+            .model
+            .as_deref()
+            .map(|model| super::inference_map::model_label(Some(model)));
+        if group.backend != "nearai" {
+            group.backend = format!("sha256:{:x}", Sha256::digest(group.backend.as_bytes()));
+        }
+    }
 }
 
 pub(crate) fn handle_proof(shared: &DaemonShared, req: &Request) -> Response {
@@ -80,13 +89,10 @@ pub(crate) fn handle_proof(shared: &DaemonShared, req: &Request) -> Response {
     )
 }
 
-pub(crate) fn handle_model_spend(req: &Request) -> Response {
+pub(crate) async fn handle_model_spend(shared: &DaemonShared, req: &Request) -> Response {
     Response::ok(
         req.id,
-        serde_json::json!({
-            "known": false, "since": null, "models": [],
-            "reason_label": "billed-model-spend-unavailable",
-        }),
+        super::nearai_credential::balance::read_model_spend(shared).await,
     )
 }
 
@@ -246,6 +252,30 @@ mod tests {
             "../../tests/fixtures/ironwire/sample-summary.json"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn summary_group_identity_survives_colliding_sanitized_model_labels() {
+        let mut body = sample();
+        let mut second = body["groups"][0].clone();
+        body["groups"][0]["model"] = serde_json::json!("https://secret.example/one");
+        second["model"] = serde_json::json!("https://secret.example/two");
+        body["groups"].as_array_mut().unwrap().push(second);
+        let mut summary: crate::routing::ironwire::SummaryView =
+            serde_json::from_value(body).unwrap();
+        normalize_summary(&mut summary);
+        let last = summary.groups.last().unwrap();
+        assert_eq!(summary.groups[0].model, last.model);
+        assert_ne!(summary.groups[0].group_id, last.group_id);
+        assert_eq!(summary.groups[0].total.calls, 3);
+        assert_eq!(last.total.calls, 3);
+        assert!(
+            !serde_json::to_string(&summary)
+                .unwrap()
+                .contains("secret.example")
+        );
+        let same: crate::routing::ironwire::SummaryView = serde_json::from_value(sample()).unwrap();
+        assert_eq!(same.groups.len() + 1, summary.groups.len());
     }
 
     const SINCE: &str = "2026-10-01T00:00:00+02:00";
