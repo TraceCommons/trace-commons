@@ -465,7 +465,6 @@ mod tests {
                 revoked_at: None,
                 approved_unattended: None,
                 approved_verdict: None,
-                title: None,
                 uploaded_bytes: None,
             })
             .collect();

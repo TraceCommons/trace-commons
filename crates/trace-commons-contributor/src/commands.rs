@@ -2060,7 +2060,6 @@ mod tests {
             status: "accepted".into(),
             approved_unattended: None,
             approved_verdict: None,
-            title: None,
             uploaded_bytes: None,
         };
         assert_eq!(
@@ -4651,7 +4650,6 @@ mod logout_tests {
                     status: "accepted".to_string(),
                     approved_unattended: None,
                     approved_verdict: None,
-                    title: None,
                     uploaded_bytes: None,
                 })
                 .unwrap();

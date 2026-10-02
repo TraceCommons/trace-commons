@@ -706,15 +706,6 @@ pub struct Receipt {
     /// `#[serde(default)]` for the same reason as `approved_unattended`.
     #[serde(default)]
     pub approved_verdict: Option<String>,
-    /// The session's title (K9), carried from `QueueEntry::title` and set
-    /// once, at upload time, by whoever drove the upload -- the same
-    /// provenance as `approved_unattended` and `approved_verdict` above.
-    /// `None` when the task named no description, or when this receipt
-    /// predates the field.
-    ///
-    /// `#[serde(default)]` for the same reason as `approved_unattended`.
-    #[serde(default)]
-    pub title: Option<String>,
     /// The serialized size, in bytes, of the redacted envelope this receipt's
     /// submission actually sent (K10) -- the witness's own
     /// `envelope_bytes.len()` when a witnessed response carried the upload,
@@ -1642,7 +1633,6 @@ mod tests {
             status: "accepted".into(),
             approved_unattended: None,
             approved_verdict: None,
-            title: None,
             uploaded_bytes: None,
         };
         store.append_receipt(&r).unwrap();
@@ -1682,9 +1672,10 @@ mod tests {
         assert_eq!(loaded[0].approved_verdict, None);
     }
 
-    /// K9: a receipts line written before `title` existed must still load.
+    /// K10: a receipts line written before `uploaded_bytes` existed must
+    /// still load.
     #[test]
-    fn a_receipt_line_written_before_title_existed_still_loads() {
+    fn a_receipt_line_written_before_uploaded_bytes_existed_still_loads() {
         let (_d, store) = store();
         let old_line = serde_json::json!({
             "submission_id": uuid::Uuid::new_v4(),
@@ -1700,8 +1691,6 @@ mod tests {
         .unwrap();
         let loaded = store.load_receipts().unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].title, None);
-        // K10: the same must hold for `uploaded_bytes`.
         assert_eq!(loaded[0].uploaded_bytes, None);
     }
 
