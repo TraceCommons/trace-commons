@@ -4817,7 +4817,7 @@ error string into `error.message`.
 |---|---|---|---|
 | `inference_summary` | `since?`: RFC3339; default previous 24 hours | `readable`, `window_hours`, `observed_at`, `summary` | IronWire summary exists; daemon wrapper new |
 | `inference_call_proof` | `call_id`: positive integer | `call_id`, `proof`, `checked_at`, `checks`, `readable`, `found` | Stored proof labels exist; method and registration new |
-| `model_spend` | none | `known`, `since`, `models`, `reason_label` | Actual billed amount by model unavailable |
+| `model_spend` | none | `known`, `scope`, `source`, `since`, `models`, `reason_label` | Organization-wide provider billing; see the Z4 source contract below |
 | `private_ai` | none | `on`, `state`, `port`, `disclosure` | Hosting state and Rust disclosure exist; wrapper new |
 | `set_private_ai` | `on`: boolean; `confirmed: true` when enabling | same as `private_ai` | Reuses existing async hosting lifecycle; wrapper new |
 | `mission_catalogue` | `limit?`: 1–50, default 20; `before?`: UUID | `kind`, `catalogue`, `disclosure` | Public skill-evaluation catalogue/client exist; IPC new |
@@ -4879,7 +4879,8 @@ read-only. It never fetches prompts, responses or receipt bodies.
 
 **C1 migration:** `InferenceSummary.models` / `ModelSummary` in #1175 were
 explicitly provisional. Decode this wrapper and the actual upstream DTO;
-identify group rows by all grouping fields, not `model` alone. A separate
+identify group rows by `group_id`, with all grouping fields as the legacy
+fallback, never by `model` alone. A separate
 view projection may aggregate per model but must retain incomplete pricing,
 route/proof distinctions and the distinction between unknown and empty.
 This contract does not authorize editing the teammate's open branch.
@@ -4905,12 +4906,12 @@ SAMPLE `model_spend` request: `{}`; SAMPLE result:
 {"known":false,"since":null,"models":[],"reason_label":"billed-model-spend-unavailable"}
 ```
 
-There is no authoritative provider debit/invoice amount by model in the
-available source. This unknown result is the supported contract until one
-exists; it is never a zero balance. IronWire summary prices, backend kinds,
+This unknown result is returned when authoritative provider billing is
+unavailable; it is never a zero balance. The Z4 source contract below defines
+known organization-wide provider rows, their window, exact nano-USD amounts
+and rounded display amounts. IronWire summary prices, backend kinds,
 account-wide NEAR AI balance and the existing harness daily price estimate
-cannot be converted into billed-per-model facts. A future known result needs
-an explicit source and window contract before adding billed rows.
+cannot be converted into billed-per-model facts.
 
 ### Private AI switch
 

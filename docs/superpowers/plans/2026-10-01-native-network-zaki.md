@@ -19,20 +19,20 @@ the credit-to-inference bridge remains unspecified.
 | Work | Deliverable / evidence boundary |
 |---|---|
 | C3 | Contract names, DTOs, SAMPLE JSON and support status before behavior |
-| Z1 | Anonymized pilot recordings are separate evidence; existing log fixture is real, synthetic samples are not recordings. Other recordings remain outstanding until captured safely. |
+| Z1 | Bounded anonymizer and actual local log/refusal projections. The pre-existing fake-local fixture is synthetic. Successful invite, summary, HTTP credit/settlement and mission publication captures remain operational gates. |
 | Z2 | Bounded IronWire summary read preserving real upstream groups and totals |
 | Z3 | Register proof lookup; return stored label, no fabricated check details |
-| Z4 | Explicit billed-per-model unknown until actual provider source exists |
+| Z4 | Authoritative NEAR AI organization-wide per-model billing, with source/window and exact nano-USD amounts; unavailable remains unknown and never becomes local-device spend |
 | Z5 | Extend existing map additively with owned hub/route facts; no invented provider or remote dev-server discovery; coordinate K14 |
 | Z6 | Core disclosure plus read/write wrappers around existing hosting lifecycle |
 | Z7 | Build the configurable missions server with rewards off. Commons pending-credit ledger is settled (#1118); daily economics and credit-to-inference bridge remain unspecified. Preserve #1174 M1–M4; no reward semantics invented. |
-| Z8 | IPC wrapper around existing anonymous skill-evaluation catalogue; local matching sends no profile/results |
+| Z8 | Separate skill-evaluation and trace-activity catalogue/status IPC; anonymous catalogue reads and local matching send no profile/results |
 | Z9 | Existing `history_rollup.community` is authoritative; preserve rank and absence behavior |
 | Z10 | Existing non-redeeming issuer lookup over IPC; full invite URL, real unit, pending conditions |
 | Z11 | Approved native passkey names, daemon ceremonies/bind/session lifecycle and Swift platform adapter; no screen redesign |
-| Z12 | Add entitlement/profile verification; approved profile bytes and signed observed origin remain operational gates |
+| Z12 | Renewed approved profile and native Associated Domains entitlement with release validation. Signed observed Apple origin and AASA qualification remain operational gates |
 | Z13 | Extract existing browser sign-in/status into IPC; preserve enrollment prerequisite and support pre-enrollment status/sign-out |
-| Z14 | Inspect and extend existing signed native update feed/release verification; signing/publishing remains separate operational evidence |
+| Z14 | Existing Sparkle release path retained; current 0.12.6 build 4301 enclosure signature verified against the installed signed app key. No installation/update or new release performed |
 | Z15 | Review consent boundaries in affected core/adapter work; every future screen PR still needs its own consent review |
 
 - [ ] Land the C3 docs-only commit and notify implementers of exact interfaces.
