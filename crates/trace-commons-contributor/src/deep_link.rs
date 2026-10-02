@@ -158,7 +158,17 @@ fn invite_link_is_valid(value: &str) -> bool {
     fragment_code || query_code
 }
 
+/// The invite folded into an `enroll` link. The outer link goes through
+/// [`deep_link_parts`] first, like every other arm: [`invite_from_deep_link`]
+/// parses with a WHATWG URL parser, which trims leading/trailing whitespace,
+/// deletes tabs and newlines anywhere, and accepts a userinfo or a port on
+/// the authority -- each of which this module refuses rather than
+/// normalising away.
 fn enroll_invite(url: &str) -> Option<String> {
+    let (authority, _) = deep_link_parts(url)?;
+    if !authority.eq_ignore_ascii_case("enroll") {
+        return None;
+    }
     let invite = invite_from_deep_link(url)?;
     invite_link_is_valid(&invite).then_some(invite)
 }
@@ -262,6 +272,41 @@ mod tests {
             parse_deep_link("tracecommons://enroll?invite="),
             Err(DEEP_LINK_INVALID)
         );
+    }
+
+    /// The two invite refusals Tauri's own test pinned before the move: an
+    /// `invite` under any authority but `enroll`, and an invite URL that
+    /// carries no code in either its fragment or a `code=` query pair.
+    #[test]
+    fn an_invite_under_another_authority_or_without_a_code_is_refused() {
+        assert_eq!(
+            parse_deep_link(
+                "tracecommons://other?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE"
+            ),
+            Err(DEEP_LINK_INVALID)
+        );
+        assert_eq!(
+            parse_deep_link("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard"),
+            Err(DEEP_LINK_INVALID)
+        );
+    }
+
+    /// The enroll arm is held to the same outer-link rules as every other
+    /// arm: whitespace or a control character anywhere in the link, a
+    /// userinfo component, or a port on the authority is refused, never
+    /// trimmed or normalised away by a lenient URL parser first.
+    #[test]
+    fn enroll_links_get_the_same_outer_link_checks_as_every_other_arm() {
+        for arg in [
+            " tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+            "tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE\n",
+            "tracecommons://en\troll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+            "tracecommons://enroll?invite=https%3A%2F%2Fissuer.ex\nample%2Fonboard%23CODE",
+            "tracecommons://user@enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+            "tracecommons://enroll:443?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+        ] {
+            assert_eq!(parse_deep_link(arg), Err(DEEP_LINK_INVALID), "{arg:?}");
+        }
     }
 
     #[test]
