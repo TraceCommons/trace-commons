@@ -4130,6 +4130,15 @@ impl PgPipelineStore {
     /// `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS`, not the phase-age
     /// backoff, since the run waited for nothing of its own. Fenced by the
     /// lease like `mark_transient_retry`.
+    ///
+    /// The Score staged its attempt rows before it tried the lock (rebase
+    /// 10, option D; `stage_score_artifacts_before_lock`), with no hash, and
+    /// published nothing, so no object is stored at their keys. The same
+    /// transaction deletes them, so a busy try, which repeats every
+    /// `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS` while another Score of
+    /// the tenant runs, leaves no rows for the attempt sweep. A release the
+    /// lease fence refuses deletes nothing; the sweep removes those rows
+    /// after their `cleanup_after`.
     pub async fn release_score_lock_busy(
         &self,
         run: &PipelineRunRecord,
@@ -4159,6 +4168,13 @@ impl PgPipelineStore {
             .await?
             .ok_or_else(stale_lease_error)?;
         let updated = pipeline_run_from_row(&row)?;
+        tx.execute(
+            "DELETE FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND state = 'staged' AND ciphertext_sha256 IS NULL",
+            &[&run.tenant_id, &run.run_id, &lease_token],
+        )
+        .await?;
         tx.commit().await?;
         Ok(updated)
     }
@@ -9598,7 +9614,9 @@ impl PipelineService {
     /// object it publishes already has a committed `staged` row. That
     /// transaction takes only the foreign key's `FOR KEY SHARE` on the run
     /// row and ends before the Score lock is requested, so it adds no
-    /// lock-order pair.
+    /// lock-order pair. A Score that then finds the lock held has published
+    /// nothing, so the transaction that releases its run also deletes those
+    /// rows (`release_score_lock_busy`).
     async fn commit_score_phase(
         &self,
         run: &PipelineRunRecord,

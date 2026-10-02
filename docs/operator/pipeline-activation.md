@@ -1090,6 +1090,11 @@ is not. Those rows are staged with no hash:
   could still be live (four leases after its rows were staged), so an object
   is never written after its row could have been swept. It stops as an
   uncharged `lease_expired` instead.
+- A compatibility Score that finds its tenant's Score lock held
+  (`score_lock_busy`, see "Compatibility credit") has staged its two rows
+  and published nothing. The transaction that releases its run deletes
+  them, so a busy try, which repeats every 2 seconds while another Score of
+  the tenant runs, leaves no rows for this sweep.
 - The artifact store must be able to derive an object key before the
   content exists and delete at a key alone. The local store, the
   filesystem-remote provider and the GCS provider can. Three labels name a

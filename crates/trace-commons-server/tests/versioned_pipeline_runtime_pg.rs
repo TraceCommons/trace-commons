@@ -30170,6 +30170,94 @@ async fn the_attempt_artifact_guard_lets_only_the_commit_set_a_missing_hash() {
     );
 }
 
+/// Option D under PR 3's try-lock (09fae4b0): a compatibility Score stages
+/// its two attempt rows before it tries its tenant's Score lock. One that
+/// finds the lock held is released uncharged as `score_lock_busy` and has
+/// published nothing, so the transaction that releases it removes both
+/// rows: a busy try leaves no row for the sweep. Once the lock is free, the
+/// next attempt stages, writes and commits rows of its own.
+#[tokio::test]
+async fn a_compatibility_score_that_finds_its_tenant_lock_held_leaves_no_staged_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let writes = Arc::new(AtomicUsize::new(0));
+    let counting: Arc<dyn TraceArtifactStore> = {
+        let writes = writes.clone();
+        Arc::new(HookedWriteStore::new(
+            artifact_store(&dir),
+            Box::new(move || {
+                writes.fetch_add(1, Ordering::SeqCst);
+            }),
+        ))
+    };
+    let service = compatibility_test_builder(
+        backend.clone(),
+        counting,
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .build()
+    .expect("build pipeline service");
+    let tenant = format!("compat-lock-busy-rows-{}", uuid::Uuid::new_v4());
+    let reviewed = compatibility_run_past_review(&service, &tenant).await;
+    let writes_after_review = writes.load(Ordering::SeqCst);
+
+    let mut holder = owner_client().await;
+    let lock = holder.transaction().await.unwrap();
+    hold_compatibility_score_lock(&lock, &tenant).await;
+    let released = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(
+        (
+            released.state,
+            released.last_error_label.as_deref(),
+            released.attempt_count,
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_SCORE_LOCK_BUSY_LABEL),
+            reviewed.attempt_count,
+        ),
+        "a Score that finds its tenant lock held is released uncharged"
+    );
+    assert_eq!(
+        writes.load(Ordering::SeqCst),
+        writes_after_review,
+        "a busy Score publishes nothing"
+    );
+    assert_eq!(
+        score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id).await,
+        Vec::new(),
+        "the release removes the rows the busy Score staged before the lock"
+    );
+
+    lock.commit().await.unwrap();
+    force_due(&backend, &tenant, reviewed.run_id).await;
+    let scored = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score runs once the lock is free");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    let rows = score_attempt_rows_with_hashes(&backend, &tenant, reviewed.run_id).await;
+    assert!(
+        !rows.is_empty()
+            && rows
+                .iter()
+                .all(|(_, state, _, hash)| state == "committed"
+                    && is_ciphertext_hash(hash.as_deref())),
+        "the next attempt commits its own rows: {rows:?}"
+    );
+}
+
 /// The renewal gap rebase 10 named: a compatibility Score that waits for
 /// its tenant's Score lock has its lease renewed while it waits. With a
 /// 1-second Score lease, the Score is still `leased` under its own token
