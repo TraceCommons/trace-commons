@@ -1,7 +1,7 @@
 {
   "approved": 1,
   "hold_secs": 10,
-  "hold_until": "<hold_until>",
+  "hold_until": "1970-01-01T00:00:00Z",
   "flagged": 1,
   "redactions": {
     "local_path": 2,

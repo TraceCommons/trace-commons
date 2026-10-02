@@ -366,13 +366,20 @@ fn default_settings() -> DaemonSettings {
 // anything that mutates the queue (a keep or an approve), exactly as that
 // harness orders it ("approve last").
 
-/// Keys whose value is computed from the real wall clock at call time
-/// (`Utc::now()` inside the handler) rather than from anything this file
-/// authored, and so differs on every run. Everything else either comes from
-/// a literal this file chose or is derived from one by a pure function
+/// Keys whose value is a timestamp computed from the real wall clock at call
+/// time (`Utc::now()` inside the handler) rather than from anything this
+/// file authored, and so differs on every run. Everything else either comes
+/// from a literal this file chose or is derived from one by a pure function
 /// (`entry_id_for`, `project_id_for`), and is therefore already stable.
 const VOLATILE_KEYS: &[&str] =
     &["next_digest_at", "resets_at", "since", "observed_at", "last_refresh_at", "next_retry_at", "hold_until"];
+
+/// A fixed, recognizably-fake instant that still decodes as a real one.
+/// `<next_digest_at>` would say "this value varies" just as plainly, but
+/// every one of `VOLATILE_KEYS` is typed as a date on the Swift side, and a
+/// sample file the decoder cannot parse defeats the entire point of
+/// recording real replies.
+const VOLATILE_TIMESTAMP_PLACEHOLDER: &str = "1970-01-01T00:00:00Z";
 
 fn normalize(value: &mut Value, key: Option<&str>) {
     match value {
@@ -388,7 +395,7 @@ fn normalize(value: &mut Value, key: Option<&str>) {
         }
         Value::String(s) => {
             if key.is_some_and(|k| VOLATILE_KEYS.contains(&k)) && !s.is_empty() {
-                *s = format!("<{}>", key.unwrap());
+                *s = VOLATILE_TIMESTAMP_PLACEHOLDER.to_string();
             }
         }
         _ => {}

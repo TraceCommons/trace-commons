@@ -61,11 +61,16 @@ final class DaemonDataContractTests: XCTestCase {
 
     // MARK: - Unknown stays unknown
 
-    func testAbsentDecisionsOwedDecodesAsNil() async throws {
-        let status = try await SampleDaemonClient(.unknownCounts).status()
-        XCTAssertNil(status.decisionsOwed)
-        XCTAssertNotNil(status.queueDepth, "queue_depth is present and must not stand in for it")
-    }
+    // K2 of #1173: there used to be a test here asserting that `unknownCounts`
+    // decodes `decisions_owed` as nil. That was never a real daemon reply --
+    // `status_value` (`daemon::ipc`) always writes `decisions_owed` as a
+    // concrete count, for every state a temp store can reach; K2's recording
+    // surfaced that the hand-written sample's "absent" case had no real
+    // counterpart. The model's own tolerance for an absent or null
+    // `decisions_owed` (a daemon too old to send it) is still real and still
+    // covered below; `unknownCounts`'s actual distinguishing facts --
+    // discovered-but-unconfigured folders, and credit/spend/harness staying
+    // unknown -- are covered by `testUnknownCreditAndSpendStayUnknown`.
 
     func testNullAndAbsentDecisionsOwedBothDecodeAsNilAndZeroStaysZero() throws {
         let decoder = DaemonDataDecoding.decoder()
@@ -150,8 +155,21 @@ final class DaemonDataContractTests: XCTestCase {
         XCTAssertEqual(rollup.takenBack, 1)
     }
 
+    /// K2: `inference_calls` is recorded from the real daemon, which answers
+    /// an empty, unreadable page whenever no routing proxy is declared --
+    /// true of every sample set, since none can declare a live one. What
+    /// this test is actually about, `ProofLabel.isProof`, is exercised
+    /// directly against decoded calls rather than against sample data that
+    /// cannot carry a live proxy's rows.
     func testOnlyVerifiedIsProof() async throws {
-        let calls = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls
+        func call(proof: String) throws -> DaemonData.InferenceCall {
+            try DaemonDataDecoding.decoder().decode(
+                DaemonData.InferenceCall.self,
+                from: Data(
+                    #"{"id":1,"at":"2026-09-30T09:00:00Z","tool":"claude-code","family":"anthropic","model":"m","route":"routed","proof":"\#(proof)"}"#
+                        .utf8))
+        }
+        let calls = try [call(proof: "verified"), call(proof: "pending"), call(proof: "failed"), call(proof: "gateway_only")]
         XCTAssertEqual(calls.filter { $0.proofLabel.isProof }.map(\.proof), ["verified"])
         XCTAssertTrue(calls.contains { $0.proofLabel == .failed })
         XCTAssertEqual(DaemonData.ProofLabel.allCases.filter(\.isProof), [.verified])

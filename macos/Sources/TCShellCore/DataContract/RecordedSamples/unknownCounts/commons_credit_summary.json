@@ -11,5 +11,5 @@
   "commons_currency_earned_this_period": null,
   "commons_period_start": null,
   "commons_period_end": null,
-  "observed_at": "<observed_at>"
+  "observed_at": "1970-01-01T00:00:00Z"
 }

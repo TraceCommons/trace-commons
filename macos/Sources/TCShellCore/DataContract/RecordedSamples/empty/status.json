@@ -18,7 +18,7 @@
     "uploads_today": 0,
     "max_uploads_per_day": 50,
     "uploads_remaining": 50,
-    "resets_at": "<resets_at>",
+    "resets_at": "1970-01-01T00:00:00Z",
     "blocked": false,
     "blocked_entries": 0,
     "blocked_bytes": 0
