@@ -13,7 +13,8 @@ final class FlowMapSceneTests: XCTestCase {
         return TracesTree.build(
             entries: try await client.listPending(projectId: nil),
             projects: try await client.listProjects().projects,
-            settings: try? await client.settings())
+            settings: try? await client.settings(),
+            scansWhenUnset: TracesTreeTests.scansWhenUnset)
     }
 
     // MARK: Traces

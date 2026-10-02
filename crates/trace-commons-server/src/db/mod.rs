@@ -22,6 +22,7 @@ mod trace_corpus_pg;
 
 pub(crate) use trace_corpus_pg::{
     insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
+    record_source_submission_withdrawal_on_tx, withdraw_source_session_on_tx,
 };
 
 pub use postgres::InviteRedemption;
@@ -104,6 +105,22 @@ impl TraceCorpusRlsDiagnostics {
             && self.force_rls_enabled_count == self.expected_table_count
     }
 
+    /// `rls_ready` and `force_rls_ready` for the tables checked, without the
+    /// transaction-local tenant-context probe: every table has row-level
+    /// security enabled and forced and the tenant policy with the expected
+    /// expression, and the current role cannot bypass it.
+    pub fn tables_isolated(&self) -> bool {
+        self.expected_table_count > 0
+            && self.missing_policy_tables.is_empty()
+            && self.rls_disabled_tables.is_empty()
+            && self.policy_expression_mismatch_tables.is_empty()
+            && self.policy_installed_count == self.expected_table_count
+            && self.rls_enabled_count == self.expected_table_count
+            && self.force_rls_ready()
+            && !self.current_role_bypasses_rls
+            && !self.current_role_owns_trace_tables
+    }
+
     pub fn production_ready(&self) -> bool {
         self.rls_ready() && self.force_rls_ready()
     }
@@ -145,6 +162,14 @@ impl NearCreditSubmitAdvisoryLock {
         } else {
             Ok(())
         }
+    }
+
+    /// The pooled connection that holds the lock, for a pass that does its
+    /// own database work on it rather than take a second pooled connection
+    /// while it holds this one (the versioned pipeline's NEAR payout, which
+    /// shares this lock with the submit worker). `None` only after release.
+    pub(crate) fn client_mut(&mut self) -> Option<&mut deadpool_postgres::Client> {
+        self.inner.as_mut().map(|inner| inner.client_mut())
     }
 }
 
@@ -2110,6 +2135,45 @@ pub enum PayoutHoldReason {
     /// The account has two or more ACTIVE NEAR identities and none is designated
     /// as the payout target, so there is no unambiguous choice.
     AmbiguousNoDesignation,
+}
+
+impl PayoutHoldReason {
+    /// The coarse label a held settlement line records
+    /// (`near_payout_hold_reason`). A label only; it carries no account
+    /// identity.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::NoneEnrolled => "none_enrolled",
+            Self::AmbiguousNoDesignation => "ambiguous_no_designation",
+        }
+    }
+}
+
+/// The prefix of a credit settlement key that names an account:
+/// `account:{account_id}`.
+pub const ACCOUNT_SETTLEMENT_KEY_PREFIX: &str = "account:";
+
+/// The key credit settlement groups a principal's credit under: its account,
+/// `account:{account_id}`, when `principal_to_account` links it to one
+/// ([`Database::resolve_principals_to_accounts`]), so every principal of an
+/// account settles into one account line and one payout; otherwise the
+/// principal itself.
+pub fn settlement_group_key(
+    auth_principal_ref: &str,
+    principal_to_account: &std::collections::HashMap<String, uuid::Uuid>,
+) -> String {
+    principal_to_account
+        .get(auth_principal_ref)
+        .map(|account_id| format!("{ACCOUNT_SETTLEMENT_KEY_PREFIX}{account_id}"))
+        .unwrap_or_else(|| auth_principal_ref.to_string())
+}
+
+/// The account a settlement key names ([`settlement_group_key`]), or `None`
+/// for a principal key.
+pub fn settlement_key_account_id(settlement_key: &str) -> Option<uuid::Uuid> {
+    settlement_key
+        .strip_prefix(ACCOUNT_SETTLEMENT_KEY_PREFIX)
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
 }
 
 /// Outcome of resolving an account's payout NEAR account id. The carried `String`

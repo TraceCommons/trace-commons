@@ -8252,6 +8252,144 @@ pub struct TraceSubmissionStatusUpdate {
     pub delayed_credit_explanations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consent_scopes: Vec<ConsentScope>,
+    /// Where the versioned pipeline stands with this submission, for a
+    /// submission a pipeline run processes. Absent on the wire otherwise, so
+    /// a legacy document keeps its shape and an older client reads a newer
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<TracePipelineStatusUpdate>,
+}
+
+/// A submission's versioned-pipeline run, as a contributor sees it. Every
+/// field is a label, an id, or an amount; none is a principal, an account,
+/// or a transaction reference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TracePipelineStatusUpdate {
+    pub run_id: Uuid,
+    pub bundle_id: String,
+    pub processing_state: String,
+    pub current_phase: Option<String>,
+    pub responsible_phase: Option<String>,
+    pub reason_label: Option<String>,
+    pub instruments: Vec<TraceInstrumentStatusUpdate>,
+}
+
+/// One instrument a pipeline run awards, and where its settlement and
+/// payout stand. The operation, the internal settlement, and the payout are
+/// separate states.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceInstrumentStatusUpdate {
+    pub instrument_id: String,
+    /// The amount in the instrument's smallest unit, as a decimal string: it
+    /// can exceed what a JSON number (and a JavaScript client) holds exactly.
+    #[serde(deserialize_with = "deserialize_decimal_atomic_units")]
+    pub atomic_units: String,
+    pub operation_state: String,
+    pub internal_settlement_state: String,
+    pub payout_rail: String,
+    pub payout_state: String,
+    pub reason_label: Option<String>,
+}
+
+/// Accepts only the canonical decimal string of an unsigned 128-bit amount:
+/// ASCII digits, no sign, no leading zero, at most `u128::MAX`. A JSON
+/// number is refused, since it may already have lost precision.
+fn deserialize_decimal_atomic_units<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let canonical = !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+        && value.parse::<u128>().is_ok();
+    if canonical {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "atomic_units must be a canonical unsigned decimal string",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod pipeline_status_wire_tests {
+    use super::*;
+
+    #[test]
+    fn a_legacy_status_document_keeps_its_wire_shape() {
+        let legacy = serde_json::json!({
+            "submission_id": Uuid::nil(),
+            "trace_id": Uuid::nil(),
+            "status": "accepted",
+            "credit_points_pending": 1.5,
+            "explanation": ["Accepted into the private redacted corpus."],
+            "consent_scopes": ["debugging_evaluation"]
+        });
+        let update: TraceSubmissionStatusUpdate =
+            serde_json::from_value(legacy.clone()).expect("a legacy document deserializes");
+        assert!(update.pipeline.is_none());
+        let written = serde_json::to_value(&update).unwrap();
+        assert!(
+            written.get("pipeline").is_none(),
+            "no pipeline key: {written}"
+        );
+        assert_eq!(written, legacy, "the document serializes back unchanged");
+    }
+
+    #[test]
+    fn instrument_atomic_units_round_trip_as_a_decimal_string() {
+        let instrument = TraceInstrumentStatusUpdate {
+            instrument_id: "trace_credit".to_string(),
+            atomic_units: "340282366920938463463374607431768211455".to_string(),
+            operation_state: "complete".to_string(),
+            internal_settlement_state: "finalized".to_string(),
+            payout_rail: "near".to_string(),
+            payout_state: "disabled".to_string(),
+            reason_label: None,
+        };
+        let value = serde_json::to_value(&instrument).unwrap();
+        assert_eq!(
+            value["atomic_units"],
+            serde_json::json!("340282366920938463463374607431768211455")
+        );
+        let read: TraceInstrumentStatusUpdate = serde_json::from_value(value).unwrap();
+        assert_eq!(read, instrument);
+    }
+
+    #[test]
+    fn instrument_atomic_units_refuse_a_json_number_and_a_non_decimal_string() {
+        let with_units = |atomic_units: serde_json::Value| {
+            serde_json::from_value::<TraceInstrumentStatusUpdate>(serde_json::json!({
+                "instrument_id": "trace_credit",
+                "atomic_units": atomic_units,
+                "operation_state": "complete",
+                "internal_settlement_state": "finalized",
+                "payout_rail": "near",
+                "payout_state": "disabled",
+                "reason_label": null
+            }))
+        };
+        assert!(
+            with_units(serde_json::json!(42)).is_err(),
+            "a JSON number is refused"
+        );
+        for refused in [
+            "",
+            "-1",
+            "4.2",
+            "0042",
+            " 42",
+            // u128::MAX + 1
+            "340282366920938463463374607431768211456",
+        ] {
+            assert!(
+                with_units(serde_json::json!(refused)).is_err(),
+                "{refused:?} is refused"
+            );
+        }
+        assert!(with_units(serde_json::json!("0")).is_ok());
+    }
 }
 
 /// Computes the value scorecard and writes it onto the envelope.

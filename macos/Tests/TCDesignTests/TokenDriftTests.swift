@@ -110,6 +110,7 @@ final class TokenDriftTests: XCTestCase {
             let entry = raw as? [String: Any] ?? [:]
             guard let made = GlassTokens.TypeScale.all[name] else { continue }
             XCTAssertTrue(Double(made.size) == Self.number(entry["size"]), "type.\(name) size")
+            XCTAssertEqual(String(describing: made.weight), entry["weight"] as? String, "type.\(name) weight")
             XCTAssertTrue(Double(made.lineHeight) == Self.number(entry["lineHeight"]), "type.\(name) lineHeight")
             XCTAssertTrue(Double(made.tracking) == Self.number(entry["tracking"]), "type.\(name) tracking")
             XCTAssertTrue(made.uppercase == ((entry["uppercase"] as? Bool) ?? false), "type.\(name) uppercase")
@@ -152,13 +153,18 @@ final class TypeScaleTests: XCTestCase {
     ]
 
     /// Each step resolves its size from its own text style.
+    /// macOS's text-style sizes at the default system text size, stated
+    /// independently of the mapping under test. A style mapped to the wrong
+    /// AppKit style resolves to the wrong size and fails here.
+    private static let defaultSizes: [GlassTextStyle: CGFloat] = [
+        .largeTitle: 26, .title: 22, .title2: 17, .title3: 15, .headline: 13, .body: 13,
+        .callout: 12, .subheadline: 11, .footnote: 10, .caption: 10, .caption2: 10,
+    ]
+
     func test_eachStepResolvesItsSizeFromItsTextStyle() {
         for (name, step) in GlassTokens.TypeScale.all {
-            XCTAssertEqual(
-                step.textStyle.resolvedSize,
-                NSFont.preferredFont(forTextStyle: step.textStyle.appKit).pointSize,
-                accuracy: 0.001, "type.\(name)")
-            XCTAssertGreaterThan(step.textStyle.resolvedSize, 0, "type.\(name) resolved to nothing")
+            XCTAssertEqual(step.textStyle.resolvedSize, Self.defaultSizes[step.textStyle], "type.\(name)")
+            XCTAssertEqual(step.size, Self.defaultSizes[step.textStyle], "type.\(name) states its style's size")
         }
     }
 

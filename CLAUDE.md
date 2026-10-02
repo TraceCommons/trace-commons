@@ -131,7 +131,7 @@ churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
 reason: a cancelled job saves no cache, and merges to `main` land close
 together.
 
-Running is not the same as blocking. **Eleven** of the seventeen are required
+Running is not the same as blocking. **Eleven** of the nineteen are required
 status checks on `main`, and only those block a merge -- `README.md` lists
 them. `main` is also behind a merge queue (`main merge queue`), so the
 required checks are re-run against `main` at merge time; a PR that never
@@ -166,6 +166,12 @@ receives them times out of the queue instead of merging.
   Both are required, and both end by refusing a run whose database shows no
   committed transactions, because a pass count alone does not prove the
   tests reached PostgreSQL.
+- `pipeline qualification and restore` — runs `python3
+  scripts/operator/pipeline.py qualify` against its own digest-pinned
+  PostgreSQL container (no `services:` block). Not a required status check
+  (owner decision P4-D17): it runs on every PR and in the merge queue, but
+  blocks nothing until the owner promotes it. See
+  `docs/operator/pipeline-qualification.md`.
 - `builds at the declared MSRV floor` — the only job that does NOT use
   `dtolnay/rust-toolchain@stable`. It reads `rust-version` out of `cargo
   metadata` (never a literal in the workflow) for both the root workspace and

@@ -424,10 +424,17 @@ struct QueueRow: View {
         RedactionLabels.removedTotal(summary?.redactions ?? [:])
     }
 
-    /// Secrets the scan found and left in what would be sent, if any.
+    /// Secrets the scan found and left in what would be sent, if any, in
+    /// the core's words (`tc_residual_secret_line_text`). The count is of
+    /// detection sites, never of secrets, and the sites are named.
     private var survivorLine: String? {
         guard let summary else { return nil }
-        return RedactionLabels.survivorLine(summary.redactions)
+        let total = RedactionLabels.survivorTotal(summary.redactions)
+        guard total > 0 else { return nil }
+        return TCCoreCopy.residualSecretLine(
+            count: total,
+            sites: RedactionLabels.survivors(summary.redactions).map(\.site)
+        )
     }
 
     // MARK: - Whether this session can be contributed at all
@@ -1289,31 +1296,39 @@ struct ArmingOfferCard: View {
     var onArm: () -> Void
     var onDecline: () -> Void
 
+    /// The core's words for this offer (`tc_arming_offer_copy_json`). Nil
+    /// draws no card: arming is not offered without them.
+    private var copy: ProjectArmingCopy? {
+        ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
+            project: offer.projectLabel,
+            count: offer.contributedCount
+        ))
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            // Evidence first, question second. Someone who reads only the
-            // first line still learns why they are being asked.
-            Text(ArmingOfferCopy.evidence(
-                project: offer.projectLabel,
-                count: offer.contributedCount
-            ))
-            .font(TC.Font_.meta)
-            .foregroundStyle(.secondary)
+        if let copy {
+            VStack(alignment: .leading, spacing: TC.Space.s) {
+                // Evidence first, question second. Someone who reads only the
+                // first line still learns why they are being asked.
+                Text(copy.evidence)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
 
-            Text(ArmingOfferCopy.question(project: offer.projectLabel))
-                .font(.callout.weight(.semibold))
+                Text(copy.question)
+                    .font(.callout.weight(.semibold))
 
-            HStack(spacing: TC.Space.m) {
-                // Untinted, and first: declining must not wear the accent
-                // that means "yes" everywhere else in this app.
-                Button(ArmingOfferCopy.decline, action: onDecline)
-                    .tint(.primary)
-                Button(ArmingOfferCopy.confirm, action: onArm)
+                HStack(spacing: TC.Space.m) {
+                    // Untinted, and first: declining must not wear the accent
+                    // that means "yes" everywhere else in this app.
+                    Button(copy.decline, action: onDecline)
+                        .tint(.primary)
+                    Button(copy.confirm, action: onArm)
+                }
             }
+            .padding(TC.Space.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
+            .accessibilityElement(children: .contain)
         }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
-        .accessibilityElement(children: .contain)
     }
 }

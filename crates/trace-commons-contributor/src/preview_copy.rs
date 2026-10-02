@@ -96,9 +96,118 @@ pub fn unsure_hint_line(label: &str) -> Option<&'static str> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The glass monitor's Traces tab (#1173 R6/R7): the session inspector's row
+// labels, the review's actions, the Traces badge's text equivalent, and what
+// the tab says when the core does not answer. One table, so the monitor
+// writes none of its own.
+
+/// **DRAFT, NEEDS APPROVAL.** What the Traces tab says when the core does
+/// not answer. The tree below it is the last one the core reported.
+pub const MONITOR_CORE_UNREACHABLE: &str =
+    "The watcher isn't answering. This is what it last reported.";
+
+/// **DRAFT, NEEDS APPROVAL.** What the Traces tab says when a request the
+/// core answered failed (a refused write, or a reply this build could not
+/// read).
+pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through. Try again.";
+
+/// Every fixed word of the monitor's Traces tab. The row labels are single
+/// words; `keep` and `undo_keep` are Customize's (K5) so the two surfaces
+/// cannot drift.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorTracesCopy {
+    /// A session's pill, which opens its review.
+    pub review: &'static str,
+    /// The inspector's rows.
+    pub tool: &'static str,
+    pub folder: &'static str,
+    pub started: &'static str,
+    pub length: &'static str,
+    pub prompts: &'static str,
+    pub size: &'static str,
+    pub sends: &'static str,
+    pub marks: &'static str,
+    pub unsure: &'static str,
+    /// The review's actions.
+    pub contribute: &'static str,
+    pub keep: &'static str,
+    pub dismiss: &'static str,
+    /// Taking back a Contribute while it is still held.
+    pub undo_contribute: &'static str,
+    /// Taking back a Keep.
+    pub undo_keep: &'static str,
+    /// The core did not answer; see [`MONITOR_CORE_UNREACHABLE`].
+    pub core_unreachable: &'static str,
+    /// A request failed; see [`MONITOR_REQUEST_FAILED`].
+    pub request_failed: &'static str,
+}
+
+/// The one table of the monitor's Traces words. See [`MonitorTracesCopy`].
+#[must_use]
+pub fn monitor_traces_copy() -> MonitorTracesCopy {
+    let customize = crate::project_copy::customize_copy();
+    MonitorTracesCopy {
+        review: "Review",
+        tool: "Tool",
+        folder: "Folder",
+        started: "Started",
+        length: "Length",
+        prompts: "Prompts",
+        size: "Size",
+        sends: "Sends",
+        marks: "Marks",
+        unsure: "Unsure",
+        contribute: "Contribute",
+        keep: customize.keep,
+        dismiss: "Not this one",
+        undo_contribute: "Undo",
+        undo_keep: customize.undo_keep,
+        core_unreachable: MONITOR_CORE_UNREACHABLE,
+        request_failed: MONITOR_REQUEST_FAILED,
+    }
+}
+
+/// The Traces badge's text equivalent, for assistive tech: the badge is a
+/// bare number, or a dash when the count is unknown.
+///
+/// `None` (the daemon did not report `decisions_owed`) is "unavailable",
+/// never zero. Zero is the empty string: no badge, nothing to say.
+#[must_use]
+pub fn decisions_owed_text(decisions_owed: Option<u64>) -> String {
+    match decisions_owed {
+        None => "Decision count unavailable".to_string(),
+        Some(0) => String::new(),
+        Some(1) => "1 decision waiting".to_string(),
+        Some(n) => format!("{n} decisions waiting"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_monitor_traces_copy_is_whole_and_shares_customize_words() {
+        let copy = monitor_traces_copy();
+        let value = serde_json::to_value(&copy).unwrap();
+        for (key, word) in value.as_object().unwrap() {
+            assert!(!word.as_str().unwrap().is_empty(), "{key} is empty");
+        }
+        let customize = crate::project_copy::customize_copy();
+        assert_eq!(copy.keep, customize.keep);
+        assert_eq!(copy.undo_keep, customize.undo_keep);
+        assert_eq!(copy.core_unreachable, MONITOR_CORE_UNREACHABLE);
+    }
+
+    #[test]
+    fn an_unknown_decision_count_is_never_zero() {
+        assert_eq!(decisions_owed_text(None), "Decision count unavailable");
+        assert_eq!(decisions_owed_text(Some(0)), "");
+        assert_eq!(decisions_owed_text(Some(1)), "1 decision waiting");
+        assert_eq!(decisions_owed_text(Some(120)), "120 decisions waiting");
+        assert_ne!(decisions_owed_text(None), decisions_owed_text(Some(0)));
+    }
 
     #[test]
     fn every_flow2_label_has_words_and_unscrubbed_is_not_zero() {

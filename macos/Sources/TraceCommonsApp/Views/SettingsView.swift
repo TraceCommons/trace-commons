@@ -297,6 +297,7 @@ struct SettingsContent: View {
                     checkRow(Notifier.copy?.notificationDenied ?? "", false)
                     Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
                         .font(TC.Font_.body)
+                        .tint(TC.accentText)
                 case .notDetermined:
                     checkRow(Notifier.copy?.notificationNotAsked ?? "", false)
                     Button(Notifier.copy?.notificationAllow ?? "") {
@@ -313,6 +314,7 @@ struct SettingsContent: View {
                 @unknown default:
                     Text(Notifier.copy?.notificationUnknown ?? "")
                     Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
+                        .tint(TC.accentText)
                 }
             }
         }
@@ -1003,6 +1005,7 @@ struct SettingsContent: View {
                     // way to say so.
                     Button(copy.lookAgain) { model.discoverRouting() }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                 }
 
                 // The port and folder are the override, and they are live
@@ -1079,6 +1082,7 @@ struct SettingsContent: View {
                             }
                         }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                         .accessibilityLabel(copy.folderTitle)
                         // The chosen folder, shown so the answer is
                         // visible. Empty until one is chosen, which is the
@@ -1268,6 +1272,7 @@ struct SettingsContent: View {
                 if let state, WitnessSurface.offersClear(state) {
                     Button(copy.clear) { model.clearWitness() }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                         .disabled(model.witnessBusy)
                     Text(copy.clearNote)
                         .font(TC.Font_.meta)
@@ -1645,10 +1650,11 @@ struct SettingsContent: View {
         // per row would build as many dialogs as there are projects, and
         // two of them can be presented at once.
         .confirmationDialog(
-            armingCandidate.map { ProjectArmingCopy.confirmationTitle(project: $0.displayLabel) }
-                ?? "",
+            armingCandidate.flatMap(armingCopy)?.question ?? "",
             isPresented: Binding(
-                get: { armingCandidate != nil },
+                // Not presented without the core's words: arming is never
+                // confirmed against a sentence this shell wrote.
+                get: { armingCandidate.flatMap(armingCopy) != nil },
                 // Any dismissal -- the Escape key, a click outside, either
                 // button -- clears the candidate. Leaving it set would show
                 // the sheet again the next time anything else republished
@@ -1663,14 +1669,25 @@ struct SettingsContent: View {
             // than alarmed -- the Linux shell marks it destructive, which
             // this shell deliberately does not follow, because on macOS that
             // role means data is about to be lost and none is.
-            Button(ProjectArmingCopy.confirm) {
+            let copy = armingCopy(project)
+            Button(copy?.confirm ?? "") {
                 model.setProjectMode(project, mode: .autoUpload)
                 armingCandidate = nil
             }
-            Button(ProjectArmingCopy.cancel, role: .cancel) { armingCandidate = nil }
-        } message: { _ in
-            Text(ProjectArmingCopy.confirmationBody)
+            Button(copy?.decline ?? "", role: .cancel) { armingCandidate = nil }
+        } message: { project in
+            Text(armingCopy(project)?.body ?? "")
         }
+    }
+
+    /// The arming confirmation's words for `project`, from the core
+    /// (`tc_arming_offer_copy_json`). No count is in hand here, so the
+    /// offer's evidence line is not rendered.
+    private func armingCopy(_ project: ProjectRow) -> ProjectArmingCopy? {
+        ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
+            project: project.displayLabel,
+            count: 0
+        ))
     }
 
     /// The mode control for one project row.
