@@ -20,7 +20,7 @@
 
 use super::*;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::pipeline_http_pg_tests::{
@@ -42,8 +42,9 @@ use trace_commons_server::versioned_pipeline_qualification::{PipelineCheckEmitte
 /// gate tests pass to `list_submissions_needing_gate_decision`.
 const GATE_MAX_ATTEMPTS: i32 = 5;
 
-/// The eight labels of the report, in the order of the plan's table.
-const DRAIN_LABELS: [&str; 8] = [
+/// The ten labels of the report, in the order of the plan's table and the two
+/// counts that the task review added.
+const DRAIN_LABELS: [&str; 10] = [
     "awaiting_pii_backstop",
     "gate_decision_pending",
     "gate_decision_exhausted",
@@ -52,6 +53,8 @@ const DRAIN_LABELS: [&str; 8] = [
     "delayed_credit_unsettled",
     "revocation_propagation_pending",
     "near_outbox_pending",
+    "near_payout_unqueued",
+    "withdrawal_completion_pending",
 ];
 
 /// A login whose only privilege source is membership in `trace_gate_driver`,
@@ -286,10 +289,20 @@ impl DrainFixture {
         body
     }
 
-    /// The report of `tenant`, with the gate ceiling of these tests.
+    /// The report of `tenant`, with the gate ceiling of these tests and no
+    /// retention policy held by a legal hold.
     async fn report(&self, tenant: &str) -> LegacyDrainReport {
+        self.report_with_held(tenant, &[]).await
+    }
+
+    /// The report of `tenant` with `held_retention_policy_ids` held.
+    async fn report_with_held(
+        &self,
+        tenant: &str,
+        held_retention_policy_ids: &[String],
+    ) -> LegacyDrainReport {
         self.store
-            .legacy_drain_report(tenant, GATE_MAX_ATTEMPTS)
+            .legacy_drain_report(tenant, GATE_MAX_ATTEMPTS, held_retention_policy_ids)
             .await
             .expect("the drain report reads")
     }
@@ -610,6 +623,119 @@ impl DrainFixture {
             .expect("eligible_source_event_count")
     }
 
+    /// A text column of one row on the owner connection.
+    async fn owner_text(&self, tenant: &str, sql: &str, params: &[&(dyn ToSql + Sync)]) -> String {
+        let mut client = self.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, tenant).await;
+        let text: String = tx
+            .query_one(sql, params)
+            .await
+            .unwrap_or_else(|error| panic!("query failed: {error}: {sql}"))
+            .get(0);
+        tx.commit().await.unwrap();
+        text
+    }
+
+    /// The durable account of the principal of `token` in `tenant`, minted
+    /// through `main`'s own call.
+    async fn account_of(&self, tenant: &str, token: &str) -> Uuid {
+        self.owner
+            .create_or_reuse_account(tenant, &static_token_principal_ref(token))
+            .await
+            .expect("mint the contributor's account")
+    }
+
+    /// A delayed credit of `points` for `submission_id` from the reviewer, a
+    /// settlement-eligible `training_utility` event.
+    async fn award_training_utility(&self, submission_id: Uuid, points: f32, tag: &str) {
+        self.call_ok(
+            "POST",
+            &format!("/v1/review/{submission_id}/credit-events"),
+            &self.reviewer,
+            serde_json::json!({
+                "event_type": "training_utility",
+                "credit_points_delta": points,
+                "reason": "drain report payout test",
+                "external_ref": format!("training-utility:{tag}"),
+            }),
+        )
+        .await;
+    }
+
+    /// A live settlement run through the admin route, with `main`'s NEAR
+    /// contract named in the request: a finalized batch with a contract, and
+    /// before it the repair of the batches that are already finalized.
+    async fn settle_with_near_contract(&self) -> serde_json::Value {
+        self.call_ok(
+            "POST",
+            "/v1/admin/credit-settlements",
+            &self.admin,
+            serde_json::json!({
+                "dry_run": false,
+                "policy_version": "trace-credit-policy-v1",
+                "reason": "drain report payout test",
+                "near_contract_id": "trace-credits.testnet",
+            }),
+        )
+        .await
+    }
+
+    /// A settlement batch in `status` whose `line_items_json` is `line_items`,
+    /// with a NEAR contract and a payout instrument or neither.
+    async fn seed_batch_with_items(
+        &self,
+        tenant: &str,
+        status: &str,
+        near_contract_id: Option<&str>,
+        instrument_id: Option<&str>,
+        line_items: serde_json::Value,
+    ) -> Uuid {
+        let batch_id = Uuid::new_v4();
+        let source_list_hash = format!("sha256:{}", batch_id.simple());
+        self.owner_execute(
+            tenant,
+            "INSERT INTO trace_credit_settlement_batches (
+                tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+                source_list_hash, settled_credit_points, settled_credit_micros,
+                actor_principal_ref, line_items_json, near_contract_id, instrument_id
+             ) VALUES ($1, $2, 'trace-credit-policy-v1', $3, 'sha256:seeded', $4, '0', 0,
+                       'principal_sha256:seeded', $5, $6, $7)",
+            &[
+                &tenant,
+                &batch_id,
+                &status,
+                &source_list_hash,
+                &line_items,
+                &near_contract_id,
+                &instrument_id,
+            ],
+        )
+        .await;
+        batch_id
+    }
+
+    /// What the withdrawal worker would complete now under `state`: a dry run
+    /// of `POST /v1/workers/revocation-propagation`
+    /// (`withdrawal_completions_checked`).
+    async fn withdrawals_the_worker_would_complete(&self, state: &Arc<AppState>) -> u64 {
+        let (status, body) = route_request(
+            state.clone(),
+            "POST",
+            "/v1/workers/revocation-propagation",
+            auth_headers(&self.admin),
+            Some(serde_json::json!({
+                "purpose": "drain report withdrawal agreement",
+                "dry_run": true,
+                "limit": 100,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["withdrawal_completions_checked"]
+            .as_u64()
+            .expect("withdrawal_completions_checked")
+    }
+
     /// How many pipeline runs `submission_id` has.
     async fn runs_of(&self, tenant: &str, submission_id: Uuid) -> usize {
         self.run_states(tenant, &[submission_id]).await.len()
@@ -732,6 +858,8 @@ async fn the_legacy_drain_report_counts_real_pending_work_and_reaches_zero() {
     assert_eq!(before.pending["delayed_credit_unsettled"], 1);
     assert_eq!(before.pending["revocation_propagation_pending"], 0);
     assert_eq!(before.pending["near_outbox_pending"], 0);
+    assert_eq!(before.pending["near_payout_unqueued"], 0);
+    assert_eq!(before.pending["withdrawal_completion_pending"], 0);
     assert!(!before.drained);
     let pending_before = total(&before);
 
@@ -956,7 +1084,11 @@ async fn a_drain_report_is_tenant_scoped() {
     // A tenant the database has never seen reads zero, not an error.
     let unknown = fixture
         .store
-        .legacy_drain_report(&format!("tenant-drain-unknown-{suffix}"), GATE_MAX_ATTEMPTS)
+        .legacy_drain_report(
+            &format!("tenant-drain-unknown-{suffix}"),
+            GATE_MAX_ATTEMPTS,
+            &[],
+        )
         .await
         .expect("a tenant with no rows");
     assert_eq!(total(&unknown), 0);
@@ -1536,5 +1668,544 @@ async fn a_submission_with_a_pipeline_run_is_never_counted_whatever_its_rows_say
             ("near_outbox_pending", 3),
         ],
         "the NEAR outbox",
+    );
+}
+
+/// A settlement line item as `main` writes it into `line_items_json`: a held
+/// payout (`near_outbox_id` null, a hold label) or a queued one (an outbox id).
+fn line_item(near_outbox_id: Option<Uuid>, hold_reason: Option<&str>) -> serde_json::Value {
+    let mut item = serde_json::json!({
+        "credit_account_ref": format!("account:{}", Uuid::new_v4()),
+        "credit_account_hash": format!("sha256:{}", Uuid::new_v4().simple()),
+        "settled_credit_delta_micros": 1_000_000,
+        "source_credit_event_ids": [],
+        "source_submission_ids": [],
+        "source_list_hash": format!("sha256:{}", Uuid::new_v4().simple()),
+        "near_status": "pending",
+        "near_outbox_id": near_outbox_id,
+    });
+    if let Some(reason) = hold_reason {
+        item["near_payout_hold_reason"] = serde_json::json!(reason);
+    }
+    item
+}
+
+/// `near_payout_unqueued` follows the settlement repair
+/// (`repair_missing_near_credit_outbox_items_for_finalized_batches`), through
+/// real legacy code. A legacy credit of a settlement-eligible type on an
+/// accepted submission whose account has no payout target is settled by the
+/// settlement route: the batch is finalized with a hold and no outbox row, so
+/// `delayed_credit_unsettled` and `near_outbox_pending` read zero while the
+/// payout is not queued. Enrolling a payout target and running the settlement
+/// route again queues it. A payout queued at settlement time whose outbox row
+/// is lost (the one row this test deletes through the owner connection, as the
+/// repair's own comment describes a row lost after the batch write) is counted
+/// until the next settlement run writes the row again. Seeded batches that the
+/// repair leaves alone are not counted: a batch with no NEAR contract, a batch
+/// that is not finalized, and a pipeline batch (an `instrument_id`) whose line
+/// items look just like a held payout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_or_lost_legacy_payout_is_counted_until_the_settlement_repair_queues_it() {
+    let Some(fixture) = DrainFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let tenant = tenant.as_str();
+    let suffix = Uuid::new_v4().simple().to_string();
+    write_routing_as_operator(tenant, "legacy").await;
+    let account = fixture.account_of(tenant, &fixture.contributor).await;
+
+    // A credit to settle, for an account with no payout target.
+    let first = clean_envelope(&format!("drain_payout_1_{suffix}")).await;
+    assert_eq!(
+        fixture.upload_ok(&fixture.contributor, &first).await["status"],
+        "accepted"
+    );
+    fixture
+        .award_training_utility(first.submission_id, 1.0, &format!("payout-1-{suffix}"))
+        .await;
+    assert_counts(
+        &fixture.report(tenant).await,
+        &[
+            ("gate_decision_pending", 1),
+            ("vector_index_pending", 1),
+            ("delayed_credit_unsettled", 1),
+        ],
+        "a credit to settle",
+    );
+
+    // The settlement finalizes the batch and holds the payout.
+    let settled = fixture.settle_with_near_contract().await;
+    assert_eq!(settled["settled_source_event_count"], 1, "{settled}");
+    assert_eq!(settled["near_outbox_item_count"], 0, "{settled}");
+    assert_eq!(
+        fixture
+            .owner_text(
+                tenant,
+                "SELECT near_contract_id || ':' || (line_items_json -> 0 ->> 'near_payout_hold_reason')
+                   FROM trace_credit_settlement_batches
+                  WHERE tenant_id = $1 AND status = 'finalized'",
+                &[&tenant],
+            )
+            .await,
+        "trace-credits.testnet:none_enrolled",
+        "a finalized batch with a contract and a held line item"
+    );
+    let held = fixture.report(tenant).await;
+    assert_counts(
+        &held,
+        &[
+            ("gate_decision_pending", 1),
+            ("vector_index_pending", 1),
+            ("near_payout_unqueued", 1),
+        ],
+        "a held payout: the credit reads settled and no outbox row exists",
+    );
+    assert!(!held.drained);
+
+    // Another run does not queue it: the account still has no payout target.
+    let again = fixture.settle_with_near_contract().await;
+    assert_eq!(again["settled_source_event_count"], 0, "{again}");
+    assert_eq!(
+        fixture.report(tenant).await.pending["near_payout_unqueued"],
+        1
+    );
+
+    // The account enrolls a payout target. Nothing is queued until a
+    // settlement run repairs the batch.
+    fixture
+        .owner
+        .insert_near_identity(
+            tenant,
+            account,
+            &format!("ed25519:drain-payout-{suffix}"),
+            "drain-payout.near",
+            None,
+        )
+        .await
+        .expect("enroll a payout target");
+    assert_eq!(
+        fixture.report(tenant).await.pending["near_payout_unqueued"],
+        1
+    );
+    fixture.settle_with_near_contract().await;
+    let repaired = fixture.report(tenant).await;
+    assert_eq!(
+        repaired.pending["near_payout_unqueued"], 0,
+        "{:?}",
+        repaired.pending
+    );
+    assert_eq!(
+        repaired.pending["near_outbox_pending"], 1,
+        "the repair wrote a pending outbox row"
+    );
+
+    // A payout queued at settlement time, with the target enrolled.
+    let second = clean_envelope(&format!("drain_payout_2_{suffix}")).await;
+    assert_eq!(
+        fixture.upload_ok(&fixture.contributor, &second).await["status"],
+        "accepted"
+    );
+    fixture
+        .award_training_utility(second.submission_id, 0.5, &format!("payout-2-{suffix}"))
+        .await;
+    let settled = fixture.settle_with_near_contract().await;
+    assert_eq!(settled["settled_source_event_count"], 1, "{settled}");
+    assert_eq!(settled["near_outbox_item_count"], 1, "{settled}");
+    let queued = fixture.report(tenant).await;
+    assert_eq!(queued.pending["near_payout_unqueued"], 0);
+    assert_eq!(queued.pending["near_outbox_pending"], 2);
+    // Its outbox row is lost: the line item names a row the table lacks.
+    assert_eq!(
+        fixture
+            .owner_execute(
+                tenant,
+                "DELETE FROM trace_near_credit_outbox o
+                  USING trace_credit_settlement_batches b
+                  WHERE o.tenant_id = $1 AND b.tenant_id = o.tenant_id
+                    AND b.settlement_batch_id = o.settlement_batch_id
+                    AND b.line_items_json -> 0 ->> 'near_outbox_id' = o.near_outbox_id::text",
+                &[&tenant],
+            )
+            .await,
+        1
+    );
+    let lost = fixture.report(tenant).await;
+    assert_eq!(
+        lost.pending["near_payout_unqueued"], 1,
+        "{:?}",
+        lost.pending
+    );
+    assert_eq!(lost.pending["near_outbox_pending"], 1);
+    fixture.settle_with_near_contract().await;
+    let rewritten = fixture.report(tenant).await;
+    assert_eq!(rewritten.pending["near_payout_unqueued"], 0);
+    assert_eq!(rewritten.pending["near_outbox_pending"], 2);
+
+    // What the repair leaves alone: no contract, not finalized, and the
+    // pipeline's batch (an instrument id; the batch is seeded as the
+    // pipeline's payout batch, with the held and lost items the legacy
+    // repair would act on in a batch of `main`'s).
+    let items = || {
+        serde_json::json!([
+            line_item(None, Some("none_enrolled")),
+            line_item(Some(Uuid::new_v4()), None),
+        ])
+    };
+    fixture
+        .seed_batch_with_items(tenant, "finalized", None, None, items())
+        .await;
+    fixture
+        .seed_batch_with_items(
+            tenant,
+            "failed",
+            Some("trace-credits.testnet"),
+            None,
+            items(),
+        )
+        .await;
+    fixture
+        .seed_batch_with_items(
+            tenant,
+            "finalized",
+            Some("trace-credits.testnet"),
+            Some("trace_credit"),
+            items(),
+        )
+        .await;
+    assert_eq!(
+        fixture.report(tenant).await.pending["near_payout_unqueued"],
+        0,
+        "no contract, not finalized, and a pipeline batch are not counted"
+    );
+    // The same items in a finalized batch of `main`'s with a contract are.
+    fixture
+        .seed_batch_with_items(
+            tenant,
+            "finalized",
+            Some("trace-credits.testnet"),
+            None,
+            items(),
+        )
+        .await;
+    assert_eq!(
+        fixture.report(tenant).await.pending["near_payout_unqueued"],
+        2,
+        "a held item and an item whose outbox row is missing"
+    );
+}
+
+/// `withdrawal_completion_pending` follows the withdrawal worker
+/// (`list_incomplete_source_session_withdrawals`): a version of a withdrawn
+/// source session that has no withdrawal tombstone or still holds content, with
+/// no revocation propagation item at all. The count is tenant-wide: the
+/// pipeline's version (it has a run) is counted too, because the same worker
+/// completes it. The legacy worker route completes both, and the count reads
+/// zero. From that complete state, each way that the worker's selection finds a
+/// version incomplete is made true on its own, and the report and a dry run of
+/// the worker agree on it, including the legal hold's retention policies,
+/// which the caller passes.
+///
+/// The state is seeded the way the pipeline's own withdrawal test seeds it
+/// (`a_withdrawal_completion_runs_the_pipeline_follow_up_and_stops_listing_the_version`):
+/// the version claims a source session, and the session is withdrawn while the
+/// version is not, which is what an account merge leaves when the other
+/// account had withdrawn the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_incomplete_withdrawal_is_counted_until_the_legacy_worker_completes_it() {
+    let Some(fixture) = DrainFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let tenant = tenant.as_str();
+    let suffix = Uuid::new_v4().simple().to_string();
+    write_routing_as_operator(tenant, "legacy").await;
+    let account = fixture.account_of(tenant, &fixture.contributor).await;
+    let legacy = clean_envelope(&format!("drain_withdraw_l_{suffix}")).await;
+    assert_eq!(
+        fixture.upload_ok(&fixture.contributor, &legacy).await["status"],
+        "accepted"
+    );
+    write_routing_as_operator(tenant, "pipeline").await;
+    let pipeline = clean_envelope(&format!("drain_withdraw_p_{suffix}")).await;
+    assert_eq!(
+        fixture.upload_ok(&fixture.contributor, &pipeline).await["status"],
+        "processing"
+    );
+    for (envelope, label) in [(&legacy, "l"), (&pipeline, "p")] {
+        let digest: [u8; 32] = Sha256::digest(format!("{tenant}:{label}").as_bytes())
+            .as_slice()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            fixture
+                .owner
+                .claim_trace_source_session(tenant, account, &digest, envelope.submission_id)
+                .await
+                .expect("claim the source session"),
+            StorageTraceSourceSessionStatus::Active
+        );
+    }
+    assert_eq!(
+        fixture.report(tenant).await.pending["withdrawal_completion_pending"],
+        0
+    );
+    assert_eq!(
+        fixture
+            .owner_execute(
+                tenant,
+                "UPDATE trace_source_sessions SET withdrawn_at = NOW()
+                  WHERE tenant_id = $1 AND account_id = $2",
+                &[&tenant, &account],
+            )
+            .await,
+        2
+    );
+
+    // Two incomplete versions and no revocation propagation item.
+    let incomplete = fixture.report(tenant).await;
+    assert_eq!(
+        incomplete.pending["withdrawal_completion_pending"], 2,
+        "the legacy version and the pipeline's: {:?}",
+        incomplete.pending
+    );
+    assert_eq!(incomplete.pending["revocation_propagation_pending"], 0);
+    assert!(!incomplete.drained);
+    assert_eq!(
+        fixture
+            .withdrawals_the_worker_would_complete(&fixture.state)
+            .await,
+        2
+    );
+
+    // The legacy worker completes both.
+    for _ in 0..3 {
+        let ran = fixture
+            .call_ok(
+                "POST",
+                "/v1/workers/revocation-propagation",
+                &fixture.admin,
+                serde_json::json!({
+                    "purpose": "drain report withdrawal",
+                    "dry_run": false,
+                    "limit": 100,
+                }),
+            )
+            .await;
+        assert_eq!(ran["withdrawal_completions_failed"], 0, "{ran}");
+        let report = fixture.report(tenant).await;
+        if report.pending["withdrawal_completion_pending"] == 0
+            && report.pending["revocation_propagation_pending"] == 0
+        {
+            break;
+        }
+    }
+    let complete = fixture.report(tenant).await;
+    assert_eq!(
+        complete.pending["withdrawal_completion_pending"], 0,
+        "{:?}",
+        complete.pending
+    );
+    assert_eq!(
+        fixture
+            .withdrawals_the_worker_would_complete(&fixture.state)
+            .await,
+        0
+    );
+
+    // From the complete state, each way a version is incomplete, alone: the
+    // report and the worker's dry run agree, and each is put back.
+    let id = legacy.submission_id;
+    let derived_id = fixture
+        .owner_text(
+            tenant,
+            "SELECT derived_id::text FROM trace_derived_records
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &id],
+        )
+        .await
+        .parse::<Uuid>()
+        .unwrap();
+    let policy = fixture
+        .owner_text(
+            tenant,
+            "SELECT retention_policy_id FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &id],
+        )
+        .await;
+    let held_state = {
+        let mut state = fixture.state.clone();
+        Arc::make_mut(&mut state).legal_hold_retention_policy_ids =
+            Arc::new(BTreeSet::from([policy.clone()]));
+        state
+    };
+    let steps: Vec<(&str, String, String)> = vec![
+        (
+            "no withdrawal tombstone",
+            "DELETE FROM trace_withdrawals WHERE tenant_id = $1 AND submission_id = $2"
+                .to_string(),
+            "INSERT INTO trace_withdrawals (tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach)
+             VALUES ($1, $2, NOW(), 'accepted', 'not_distributed')"
+                .to_string(),
+        ),
+        (
+            "an object ref not deleted",
+            "UPDATE trace_object_refs SET deleted_at = NULL
+              WHERE tenant_id = $1 AND submission_id = $2"
+                .to_string(),
+            "UPDATE trace_object_refs SET deleted_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2"
+                .to_string(),
+        ),
+        (
+            "a derived record not revoked",
+            "UPDATE trace_derived_records SET status = 'current'
+              WHERE tenant_id = $1 AND submission_id = $2"
+                .to_string(),
+            "UPDATE trace_derived_records SET status = 'revoked'
+              WHERE tenant_id = $1 AND submission_id = $2"
+                .to_string(),
+        ),
+        (
+            "a gate decision with a dedup assignment",
+            "INSERT INTO trace_gate_decisions (
+                tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                attestation_chain_hash, dedup_simhash
+             ) VALUES ($1, gen_random_uuid(), $2, 'v', 'h', 0, 0, true, 0, 'h', true, 'h', 'h', 7)"
+                .to_string(),
+            "DELETE FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2"
+                .to_string(),
+        ),
+    ];
+    for (what, make_incomplete, put_back) in &steps {
+        fixture
+            .owner_execute(tenant, make_incomplete, &[&tenant, &id])
+            .await;
+        assert_eq!(
+            fixture.report(tenant).await.pending["withdrawal_completion_pending"],
+            1,
+            "{what}"
+        );
+        assert_eq!(
+            fixture
+                .withdrawals_the_worker_would_complete(&fixture.state)
+                .await,
+            1,
+            "{what}"
+        );
+        fixture
+            .owner_execute(tenant, put_back, &[&tenant, &id])
+            .await;
+        assert_eq!(
+            fixture.report(tenant).await.pending["withdrawal_completion_pending"],
+            0,
+            "{what}, put back"
+        );
+    }
+    // A vector entry that is not invalidated (and not deleted).
+    let vector_entry_id = Uuid::new_v4();
+    let source_hash = format!("sha256:{}", Uuid::new_v4().simple());
+    fixture
+        .owner_execute(
+            tenant,
+            "INSERT INTO trace_vector_entries (
+                tenant_id, submission_id, derived_id, vector_entry_id, vector_store,
+                embedding_model, embedding_dimension, embedding_version, source_projection,
+                source_hash, status
+             ) VALUES ($1, $2, $3, $4, 'x', 'm', 8, 'v1', 'canonical_summary', $5, 'active')",
+            &[&tenant, &id, &derived_id, &vector_entry_id, &source_hash],
+        )
+        .await;
+    assert_eq!(
+        fixture.report(tenant).await.pending["withdrawal_completion_pending"],
+        1
+    );
+    assert_eq!(
+        fixture
+            .withdrawals_the_worker_would_complete(&fixture.state)
+            .await,
+        1
+    );
+    for assignment in ["status = 'invalidated'", "deleted_at = NOW()"] {
+        fixture
+            .owner_execute(
+                tenant,
+                "UPDATE trace_vector_entries
+                    SET status = 'active', deleted_at = NULL, invalidated_at = NULL
+                  WHERE tenant_id = $1 AND vector_entry_id = $2",
+                &[&tenant, &vector_entry_id],
+            )
+            .await;
+        fixture
+            .owner_execute(
+                tenant,
+                &format!(
+                    "UPDATE trace_vector_entries SET {assignment}
+                      WHERE tenant_id = $1 AND vector_entry_id = $2"
+                ),
+                &[&tenant, &vector_entry_id],
+            )
+            .await;
+        assert_eq!(
+            fixture.report(tenant).await.pending["withdrawal_completion_pending"],
+            0,
+            "{assignment}: an invalidated or deleted entry is not owed"
+        );
+        assert_eq!(
+            fixture
+                .withdrawals_the_worker_would_complete(&fixture.state)
+                .await,
+            0,
+            "{assignment}"
+        );
+    }
+    // A token attachment not deleted: owed, unless a legal hold keeps its
+    // retention policy, which the caller passes as the worker is given it.
+    fixture
+        .owner_execute(
+            tenant,
+            "INSERT INTO trace_token_bundles (
+                tenant_id, submission_id, revision, owner_ref, manifest_digest,
+                witness_headers, manifest, state, expires_at
+             ) VALUES ($1, $2, 'r1', 'principal_sha256:seeded', $3, '{}'::jsonb, '{}'::jsonb,
+                       'committed', NOW() + INTERVAL '1 day')",
+            &[&tenant, &id, &"0".repeat(64)],
+        )
+        .await;
+    fixture
+        .owner_execute(
+            tenant,
+            "INSERT INTO trace_token_attachments (
+                tenant_id, submission_id, revision, artifact_id, object_ref
+             ) VALUES ($1, $2, 'r1', 'a1', '{}'::jsonb)",
+            &[&tenant, &id],
+        )
+        .await;
+    assert_eq!(
+        fixture.report(tenant).await.pending["withdrawal_completion_pending"],
+        1
+    );
+    assert_eq!(
+        fixture
+            .withdrawals_the_worker_would_complete(&fixture.state)
+            .await,
+        1
+    );
+    assert_eq!(
+        fixture
+            .report_with_held(tenant, std::slice::from_ref(&policy))
+            .await
+            .pending["withdrawal_completion_pending"],
+        0,
+        "the legal hold keeps the attachment out of the count"
+    );
+    assert_eq!(
+        fixture
+            .withdrawals_the_worker_would_complete(&held_state)
+            .await,
+        0
     );
 }

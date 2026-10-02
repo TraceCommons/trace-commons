@@ -203,8 +203,8 @@ pub struct ReceiptOwnership {
 /// are zero. Labels, counts, a routing state, a time, and a hash: no tenant,
 /// submission, principal, or trace text.
 ///
-/// `pending` holds every label of the table below, a zero too, so a missing
-/// key never reads as "nothing owed". `evidence_hash` is the canonical hash
+/// `pending` holds every one of the ten labels that `legacy_drain_report`
+/// lists, a zero too, so a missing key never reads as "nothing owed". `evidence_hash` is the canonical hash
 /// (`evidence_hash`) of `{"schema": "trace_commons.pipeline_legacy_drain.v1",
 /// "pending": pending}`: the same counts give the same hash, and it names no
 /// time.
@@ -222,16 +222,25 @@ pub struct LegacyDrainReport {
 
 const LEGACY_DRAIN_EVIDENCE_SCHEMA: &str = "trace_commons.pipeline_legacy_drain.v1";
 
-/// One count of the drain report: its label, its statement, and whether the
-/// statement takes the gate driver's attempt ceiling (`$2`) after the tenant
-/// (`$1`).
+/// What a count's statement takes after the tenant (`$1`): nothing, the gate
+/// driver's attempt ceiling (`$2`), or the retention policies a legal hold
+/// keeps (`$2`, a `text[]`).
+#[derive(Clone, Copy)]
+enum DrainParams {
+    Tenant,
+    TenantAndGateCeiling,
+    TenantAndHeldRetentionPolicies,
+}
+
+/// One count of the drain report: its label, its statement, and its
+/// parameters.
 struct LegacyDrainCount {
     label: &'static str,
     sql: &'static str,
-    gate_ceiling: bool,
+    params: DrainParams,
 }
 
-/// The eight counts, each the predicate of the legacy worker that does the
+/// The ten counts, each the predicate of the legacy worker that does the
 /// work, with the tenant filter and "no pipeline run owns the submission"
 /// (`NOT EXISTS ... pipeline_runs`, the exclusion
 /// `list_submissions_needing_gate_decision` applies too: a pipeline receipt
@@ -246,7 +255,7 @@ struct LegacyDrainCount {
 /// to prevent. The comments say where. (The legacy workers do not themselves
 /// leave out a submission with a pipeline run, except the gate driver; the
 /// report does, because that work belongs to the pipeline.)
-const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
+const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 10] = [
     // `list_submissions_awaiting_pii_backstop` (db/postgres.rs) selects a
     // submission in this status that also has an active envelope ref, fewer
     // attempts than its ceiling, and an elapsed backoff. This count is the
@@ -261,7 +270,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
                      SELECT 1 FROM pipeline_runs r
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
-        gate_ceiling: false,
+        params: DrainParams::Tenant,
     },
     // `list_submissions_needing_gate_decision` (db/postgres.rs), without its
     // backoff clause: a submission that waits out a backoff is still owed its
@@ -293,7 +302,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
                      SELECT 1 FROM pipeline_runs r
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
-        gate_ceiling: true,
+        params: DrainParams::TenantAndGateCeiling,
     },
     // The same query with the attempts at or above the ceiling: the driver
     // no longer selects the submission, and no decision exists. Without an
@@ -322,7 +331,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
                      SELECT 1 FROM pipeline_runs r
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
-        gate_ceiling: true,
+        params: DrainParams::TenantAndGateCeiling,
     },
     // `claim_trace_review_lease` (db/trace_corpus_pg.rs) claims a submission
     // in this status. A submission whose lease another reviewer holds is
@@ -336,7 +345,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
                      SELECT 1 FROM pipeline_runs r
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
-        gate_ceiling: false,
+        params: DrainParams::Tenant,
     },
     // `index_vector_metadata_from_db` (trace-commons-ingest.rs) builds this
     // set in memory: an accepted submission that is not revoked or purged,
@@ -380,7 +389,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
                      SELECT 1 FROM pipeline_runs r
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
-        gate_ceiling: false,
+        params: DrainParams::Tenant,
     },
     // `run_credit_settlement_unlocked` (trace-commons-ingest.rs) settles the
     // events of the four types `trace_credit_event_type_is_settlement_eligible`
@@ -415,7 +424,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
                      SELECT 1 FROM pipeline_runs r
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
-        gate_ceiling: false,
+        params: DrainParams::Tenant,
     },
     // `list_due_trace_revocation_propagation_items` (db/trace_corpus_pg.rs)
     // lists the `pending` and `failed` items whose `next_attempt_at` is due.
@@ -435,7 +444,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
                       WHERE r.tenant_id = i.tenant_id
                         AND r.submission_id = i.source_submission_id
                  )",
-        gate_ceiling: false,
+        params: DrainParams::Tenant,
     },
     // `read_mains_near_credit_outbox_items` (trace-commons-ingest.rs): the
     // outbox rows `main`'s NEAR workers read, which leave out the pipeline's
@@ -448,7 +457,102 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
                WHERE o.tenant_id = $1
                  AND o.instrument_id IS NULL
                  AND o.status IN ('pending', 'failed', 'submitted')",
-        gate_ceiling: false,
+        params: DrainParams::Tenant,
+    },
+    // `repair_missing_near_credit_outbox_items_for_finalized_batches`
+    // (trace-commons-ingest.rs), which every live settlement run calls first.
+    // It acts on the line items (`line_items_json`, an array) of a finalized
+    // batch that has a NEAR contract (`near_contract_id`, stored on the batch:
+    // no ingest setting is needed, and with NEAR payouts not configured no
+    // batch has one): an item that names an outbox row (`near_outbox_id`)
+    // the table lacks gets the row written again, and an item with a recorded
+    // payout hold (`near_payout_hold_reason`, no `near_outbox_id`) and no
+    // outbox row for its (batch, account) gets one once the account's payout
+    // target resolves. The count takes both kinds of item, and takes a held
+    // item whether or not its payout target resolves now: until an outbox row
+    // exists the payout is not queued, though the batch is finalized and
+    // `delayed_credit_unsettled` reads its events as settled. The pipeline's
+    // batches (an `instrument_id`) are not `main`'s to repair.
+    LegacyDrainCount {
+        label: "near_payout_unqueued",
+        sql: "SELECT COUNT(*) FROM trace_credit_settlement_batches b
+               CROSS JOIN LATERAL jsonb_array_elements(b.line_items_json) AS item
+               WHERE b.tenant_id = $1
+                 AND b.status = 'finalized'
+                 AND b.instrument_id IS NULL
+                 AND b.near_contract_id IS NOT NULL
+                 AND (
+                     (item ->> 'near_outbox_id' IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM trace_near_credit_outbox o
+                           WHERE o.tenant_id = b.tenant_id
+                             AND o.near_outbox_id = (item ->> 'near_outbox_id')::uuid
+                      ))
+                     OR
+                     (item ->> 'near_outbox_id' IS NULL
+                      AND item ->> 'near_payout_hold_reason' IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM trace_near_credit_outbox o
+                           WHERE o.tenant_id = b.tenant_id
+                             AND o.settlement_batch_id = b.settlement_batch_id
+                             AND o.credit_account_hash = item ->> 'credit_account_hash'
+                      ))
+                 )",
+        params: DrainParams::Tenant,
+    },
+    // `list_incomplete_source_session_withdrawals` (db/trace_corpus_pg.rs),
+    // which the revocation propagation worker runs for the whole tenant
+    // (`reconcile_source_session_withdrawals`): one row for each submission
+    // mapped to a withdrawn source session that has no `trace_withdrawals`
+    // row, or still has an object ref not marked deleted, a vector entry not
+    // invalidated, a dedup assignment, a derived record not revoked, or a
+    // token attachment not deleted outside the retention policies a legal hold
+    // keeps (`$2`, the worker's `held_retention_policy_ids`). The selection is
+    // by session mapping and by actual state, not by an item the legacy path
+    // wrote, and the worker completes a version that has a pipeline run too
+    // (it runs the pipeline's follow-up first), so the count is tenant-wide:
+    // it does not leave out a submission with a run.
+    LegacyDrainCount {
+        label: "withdrawal_completion_pending",
+        sql: "SELECT COUNT(*) FROM trace_submission_sessions mapping
+               JOIN trace_source_sessions source
+                 ON source.tenant_id = mapping.tenant_id
+                AND source.account_id = mapping.account_id
+                AND source.session_digest = mapping.session_digest
+               WHERE mapping.tenant_id = $1
+                 AND source.withdrawn_at IS NOT NULL
+                 AND (
+                     NOT EXISTS (SELECT 1 FROM trace_withdrawals withdrawal
+                                  WHERE withdrawal.tenant_id = mapping.tenant_id
+                                    AND withdrawal.submission_id = mapping.submission_id)
+                  OR EXISTS (SELECT 1 FROM trace_object_refs object_ref
+                              WHERE object_ref.tenant_id = mapping.tenant_id
+                                AND object_ref.submission_id = mapping.submission_id
+                                AND object_ref.deleted_at IS NULL)
+                  OR EXISTS (SELECT 1 FROM trace_vector_entries vector_entry
+                              WHERE vector_entry.tenant_id = mapping.tenant_id
+                                AND vector_entry.submission_id = mapping.submission_id
+                                AND vector_entry.status <> 'invalidated'
+                                AND vector_entry.deleted_at IS NULL)
+                  OR EXISTS (SELECT 1 FROM trace_gate_decisions decision
+                              WHERE decision.tenant_id = mapping.tenant_id
+                                AND decision.submission_id = mapping.submission_id
+                                AND (decision.dedup_cluster_id IS NOT NULL
+                                     OR decision.dedup_simhash IS NOT NULL))
+                  OR EXISTS (SELECT 1 FROM trace_derived_records derived
+                              WHERE derived.tenant_id = mapping.tenant_id
+                                AND derived.submission_id = mapping.submission_id
+                                AND derived.status <> 'revoked')
+                  OR EXISTS (SELECT 1 FROM trace_token_attachments attachment
+                               JOIN trace_submissions submission
+                                 ON submission.tenant_id = attachment.tenant_id
+                                AND submission.submission_id = attachment.submission_id
+                              WHERE attachment.tenant_id = mapping.tenant_id
+                                AND attachment.submission_id = mapping.submission_id
+                                AND attachment.deleted = FALSE
+                                AND NOT (submission.retention_policy_id = ANY($2)))
+                 )",
+        params: DrainParams::TenantAndHeldRetentionPolicies,
     },
 ];
 
@@ -829,28 +933,86 @@ impl PipelineActivationStore {
         .await
     }
 
-    /// What the legacy path still owes `tenant_id`: for each kind of pending
-    /// legacy work, the number of submissions (or rows) that the legacy worker
-    /// would pick up and that no pipeline run owns (`LEGACY_DRAIN_COUNTS`
-    /// names the worker and the predicate of each count), and `drained`,
-    /// which is true only when every count is zero. Before a tenant's legacy
-    /// writer can be retired the legacy code must have finished this work.
+    /// What the legacy path still owes `tenant_id`, as ten counts and one
+    /// verdict: `drained` is true only when every count is zero. Before a
+    /// tenant's legacy writer can be retired the legacy code must have
+    /// finished this work. Each count is the selection of the legacy worker
+    /// that does the work, left to what the pipeline does not own: by
+    /// submission (no pipeline run) for the first seven counts, by payout
+    /// instrument (none) for the two NEAR counts, and tenant-wide for the
+    /// withdrawals. `LEGACY_DRAIN_COUNTS` names each worker function and every
+    /// place a count is wider than the worker's own selection:
     ///
-    /// `gate_max_attempts` is the attempt ceiling the gate driver runs with
-    /// (`PerplexityDriverKnobs::max_attempts`); it splits the gate work into
-    /// pending (below the ceiling) and exhausted (at it, which the driver no
-    /// longer selects).
+    /// - `awaiting_pii_backstop`: submissions held for the PII backstop's
+    ///   verdict.
+    /// - `gate_decision_pending`: submissions with an active submitted
+    ///   envelope and no gate decision whose attempts are below
+    ///   `gate_max_attempts` (`list_submissions_needing_gate_decision`, with
+    ///   no backoff and no status filter).
+    /// - `gate_decision_exhausted`: the same with attempts at or above the
+    ///   ceiling, which the gate driver no longer selects.
+    /// - `quarantine_review_pending`: quarantined submissions waiting for a
+    ///   reviewer's decision (`claim_trace_review_lease`).
+    /// - `vector_index_pending`: the current precheck records of accepted
+    ///   submissions that have no active vector entry
+    ///   (`index_vector_metadata_from_db`).
+    /// - `delayed_credit_unsettled`: positive credit events of the four
+    ///   settlement-eligible types on accepted submissions that no finalized
+    ///   settlement batch names (`run_credit_settlement`).
+    /// - `revocation_propagation_pending`: revocation propagation items
+    ///   `pending`, `in_progress`, or `failed`
+    ///   (`list_due_trace_revocation_propagation_items`).
+    /// - `near_outbox_pending`, tenant-wide: `main`'s NEAR outbox rows
+    ///   `pending`, `failed`, or `submitted` (`read_mains_near_credit_outbox_items`).
+    /// - `near_payout_unqueued`: line items of finalized `main` settlement
+    ///   batches that have a NEAR contract and whose payout has no outbox row:
+    ///   a payout held for want of a payout target, or an outbox row that is
+    ///   missing (`repair_missing_near_credit_outbox_items_for_finalized_batches`,
+    ///   which each live settlement run calls first). The batch is settled,
+    ///   so `delayed_credit_unsettled` and `near_outbox_pending` read zero
+    ///   while the payout is not queued. A batch has a contract only when NEAR
+    ///   payouts were configured when it was settled: with none, this count is
+    ///   zero.
+    /// - `withdrawal_completion_pending`, tenant-wide: submissions of a
+    ///   withdrawn source session whose withdrawal is not complete
+    ///   (`list_incomplete_source_session_withdrawals`, which the revocation
+    ///   propagation worker runs for the whole tenant). The worker completes a
+    ///   version that has a pipeline run too, so this count does not leave
+    ///   out a submission with a run.
     ///
-    /// The report runs as the ingest runtime role in one tenant transaction:
-    /// a read-only, single-snapshot transaction (`REPEATABLE READ`), so all
-    /// eight counts and the routing state describe one instant, with one
-    /// statement for each count and no row lock. It reads `main`'s tables,
-    /// which hold what the database mirror wrote; a tenant whose reads still
-    /// come from the file store has records the report does not see.
+    /// Counts that can stay above zero without legacy code ever clearing
+    /// them, so that an operator reads them as work for a person:
     ///
-    /// Not counted, by the owner's decision (P5-D8): none of these is
-    /// follow-up the legacy path owes for a receipt it took, so none can
-    /// strand a tenant when its legacy writer retires.
+    /// - `gate_decision_pending` is every legacy submission with an envelope
+    ///   and no decision, accepted or not, and nothing scores one by itself
+    ///   unless the in-process gate driver runs, which it does not unless an
+    ///   operator turns it on (`TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`);
+    ///   `/v1/workers/gate/evaluate` scores a submission its caller names.
+    /// - `gate_decision_exhausted` and `awaiting_pii_backstop` after the
+    ///   attempts ran out: the driver stops, and an operator resets the
+    ///   attempt row or accepts the loss.
+    /// - `quarantine_review_pending` waits for a reviewer, not for code.
+    /// - `revocation_propagation_pending` for an item left `in_progress` by a
+    ///   run that crashed: the worker never lists it again.
+    /// - `delayed_credit_unsettled` for credit of an account with an active
+    ///   hold, a ranking event that its calibration gate excludes, or what the
+    ///   per-account cap holds back: the settlement worker skips them until
+    ///   the hold is released, the gate passes, or the cap allows them.
+    /// - `vector_index_pending` for a record that the credential's or the
+    ///   tenant policy's consent check refuses: the report cannot apply that
+    ///   check, so the worker will never index the record.
+    /// - `near_outbox_pending` for a line `submitted` with no transaction
+    ///   hash: the confirm worker acts only on a hash.
+    /// - `near_payout_unqueued` for an account that stays without a payout
+    ///   target (none enrolled, or several and none designated): enrolling or
+    ///   designating one, then a live settlement run, queues the payout.
+    /// - `withdrawal_completion_pending` for a withdrawal whose tail keeps
+    ///   failing; the held retention policies below keep a legal hold's
+    ///   attachments out of the count.
+    ///
+    /// Not counted, by the owner's decision (P5-D8), because none of it is
+    /// follow-up that the legacy path owes for a receipt it took. This list
+    /// is the owner's; nothing here proves it complete.
     ///
     /// - Retention and purge are time-driven maintenance over every
     ///   submission's `expires_at`; the pipeline's submissions go through the
@@ -865,23 +1027,56 @@ impl PipelineActivationStore {
     ///   `/v1/workers/utility-credit` takes its submission ids from its
     ///   caller, so no table lists what it still has to do.
     ///
-    /// The `near_outbox_pending` count is tenant-wide and blocks `drained`
-    /// (owner decision, 2026-10-02): an outbox row stays `pending`,
-    /// `failed`, or `submitted` until `main`'s NEAR workers confirm it, and
-    /// retiring the legacy path before then would strand the payout.
+    /// The counts `near_outbox_pending`, `near_payout_unqueued`, and
+    /// `withdrawal_completion_pending` block `drained` (owner decisions,
+    /// 2026-10-02): retiring the legacy path before a payout is confirmed or
+    /// queued, or a withdrawal is complete, would strand money or privacy
+    /// work.
+    ///
+    /// Precondition on the caller. The report reads the database tables only,
+    /// and the store cannot see how the deployment fills and reads them. The
+    /// caller must not present this report as a drain signal unless the
+    /// tenant's legacy records in the database are authoritative: (1) the
+    /// legacy path's database writes are required, not best effort
+    /// (`TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES`, or account admission, is
+    /// on), so a failed database write fails the legacy operation instead of
+    /// leaving a record in the file store alone; and (2) the
+    /// tenant's review, credit, settlement, and outbox reads come from the
+    /// database (`db_reviewer_reads_for_tenant`), so the legacy workers act
+    /// on the rows this report counts. Otherwise a quarantined submission, a
+    /// credit event, or an outbox row that exists only in the file store is
+    /// owed work and the report reads zero with `drained` true.
+    ///
+    /// Parameters. `tenant_id` is the tenant of the credential, never a
+    /// second tenant. `gate_max_attempts` is the attempt ceiling the gate
+    /// driver runs with (`PerplexityDriverKnobs::max_attempts`); it splits
+    /// the gate work into pending (below the ceiling) and exhausted (at it).
+    /// `held_retention_policy_ids` is the retention policies a legal hold
+    /// keeps (`legal_hold_retention_policy_ids`), as the withdrawal worker
+    /// receives them: a withdrawn submission's token attachment under one of
+    /// them is not owed deletion, so it is not counted. An empty list holds
+    /// nothing.
+    ///
+    /// The report runs as the ingest runtime role in one tenant transaction:
+    /// a read-only, single-snapshot transaction (`REPEATABLE READ`), so all
+    /// ten counts and the routing state describe one instant, with one
+    /// statement for each count and no row lock.
     pub async fn legacy_drain_report(
         &self,
         tenant_id: &str,
         gate_max_attempts: i32,
+        held_retention_policy_ids: &[String],
     ) -> Result<LegacyDrainReport, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::read_only_tenant_transaction(&mut client, tenant_id).await?;
         let mut pending = BTreeMap::new();
         for count in &LEGACY_DRAIN_COUNTS {
-            let params: &[&(dyn ToSql + Sync)] = if count.gate_ceiling {
-                &[&tenant_id, &gate_max_attempts]
-            } else {
-                &[&tenant_id]
+            let params: &[&(dyn ToSql + Sync)] = match count.params {
+                DrainParams::Tenant => &[&tenant_id],
+                DrainParams::TenantAndGateCeiling => &[&tenant_id, &gate_max_attempts],
+                DrainParams::TenantAndHeldRetentionPolicies => {
+                    &[&tenant_id, &held_retention_policy_ids]
+                }
             };
             let counted: i64 = tx.query_one(count.sql, params).await?.get(0);
             let counted = u64::try_from(counted).map_err(|_| {
