@@ -19,11 +19,15 @@ public struct GlassGallery: View {
     @State private var hovered: String?
 
     private let scrolls: Bool
+    private let scene: Bool
 
     /// `scrolls: false` lays the gallery out at full height, for snapshot
     /// renders (`ImageRenderer` does not draw a scroll view's content).
-    public init(scrolls: Bool = true) {
+    /// `scene: false` draws no ground, for a glass window whose panes show
+    /// the desktop (`TCDesignGallery`).
+    public init(scrolls: Bool = true, scene: Bool = true) {
         self.scrolls = scrolls
+        self.scene = scene
     }
 
     public var body: some View {
@@ -35,7 +39,7 @@ public struct GlassGallery: View {
             }
         }
         .frame(minWidth: 900, minHeight: 700)
-        .background(GlassTokens.Color.sceneBase.color)
+        .background(scene ? GlassTokens.Color.sceneBase.color : .clear)
         .preferredColorScheme(.dark)
     }
 

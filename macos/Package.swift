@@ -57,13 +57,21 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // The glass design system: generated tokens, the SwiftUI components
-        // every screen is built from, and their preview gallery. SwiftUI
-        // only -- no FFI dylib, no AppKit model -- so it builds, previews
-        // and tests on its own. Tokens are generated from
+        // every screen is built from, and their preview gallery. SwiftUI,
+        // plus the AppKit material views under a pane -- no FFI dylib, no
+        // app model -- so it builds, previews and tests on its own. Tokens are generated from
         // design-tokens/glass.tokens.json by scripts/design-tokens/generate.py;
         // TCDesignTests fails if the two drift.
         .target(
             name: "TCDesign",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // `swift run TCDesignGallery`: the gallery in a real glass window,
+        // for tuning the material and the pane gaps on a real machine
+        // (R3). A development tool; the app bundle does not include it.
+        .executableTarget(
+            name: "TCDesignGallery",
+            dependencies: ["TCDesign"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

@@ -148,16 +148,15 @@ public enum GlassTier: Sendable, Equatable {
         }
     }
 
-    /// The painted fill. A pane paints its glass over the neutral base; R3
-    /// replaces that base with Liquid Glass (macOS 26) or a system material.
+    /// The fill. A pane is the native material (R3, D4): Liquid Glass on
+    /// macOS 26, the HUD material on 14–25, the opaque base under Reduce
+    /// Transparency. Everything inside a pane is painted: never glass on
+    /// glass.
     @ViewBuilder
     func fill(in shape: RoundedRectangle) -> some View {
         switch self {
         case .pane:
-            ZStack {
-                shape.fill(GlassTokens.Color.paneBase.color)
-                shape.fill(GlassTokens.Gradient.paneFill.linear)
-            }
+            GlassPaneFill(radius: shape.cornerSize.width)
         case .card:
             shape.fill(GlassTokens.Gradient.cardFill.linear)
         case .cardQuiet:
