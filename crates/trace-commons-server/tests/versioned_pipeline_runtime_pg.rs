@@ -31783,6 +31783,49 @@ async fn receipt_rows(tenant_id: &str) -> ReceiptRows {
     }
 }
 
+/// Inserts, through `tx` (a transaction on an owner connection), the
+/// submission row the legacy path writes for `env`, with no ownership row and
+/// no run: a legacy receipt, from before the tenant had ownership rows or
+/// still uncommitted.
+async fn insert_legacy_submission_in(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    env: &TraceContributionEnvelope,
+) {
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING",
+        &[&tenant_id],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "INSERT INTO trace_submissions (
+            tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+            consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+            status, privacy_risk, redaction_pipeline_version, redaction_hash,
+            redaction_counts
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+        &[
+            &tenant_id,
+            &env.submission_id,
+            &env.trace_id,
+            &"legacy-principal",
+            &"ironclaw.trace_contribution.v1",
+            &"v1",
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+            &"retention-default",
+            &"accepted",
+            &"low",
+            &"v1",
+            &env.privacy.redaction_hash,
+            &serde_json::json!({}),
+        ],
+    )
+    .await
+    .expect("insert a legacy submission row");
+}
+
 /// A service over the reference scorer and embedder that never calls
 /// `with_unqualified_routing`, so it keeps the default (`false`): the one
 /// shape of service that `test_service` and its siblings no longer build.
@@ -32083,38 +32126,7 @@ async fn a_legacy_submission_is_never_given_a_pipeline_run() {
     {
         let mut owner = owner_client().await;
         let tx = owner_tenant_tx(&mut owner, &tenant).await;
-        tx.execute(
-            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING",
-            &[&tenant],
-        )
-        .await
-        .unwrap();
-        tx.execute(
-            "INSERT INTO trace_submissions (
-                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
-                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                status, privacy_risk, redaction_pipeline_version, redaction_hash,
-                redaction_counts
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
-            &[
-                &tenant,
-                &env.submission_id,
-                &env.trace_id,
-                &"legacy-principal",
-                &"ironclaw.trace_contribution.v1",
-                &"v1",
-                &serde_json::json!([]),
-                &serde_json::json!([]),
-                &"retention-default",
-                &"accepted",
-                &"low",
-                &"v1",
-                &env.privacy.redaction_hash,
-                &serde_json::json!({}),
-            ],
-        )
-        .await
-        .expect("seed a legacy submission row");
+        insert_legacy_submission_in(&tx, &tenant, &env).await;
         tx.commit().await.unwrap();
     }
     assert_eq!(
@@ -32509,12 +32521,111 @@ async fn a_receipt_in_flight_cannot_commit_after_containment() {
     );
 }
 
-/// Both commit-time conflicts end as `LegacyOwned` with the transaction rolled
-/// back and the attempt discarded: (i) the ownership row exists for the id
-/// (a pipeline run owns it under another key), and (ii) the submission row
-/// exists (a pipeline run from before ownership rows). The ownership row of
-/// (ii), inserted first in the transaction, does not outlive the rollback.
+/// A second idempotency key for a submission id that a pipeline run owns is
+/// not the legacy path's id: the receipt is `main`'s error ("already bound to
+/// another receipt"), never `LegacyOwned`, which would send the caller to the
+/// legacy path. The id keeps its one owner, run, and submission row; the
+/// failed attempt's object and `staged` row wait for the sweeper, as after
+/// every error of the commit transaction, and the sweep removes them.
 #[tokio::test]
+async fn a_second_key_for_a_pipeline_owned_submission_is_an_error_not_legacy_owned() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let activation = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("second-key");
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let first_key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(first) = submit_registered(
+        &service,
+        receipt(&tenant, &first_key, &raw, &env, NO_LIMITS),
+    )
+    .await
+    .unwrap() else {
+        panic!("the first receipt creates a run")
+    };
+    let rows_after_first = receipt_rows(&tenant).await;
+    assert_eq!(
+        (
+            rows_after_first.runs,
+            rows_after_first.submissions,
+            rows_after_first.ownership
+        ),
+        (1, 1, 1)
+    );
+
+    let second_key = format!("{first_key}-again");
+    let error = submit_registered(
+        &service,
+        receipt(&tenant, &second_key, &raw, &env, NO_LIMITS),
+    )
+    .await
+    .expect_err("a second key for a pipeline-owned id is an error, not a LegacyOwned result");
+    assert!(
+        error
+            .to_string()
+            .contains("already bound to another receipt"),
+        "unexpected error: {error}"
+    );
+
+    assert_eq!(
+        activation
+            .ownership(&tenant, env.submission_id)
+            .await
+            .unwrap(),
+        Some(ReceiptOwnership {
+            owner: ReceiptOwner::Pipeline,
+            submission_id: env.submission_id,
+            run_id: Some(first.run_id),
+        }),
+        "the id keeps its one pipeline owner and its first run"
+    );
+    assert_eq!(
+        receipt_rows(&tenant).await,
+        ReceiptRows {
+            // The attempt's staging row stays for the sweeper, and the
+            // staging transaction counted the second key.
+            staging: rows_after_first.staging + 1,
+            usage: rows_after_first.usage + 1,
+            ..rows_after_first
+        },
+        "no second run, outcome, submission, object ref, or ownership row"
+    );
+    let rows = receipt_artifact_rows(&backend, &tenant).await;
+    assert_eq!(
+        rows.iter().filter(|row| row.state == "committed").count(),
+        1,
+        "only the first key has a committed staging row"
+    );
+    assert_eq!(rows.iter().filter(|row| row.state == "staged").count(), 1);
+    assert_eq!(count_files_under(dir.path()), 2);
+
+    // The sweeper removes the failed attempt, and only that one.
+    make_receipt_artifacts_due(&backend, &tenant, "staged").await;
+    assert_eq!(service.sweep_staged_receipts(&tenant, 10).await.unwrap(), 1);
+    assert_eq!(receipt_artifact_rows(&backend, &tenant).await.len(), 1);
+    assert_eq!(count_files_under(dir.path()), 1);
+}
+
+/// A conflict at the receipt's own inserts is answered by who owns the id.
+/// (a) A pipeline run from before ownership rows owns it (a submission and a
+/// run, no ownership row): `main`'s "already bound to another receipt" error,
+/// and the receipt's ownership insert rolls back. A legacy owner that commits
+/// after the receipt's checks gives `LegacyOwned`, with the transaction
+/// rolled back and the attempt discarded: (b) the legacy path's ownership row,
+/// (c) a legacy submission row. In (b) and (c) the legacy path's transaction
+/// is open and uncommitted while the receipt's commit transaction reaches its
+/// insert, so the receipt's checks do not see it and the insert waits for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_conflict_on_ownership_or_submission_stores_nothing() {
     let Some(backend) = runtime_backend(4).await else {
         return;
@@ -32528,28 +32639,68 @@ async fn a_commit_conflict_on_ownership_or_submission_stores_nothing() {
     )
     .await;
 
-    // (i) The ownership row exists: a second key for the same submission id.
-    let tenant = routing_tenant("conflict-ownership");
+    // (a) The submission row exists with a run and no ownership row.
+    let tenant = routing_tenant("conflict-pipeline-run");
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let env = envelope(seeded.submission_id).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = format!("conflict-pipeline-run-{}", uuid::Uuid::new_v4());
+    let error = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect_err("an id that a pipeline run owns is an error, not a LegacyOwned result");
+    assert!(
+        error
+            .to_string()
+            .contains("already bound to another receipt"),
+        "unexpected error: {error}"
+    );
+    let rows = receipt_rows(&tenant).await;
+    assert_eq!(rows.runs, 1, "only the seeded run");
+    assert_eq!(rows.ownership, 0, "the ownership insert rolled back");
+    assert_eq!(rows.submissions, 1, "only the seeded submission");
+    assert_eq!(
+        rows.staging, 1,
+        "the failed attempt's row stays for the sweeper"
+    );
+
+    // (b) The legacy path's ownership row commits after the receipt's checks.
+    let tenant = routing_tenant("conflict-legacy-claim");
+    service.register_default_bundle(&tenant).await.unwrap();
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
-    let first_key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(first) = submit_registered(
-        &service,
-        receipt(&tenant, &first_key, &raw, &env, NO_LIMITS),
-    )
-    .await
-    .unwrap() else {
-        panic!("the first receipt creates a run")
-    };
-    let rows_after_first = receipt_rows(&tenant).await;
-    assert_eq!((rows_after_first.runs, rows_after_first.ownership), (1, 1));
-    let second_key = format!("{first_key}-again");
-    let result = submit_registered(
-        &service,
-        receipt(&tenant, &second_key, &raw, &env, NO_LIMITS),
-    )
-    .await
-    .unwrap();
+    let key = env.submission_id.to_string();
+    let mut legacy = owner_client().await;
+    let claim = owner_tenant_tx(&mut legacy, &tenant).await;
+    claim
+        .execute(
+            "INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner)
+             VALUES ($1, $2, 'legacy')",
+            &[&tenant, &env.submission_id],
+        )
+        .await
+        .unwrap();
+    let mut waiting = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut waiting)
+            .await
+            .is_err(),
+        "the receipt's ownership insert must wait for the open legacy claim"
+    );
+    claim.commit().await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .expect("the receipt finishes once the legacy claim commits")
+        .expect("the receipt task does not panic")
+        .expect("a legacy owner is a result, not an error");
     assert!(
         matches!(result, PipelineReceiptResult::LegacyOwned),
         "unexpected result: {result:?}"
@@ -32557,49 +32708,63 @@ async fn a_commit_conflict_on_ownership_or_submission_stores_nothing() {
     assert_eq!(
         receipt_rows(&tenant).await,
         ReceiptRows {
-            // The staging transaction counted the second key.
-            usage: rows_after_first.usage + 1,
-            ..rows_after_first
+            // The legacy claim, and the key the staging transaction counted.
+            ownership: 1,
+            usage: 1,
+            ..ReceiptRows::default()
         }
     );
-    assert_eq!(
-        PipelineActivationStore::new(backend.clone())
-            .ownership(&tenant, env.submission_id)
-            .await
-            .unwrap()
-            .and_then(|ownership| ownership.run_id),
-        Some(first.run_id),
-        "the id keeps its first run"
-    );
-    assert_eq!(
-        receipt_artifact_rows(&backend, &tenant).await.len(),
-        1,
-        "the refused attempt removed its staging row"
-    );
-    assert_eq!(count_files_under(dir.path()), 1);
+    drop(legacy);
 
-    // (ii) The submission row exists, with a run and no ownership row.
-    let tenant = routing_tenant("conflict-submission");
-    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
-    let env = envelope(seeded.submission_id).await;
+    // (c) A legacy submission row commits after the receipt's checks.
+    let tenant = routing_tenant("conflict-legacy-record");
+    service.register_default_bundle(&tenant).await.unwrap();
+    let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
-    let key = format!("conflict-submission-{}", uuid::Uuid::new_v4());
-    let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+    let key = env.submission_id.to_string();
+    let mut legacy = owner_client().await;
+    let record = owner_tenant_tx(&mut legacy, &tenant).await;
+    insert_legacy_submission_in(&record, &tenant, &env).await;
+    let mut waiting = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut waiting)
+            .await
+            .is_err(),
+        "the receipt's submission insert must wait for the open legacy record"
+    );
+    record.commit().await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
         .await
-        .unwrap();
+        .expect("the receipt finishes once the legacy record commits")
+        .expect("the receipt task does not panic")
+        .expect("a legacy owner is a result, not an error");
     assert!(
         matches!(result, PipelineReceiptResult::LegacyOwned),
         "unexpected result: {result:?}"
     );
-    let rows = receipt_rows(&tenant).await;
-    assert_eq!(rows.runs, 1, "only the seeded run");
-    assert_eq!(rows.ownership, 0, "the ownership insert rolled back");
-    assert_eq!(rows.submissions, 1, "only the seeded submission");
     assert_eq!(
-        rows.staging, 0,
-        "the refused attempt removed its staging row"
+        receipt_rows(&tenant).await,
+        ReceiptRows {
+            // The legacy submission row alone (the receipt's ownership insert
+            // rolled back), and the key the staging transaction counted.
+            submissions: 1,
+            usage: 1,
+            ..ReceiptRows::default()
+        }
     );
-    assert_eq!(count_files_under(dir.path()), 1, "and its object");
+    drop(legacy);
+    // The refused attempts of (b) and (c) deleted their own objects; the
+    // failed attempt of (a) left its object and row to the sweeper.
+    assert_eq!(count_files_under(dir.path()), 1);
 }
 
 /// A routing change takes the tenant's routing lock exclusively. While a

@@ -145,10 +145,18 @@ pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
 pub const PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL: &str = "pipeline_attempt_artifact_missing";
 /// Safe label of a receipt for a submission id that the legacy path owns
 /// (`PipelineReceiptResult::LegacyOwned`): the ownership row names the legacy
-/// path, or a legacy submission row holds the id. A conflict at the receipt's
-/// own inserts (`insert_receipt_records`) carries this label to
-/// `commit_receipt_attempt`, which turns it into the result.
+/// path, or a legacy submission row holds the id. A conflict with a legacy
+/// owner at the receipt's own inserts (`insert_receipt_records`) carries this
+/// label to `commit_receipt_attempt`, which turns it into the result. A
+/// conflict with a pipeline owner does not: it is
+/// `PIPELINE_SUBMISSION_BOUND_MESSAGE`, an error.
 pub const PIPELINE_LEGACY_RECEIPT_OWNED_LABEL: &str = "legacy_receipt_owned";
+/// `main`'s error for a receipt whose submission id is already bound to
+/// another receipt. `insert_receipt_records` returns it when a pipeline run
+/// owns the id (a second idempotency key for the same submission id): the id
+/// is not the legacy path's, so the receipt is an error, not `LegacyOwned`.
+const PIPELINE_SUBMISSION_BOUND_MESSAGE: &str =
+    "submission identity is already bound to another receipt";
 /// A bundle whose own configuration is not qualifiable
 /// (`PipelineBundleQualification::configuration_qualifiable`).
 pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
@@ -5264,12 +5272,20 @@ async fn insert_outcome(
 /// The ownership row is the first statement. Its primary key is the one place
 /// where the legacy path's claim (`PipelineActivationStore::claim_legacy_receipt`)
 /// and this insert meet, so exactly one of them succeeds for a submission id:
-/// a concurrent claim makes this insert wait for its outcome. A conflict, here
-/// or at the submission row (a legacy receipt from before ownership rows),
-/// ends in `DatabaseError::Constraint(PIPELINE_LEGACY_RECEIPT_OWNED_LABEL)`,
-/// and the caller rolls the transaction back. The row names a run that does
-/// not exist yet; its foreign key is deferred, so it is checked when the
-/// transaction commits.
+/// a concurrent claim makes this insert wait for its outcome. The row names a
+/// run that does not exist yet; its foreign key is deferred, so it is checked
+/// when the transaction commits.
+///
+/// A conflict is answered by who owns the id, and the caller rolls the
+/// transaction back either way. At the ownership row: a `legacy` owner ends in
+/// `DatabaseError::Constraint(PIPELINE_LEGACY_RECEIPT_OWNED_LABEL)`, which
+/// `commit_receipt_attempt` turns into `LegacyOwned`; a `pipeline` owner (a
+/// second key for an id a run owns) ends in `main`'s error
+/// (`PIPELINE_SUBMISSION_BOUND_MESSAGE`), which stays an error. At the
+/// submission row, where no ownership row existed: a pipeline run for the id
+/// (a run from before ownership rows) is the same error, and no run means a
+/// legacy submission from before the tenant came into scope, which is the
+/// legacy label.
 async fn insert_receipt_records(
     tx: &Transaction<'_>,
     run: &NewPipelineRun,
@@ -5305,8 +5321,24 @@ async fn insert_receipt_records(
         )
         .await?;
     if owned != 1 {
+        // The id has an owner. Its row, committed by the time this insert
+        // returned, says whose: only a legacy owner makes the receipt
+        // `LegacyOwned`.
+        let owner: String = tx
+            .query_one(
+                "SELECT owner FROM pipeline_receipt_ownership
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+            .get(0);
         return Err(DatabaseError::Constraint(
-            PIPELINE_LEGACY_RECEIPT_OWNED_LABEL.to_string(),
+            if owner == "legacy" {
+                PIPELINE_LEGACY_RECEIPT_OWNED_LABEL
+            } else {
+                PIPELINE_SUBMISSION_BOUND_MESSAGE
+            }
+            .to_string(),
         ));
     }
     let (submission_status, admission_decision, admission_reason, next_phase, run_state) =
@@ -5369,8 +5401,25 @@ async fn insert_receipt_records(
         )
         .await?;
     if inserted != 1 {
+        // No ownership row existed, so the submission row is a pipeline run's
+        // from before ownership rows, or a legacy receipt's.
+        let pipeline_run_exists: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pipeline_runs
+                      WHERE tenant_id = $1 AND submission_id = $2
+                 )",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+            .get(0);
         return Err(DatabaseError::Constraint(
-            PIPELINE_LEGACY_RECEIPT_OWNED_LABEL.to_string(),
+            if pipeline_run_exists {
+                PIPELINE_SUBMISSION_BOUND_MESSAGE
+            } else {
+                PIPELINE_LEGACY_RECEIPT_OWNED_LABEL
+            }
+            .to_string(),
         ));
     }
     tx.execute(
@@ -8254,9 +8303,13 @@ impl PipelineService {
     /// The records include the pipeline's `pipeline_receipt_ownership` row
     /// (`insert_receipt_records` inserts it first). When the legacy path
     /// claimed or recorded the id after the checks above (a conflict on the
-    /// ownership row or the submission row), the transaction rolls back --
-    /// its deferred foreign key to the run is never checked -- and the
-    /// result is `LegacyOwned`.
+    /// ownership row or the submission row with a legacy owner), the
+    /// transaction rolls back -- its deferred foreign key to the run is never
+    /// checked -- and the result is `LegacyOwned`. A conflict with a pipeline
+    /// owner (a second key for an id a run owns) is not the legacy path's: it
+    /// is `main`'s "already bound to another receipt" error, as before PR 5,
+    /// and like every error from this transaction it leaves the attempt's
+    /// object and `staged` row to the sweeper.
     async fn commit_receipt_attempt(
         &self,
         request: &PipelineReceiptRequest<'_>,
@@ -8394,7 +8447,7 @@ impl PipelineService {
             Err(DatabaseError::Constraint(label))
                 if label == PIPELINE_LEGACY_RECEIPT_OWNED_LABEL =>
             {
-                // Another owner took the id since the check above. Dropping
+                // The legacy path took the id since the check above. Dropping
                 // the transaction rolls it back, ownership row included, and
                 // the deferred run foreign key is never checked.
                 drop(tx);
