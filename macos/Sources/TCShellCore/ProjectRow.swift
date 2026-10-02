@@ -78,6 +78,15 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// A count, not a promise. Entries move between this call and the
     /// approve, and the expensive checks still run at submit.
     public let contributableCount: Int?
+    /// Sessions the watcher has seen in this project still on this
+    /// machine at the last full pass. `nil` from a daemon predating it.
+    public let sessionCount: Int?
+    /// The latest of those sessions' modification times, or `nil` when
+    /// none has been observed (or the daemon predates the field).
+    public let lastSessionAt: Date?
+    /// On an armed row only: `true` when armed from now, so the backlog
+    /// waits. Absent (nil) on rows that are not armed.
+    public let fromNow: Bool?
 
     public var id: String { projectId }
 
@@ -90,7 +99,10 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         configured: Bool = false,
         isUnresolvedBucket: Bool = false,
         pendingCount: Int? = nil,
-        contributableCount: Int? = nil
+        contributableCount: Int? = nil,
+        sessionCount: Int? = nil,
+        lastSessionAt: Date? = nil,
+        fromNow: Bool? = nil
     ) {
         self.projectId = projectId
         self.projectLabel = projectLabel
@@ -101,6 +113,9 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.isUnresolvedBucket = isUnresolvedBucket
         self.pendingCount = pendingCount
         self.contributableCount = contributableCount
+        self.sessionCount = sessionCount
+        self.lastSessionAt = lastSessionAt
+        self.fromNow = fromNow
     }
 
     public enum CodingKeys: String, CodingKey {
@@ -113,6 +128,9 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case isUnresolvedBucket = "is_unresolved_bucket"
         case pendingCount = "pending_count"
         case contributableCount = "contributable_count"
+        case sessionCount = "session_count"
+        case lastSessionAt = "last_session_at"
+        case fromNow = "from_now"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -137,6 +155,9 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         // contributor, and collapsing that into 0 would draw no control on
         // a folder that submits whole.
         contributableCount = try c.decodeIfPresent(Int.self, forKey: .contributableCount)
+        sessionCount = try c.decodeIfPresent(Int.self, forKey: .sessionCount)
+        lastSessionAt = try c.decodeIfPresent(Date.self, forKey: .lastSessionAt)
+        fromNow = try c.decodeIfPresent(Bool.self, forKey: .fromNow)
     }
 
     /// Whether this project could ever be armed to contribute without asking.
