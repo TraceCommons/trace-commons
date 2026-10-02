@@ -344,7 +344,8 @@ the macOS text-size setting; leading and tracking scale with it (#1179).
 - **`windowControlsInset` 30 and `windowControlsWidth` 76: width must
   change.** The traffic-light clearance is at least 78pt (see Window and
   layout); the token and its test (which asserts at least 70) are raised.
-- **`watchSwitchWidth`/`watchSwitchHeight` 38×22: not adopted.** Toggles are
+- **`watchSwitchWidth`/`watchSwitchHeight` 38×22 and
+  `toggleWidth`/`toggleHeight` 40×24: not adopted.** Toggles are
   `Toggle(.switch)` at system size (see Components); the tokens become unused
   and should be removed.
 - **`mapWidth` 600: open, still in the JSON.** As built in #1146 the map is
@@ -457,7 +458,8 @@ three durations or add a named token for it.
   followed by a separate round Settings button. Reserve at least 78pt at the
   leading edge for the real traffic lights; this is a clearance, not a fixed
   origin for the capsule. Tabs: Home, Inference, Traces; the map selector's
-  second mode is labelled "Private AI" (D11). Preserve the Traces count badge
+  second mode is labelled "Private AI" (D11), as supplied by the core's
+  copy, not typed in the shell. Preserve the Traces count badge
   and the Inference status dot, with accessible text equivalents; an unknown
   status has no dot, never an "off" dot. Every icon has a tooltip and
   accessible name; toggles expose their state.
@@ -731,7 +733,7 @@ Each step is a PR of its own. #1173's numbering is in brackets.
 - Glass controls and node cards floating over a map that is itself in a
   Liquid Glass pane (#1181): decide on a real device.
 - How Increase Contrast values are represented in the JSON.
-- Removing the unused `mapWidth` and `watchSwitch*` tokens.
+- Removing the unused `mapWidth`, `watchSwitch*` and `toggleWidth`/`toggleHeight` tokens.
 - A separate tint for Gemini CLI, and artwork for Gemini CLI and Cline.
 - Restyling the Settings window to the glass theme (Ron, D8: "theming may
   follow").
