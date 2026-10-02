@@ -58,6 +58,7 @@ final class ComponentContractTests: XCTestCase {
         }
     }
 
+    @MainActor
     func test_stepProgressSpeaksOnlyTheCallersStateWords() {
         let values = GlassStepProgress.StateValues(done: "d", current: "c", pending: "p")
         XCTAssertEqual(values.done, "d")
