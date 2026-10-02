@@ -208,7 +208,9 @@ enum SampleDaemonData {
         let lastJSON = last.map { "\"\($0)\"" } ?? "null"
         let sessionsJSON = sessions.map(String.init) ?? "null"
         let fromNowJSON = fromNow.map { #","from_now":\#($0)"# } ?? ""
-        return #"{"project_id":"\#(p.id)","project_label":"\#(p.label)","project_path":"\#(p.path)","mode":"\#(mode)","added_at":\#(added),"configured":\#(configured),"is_unresolved_bucket":false,"session_count":\#(sessionsJSON),"last_session_at":\#(lastJSON),"pending_count":\#(pending)\#(fromNowJSON)}"#
+        // The daemon names an armed folder's disclosure, and only an armed one's.
+        let disclosureJSON = mode == "auto_upload" ? #","automatic_disclosure":"patterns_only""# : ""
+        return #"{"project_id":"\#(p.id)","project_label":"\#(p.label)","project_path":"\#(p.path)","mode":"\#(mode)","added_at":\#(added),"configured":\#(configured),"is_unresolved_bucket":false,"session_count":\#(sessionsJSON),"last_session_at":\#(lastJSON),"pending_count":\#(pending)\#(fromNowJSON)\#(disclosureJSON)}"#
     }
 
     static func projects(_ set: Sample) -> String {

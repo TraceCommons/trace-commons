@@ -16,6 +16,7 @@ public struct GlassListRow: View {
     private let expanded: Bool?
     private let submitTitle: String?
     private let submitDone: Bool
+    private let submitFocusable: Bool
     private let watched: Binding<Bool>?
     private let watchDisabled: Bool
     private let accessory: AnyView?
@@ -36,7 +37,9 @@ public struct GlassListRow: View {
     /// `watchLabel` names the switch, `expandLabel` the chevron and
     /// `menuLabel` the row menu, from the core's copy; the components author no
     /// wording. A row menu with an empty `menuLabel` is not drawn, so it can
-    /// never borrow the row's own name.
+    /// never borrow the row's own name. `submitFocusable` false keeps the
+    /// pill out of the keyboard's tab order, for a list whose focus roves
+    /// with its selection (only the selected row's pill is a stop).
     public init(
         depth: Depth,
         tile: GlassToolTile.Kind,
@@ -48,6 +51,7 @@ public struct GlassListRow: View {
         expanded: Bool? = nil,
         submitTitle: String? = nil,
         submitDone: Bool = false,
+        submitFocusable: Bool = true,
         watched: Binding<Bool>? = nil,
         watchDisabled: Bool = false,
         accessory: AnyView? = nil,
@@ -70,6 +74,7 @@ public struct GlassListRow: View {
         self.expanded = expanded
         self.submitTitle = submitTitle
         self.submitDone = submitDone
+        self.submitFocusable = submitFocusable
         self.watched = watched
         self.watchDisabled = watchDisabled
         self.accessory = accessory
@@ -136,6 +141,7 @@ public struct GlassListRow: View {
                 Button(submitTitle) { onSubmit?() }
                     .buttonStyle(GlassButtonStyle(.submit(done: submitDone)))
                     .disabled(onSubmit == nil)
+                    .focusable(submitFocusable)
             }
 
             if let accessory {
@@ -182,6 +188,19 @@ public struct GlassListRow: View {
         .accessibilityLabel(title)
         .accessibilityValue(sub ?? "")
         .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+        // The tree's depth, for assistive tech: a tool row heads its
+        // folders, a folder row its sessions, so the rotor and heading
+        // navigation walk the levels as they are drawn.
+        .accessibilityAddTraits(depth == .session ? [] : .isHeader)
+        .accessibilityHeading(Self.heading(depth))
+    }
+
+    static func heading(_ depth: Depth) -> AccessibilityHeadingLevel {
+        switch depth {
+        case .tool: .h1
+        case .folder: .h2
+        case .session: .unspecified
+        }
     }
 
     private var subColor: Color {

@@ -5446,6 +5446,31 @@ pub extern "C" fn tc_monitor_screens_copy_json() -> *mut c_char {
     })
 }
 
+/// The grant screens' words for one disclosure the daemon chose and named
+/// (`consent_copy::automatic_grant_copy_named`): a JSON object of
+/// `AutomaticGrantCopy`'s fields. An armed folder's `list_projects` row says
+/// which disclosure is true for it (`automatic_disclosure`); this only words
+/// that answer and never chooses.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unknown `disclosure`, and on a caught panic.
+///
+/// # Safety
+/// `disclosure`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_automatic_grant_copy_json(disclosure: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(name) = (unsafe { borrow_optional_str(disclosure) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        match trace_commons_contributor::consent_copy::automatic_grant_copy_named(name) {
+            Some(copy) => Ok(to_owned_cstring(&serde_json::to_string(&copy)?)),
+            None => Ok(std::ptr::null_mut()),
+        }
+    })
+}
+
 /// The Traces badge's text equivalent
 /// (`preview_copy::decisions_owed_text`). A negative `decisions_owed` is an
 /// unknown count, which is never read as zero.
