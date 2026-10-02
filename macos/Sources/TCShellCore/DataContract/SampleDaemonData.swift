@@ -11,13 +11,18 @@ import Foundation
 /// against a temp store, and these sets fill those shapes with plausible
 /// values. K2 replaces them with exact recordings and a drift test.
 ///
-/// Values with no source on main are marked `"_sample": "no source yet"`
-/// in the JSON. That is every PROVISIONAL network method (Zaki's C3); the
-/// marker key is ignored by every decoder.
+/// All served result objects are marked `"_sample":"SAMPLE"`; the marker
+/// is ignored by the wire decoders. Network examples follow the finalized C3
+/// contract and are synthetic, never pilot observations or release fallbacks.
 enum SampleDaemonData {
     typealias Sample = SampleDaemonClient.SampleSet
 
     static func reply(_ method: String, in set: Sample) -> String? {
+        guard let raw = unmarkedReply(method, in: set) else { return nil }
+        return #"{"_sample":"SAMPLE",\#(raw.dropFirst())"#
+    }
+
+    private static func unmarkedReply(_ method: String, in set: Sample) -> String? {
         switch method {
         case "status": return status(set)
         case "list_pending": return #"{"pending":\#(pending(set))}"#
@@ -35,15 +40,18 @@ enum SampleDaemonData {
         case "keep": return #"{"kept":true}"#
         case "undo_keep": return #"{"kept":false}"#
         case "set_project_mode": return #"{"ok":true,"purged":0,"retracted":0,"from_now":true}"#
-        // PROVISIONAL (Zaki's C3): no source on main.
+        // SAMPLE: finalized C3 shapes, not pilot observations.
         case "inference_summary": return inferenceSummary(set)
-        case "inference_call_proof": return proofDetail
+        case "inference_call_proof": return proofDetail(set)
         case "model_spend": return modelSpend(set)
         case "private_ai": return privateAI(set)
         case "mission_catalogue": return missionCatalogue
         case "invite_lookup": return inviteLookup
         case "passkey_state": return passkeyState(set)
         case "account_session_status": return accountState(set)
+        case "activity_missions_catalogue":
+            guard set != .unknownCounts else { return nil }
+            return #"{"catalogue":{"schema_version":1,"kind":"trace_activity","state":"unconfigured","policy_sha256":null,"policy":null,"rewards_enabled":false,"credit_points_pending":null,"credit_condition":"mission_credit_ledger_unavailable"},"disclosure":"SAMPLE: activity mission consent disclosure from the Rust core"}"#
         default: return nil
         }
     }
@@ -349,53 +357,69 @@ enum SampleDaemonData {
             "Settings validation refactor",
         ]
         let title = titles[entry.entryId.unicodeScalars.reduce(0) { $0 + Int($1.value) } % titles.count]
-        return #"{"entry":\#(entryJSON),"title":"\#(title)","would_send_bytes":\#((entry.sizeBytes ?? 40000) + 2545),"raw_session_bytes":\#(entry.sizeBytes ?? 40000),"event_count":\#((entry.userTurns ?? 3) * 6),"opening_prompt":"\#(title)","redactions":{"local_path":\#(marks - content),"email":\#(content)},"pii_labels_present":["email"],"consent_scopes":["debugging_evaluation"],"residual_risk":"pattern-based","envelope_digest":"sha256:sample-envelope","input_fingerprint":"sha256:sample-input","enrolled":true,"subagent_count":\#(entry.subagentCount ?? 0),"subagents_dropped":\#(entry.subagentsDropped ?? 0),"scrub":"scrubbed","marks":\#(marks),"content_marks":\#(content),"unsure_spans":\#(unsure),"second_look":[\#(reasons)]}"#
+        return #"{"_sample":"SAMPLE","entry":\#(entryJSON),"title":"\#(title)","would_send_bytes":\#((entry.sizeBytes ?? 40000) + 2545),"raw_session_bytes":\#(entry.sizeBytes ?? 40000),"event_count":\#((entry.userTurns ?? 3) * 6),"opening_prompt":"\#(title)","redactions":{"local_path":\#(marks - content),"email":\#(content)},"pii_labels_present":["email"],"consent_scopes":["debugging_evaluation"],"residual_risk":"pattern-based","envelope_digest":"sha256:sample-envelope","input_fingerprint":"sha256:sample-input","enrolled":true,"subagent_count":\#(entry.subagentCount ?? 0),"subagents_dropped":\#(entry.subagentsDropped ?? 0),"scrub":"scrubbed","marks":\#(marks),"content_marks":\#(content),"unsure_spans":\#(unsure),"second_look":[\#(reasons)]}"#
     }
 
     static func unsureSpans(entryId: String, bodyDigest: String) -> String {
-        #"{"entry_id":"\#(entryId)","body_digest":"\#(bodyDigest)","envelope_digest":"sha256:sample-envelope","span_count":2,"spans":[{"label":"looks-like-email","byte_offset":1408,"byte_len":11},{"label":"looks-like-phone","byte_offset":2210,"byte_len":12}],"spans_truncated":false}"#
+        #"{"_sample":"SAMPLE","entry_id":"\#(entryId)","body_digest":"\#(bodyDigest)","envelope_digest":"sha256:sample-envelope","span_count":2,"spans":[{"label":"looks-like-email","byte_offset":1408,"byte_len":11},{"label":"looks-like-phone","byte_offset":2210,"byte_len":12}],"spans_truncated":false}"#
     }
 
-    // MARK: - PROVISIONAL network methods (Zaki's C3): no source on main
+    // MARK: - SAMPLE network methods (finalized C3 contract)
 
     static func inferenceSummary(_ set: Sample) -> String {
         guard set == .normalDay || set == .busyQueue else {
-            return #"{"_sample":"no source yet","readable":false,"window_hours":24,"models":[]}"#
+            return #"{"readable":false,"window_hours":24,"observed_at":null,"summary":null}"#
         }
-        return #"{"_sample":"no source yet","readable":true,"window_hours":24,"models":[{"model":"zai-org/GLM-4.6","family":"anthropic","calls":9,"priced_micros":61200,"proof_counts":{"verified":7,"pending":1,"failed":1}},{"model":"Qwen/Qwen3.6-27B-FP8","family":"openai","calls":3,"priced_micros":36900,"proof_counts":{"gateway_only":3}}]}"#
+        // SAMPLE: registry-priced cost is incomplete and never billed spend.
+        return #"{"readable":true,"window_hours":24,"observed_at":"2026-10-01T00:00:00Z","summary":{"enabled":true,"receipts":true,"since":"2026-09-30T00:00:00Z","groups":[{"group_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model":"example-model","backend":"nearai","route":"routed","work_kind":null,"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":1,"outside":0,"unrecorded":0}},{"group_id":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","model":"example-model","backend":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","route":"outside","work_kind":null,"calls":1,"priced_calls":1,"cost_usd":0.01,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":1,"unrecorded":0}}],"routed":{"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":1,"outside":0,"unrecorded":0}},"outside":{"calls":1,"priced_calls":1,"cost_usd":0.01,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":1,"unrecorded":0}},"unknown":{"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}}}"#
     }
 
-    static let proofDetail =
-        #"{"_sample":"no source yet","call_id":414,"proof":"verified","checked_at":"2026-09-30T09:04:13Z","checks":["receipt-signature-valid","quote-measurement-pinned","digests-match"]}"#
+    static func proofDetail(_ set: Sample) -> String {
+        set == .normalDay || set == .busyQueue
+            ? #"{"call_id":414,"proof":"verified","checked_at":null,"checks":null,"readable":true,"found":true}"#
+            : #"{"call_id":414,"proof":"unrecorded","checked_at":null,"checks":null,"readable":false,"found":false}"#
+    }
 
     static func modelSpend(_ set: Sample) -> String {
-        guard set == .normalDay || set == .busyQueue else {
-            return #"{"_sample":"no source yet","known":false,"since":null,"models":[]}"#
-        }
-        return #"{"_sample":"no source yet","known":true,"since":"2026-09-30T00:00:00Z","models":[{"model":"zai-org/GLM-4.6","billed_micros":820000},{"model":"Qwen/Qwen3.6-27B-FP8","billed_micros":410000}]}"#
+        // SAMPLE: default previews have no authoritative organization billing recording.
+        #"{"known":false,"since":null,"models":[],"reason_label":"billed-model-spend-unavailable"}"#
     }
 
     static func privateAI(_ set: Sample) -> String {
+        if set == .unknownCounts {
+            return #"{"on":null,"state":null,"port":null,"disclosure":"SAMPLE: exposure disclosure from the Rust core"}"#
+        }
         let on = set == .normalDay || set == .busyQueue
-        return #"{"_sample":"no source yet","on":\#(on),"state":"\#(on ? "running" : "off")","disclosure":"Sample disclosure text, supplied by the core"}"#
+        return #"{"on":\#(on),"state":"\#(on ? "running" : "off")","port":\#(on ? "3128" : "null"),"disclosure":"SAMPLE: exposure disclosure from the Rust core"}"#
     }
 
+    // SAMPLE: public skill-evaluation catalogue, no daily assignments or credits.
     static let missionCatalogue =
-        #"{"_sample":"no source yet","fetched_at":"2026-09-30T06:00:00Z","posture":{"settlement":"disabled","graded":false,"explanation":"Sample settlement explanation, supplied by the commons"},"missions":[{"id":"mission-sample-1","title":"Debug a failing test","summary":"Failing test found, then fixed","credit_range":{"min":5,"max":20,"unit":"points"}},{"id":"mission-sample-2","title":"Review a pull request","summary":null,"credit_range":null}]}"#
+        #"{"kind":"skill_evaluation","disclosure":"SAMPLE: catalogue consent disclosure from the Rust core","catalogue":{"schema_version":1,"entries":[{"mission_id":"00000000-0000-4000-8000-000000000001","program_id":"00000000-0000-4000-8000-000000000002","package_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","offer_version_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","task_preview":"SAMPLE: evaluate a reviewed skill package against its controls.","published_at":"2026-10-01T00:00:00Z"}],"next_cursor":null}}"#
 
     static let inviteLookup =
-        #"{"_sample":"no source yet","valid":true,"issuer_display_name":"Sample Labs","credit_range":{"min":10,"max":40,"unit":"points"}}"#
+        #"{"valid":true,"issuer_display_name":"SAMPLE Pilot","credit_range":{"min":1,"max":5,"unit":"points_per_accepted_trace"}}"#
 
     static func passkeyState(_ set: Sample) -> String {
-        set == .empty
-            ? #"{"_sample":"no source yet","state":"none","passkey_count":0,"near_ai_connected":false}"#
-            : #"{"_sample":"no source yet","state":"bound","passkey_count":1,"near_ai_connected":true}"#
+        switch set {
+        case .empty:
+            return #"{"state":"none","passkey_count":null,"near_ai_connected":null}"#
+        case .unknownCounts:
+            return #"{"state":"unknown","passkey_count":null,"near_ai_connected":null}"#
+        default:
+            return #"{"state":"bound","passkey_count":null,"near_ai_connected":true}"#
+        }
     }
 
     static func accountState(_ set: Sample) -> String {
-        set == .empty
-            ? #"{"_sample":"no source yet","signed_in":false,"account_id":null}"#
-            : #"{"_sample":"no source yet","signed_in":true,"account_id":"sample.near"}"#
+        switch set {
+        case .empty:
+            return #"{"state":"known","signed_in":false,"account_id":null,"expires_at":null}"#
+        case .unknownCounts:
+            return #"{"state":"unknown","signed_in":null,"account_id":null,"expires_at":null}"#
+        default:
+            return #"{"state":"known","signed_in":true,"account_id":"00000000-0000-4000-8000-000000000003","expires_at":"2026-10-02T00:00:00Z"}"#
+        }
     }
 }
 #endif

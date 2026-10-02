@@ -46,7 +46,7 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     /// The raw JSON this set answers `method` with: the IPC `result`
-    /// object, or `nil` for a set where the core is down.
+    /// object, or `nil` when the core is down or no result sample is asserted.
     public func json(for method: String) -> String? {
         set == .coreDown ? nil : SampleDaemonData.reply(method, in: set)
     }
@@ -170,7 +170,7 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("inference_calls", as: DaemonData.InferenceCallPage.self)
     }
 
-    // MARK: PROVISIONAL network methods (Zaki's C3)
+    // MARK: SAMPLE network methods (C3)
 
     public func inferenceSummary() async throws -> DaemonData.InferenceSummary {
         try serve("inference_summary", as: DaemonData.InferenceSummary.self)
@@ -188,8 +188,12 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
     }
 
-    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
-        try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
+    public func setPrivateAI(on: Bool, confirmed: Bool) async throws -> DaemonData.PrivateAISwitch {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        guard !on || confirmed else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "confirmation-required")
+        }
+        return try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
     }
 
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
@@ -206,6 +210,20 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func accountState() async throws -> DaemonData.AccountState {
         try serve("account_session_status", as: DaemonData.AccountState.self)
+    }
+
+    public func activityMissionsCatalogue() async throws -> DaemonData.ActivityMissionsCatalogue {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        guard set != .unknownCounts else {
+            throw DaemonDataError.daemon(code: "unavailable", message: "activity-missions-unavailable")
+        }
+        return try serve("activity_missions_catalogue", as: DaemonData.ActivityMissionsCatalogue.self)
+    }
+
+    public func activityMissionsStatus() async throws -> DaemonData.ActivityMissionsStatus {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no official configured policy or authoritative progress recording yet.
+        throw DaemonDataError.daemon(code: "unavailable", message: "activity-missions-unavailable")
     }
 
     // MARK: Live updates
