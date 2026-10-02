@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // INTEGRATION: upgrades a real V91 database and qualifies pipeline RLS.
 
-use tokio_postgres::Client;
+use tokio_postgres::{Client, error::SqlState};
 
 use super::{MIGRATIONS, PgBackend, TRACE_COMMONS_RLS_TABLES, apply_and_record_migration};
 use crate::{
@@ -85,7 +85,7 @@ async fn set_tenant(client: &Client, tenant: &str) {
         .expect("set migration test tenant");
 }
 
-const PIPELINE_TABLES: [&str; 15] = [
+const PIPELINE_TABLES: [&str; 18] = [
     "pipeline_runs",
     "phase_outcomes",
     "pipeline_bundle_packages",
@@ -101,10 +101,13 @@ const PIPELINE_TABLES: [&str; 15] = [
     "pipeline_export_snapshot_items",
     "pipeline_bundle_qualifications",
     "pipeline_attempt_artifacts",
+    "pipeline_tenant_routing",
+    "pipeline_activation_events",
+    "pipeline_receipt_ownership",
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95 and V105 to V108 have run, as
+/// the pipeline tables once V92 to V95, V105 to V108, and V110 have run, as
 /// `(table, privilege, columns)`; no columns means the whole table. It holds
 /// what the pipeline code reads and writes and nothing broader. The only
 /// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
@@ -246,6 +249,27 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
         "UPDATE",
         &["state", "committed_at", "ciphertext_sha256"],
     ),
+    // V110: the routing row is read by every upload and written by an
+    // operator action (every column but the key); the event and ownership
+    // tables are append-only, no UPDATE or DELETE.
+    ("pipeline_tenant_routing", "SELECT", &[]),
+    ("pipeline_tenant_routing", "INSERT", &[]),
+    (
+        "pipeline_tenant_routing",
+        "UPDATE",
+        &[
+            "routing_state",
+            "activation_record_id",
+            "actor_principal_ref",
+            "reason_code",
+            "evidence_hash",
+            "recorded_at",
+        ],
+    ),
+    ("pipeline_activation_events", "SELECT", &[]),
+    ("pipeline_activation_events", "INSERT", &[]),
+    ("pipeline_receipt_ownership", "SELECT", &[]),
+    ("pipeline_receipt_ownership", "INSERT", &[]),
 ];
 
 /// What `main`'s gate driver role, `trace_gate_driver`, holds on the pipeline
@@ -319,7 +343,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108] {
+    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 110] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
@@ -378,7 +402,8 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
 
     // The pipeline's row-guard triggers, as the upgrade leaves them: present,
     // on their tables, and enabled. V108's guard is what keeps a committed
-    // attempt artifact from going back to `staged` (final review M6).
+    // attempt artifact from going back to `staged` (final review M6). V110's
+    // four triggers keep an activation event and a receipt owner immutable.
     for (table, trigger) in [
         ("phase_outcomes", "phase_outcomes_reject_update"),
         ("phase_outcomes", "phase_outcomes_reject_delete"),
@@ -401,6 +426,22 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         (
             "pipeline_attempt_artifacts",
             "pipeline_attempt_artifacts_guard_update",
+        ),
+        (
+            "pipeline_activation_events",
+            "pipeline_activation_events_reject_update",
+        ),
+        (
+            "pipeline_activation_events",
+            "pipeline_activation_events_reject_delete",
+        ),
+        (
+            "pipeline_receipt_ownership",
+            "pipeline_receipt_ownership_reject_update",
+        ),
+        (
+            "pipeline_receipt_ownership",
+            "pipeline_receipt_ownership_reject_delete",
         ),
     ] {
         let enabled: bool = admin
@@ -559,6 +600,106 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         .get(0);
     assert_eq!(unscoped, 0, "no tenant context sees nothing");
     admin.batch_execute("RESET ROLE").await.unwrap();
+
+    // V110: an ownership row is unique for each submission id, an event and
+    // an ownership row are never updated or deleted directly, and deleting
+    // the tenant removes its routing, event, and ownership rows (the cascade
+    // is let through by the triggers' `pg_trigger_depth() > 1` rule).
+    let owner_tenant = "upgrade-v110";
+    let owner_hash = format!("sha256:{}", "c".repeat(64));
+    admin
+        .batch_execute(&format!(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ('{owner_tenant}')
+                 ON CONFLICT DO NOTHING;
+             INSERT INTO pipeline_tenant_routing
+                 (tenant_id, routing_state, activation_record_id, actor_principal_ref,
+                  reason_code, evidence_hash)
+                 VALUES ('{owner_tenant}', 'pipeline', gen_random_uuid(),
+                         'principal:operator', 'activation_recorded', '{owner_hash}');
+             INSERT INTO pipeline_activation_events
+                 (tenant_id, event_id, action, previous_state, resulting_state,
+                  previous_bundle_id, resulting_bundle_id, actor_principal_ref,
+                  reason_code, evidence_hash)
+                 VALUES ('{owner_tenant}', gen_random_uuid(), 'activate', 'unselected',
+                         'pipeline', NULL, '{owner_hash}', 'principal:operator',
+                         'activation_recorded', '{owner_hash}');
+             INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner)
+                 VALUES ('{owner_tenant}', '00000000-0000-0000-0000-0000000000a1', 'legacy');"
+        ))
+        .await
+        .expect("insert one routing, event, and ownership row");
+    set_tenant(&admin, owner_tenant).await;
+    let duplicate = admin
+        .batch_execute(&format!(
+            "INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner)
+                 VALUES ('{owner_tenant}', '00000000-0000-0000-0000-0000000000a1', 'legacy');"
+        ))
+        .await
+        .expect_err("a second owner row for one submission id must fail");
+    assert_eq!(
+        duplicate.code(),
+        Some(&SqlState::UNIQUE_VIOLATION),
+        "a second ownership row for one (tenant_id, submission_id) is a unique violation: \
+         {duplicate}"
+    );
+    for statement in [
+        "UPDATE pipeline_receipt_ownership SET owner = 'legacy'",
+        "DELETE FROM pipeline_receipt_ownership",
+        "UPDATE pipeline_activation_events SET reason_code = 'rewritten'",
+        "DELETE FROM pipeline_activation_events",
+    ] {
+        let refused = admin
+            .batch_execute(&format!("{statement} WHERE tenant_id = '{owner_tenant}';"))
+            .await
+            .expect_err("an activation record is immutable");
+        assert_eq!(
+            refused.as_db_error().map(|error| error.message()),
+            Some("pipeline activation records are immutable"),
+            "`{statement}` must fail with the trigger's message: {refused}"
+        );
+    }
+    let owner_counts = |table: &'static str| {
+        let admin = &admin;
+        async move {
+            admin
+                .query_one(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = $1"),
+                    &[&owner_tenant],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+        }
+    };
+    for table in [
+        "pipeline_tenant_routing",
+        "pipeline_activation_events",
+        "pipeline_receipt_ownership",
+    ] {
+        assert_eq!(
+            owner_counts(table).await,
+            1,
+            "{table} keeps its row through every refused change"
+        );
+    }
+    admin
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&owner_tenant],
+        )
+        .await
+        .expect("deleting the tenant cascades through the immutable tables");
+    for table in [
+        "pipeline_tenant_routing",
+        "pipeline_activation_events",
+        "pipeline_receipt_ownership",
+    ] {
+        assert_eq!(
+            owner_counts(table).await,
+            0,
+            "deleting the tenant removes its {table} rows"
+        );
+    }
 
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_storage_upgrade_rls",

@@ -185,12 +185,13 @@ const RUNTIME_PRIVILEGES_SQL: &str = r"
     )
     SELECT COALESCE(string_agg(entry, E'\n' ORDER BY entry), ''), COUNT(*) FROM entries";
 
-/// Every table the pipeline migrations create (V92 to V95, V105 to V108),
-/// sorted: the set the resume requires to enable and force RLS in the
+/// Every table the pipeline migrations create (V92 to V95, V105 to V108, and
+/// V110), sorted: the set the resume requires to enable and force RLS in the
 /// restored database. A new pipeline table must be added here, or the drill
 /// fails.
-const PIPELINE_TABLES: [&str; 15] = [
+const PIPELINE_TABLES: [&str; 18] = [
     "phase_outcomes",
+    "pipeline_activation_events",
     "pipeline_active_bundles",
     "pipeline_admission_usage",
     "pipeline_attempt_artifacts",
@@ -201,10 +202,12 @@ const PIPELINE_TABLES: [&str; 15] = [
     "pipeline_export_snapshots",
     "pipeline_index_invalidations",
     "pipeline_receipt_artifacts",
+    "pipeline_receipt_ownership",
     "pipeline_review_assessments",
     "pipeline_review_claims",
     "pipeline_run_settlements",
     "pipeline_runs",
+    "pipeline_tenant_routing",
 ];
 
 /// The four authoritative tables, as the port's `fingerprint` reads them

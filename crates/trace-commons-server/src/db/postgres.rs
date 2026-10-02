@@ -262,6 +262,9 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_export_snapshot_items",
     "pipeline_bundle_qualifications",
     "pipeline_attempt_artifacts",
+    "pipeline_tenant_routing",
+    "pipeline_activation_events",
+    "pipeline_receipt_ownership",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1677,6 +1680,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         108,
         "versioned_pipeline_attempt_artifacts",
         include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+    ),
+    // V110 (PR 5) adds each tenant's committed routing record, the immutable
+    // activation event history, and the permanent per-submission receipt
+    // owner, which the upload route reads before it chooses the legacy or the
+    // pipeline path. No cross-tenant claim function, same as
+    // V105/V106/V107/V108.
+    (
+        110,
+        "versioned_pipeline_activation",
+        include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
     ),
 ];
 
@@ -7035,6 +7048,7 @@ mod tests {
         (106, 4),
         (107, 4),
         (108, 4),
+        (110, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7778,6 +7792,7 @@ mod tests {
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
             include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7813,6 +7828,7 @@ mod tests {
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
             include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -8087,6 +8103,64 @@ mod tests {
             assert!(
                 !attempt_artifacts.contains(forbidden),
                 "V108 must not contain `{forbidden}`"
+            );
+        }
+    }
+
+    /// V110 (delivery PR 5) adds the routing record, the activation event
+    /// history, and the receipt ownership record. Each is a forced-RLS table
+    /// with the tenant policy, the two immutable tables carry the V107-shaped
+    /// triggers and an append-only grant, and the migration holds no
+    /// `SECURITY DEFINER` function, no role attribute change, and nothing
+    /// that a later PR 5 migration adds.
+    #[test]
+    fn v110_defines_routing_events_and_ownership() {
+        let activation =
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql");
+        for required in [
+            "CREATE TABLE pipeline_tenant_routing",
+            "CREATE TABLE pipeline_activation_events",
+            "CREATE TABLE pipeline_receipt_ownership",
+            "CREATE TRIGGER pipeline_activation_events_reject_update",
+            "CREATE TRIGGER pipeline_receipt_ownership_reject_update",
+            "GRANT SELECT, INSERT ON pipeline_activation_events TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_receipt_ownership TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                activation.contains(required),
+                "V110 is missing `{required}`"
+            );
+        }
+        for table in [
+            "pipeline_tenant_routing",
+            "pipeline_activation_events",
+            "pipeline_receipt_ownership",
+        ] {
+            let force = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
+            assert_eq!(
+                activation.matches(&force).count(),
+                1,
+                "V110 must force RLS on {table} exactly once"
+            );
+            let policy = format!("CREATE POLICY trace_corpus_tenant_isolation ON {table}\n");
+            assert_eq!(
+                activation.matches(&policy).count(),
+                1,
+                "V110 must create the tenant policy on {table} exactly once"
+            );
+        }
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "pipeline_bundle_qualifications",
+            "pipeline_active_bundles",
+            "pipeline_legacy_owned_work",
+            "pipeline_legacy_writer_status",
+            "ledger_source_key",
+        ] {
+            assert!(
+                !activation.contains(forbidden),
+                "V110 must not contain `{forbidden}`"
             );
         }
     }
