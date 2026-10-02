@@ -88,6 +88,16 @@ struct TraceCommonsShell: App {
                      height: GlassTokens.Size.windowHeight)
         .windowResizability(.contentMinSize)
 
+        // First run in a glass pane over the scene (R12 of #1173).
+        // TRACE_COMMONS_FIRST_RUN=1 opens it at launch.
+        Window("First run", id: WindowID.firstRun) {
+            FirstRunWindowView()
+                .environmentObject(model)
+                .tint(TC.accent)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 860, height: 760)
+
         Settings {
             MonitorSettingsWindow(navigation: navigation)
                 .environmentObject(model)
@@ -113,6 +123,7 @@ private struct OpenMonitorButton: View {
 
     var body: some View {
         Button("Monitor") { openWindow(id: WindowID.monitor) }
+        Button("First run") { openWindow(id: WindowID.firstRun) }
     }
 }
 #endif
@@ -198,6 +209,11 @@ private struct Launcher: View {
                 openWindow(id: WindowID.monitor)
             }
         }
+        if ProcessInfo.processInfo.environment["TRACE_COMMONS_FIRST_RUN"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                openWindow(id: WindowID.firstRun)
+            }
+        }
         #endif
         DebugScreenshot.scheduleIfRequested(model: model)
         SelfTest.runIfRequested(model: model)
@@ -208,6 +224,8 @@ enum WindowID {
     static let main = "trace-commons-main"
     /// The glass monitor window (R5), debug builds only for now.
     static let monitor = "trace-commons-monitor"
+    /// The glass first-run pane (R12), debug builds only for now.
+    static let firstRun = "trace-commons-first-run"
 }
 
 /// Opening the window from outside a SwiftUI view (a notification action, a
