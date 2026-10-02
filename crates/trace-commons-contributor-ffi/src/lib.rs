@@ -4191,6 +4191,59 @@ pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
     })
 }
 
+/// How many of `pending` are actually eligible, clamped to `pending`.
+///
+/// Before this existed, a caller that wanted both the eligible count and
+/// [`tc_contribution_withheld_line`]'s sentence had to derive `withheld`
+/// itself -- `pending` minus `contributable` -- which is the exact
+/// arithmetic this call and [`tc_contribution_group_withheld_count`] now do
+/// once, in the core, instead of in each shell's own language.
+///
+/// Same `pending`/`contributable` convention as
+/// [`tc_contribution_group_control`]: `contributable` is a `list_projects`
+/// row's `contributable_count`, or any NEGATIVE value for an ABSENT one --
+/// never zero, which means the question applies and nothing qualifies.
+///
+/// `pending` is read as 0 on a negative value, which no honest caller
+/// produces; a negative `contributable` is read as absent, per the
+/// convention above.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_group_eligible_count(pending: i64, contributable: i64) -> i64 {
+    guard(|| {
+        let pending = u64::try_from(pending).unwrap_or(0);
+        let contributable = u64::try_from(contributable).ok();
+        Ok(
+            trace_commons_contributor::private_inference_copy::group_eligibility(
+                pending,
+                contributable,
+            )
+            .eligible_count as i64,
+        )
+    })
+    .unwrap_or(0)
+}
+
+/// `pending` minus [`tc_contribution_group_eligible_count`]'s answer, never
+/// negative. The exact value [`tc_contribution_withheld_line`] expects.
+///
+/// Same `pending`/`contributable` convention as
+/// [`tc_contribution_group_eligible_count`].
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_group_withheld_count(pending: i64, contributable: i64) -> i64 {
+    guard(|| {
+        let pending = u64::try_from(pending).unwrap_or(0);
+        let contributable = u64::try_from(contributable).ok();
+        Ok(
+            trace_commons_contributor::private_inference_copy::group_eligibility(
+                pending,
+                contributable,
+            )
+            .withheld_count as i64,
+        )
+    })
+    .unwrap_or(0)
+}
+
 /// K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
 /// limit X of Y", the WYSIWYG design's Flow 2/3 example.
 ///

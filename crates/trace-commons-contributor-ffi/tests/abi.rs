@@ -3950,6 +3950,45 @@ fn the_withheld_line_crosses_and_says_nothing_at_zero() {
     assert!(!line(4).is_empty());
 }
 
+/// `tc_contribution_group_eligible_count` and
+/// `_group_withheld_count` are the arithmetic a caller used to derive by
+/// hand from `pending` and `contributable` -- clamped to `pending`, and the
+/// non-negative remainder -- matching exactly what the core's own
+/// `group_eligibility` computes, and what `tc_contribution_withheld_line`
+/// expects as its `withheld` argument.
+#[test]
+fn the_group_eligible_and_withheld_counts_cross_and_clamp() {
+    use trace_commons_contributor::private_inference_copy::group_eligibility;
+    use trace_commons_contributor_ffi::{
+        tc_contribution_group_eligible_count, tc_contribution_group_withheld_count,
+    };
+
+    for (pending, contributable) in [(7i64, Some(3u64)), (7, None), (7, Some(0)), (3, Some(9))] {
+        let expected = group_eligibility(pending as u64, contributable);
+        assert_eq!(
+            tc_contribution_group_eligible_count(pending, contributable.map_or(-1, |c| c as i64)),
+            expected.eligible_count as i64,
+            "eligible_count for pending={pending} contributable={contributable:?}"
+        );
+        assert_eq!(
+            tc_contribution_group_withheld_count(pending, contributable.map_or(-1, |c| c as i64)),
+            expected.withheld_count as i64,
+            "withheld_count for pending={pending} contributable={contributable:?}"
+        );
+    }
+
+    // `contributable` above `pending` is clamped, not a negative withheld
+    // count -- the same trap `tc_contribution_withheld_line` guards against
+    // by clamping a negative input to zero.
+    assert_eq!(tc_contribution_group_eligible_count(3, 9), 3);
+    assert_eq!(tc_contribution_group_withheld_count(3, 9), 0);
+
+    // A negative `pending` is nobody's honest answer; read as 0, matching
+    // every other scalar in this file's negative-input convention.
+    assert_eq!(tc_contribution_group_eligible_count(-1, 5), 0);
+    assert_eq!(tc_contribution_group_withheld_count(-1, 5), 0);
+}
+
 /// The contribution control numbering shares no number with a credential
 /// action or a tone. Both blocks have a "nothing" member, and one collision
 /// draws a sign-in button on a queue row.
