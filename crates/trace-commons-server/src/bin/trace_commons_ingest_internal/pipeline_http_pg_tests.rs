@@ -325,6 +325,28 @@ pub(super) fn compatibility_reference_package(
     )
 }
 
+/// The one package a qualification run names (P5-D15): the compatibility
+/// bundle over `CompatibilityBundleConfig::local_reference()` with the
+/// corpus harness's `NoveltyUtility` delta, the reference scorer, and the
+/// reference embedder. Four checks test the candidate and pass it to
+/// `PipelineCheckEmitter`: the `compatibility` and `hf_local` corpus runs
+/// (`corpus_bundle_package`), the restore drill, and the bundle
+/// qualification, whose test in `tests/versioned_pipeline_runtime_pg.rs`
+/// repeats this construction (`qualification_candidate_config` there, which
+/// `compatibility_test_service` builds with the same scorer and embedder; a
+/// suite in `tests/` cannot import this module). Every other check is a
+/// mechanics check and names no package. `pipeline.py qualify` refuses a run
+/// whose results name more than one package, so the two constructions
+/// cannot drift apart unseen.
+pub(super) fn qualification_candidate_package()
+-> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    compatibility_reference_package(
+        super::pipeline_corpus_pg_tests::COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+}
+
 /// The authority every test service in this file holds: each tenant gets
 /// empty allowlists, which restrict nothing, and no tenant policy.
 pub(super) fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider> {
@@ -874,12 +896,6 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 
     // ---- App 2: same database, artifact root, index, and adapters; no crash point ----
     let resumed_state = start(None);
-    let package = resumed_state
-        .pipeline_service
-        .as_ref()
-        .expect("app 2 serves the injected pipeline service")
-        .default_package()
-        .clone();
     let (base, stop, server) = serve_pipeline_app(resumed_state).await;
 
     // Readiness is live while app 2 runs.
@@ -1040,9 +1056,11 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
     stop.send(()).expect("send shutdown to app 2");
     join_within(server, 20, "app 2").await;
 
+    // A mechanics check: it serves a test bundle and names no package
+    // (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_http_restart_recovery",
-        Some(&package),
+        None,
         serde_json::json!({
             "phase_outcomes": 4,
             "replay_status": 200,
@@ -1774,7 +1792,6 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
 
     let dir = tempfile::tempdir().expect("temp dir");
     let service = o1_pipeline_service(backend.clone(), &dir);
-    let package = service.default_package().clone();
 
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
@@ -1889,9 +1906,11 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
     stop.send(()).expect("send shutdown");
     join_within(server, 20, "ownership-on-replay test server").await;
 
+    // A mechanics check: it serves a test bundle and names no package
+    // (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_http_receipt_ownership",
-        Some(&package),
+        None,
         serde_json::json!({
             "other_principal_refusals": 2,
             "refusal_status": 409,

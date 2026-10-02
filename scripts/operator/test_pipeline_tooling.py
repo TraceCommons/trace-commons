@@ -470,6 +470,148 @@ class ResultFileNamingTests(unittest.TestCase):
             self.assertEqual(set(results.load_results(run)), {"pipeline_crash_matrix"})
 
 
+class OnePackageTests(unittest.TestCase):
+    """P5-D15: a qualification run names exactly one package. The results
+    that name a package agree on all three digests; a mechanics result
+    names none."""
+
+    def _result(self, check_id, *, package=None, **overrides):
+        digests = {}
+        if package is not None:
+            digests = {
+                "package_hash": _fake_hash(f"{package}-package"),
+                "configuration_digest": _fake_hash(f"{package}-configuration"),
+                "dependency_digest": _fake_hash(f"{package}-dependency"),
+            }
+        else:
+            digests = {"package_hash": None, "configuration_digest": None, "dependency_digest": None}
+        fields = {
+            "schema": results.SCHEMA,
+            "run_id": "qcafebabe",
+            "check_id": check_id,
+            "status": "pass",
+            "code_revision_hash": _fake_hash("code-revision"),
+            "observed_at": datetime.now(timezone.utc),
+            "evidence_hash": _fake_hash(check_id),
+            "safe_blockers": (),
+            **digests,
+        }
+        fields.update(overrides)
+        return results.CheckResult(**fields)
+
+    def _keyed(self, *items):
+        return {item.check_id: item for item in items}
+
+    def test_a_result_set_with_two_packages_is_reported_mixed(self):
+        with self.subTest("two package hashes"):
+            mixed = self._keyed(
+                self._result("pipeline_bundle_qualification", package="candidate"),
+                self._result("pipeline_http_corpus_compatibility", package="other"),
+            )
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.require_one_package(mixed)
+            self.assertEqual(str(ctx.exception), "qualification_evidence_mixed_package")
+
+        with self.subTest("one digest that differs is a different package"):
+            same_hash = self._result("pipeline_http_corpus_hf_local", package="candidate")
+            other_configuration = self._result(
+                "pipeline_restore_drill",
+                package="candidate",
+                configuration_digest=_fake_hash("other-configuration"),
+            )
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.require_one_package(self._keyed(same_hash, other_configuration))
+            self.assertEqual(str(ctx.exception), "qualification_evidence_mixed_package")
+
+        with self.subTest("a lone configuration digest names a package, as in evaluate_promotion"):
+            partial = self._result("pipeline_crash_matrix", configuration_digest=_fake_hash("candidate-configuration"))
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.require_one_package(
+                    self._keyed(partial, self._result("pipeline_restore_drill", package="candidate"))
+                )
+            self.assertEqual(str(ctx.exception), "qualification_evidence_mixed_package")
+
+        with self.subTest("package-bearing results agree and the others carry none"):
+            results.require_one_package(
+                self._keyed(
+                    *(self._result(check_id, package="candidate") for check_id in _CANDIDATE_CHECKS),
+                    self._result("pipeline_crash_matrix"),
+                    self._result("pipeline_http_corpus_minimal"),
+                )
+            )  # must not raise
+
+        with self.subTest("no result names a package"):
+            results.require_one_package(self._keyed(self._result("pipeline_crash_matrix")))
+            results.require_one_package({})
+
+    def test_a_mechanics_result_may_not_name_a_package(self):
+        """The tooling refuses a mechanics check that carries a digest (any
+        one of the three), so a later check cannot name a test bundle again
+        without a test failing."""
+        for key in ("package_hash", "configuration_digest", "dependency_digest"):
+            with self.subTest(key), tempfile.TemporaryDirectory() as tmp:
+                run = _make_run(Path(tmp))
+                digests = {"package_hash": None, "configuration_digest": None, "dependency_digest": None}
+                digests[key] = _fake_hash("a-test-bundle")
+                _write_check_files(
+                    run.results_dir, "pipeline_crash_matrix", {"a": 1},
+                    run_id=run.run_id, code_revision_hash=run.code_revision_hash, **digests,
+                )
+                loaded = results.load_results(run)
+                required = {"pipeline_crash_matrix": checks.CheckSpec("pipeline_crash_matrix", digests_required=False)}
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    results.require_current_pass_results(run, loaded, required)
+                self.assertEqual(str(ctx.exception), "pipeline_check_digests_unexpected")
+
+        with self.subTest("none carried passes"), tempfile.TemporaryDirectory() as tmp:
+            run = _make_run(Path(tmp))
+            _write_check_files(
+                run.results_dir, "pipeline_crash_matrix", {"a": 1},
+                run_id=run.run_id, code_revision_hash=run.code_revision_hash,
+                package_hash=None, configuration_digest=None, dependency_digest=None,
+            )
+            required = {"pipeline_crash_matrix": checks.CheckSpec("pipeline_crash_matrix", digests_required=False)}
+            results.require_current_pass_results(run, results.load_results(run), required)  # must not raise
+
+    def test_a_candidate_check_still_needs_all_three_digests(self):
+        """The other direction, for each of the four checks that test the
+        candidate: a result without a digest is refused, whichever digest it
+        lacks."""
+        specs = checks.required_specs()
+        for check_id in _CANDIDATE_CHECKS:
+            for missing in ("package_hash", "configuration_digest", "dependency_digest"):
+                with self.subTest(check_id=check_id, missing=missing), tempfile.TemporaryDirectory() as tmp:
+                    run = _make_run(Path(tmp))
+                    _write_check_files(
+                        run.results_dir, check_id, {"a": 1},
+                        run_id=run.run_id, code_revision_hash=run.code_revision_hash, **{missing: None},
+                    )
+                    with self.assertRaises(errors.ToolingError) as ctx:
+                        results.require_current_pass_results(
+                            run, results.load_results(run), {check_id: specs[check_id]}
+                        )
+                    self.assertEqual(str(ctx.exception), f"check_result_digest_missing:{check_id}")
+
+    def test_require_current_pass_results_refuses_a_mixed_run(self):
+        """`require_current_pass_results` applies the one-package rule to
+        every result it is given, not only the ones it requires."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _make_run(Path(tmp))
+            for check_id, package in (
+                ("pipeline_bundle_qualification", "candidate"),
+                ("pipeline_http_corpus_compatibility", "other"),
+            ):
+                _write_check_files(
+                    run.results_dir, check_id, {"a": 1},
+                    run_id=run.run_id, code_revision_hash=run.code_revision_hash,
+                    package_hash=_fake_hash(f"{package}-package"),
+                )
+            required = {"pipeline_bundle_qualification": checks.required_specs()["pipeline_bundle_qualification"]}
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.require_current_pass_results(run, results.load_results(run), required)
+            self.assertEqual(str(ctx.exception), "qualification_evidence_mixed_package")
+
+
 class EvidenceValidatorTests(unittest.TestCase):
     def test_evidence_validator_refuses_secret_like_values(self):
         refused = (
@@ -1277,6 +1419,25 @@ def _policy_manifest():
     }
 
 
+_NO_DIGESTS = {"package_hash": None, "configuration_digest": None, "dependency_digest": None}
+
+
+def _candidate_digests():
+    """The three digests of the fake candidate package. Every fake that
+    stands for a check that tests the candidate (the corpus harness, the
+    restore resume, the runtime and HTTP database tests) names these, so a
+    qualification run of the fakes has one package. The corpus report's
+    configuration digest is derived from its manifest, so this one is too."""
+    manifest = _policy_manifest()
+    return {
+        "package_hash": _fake_hash("package"),
+        "configuration_digest": _digest(
+            results.canonical({phase: manifest[phase]["configuration_hash"] for phase in corpus.PHASES})
+        ),
+        "dependency_digest": _fake_hash("dependency"),
+    }
+
+
 def _corpus_report(check_id, partitions):
     """`partitions` is a list of `(name, corpus_digest, [fixture reports])`."""
     manifest = _policy_manifest()
@@ -1304,11 +1465,7 @@ def _corpus_report(check_id, partitions):
         "safe_blockers": list(corpus.LOCAL_BLOCKERS),
         "check_id": check_id,
         "bundle_id": bundle_id,
-        "package_hash": _fake_hash("package"),
-        "configuration_digest": _digest(
-            results.canonical({phase: manifest[phase]["configuration_hash"] for phase in corpus.PHASES})
-        ),
-        "dependency_digest": _fake_hash("dependency"),
+        **_candidate_digests(),
         "policy_manifest": manifest,
         "fixture_count": len(every),
         "completed_fixture_count": sum(section["completed_fixture_count"] for section in sections),
@@ -1328,10 +1485,13 @@ def _resigned(report):
     return {**unsigned, "report_digest": _digest(results.canonical(unsigned))}
 
 
-def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
+def _write_harness_outputs(env, fixtures_by_partition=None, emit=True, digests=None):
     """What `pipeline_corpus_run` leaves behind: the report at
     `TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH` and, when every fixture
-    passed, one check result and its evidence in the result directory."""
+    passed, one check result and its evidence in the result directory. The
+    result names the corpus report's package (`digests=True`) or none
+    (`digests=False`); by default only `pipeline_http_corpus_minimal`, which
+    serves a test bundle, names none (P5-D15)."""
     paths = [("corpus", env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"])]
     if "TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH" in env:
         paths = [
@@ -1358,6 +1518,8 @@ def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
         "tenant_isolation": report["tenant_isolation"],
         "report_hash": _digest(report_bytes),
     }
+    if digests is None:
+        digests = check_id != "pipeline_http_corpus_minimal"
     result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
     raw = {
         "schema": results.SCHEMA,
@@ -1365,9 +1527,9 @@ def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
         "check_id": check_id,
         "status": "pass",
         "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
-        "package_hash": report["package_hash"],
-        "configuration_digest": report["configuration_digest"],
-        "dependency_digest": report["dependency_digest"],
+        "package_hash": report["package_hash"] if digests else None,
+        "configuration_digest": report["configuration_digest"] if digests else None,
+        "dependency_digest": report["dependency_digest"] if digests else None,
         "observed_at": _iso(datetime.now(timezone.utc)),
         "evidence_hash": _digest(results.canonical(evidence)),
         "safe_blockers": [],
@@ -1649,6 +1811,45 @@ class CorpusRunTests(_CorpusRunCase):
         self.assertEqual(record["status"], "pass")
         self.assertTrue((catalog_path.parent / record["report"]).is_file())
 
+    def test_run_names_a_package_only_for_a_candidate_check(self):
+        """The minimal bundle is a test bundle, so its check result names no
+        package (P5-D15); the compatibility check names the report's. The
+        corpus report keeps its own digests either way."""
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        for bundle, named in (("minimal", False), ("compatibility", True)):
+            with self.subTest(bundle=bundle):
+                shutil.rmtree(self.run.run_dir)
+                self.run = _scratch_run("corpus")
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                argv = ["run", "--bundle", bundle, "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL]
+                self.assertEqual(self._main(argv, cargo=self._fake_cargo()), 0, self.stderr.getvalue())
+                result = results.load_results(self.run)[f"pipeline_http_corpus_{bundle}"]
+                report = json.loads((self.tmp / "local" / f"pipeline-{bundle}-corpus-report.json").read_text())
+                self.assertEqual(report["package_hash"], _fake_hash("package"))
+                self.assertIsNotNone(report["configuration_digest"])
+                self.assertEqual(
+                    (result.package_hash, result.configuration_digest, result.dependency_digest),
+                    (report["package_hash"], report["configuration_digest"], report["dependency_digest"])
+                    if named
+                    else (None, None, None),
+                )
+
+    def test_run_refuses_digests_on_the_minimal_check_and_their_absence_elsewhere(self):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        for bundle, digests, label in (
+            ("minimal", True, "pipeline_check_digests_unexpected"),
+            ("compatibility", False, "check_result_digest_missing:pipeline_http_corpus_compatibility"),
+        ):
+            with self.subTest(bundle=bundle):
+                shutil.rmtree(self.run.run_dir)
+                self.run = _scratch_run("corpus")
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                argv = ["run", "--bundle", bundle, "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL]
+                self.assertEqual(self._main(argv, cargo=self._fake_cargo(digests=digests)), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+
     def test_run_refuses_a_report_that_does_not_match_its_evidence(self):
         corpus_path = self.tmp / "corpus.json"
         corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
@@ -1890,9 +2091,7 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "check_id": _RESTORE_CHECK,
                     "status": "pass",
                     "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
-                    "package_hash": _fake_hash("package"),
-                    "configuration_digest": _fake_hash("configuration"),
-                    "dependency_digest": _fake_hash("dependency"),
+                    **_candidate_digests(),
                     "observed_at": _iso(datetime.now(timezone.utc)),
                     "evidence_hash": _digest(results.canonical(evidence)),
                     "safe_blockers": overrides.get("safe_blockers", ["filesystem_restore_local_only"]),
@@ -2222,6 +2421,14 @@ _CONTRACT_MANIFEST = (
     environment.ROOT / "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json"
 )
 _INVENTORY_SCRIPT = "pipeline-deployment-inventory.py"
+# The checks that test the candidate package, and so carry its digests
+# (P5-D15); every other required check carries none.
+_CANDIDATE_CHECKS = (
+    "pipeline_bundle_qualification",
+    "pipeline_http_corpus_compatibility",
+    "pipeline_http_corpus_hf_local",
+    "pipeline_restore_drill",
+)
 
 
 def _promotion_required_checks():
@@ -2243,9 +2450,7 @@ def _emit_check(env, check_id, *, digests=True, evidence=None, **overrides):
         "check_id": check_id,
         "status": "pass",
         "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
-        "package_hash": _fake_hash("package") if digests else None,
-        "configuration_digest": _fake_hash("configuration") if digests else None,
-        "dependency_digest": _fake_hash("dependency") if digests else None,
+        **(_candidate_digests() if digests else _NO_DIGESTS),
         "observed_at": _iso(datetime.now(timezone.utc)),
         "evidence_hash": _digest(results.canonical(evidence)),
         "safe_blockers": [],
@@ -2314,7 +2519,22 @@ class RequiredCheckTests(unittest.TestCase):
             with self.subTest(check=check.check_id):
                 self.assertRegex(check.check_id, r"^[a-z0-9_]{1,64}$")
                 self.assertIn(check.database, ("upgrade", "runtime", "pilot"))
-                self.assertEqual(check.digests, check.database != "upgrade")
+                self.assertEqual(check.digests, check.check_id in _CANDIDATE_CHECKS)
+
+    def test_only_candidate_checks_require_package_digests(self):
+        """P5-D15: a qualification run names exactly one package. The four
+        checks that test the candidate carry its three digests, and every
+        mechanics check carries none, so `evaluate_promotion` finds one
+        package among the results. A fifth check that asked for digests
+        would name a test bundle again."""
+        required = {spec.check_id for spec in checks.required_specs().values() if spec.digests_required}
+        self.assertEqual(required, set(_CANDIDATE_CHECKS))
+        self.assertEqual(len(checks.required_specs()), 16)
+        # The database checks' own rows agree with `required_specs`.
+        self.assertEqual(
+            {check.check_id for check in checks.REQUIRED_DATABASE_CHECKS if check.digests},
+            {"pipeline_bundle_qualification"},
+        )
 
 
 class _QualifyCase(_RestoreDrillCase):
@@ -2333,6 +2553,14 @@ class _QualifyCase(_RestoreDrillCase):
         self.interrupt = None
         self.harness_emits = True
         self.fail_lock_drop = False
+        # Check ids whose result names another package than the candidate's,
+        # and check ids whose result names a package (True) or none (False)
+        # whatever their row says.
+        self.other_package = set()
+        self.digest_override = {}
+        # The corpus harness's result names the report's package (True) or
+        # none (False) for a check id here; the others follow the default.
+        self.harness_digests = {}
 
     def _invoke(self, command, *, env, capture=False, input_text=None, log_path=None):
         if any(str(part).endswith(_INVENTORY_SCRIPT) for part in command) and "--output" in command:
@@ -2359,7 +2587,11 @@ class _QualifyCase(_RestoreDrillCase):
                 return
             self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
             if test_filter == _HARNESS:
-                _write_harness_outputs(env, emit=self.harness_emits)
+                _write_harness_outputs(
+                    env,
+                    emit=self.harness_emits,
+                    digests=self.harness_digests.get(env["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"]),
+                )
             elif test_filter in by_test and "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR" in env:
                 check = by_test[test_filter]
                 if check.check_id == self.interrupt:
@@ -2372,7 +2604,9 @@ class _QualifyCase(_RestoreDrillCase):
                 elif check.check_id in self.foreign:
                     _emit_check(env, check.check_id, digests=check.digests, run_id="qforeign0")
                 elif check.check_id not in self.silent:
-                    _emit_check(env, check.check_id, digests=check.digests)
+                    named = self.digest_override.get(check.check_id, check.digests)
+                    other = {"package_hash": _fake_hash("other-package")} if check.check_id in self.other_package else {}
+                    _emit_check(env, check.check_id, digests=named, **other)
 
         return fake_cargo_test
 
@@ -2455,6 +2689,66 @@ class QualifyTests(_QualifyCase):
             self.assertEqual(value["status"], "fail")
             self.assertEqual(value["failure"], "check_result_missing:pipeline_http_corpus_minimal")
             self.assertFalse(self.catalog_path.exists(), "a failed qualify archives nothing")
+
+    def test_qualify_names_one_package_on_exactly_the_four_candidate_checks(self):
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        loaded = results.load_results(self.run)
+        named = {check_id for check_id, result in loaded.items() if result.package_hash is not None}
+        self.assertEqual(named, set(_CANDIDATE_CHECKS))
+        self.assertEqual(
+            {(result.package_hash, result.configuration_digest, result.dependency_digest) for result in loaded.values()}
+            - {(None, None, None)},
+            {tuple(_candidate_digests().values())},
+        )
+        self.assertEqual(
+            (loaded["pipeline_http_corpus_minimal"].package_hash, loaded["pipeline_crash_matrix"].package_hash),
+            (None, None),
+        )
+        # The report's checks say the same.
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual(
+            {item["check_id"] for item in value["checks"] if item["package_hash"] is not None},
+            set(_CANDIDATE_CHECKS),
+        )
+
+    def test_qualify_refuses_a_candidate_check_that_names_another_package(self):
+        self.other_package = {"pipeline_bundle_qualification"}
+        self.assertEqual(self._qualify(), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: qualification_evidence_mixed_package")
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", "qualification_evidence_mixed_package"))
+        self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+
+    def test_qualify_refuses_a_mechanics_check_that_names_a_package(self):
+        self.digest_override = {"pipeline_crash_matrix": True}
+        self.assertEqual(self._qualify(), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: pipeline_check_digests_unexpected")
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", "pipeline_check_digests_unexpected"))
+
+        with self.subTest("the minimal corpus check names no package either"):
+            self._fresh_run()
+            self.digest_override = {}
+            self.harness_digests = {"pipeline_http_corpus_minimal": True}
+            self.assertEqual(self._qualify(), 1)
+            self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: pipeline_check_digests_unexpected")
+
+    def test_qualify_refuses_a_candidate_check_without_its_digests(self):
+        self.digest_override = {"pipeline_bundle_qualification": False}
+        self.assertEqual(self._qualify(), 1)
+        self.assertEqual(
+            self.stderr.getvalue().strip(), "PipelineFailure: check_result_digest_missing:pipeline_bundle_qualification"
+        )
+
+        with self.subTest("a compatibility corpus result without its digests"):
+            self._fresh_run()
+            self.digest_override = {}
+            self.harness_digests = {"pipeline_http_corpus_compatibility": False}
+            self.assertEqual(self._qualify(), 1)
+            self.assertEqual(
+                self.stderr.getvalue().strip(),
+                "PipelineFailure: check_result_digest_missing:pipeline_http_corpus_compatibility",
+            )
 
     def test_qualify_runs_each_check_in_a_fresh_scenario(self):
         code = self._qualify()

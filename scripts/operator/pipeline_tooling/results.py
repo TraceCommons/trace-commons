@@ -223,10 +223,29 @@ def load_results(run):
     return results
 
 
+def require_one_package(results):
+    """A qualification run names exactly one package (P5-D15): among the
+    results (a map of check id to `CheckResult`, as `load_results` returns
+    it) that carry any of the three package digests, all carry the same
+    `(package_hash, configuration_digest, dependency_digest)`. This is
+    `evaluate_promotion`'s own rule (`qualification_evidence_mixed_package`),
+    applied before a promotion is evaluated."""
+    packages = {
+        (result.package_hash, result.configuration_digest, result.dependency_digest)
+        for result in results.values()
+        if (result.package_hash, result.configuration_digest, result.dependency_digest) != (None, None, None)
+    }
+    require(len(packages) <= 1, "qualification_evidence_mixed_package")
+
+
 def require_current_pass_results(run, results, required):
     """`required` maps check id to `checks.CheckSpec`. Every required check
     must have a passing, current result from this exact run, against this
-    exact code revision, with its required digests present."""
+    exact code revision. A check whose spec asks for digests must carry all
+    three; one whose spec does not (a mechanics check) must carry none
+    (`pipeline_check_digests_unexpected`), so no check names a test bundle.
+    Last, the results given name at most one package
+    (`require_one_package`)."""
     now = datetime.now(timezone.utc)
     for check_id, spec in required.items():
         result = results.get(check_id)
@@ -248,3 +267,10 @@ def require_current_pass_results(run, results, required):
             or result.dependency_digest is None
         ):
             raise ToolingError(f"check_result_digest_missing:{check_id}")
+        if not spec.digests_required and (
+            result.package_hash is not None
+            or result.configuration_digest is not None
+            or result.dependency_digest is not None
+        ):
+            raise ToolingError("pipeline_check_digests_unexpected")
+    require_one_package(results)

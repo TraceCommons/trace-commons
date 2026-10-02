@@ -100,7 +100,10 @@ def _iso(when):
 
 
 def corpus_run_input(report):
-    """The `inputs.corpus_runs` entry for one validated corpus report."""
+    """The `inputs.corpus_runs` entry for one validated corpus report. It
+    names the package the run served, so the minimal run's entry carries
+    its test bundle's digests even though that check's result names none
+    (P5-D15)."""
     return {
         "check_id": report["check_id"],
         "bundle_id": report["bundle_id"],

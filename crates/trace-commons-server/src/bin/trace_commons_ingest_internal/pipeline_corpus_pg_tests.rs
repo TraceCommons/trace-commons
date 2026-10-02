@@ -32,8 +32,9 @@ use std::path::{Path, PathBuf};
 use super::pipeline_http_pg_tests::{
     PassThroughPipelinePrivacyBoundary, TEST_PIPELINE_CREDIT_ISSUER, account_owner_backend,
     allow_all_test_authority, compatibility_reference_package, join_within, mains_database,
-    minimal_storage_rebate_package, post_submission_status, post_trace, runtime_backend, send_http,
-    serve_pipeline_app, wait_for_pipeline_ready,
+    minimal_storage_rebate_package, post_submission_status, post_trace,
+    qualification_candidate_package, runtime_backend, send_http, serve_pipeline_app,
+    wait_for_pipeline_ready,
 };
 use trace_commons_gate_api::pipeline::{
     AtomicUnits, BundlePackage, InstrumentId, ReasonCode, ReviewRecommendation,
@@ -64,12 +65,16 @@ use trace_commons_server::versioned_pipeline_qualification::{
 const CORPUS_SCHEMA: &str = "trace_commons.pipeline_corpus.v1";
 const CORPUS_REPORT_SCHEMA: &str = "trace_commons.pipeline_corpus_report.v1";
 
+/// The corpus check whose result names no package (P5-D15): it serves a
+/// test bundle, not the qualification candidate.
+const MINIMAL_CORPUS_CHECK_ID: &str = "pipeline_http_corpus_minimal";
+
 /// The check ids `pipeline_corpus_run` may emit. `pipeline.py` chooses one:
 /// `_<bundle>` for a built-in bundle, `_package` for a signed package, and
 /// `_hf_local` for an HF pin (two partitions). `pipeline_http_corpus_package`
 /// is not a required check (controller ruling PF-1).
 const CORPUS_CHECK_IDS: [&str; 4] = [
-    "pipeline_http_corpus_minimal",
+    MINIMAL_CORPUS_CHECK_ID,
     "pipeline_http_corpus_compatibility",
     "pipeline_http_corpus_hf_local",
     "pipeline_http_corpus_package",
@@ -473,18 +478,16 @@ impl CorpusRunConfig {
 }
 
 /// The built-in bundles, by name: PR 2's minimal package with the
-/// `storage_rebate` award, and the compatibility package over
-/// `local_reference()` with a 2_500_000 microcredit `NoveltyUtility` delta.
+/// `storage_rebate` award, and the qualification candidate, the
+/// compatibility package over `local_reference()` with a 2_500_000
+/// microcredit `NoveltyUtility` delta (`qualification_candidate_package`).
 fn corpus_bundle_package(bundle: &str) -> anyhow::Result<BundlePackage> {
-    let scorer = ReferencePerplexityScorer::new();
-    let embedder = ReferenceEmbedder::new();
     match bundle {
-        "minimal" => minimal_storage_rebate_package(&scorer, &embedder),
-        "compatibility" => compatibility_reference_package(
-            COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
-            &scorer,
-            &embedder,
+        "minimal" => minimal_storage_rebate_package(
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
         ),
+        "compatibility" => qualification_candidate_package(),
         _ => anyhow::bail!("corpus_bundle_invalid"),
     }
 }
@@ -1463,7 +1466,12 @@ async fn pipeline_corpus_run() {
         ),
         "corpus_probe_in_evidence"
     );
-    PipelineCheckEmitter::emit_pass_from_env(&config.check_id, Some(&package), evidence);
+    // The minimal corpus check serves a test bundle, so its result names no
+    // package (P5-D15); the compatibility, HF-local, and signed-package
+    // checks name the package they served. The report keeps its own
+    // digests either way.
+    let named = (config.check_id != MINIMAL_CORPUS_CHECK_ID).then_some(&package);
+    PipelineCheckEmitter::emit_pass_from_env(&config.check_id, named, evidence);
 }
 
 /// `pipeline.py package`: builds the named bundle's package, signs it with

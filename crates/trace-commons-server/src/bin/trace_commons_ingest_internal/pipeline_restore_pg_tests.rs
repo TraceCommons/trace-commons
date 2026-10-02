@@ -62,9 +62,9 @@ use super::pipeline_corpus_pg_tests::{
 use super::pipeline_http_pg_tests::{
     PIPELINE_HTTP_RUNTIME_ROLE, PassThroughPipelinePrivacyBoundary, account_owner_backend,
     assemble_compatibility_pipeline_service_with, expire_run_lease, join_within, mains_database,
-    mains_database_at, pilot_runtime_login, post_trace, runtime_backend, runtime_backend_at,
-    serve_pipeline_app, tenant_tx, wait_for_pipeline_ready, wait_for_run_complete,
-    wait_for_settle_selection,
+    mains_database_at, pilot_runtime_login, post_trace, qualification_candidate_package,
+    runtime_backend, runtime_backend_at, serve_pipeline_app, tenant_tx, wait_for_pipeline_ready,
+    wait_for_run_complete, wait_for_settle_selection,
 };
 use trace_commons_gate_api::SettlementAdapter;
 use trace_commons_gate_api::pipeline::InstrumentId;
@@ -1381,8 +1381,15 @@ async fn pipeline_restore_resume() {
         "restore_index_entry_set_mismatch"
     );
 
-    // The app on the restored state resumes the pending run by itself.
-    let package = service.default_package().clone();
+    // The app on the restored state resumes the pending run by itself. The
+    // drill is one of the four checks that test the qualification
+    // candidate (P5-D15), so its result names that package: the service the
+    // drill resumed on serves exactly it.
+    let package = qualification_candidate_package().expect("build the qualification candidate");
+    assert!(
+        *service.default_package() == package,
+        "restore_service_not_the_candidate"
+    );
     let state = restore_app_state(
         state_dir.path(),
         &mains,

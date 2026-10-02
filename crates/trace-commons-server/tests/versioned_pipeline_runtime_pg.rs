@@ -359,14 +359,10 @@ async fn stale_lease_cannot_commit_after_reclaim() {
         second.lease_token
     );
 
-    let package = store
-        .load_bundle(&tenant, &run.bundle_id)
-        .await
-        .unwrap()
-        .expect("the run's bundle is registered");
+    // A mechanics check: it names no package (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_stale_lease_fence",
-        Some(&package),
+        None,
         serde_json::json!({
             "claims": 2,
             "stale_writes_refused": 1,
@@ -599,12 +595,6 @@ async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
         embedder.clone(),
     )
     .await;
-    let package = MinimalPolicyBundle::minimal_package(
-        &minimal_config(true),
-        &ReferencePerplexityScorer::new(),
-        embedder.as_ref(),
-    )
-    .expect("build minimal bundle package");
 
     let tenant = format!("two-workers-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
@@ -728,9 +718,10 @@ async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
         "exactly one Score outcome is recorded"
     );
 
+    // A mechanics check: it names no package (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_lease_renewal",
-        Some(&package),
+        None,
         serde_json::json!({
             "score_claims": 1,
             "competing_claims": 0,
@@ -2694,6 +2685,21 @@ impl trace_commons_gate_api::IdentifiedPerplexityScorer for CountingScorer {
     }
 }
 
+/// The configuration of the qualification candidate (P5-D15): the
+/// compatibility bundle over `CompatibilityBundleConfig::local_reference()`
+/// with the corpus harness's `NoveltyUtility` delta, built with the
+/// reference scorer and embedder (`compatibility_test_service`). The bin's
+/// `qualification_candidate_package` (`pipeline_http_pg_tests.rs`) builds
+/// the same package for the corpus runs and the restore drill; a suite in
+/// `tests/` cannot import it, so this repeats the configuration, and
+/// `pipeline.py qualify` shows whether the two agree: the four checks that
+/// test the candidate must carry one `package_hash`.
+fn qualification_candidate_config() -> CompatibilityBundleConfig {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = 2_500_000;
+    config
+}
+
 /// Task 5 (FR5 P4): qualification is scoped to what the constructor actually
 /// resolves for the package being qualified, not to every scorer the service
 /// happens to hold. Two counting scorer doubles -- Q (qualified) and U
@@ -2747,7 +2753,7 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
         )]),
     };
     let service = PipelineServiceBuilder::new(
-        backend,
+        backend.clone(),
         artifact_store(&dir),
         package.clone(),
         index.clone(),
@@ -2799,9 +2805,40 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
     );
     assert_eq!(u.calls.load(Ordering::SeqCst), 0, "U is never called");
 
+    // The qualification candidate (P5-D15). The Q and U doubles above prove
+    // that qualification reads the objects the constructor received; the
+    // check result names a package, so it must be a package this test
+    // served: a second service, constructed from the candidate package with
+    // the reference scorer and embedder it names, qualifies that package.
+    let candidate_service = compatibility_test_service(
+        backend,
+        artifact_store(&dir),
+        qualification_candidate_config(),
+    )
+    .await;
+    let candidate = candidate_service.default_package().clone();
+    let candidate_qualification = candidate_service
+        .bundle_qualification(&candidate)
+        .expect("the candidate resolves against the dependencies its service was built with");
+    assert_eq!(candidate_qualification.bundle_id, candidate.bundle_id);
+    assert_eq!(
+        candidate_qualification.scorer.identity,
+        "reference_perplexity_test_only"
+    );
+    assert_eq!(
+        candidate_qualification.embedder.identity,
+        "reference_embedder_test_only"
+    );
+    assert!(!candidate_qualification.scorer.production_qualified);
+    assert!(!candidate_qualification.embedder.production_qualified);
+    assert_ne!(
+        candidate.bundle_id, package.bundle_id,
+        "the candidate is not the Q package above: that one names the counting scorer"
+    );
+
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_bundle_qualification",
-        Some(&package),
+        Some(&candidate),
         serde_json::json!({
             "scorer_identity_is_q": true,
             "scorer_identity_u_absent": true,
@@ -3787,9 +3824,10 @@ async fn receipt_replay_and_conflict_are_exact() {
     ));
     assert_eq!(count_runs(&backend, &tenant).await, 1);
 
+    // A mechanics check: it names no package (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_receipt_replay_exact",
-        Some(service.default_package()),
+        None,
         serde_json::json!({
             "runs": 1,
             "replay_same_run": true,
@@ -9886,9 +9924,10 @@ async fn a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes() {
         "a committed row is never swept"
     );
 
+    // A mechanics check: it names no package (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_orphan_sweep",
-        Some(service.default_package()),
+        None,
         serde_json::json!({
             "removed_before_due": removed_before,
             "removed_after_due": removed_after,
@@ -11393,9 +11432,10 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
     let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
     assert_eq!(evidence.settlement_progress.len(), 2);
 
+    // A mechanics check: it names no package (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_independent_instruments",
-        Some(service.default_package()),
+        None,
         serde_json::json!({
             "uncharged_retries": run.max_attempts + 2,
             "completed_leg_dispatches": 1,
@@ -13475,7 +13515,6 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
         return;
     };
     let mut points_checked = 0usize;
-    let mut checked_package = None;
     for point in [
         PipelineCrashPoint::AfterArtifactStorage,
         PipelineCrashPoint::AfterReviewArtifactStorage,
@@ -13761,13 +13800,13 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
             }
         }
         points_checked += 1;
-        checked_package = Some(service_b.default_package().clone());
     }
 
-    let package = checked_package.expect("at least one crash point ran");
+    assert!(points_checked > 0, "at least one crash point ran");
+    // A mechanics check: it names no package (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_crash_matrix",
-        Some(&package),
+        None,
         serde_json::json!({
             "crash_points": points_checked,
             "outcomes_per_phase": 1,
@@ -22845,7 +22884,6 @@ async fn payout_crash_between_submit_and_confirm_submits_once() {
         return;
     };
     let mut points_checked = 0usize;
-    let mut checked_package = None;
     for point in [
         PipelineCrashPoint::AfterNearSubmit,
         PipelineCrashPoint::AfterNearConfirm,
@@ -22934,13 +22972,13 @@ async fn payout_crash_between_submit_and_confirm_submits_once() {
             "payout never writes an outcome ({point:?})"
         );
         points_checked += 1;
-        checked_package = Some(restarted.default_package().clone());
     }
 
-    let package = checked_package.expect("at least one crash point ran");
+    assert!(points_checked > 0, "at least one crash point ran");
+    // A mechanics check: it names no package (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_payout_recovery",
-        Some(&package),
+        None,
         serde_json::json!({
             "crash_points": points_checked,
             "outbox_lines_per_point": 1,
@@ -28548,9 +28586,10 @@ async fn index_rebuild_uses_sealed_commands_without_new_credit_or_outcomes() {
     assert_eq!(second.unchanged_entry_count, expected_entry_count);
     assert_eq!(second.command_set_hash, report.command_set_hash);
 
+    // A mechanics check: it names no package (P5-D15).
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_index_rebuild",
-        Some(service.default_package()),
+        None,
         serde_json::json!({
             "command_count": report.command_count,
             "entry_count": report.entry_count,

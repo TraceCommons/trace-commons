@@ -32,6 +32,7 @@ from pipeline_tooling.checks import (
     RUNTIME_STEPS,
     TEST_CHECKS,
     CheckSpec,
+    corpus_check_spec,
     required_specs,
 )
 from pipeline_tooling.corpus import (
@@ -421,13 +422,17 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
     require(report["failure_count"] == 0, "corpus_report_has_failures")
 
     results = load_results(run)
-    require_current_pass_results(run, results, {check_id: CheckSpec(check_id, digests_required=True)})
+    spec = corpus_check_spec(check_id)
+    require_current_pass_results(run, results, {check_id: spec})
     result = results[check_id]
-    require(
-        (result.package_hash, result.configuration_digest, result.dependency_digest)
-        == (report["package_hash"], report["configuration_digest"], report["dependency_digest"]),
-        "corpus_report_package_mismatch",
-    )
+    # The minimal corpus check names no package (P5-D15), so there is
+    # nothing to compare; its report keeps the digests of the bundle it served.
+    if spec.digests_required:
+        require(
+            (result.package_hash, result.configuration_digest, result.dependency_digest)
+            == (report["package_hash"], report["configuration_digest"], report["dependency_digest"]),
+            "corpus_report_package_mismatch",
+        )
     evidence = _read_json(run.results_dir / f"{check_id}.evidence.json", "corpus_evidence_malformed")
     validate_evidence(evidence)
     require(

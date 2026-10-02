@@ -420,10 +420,16 @@ pub struct PromotionDecision {
 /// (a package is its three digests together). A result that names no
 /// package does not count: one result that names a package binds the
 /// decision to it, and a decision can be ready with no package at all when
-/// no result names one (only `qualify_bundle` refuses that). Every runtime
-/// check names its own test bundle today, so PR 5 must have the mechanics
-/// checks name no package, or run them against the candidate, before their
-/// results can promote one.
+/// no result names one (only `qualify_bundle` refuses that). A qualification
+/// run names exactly one package (P5-D15): the four checks that test the
+/// candidate (`pipeline_bundle_qualification`,
+/// `pipeline_http_corpus_compatibility`, `pipeline_http_corpus_hf_local`,
+/// and `pipeline_restore_drill`) carry its three digests, and every
+/// mechanics check names none, so its result does not count here. The list
+/// of the four is `digests_required` in
+/// `scripts/operator/pipeline_tooling/checks.py`, which also refuses a
+/// mechanics result that carries a digest; this function only counts the
+/// packages the results name.
 ///
 /// `evidence_hash` covers, for each check id, the result's run id, code
 /// revision, package digests and evidence hash, with the blockers, as
@@ -1810,6 +1816,84 @@ mod tests {
         let decision = evaluate_promotion(&unnamed, now).unwrap();
         assert!(decision.ready);
         assert_eq!(decision.package, None, "no result names a package");
+    }
+
+    /// P5-D15: a qualification run names exactly one package. The four
+    /// checks that test the candidate (the bundle qualification, the
+    /// compatibility and HF-local corpus checks, and the restore drill)
+    /// carry its three digests, and every mechanics check carries none, so a
+    /// result for each required check promotes the one candidate. A
+    /// mechanics result that names another package (a test bundle, the
+    /// state before PR 5) is a mixed package again. The list of those four
+    /// ids lives in `scripts/operator/pipeline_tooling/checks.py`
+    /// (`digests_required`), which refuses a result that disagrees; the
+    /// rule here is only that results naming no package do not count.
+    #[test]
+    fn mechanics_results_without_a_package_do_not_mix_a_promotion() {
+        const CANDIDATE_CHECKS: [&str; 4] = [
+            "pipeline_bundle_qualification",
+            "pipeline_http_corpus_compatibility",
+            "pipeline_http_corpus_hf_local",
+            "pipeline_restore_drill",
+        ];
+        let now = Utc::now();
+        let mut evidence = passing_evidence(now);
+        for item in evidence.iter_mut() {
+            if CANDIDATE_CHECKS.contains(&item.check.check_id.as_str()) {
+                name_package(&mut item.check, "candidate");
+            }
+        }
+        assert_eq!(
+            evidence
+                .iter()
+                .filter(|item| item.check.package_hash.is_some())
+                .count(),
+            CANDIDATE_CHECKS.len(),
+            "exactly the four candidate checks name a package"
+        );
+        assert_eq!(
+            evidence.len(),
+            PROMOTION_REQUIRED_CHECKS.len(),
+            "one result for each promotion check"
+        );
+        let decision = evaluate_promotion(&evidence, now).unwrap();
+        assert!(decision.ready, "{:?}", decision.safe_blockers);
+        assert!(
+            !decision
+                .safe_blockers
+                .contains(&QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string())
+        );
+        let candidate = PipelinePackageDigests {
+            package_hash: sha256_prefixed(b"candidate-package"),
+            configuration_digest: sha256_prefixed(b"candidate-configuration"),
+            dependency_digest: sha256_prefixed(b"candidate-dependency"),
+        };
+        assert!(
+            decision
+                .package
+                .as_ref()
+                .expect("the decision names the candidate package")
+                .is(&candidate)
+        );
+
+        // The crash matrix, a mechanics check, naming another package (a
+        // test bundle) is the mixed package the rule exists to prevent.
+        let mut mixed = evidence.clone();
+        let crash_matrix = mixed
+            .iter_mut()
+            .find(|item| item.check.check_id == "pipeline_crash_matrix")
+            .expect("the crash matrix is a promotion check");
+        name_package(&mut crash_matrix.check, "test-bundle");
+        let decision = evaluate_promotion(&mixed, now).unwrap();
+        assert!(!decision.ready);
+        assert!(
+            decision
+                .safe_blockers
+                .contains(&QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string()),
+            "{:?}",
+            decision.safe_blockers
+        );
+        assert_eq!(decision.package, None);
     }
 
     /// Wave 2: the decision's `evidence_hash` covers each result's run id,
