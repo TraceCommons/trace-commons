@@ -35,7 +35,7 @@ async fn mission_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
 
 fn configure_catalogue(s: &DaemonShared, base: &str) {
     let mut cfg = crate::commands::unenrolled_preview_config();
-    cfg.ingest_url = base.into();
+    cfg.ingest_url = format!("{base}/v1/traces");
     cfg.allowed_hosts = Some("127.0.0.1".into());
     cfg.display_handle = Some("private-local-handle".into());
     cfg.user_subject = "private-subject".into();

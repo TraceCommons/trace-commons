@@ -24,7 +24,10 @@ pub(super) async fn handle_catalogue(shared: &DaemonShared, req: &Request) -> Re
     let Ok(Some(config)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, UNAVAILABLE);
     };
-    let Ok(client) = MissionCatalogClient::new(&config.ingest_url, config.allowed_hosts.as_deref())
+    let Ok(origin) = crate::config::ingest_origin_url(&config.ingest_url, "/") else {
+        return Response::err(req.id, ERR_UNAVAILABLE, UNAVAILABLE);
+    };
+    let Ok(client) = MissionCatalogClient::new(origin.as_str(), config.allowed_hosts.as_deref())
     else {
         return Response::err(req.id, ERR_UNAVAILABLE, UNAVAILABLE);
     };
