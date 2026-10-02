@@ -385,11 +385,11 @@ public struct GlassToggleStyle: ToggleStyle {
         case .watch: GlassTokens.Color.watchOn
         }
         return HStack(spacing: showsLabel ? GlassTokens.Space.s6 : 0) {
-            // Hidden, the label stays in the tree at no size, so the
-            // combined element below still reads it to VoiceOver.
-            configuration.label
-                .frame(width: showsLabel ? nil : 0, height: showsLabel ? nil : 0)
-                .clipped()
+            // Hidden or not, the native toggle below carries the label to
+            // VoiceOver.
+            if showsLabel {
+                configuration.label
+            }
             Button {
                 withAnimation(.easeOut(duration: GlassTokens.Motion.fast)) { configuration.isOn.toggle() }
             } label: {
@@ -410,7 +410,6 @@ public struct GlassToggleStyle: ToggleStyle {
         .accessibilityRepresentation {
             Toggle(isOn: configuration.$isOn) { configuration.label }
         }
-        .accessibilityElement(children: .combine)
     }
 }
 
