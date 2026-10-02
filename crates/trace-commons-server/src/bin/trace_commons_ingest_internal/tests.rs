@@ -96725,6 +96725,14 @@ mod pipeline_corpus_pg_tests;
 #[path = "pipeline_restore_pg_tests.rs"]
 mod pipeline_restore_pg_tests;
 
+/// The legacy drain report (PR 5, Task 6): the pending work the legacy path
+/// still owes, counted from `main`'s tables for the submissions no pipeline
+/// run owns, and the rehearsal that does that work through the legacy routes
+/// until the report reads zero. Nested here beside the modules above, whose
+/// `pub(super)` helpers it reuses.
+#[path = "pipeline_activation_pg_tests.rs"]
+mod pipeline_activation_pg_tests;
+
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two
 /// message templates are pinned here once rather than at each wrapper.

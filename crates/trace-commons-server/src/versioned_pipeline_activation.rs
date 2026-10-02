@@ -9,11 +9,14 @@
 //! activation or a rollback selects a qualified bundle for later runs only.
 //! Timestamps are audit metadata and select nothing.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Transaction;
 use serde::{Deserialize, Serialize};
+use tokio_postgres::IsolationLevel;
+use tokio_postgres::types::ToSql;
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
@@ -194,6 +197,260 @@ pub struct ReceiptOwnership {
     pub submission_id: Uuid,
     pub run_id: Option<Uuid>,
 }
+
+/// What the legacy path still owes one tenant for the receipts it already
+/// took: a count for each kind of pending legacy work, and whether all of them
+/// are zero. Labels, counts, a routing state, a time, and a hash: no tenant,
+/// submission, principal, or trace text.
+///
+/// `pending` holds every label of the table below, a zero too, so a missing
+/// key never reads as "nothing owed". `evidence_hash` is the canonical hash
+/// (`evidence_hash`) of `{"schema": "trace_commons.pipeline_legacy_drain.v1",
+/// "pending": pending}`: the same counts give the same hash, and it names no
+/// time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LegacyDrainReport {
+    pub generated_at: DateTime<Utc>,
+    /// The tenant's routing row at the same snapshot; `None` for a tenant
+    /// that has none.
+    pub routing_state: Option<RoutingState>,
+    pub pending: BTreeMap<String, u64>,
+    /// True only when every count is zero.
+    pub drained: bool,
+    pub evidence_hash: String,
+}
+
+const LEGACY_DRAIN_EVIDENCE_SCHEMA: &str = "trace_commons.pipeline_legacy_drain.v1";
+
+/// One count of the drain report: its label, its statement, and whether the
+/// statement takes the gate driver's attempt ceiling (`$2`) after the tenant
+/// (`$1`).
+struct LegacyDrainCount {
+    label: &'static str,
+    sql: &'static str,
+    gate_ceiling: bool,
+}
+
+/// The eight counts, each the predicate of the legacy worker that does the
+/// work, with the tenant filter and "no pipeline run owns the submission"
+/// (`NOT EXISTS ... pipeline_runs`, the exclusion
+/// `list_submissions_needing_gate_decision` applies too: a pipeline receipt
+/// also writes a `trace_submissions` row, in the status `received`,
+/// `quarantined`, `rejected`, or, after a review approval, `accepted`). Every
+/// statement is one `SELECT COUNT(*)` over a tenant predicate: no row is
+/// locked and nothing is written.
+///
+/// Where a count cannot select exactly what its worker selects for the
+/// legacy-owned submissions, it selects more, never less: a count that reads
+/// zero while the legacy path still owes work is the failure the report exists
+/// to prevent. The comments say where. (The legacy workers do not themselves
+/// leave out a submission with a pipeline run, except the gate driver; the
+/// report does, because that work belongs to the pipeline.)
+const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 8] = [
+    // `list_submissions_awaiting_pii_backstop` (db/postgres.rs) selects a
+    // submission in this status that also has an active envelope ref, fewer
+    // attempts than its ceiling, and an elapsed backoff. This count is the
+    // status alone: a submission the driver gave up on, or one in backoff, is
+    // still owed its verdict.
+    LegacyDrainCount {
+        label: "awaiting_pii_backstop",
+        sql: "SELECT COUNT(*) FROM trace_submissions s
+               WHERE s.tenant_id = $1
+                 AND s.status = 'awaiting_pii_backstop'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pipeline_runs r
+                      WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                 )",
+        gate_ceiling: false,
+    },
+    // `list_submissions_needing_gate_decision` (db/postgres.rs), without its
+    // backoff clause: a submission that waits out a backoff is still owed its
+    // decision. Attempts below the ceiling the gate driver runs with
+    // (`run_perplexity_score_driver_tick`'s `max_attempts`). The envelope ref
+    // is an `EXISTS`, not the worker's join: the join fans out to one row for
+    // each active ref and the worker deduplicates it with `DISTINCT`.
+    LegacyDrainCount {
+        label: "gate_decision_pending",
+        sql: "SELECT COUNT(*) FROM trace_submissions s
+               WHERE s.tenant_id = $1
+                 AND EXISTS (
+                     SELECT 1 FROM trace_object_refs o
+                      WHERE o.tenant_id = s.tenant_id
+                        AND o.submission_id = s.submission_id
+                        AND o.artifact_kind = 'submitted_envelope'
+                        AND o.invalidated_at IS NULL
+                        AND o.deleted_at IS NULL
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM trace_gate_decisions d
+                      WHERE d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 )
+                 AND COALESCE((
+                     SELECT a.attempts FROM trace_gate_evaluation_attempts a
+                      WHERE a.tenant_id = s.tenant_id AND a.submission_id = s.submission_id
+                 ), 0) < $2
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pipeline_runs r
+                      WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                 )",
+        gate_ceiling: true,
+    },
+    // The same query with the attempts at or above the ceiling: the driver
+    // no longer selects the submission, and no decision exists. Without an
+    // operator resetting its attempt row it never gets one.
+    LegacyDrainCount {
+        label: "gate_decision_exhausted",
+        sql: "SELECT COUNT(*) FROM trace_submissions s
+               WHERE s.tenant_id = $1
+                 AND EXISTS (
+                     SELECT 1 FROM trace_object_refs o
+                      WHERE o.tenant_id = s.tenant_id
+                        AND o.submission_id = s.submission_id
+                        AND o.artifact_kind = 'submitted_envelope'
+                        AND o.invalidated_at IS NULL
+                        AND o.deleted_at IS NULL
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM trace_gate_decisions d
+                      WHERE d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 )
+                 AND COALESCE((
+                     SELECT a.attempts FROM trace_gate_evaluation_attempts a
+                      WHERE a.tenant_id = s.tenant_id AND a.submission_id = s.submission_id
+                 ), 0) >= $2
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pipeline_runs r
+                      WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                 )",
+        gate_ceiling: true,
+    },
+    // `claim_trace_review_lease` (db/trace_corpus_pg.rs) claims a submission
+    // in this status. A submission whose lease another reviewer holds is
+    // still waiting for a decision, so the lease is not part of the count.
+    LegacyDrainCount {
+        label: "quarantine_review_pending",
+        sql: "SELECT COUNT(*) FROM trace_submissions s
+               WHERE s.tenant_id = $1
+                 AND s.status = 'quarantined'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pipeline_runs r
+                      WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                 )",
+        gate_ceiling: false,
+    },
+    // `index_vector_metadata_from_db` (trace-commons-ingest.rs) builds this
+    // set in memory: an accepted submission that is not revoked or purged,
+    // whose allowed uses include one of `VECTOR_INDEX_ALLOWED_USES`, and
+    // each of its current `duplicate_precheck` derived records that has a
+    // summary hash, minus the records whose deterministic vector entry id
+    // has an active entry. That id is a version 5 UUID over the tenant, the
+    // submission, the derived record, and the summary hash, and SQL has no
+    // SHA-1: an entry is matched by the three values the id is made of (the
+    // entry stores them, and the worker is the only writer of entries), which
+    // selects the same records as the id does. What the worker also asks of
+    // its caller (the credential's and the tenant policy's consent scopes
+    // and uses) is not applied: a record that fails it stays counted.
+    LegacyDrainCount {
+        label: "vector_index_pending",
+        sql: "SELECT COUNT(*) FROM trace_derived_records d
+               JOIN trace_submissions s
+                 ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+               WHERE d.tenant_id = $1
+                 AND d.status = 'current'
+                 AND d.worker_kind = 'duplicate_precheck'
+                 AND d.canonical_summary_hash IS NOT NULL
+                 AND s.status = 'accepted'
+                 AND s.revoked_at IS NULL
+                 AND s.purged_at IS NULL
+                 AND s.allowed_uses ?| ARRAY[
+                     'debugging', 'evaluation', 'benchmark_generation',
+                     'ranking_model_training', 'model_training'
+                 ]
+                 AND NOT EXISTS (
+                     SELECT 1 FROM trace_vector_entries v
+                      WHERE v.tenant_id = d.tenant_id
+                        AND v.submission_id = d.submission_id
+                        AND v.derived_id = d.derived_id
+                        AND v.source_hash = d.canonical_summary_hash
+                        AND v.status = 'active'
+                        AND v.invalidated_at IS NULL
+                        AND v.deleted_at IS NULL
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pipeline_runs r
+                      WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                 )",
+        gate_ceiling: false,
+    },
+    // `run_credit_settlement_unlocked` (trace-commons-ingest.rs) settles the
+    // events of the four types `trace_credit_event_type_is_settlement_eligible`
+    // names (`NoveltyUtility` and the immediate events never settle) with a
+    // positive delta, on an accepted submission, that no finalized batch
+    // names in `source_credit_event_ids`. The settled ids are unnested once
+    // and anti-joined, not searched for each event. The worker also skips an
+    // event of an account with an active credit hold, a ranking event its
+    // calibration gate excludes, and what the per-account cap holds back;
+    // those events are still owed, so they stay counted.
+    LegacyDrainCount {
+        label: "delayed_credit_unsettled",
+        sql: "WITH settled AS (
+                  SELECT DISTINCT unnest(b.source_credit_event_ids) AS credit_event_id
+                    FROM trace_credit_settlement_batches b
+                   WHERE b.tenant_id = $1 AND b.status = 'finalized'
+              )
+              SELECT COUNT(*) FROM trace_credit_ledger l
+               JOIN trace_submissions s
+                 ON s.tenant_id = l.tenant_id AND s.submission_id = l.submission_id
+               WHERE l.tenant_id = $1
+                 AND l.event_type IN (
+                     'benchmark_conversion', 'regression_catch',
+                     'training_utility', 'ranking_utility'
+                 )
+                 AND l.points_delta::numeric > 0
+                 AND s.status = 'accepted'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM settled x WHERE x.credit_event_id = l.credit_event_id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pipeline_runs r
+                      WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                 )",
+        gate_ceiling: false,
+    },
+    // `list_due_trace_revocation_propagation_items` (db/trace_corpus_pg.rs)
+    // lists the `pending` and `failed` items whose `next_attempt_at` is due.
+    // This count takes the `failed` items whatever their `next_attempt_at`
+    // (an item in backoff, or one that reached its attempt limit, is still
+    // owed) and the `in_progress` items, which the worker never lists again:
+    // an item a crashed run left claimed is work that started and did not
+    // finish. Items whose source submission has a pipeline run belong to the
+    // pipeline's own follow-up.
+    LegacyDrainCount {
+        label: "revocation_propagation_pending",
+        sql: "SELECT COUNT(*) FROM trace_revocation_propagation_items i
+               WHERE i.tenant_id = $1
+                 AND i.status IN ('pending', 'in_progress', 'failed')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pipeline_runs r
+                      WHERE r.tenant_id = i.tenant_id
+                        AND r.submission_id = i.source_submission_id
+                 )",
+        gate_ceiling: false,
+    },
+    // `read_mains_near_credit_outbox_items` (trace-commons-ingest.rs): the
+    // outbox rows `main`'s NEAR workers read, which leave out the pipeline's
+    // payout rows (`instrument_id` set), in the states those workers still
+    // act on: `pending` and `failed` are submitted, `submitted` is confirmed.
+    // Tenant-wide: an outbox row names a settlement batch, not a submission.
+    LegacyDrainCount {
+        label: "near_outbox_pending",
+        sql: "SELECT COUNT(*) FROM trace_near_credit_outbox o
+               WHERE o.tenant_id = $1
+                 AND o.instrument_id IS NULL
+                 AND o.status IN ('pending', 'failed', 'submitted')",
+        gate_ceiling: false,
+    },
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivationReadiness {
@@ -570,6 +827,111 @@ impl PipelineActivationStore {
             RoutingState::Legacy,
         )
         .await
+    }
+
+    /// What the legacy path still owes `tenant_id`: for each kind of pending
+    /// legacy work, the number of submissions (or rows) that the legacy worker
+    /// would pick up and that no pipeline run owns (`LEGACY_DRAIN_COUNTS`
+    /// names the worker and the predicate of each count), and `drained`,
+    /// which is true only when every count is zero. Before a tenant's legacy
+    /// writer can be retired the legacy code must have finished this work.
+    ///
+    /// `gate_max_attempts` is the attempt ceiling the gate driver runs with
+    /// (`PerplexityDriverKnobs::max_attempts`); it splits the gate work into
+    /// pending (below the ceiling) and exhausted (at it, which the driver no
+    /// longer selects).
+    ///
+    /// The report runs as the ingest runtime role in one tenant transaction:
+    /// a read-only, single-snapshot transaction (`REPEATABLE READ`), so all
+    /// eight counts and the routing state describe one instant, with one
+    /// statement for each count and no row lock. It reads `main`'s tables,
+    /// which hold what the database mirror wrote; a tenant whose reads still
+    /// come from the file store has records the report does not see.
+    ///
+    /// Not counted, by the owner's decision (P5-D8): none of these is
+    /// follow-up the legacy path owes for a receipt it took, so none can
+    /// strand a tenant when its legacy writer retires.
+    ///
+    /// - Retention and purge are time-driven maintenance over every
+    ///   submission's `expires_at`; the pipeline's submissions go through the
+    ///   same maintenance.
+    /// - Export jobs are snapshots an operator requests and completes by
+    ///   calling a route; they have their own completion state.
+    /// - Benchmark and process-evaluation work runs when an operator calls
+    ///   its route, with the inputs of the request.
+    /// - The database mirror backfill copies file records into the tables, an
+    ///   operator's maintenance over the file store.
+    /// - Work that the legacy path does not start by itself:
+    ///   `/v1/workers/utility-credit` takes its submission ids from its
+    ///   caller, so no table lists what it still has to do.
+    ///
+    /// The `near_outbox_pending` count is tenant-wide and blocks `drained`
+    /// (owner decision, 2026-10-02): an outbox row stays `pending`,
+    /// `failed`, or `submitted` until `main`'s NEAR workers confirm it, and
+    /// retiring the legacy path before then would strand the payout.
+    pub async fn legacy_drain_report(
+        &self,
+        tenant_id: &str,
+        gate_max_attempts: i32,
+    ) -> Result<LegacyDrainReport, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::read_only_tenant_transaction(&mut client, tenant_id).await?;
+        let mut pending = BTreeMap::new();
+        for count in &LEGACY_DRAIN_COUNTS {
+            let params: &[&(dyn ToSql + Sync)] = if count.gate_ceiling {
+                &[&tenant_id, &gate_max_attempts]
+            } else {
+                &[&tenant_id]
+            };
+            let counted: i64 = tx.query_one(count.sql, params).await?.get(0);
+            let counted = u64::try_from(counted).map_err(|_| {
+                DatabaseError::Serialization("legacy_drain_count_invalid".to_string())
+            })?;
+            pending.insert(count.label.to_string(), counted);
+        }
+        let routing_state = tx
+            .query_opt(
+                "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?
+            .map(|row| RoutingState::from_db(row.get::<_, String>("routing_state").as_str()))
+            .transpose()?;
+        tx.commit().await?;
+        let drained = pending.values().all(|count| *count == 0);
+        let evidence_hash =
+            crate::versioned_pipeline_qualification::evidence_hash(&serde_json::json!({
+                "schema": LEGACY_DRAIN_EVIDENCE_SCHEMA,
+                "pending": pending,
+            }))
+            .map_err(DatabaseError::Serialization)?;
+        Ok(LegacyDrainReport {
+            generated_at: Utc::now(),
+            routing_state,
+            pending,
+            drained,
+            evidence_hash,
+        })
+    }
+
+    /// `tenant_transaction` for a read: the transaction cannot write, and
+    /// every statement in it sees one snapshot.
+    async fn read_only_tenant_transaction<'a>(
+        client: &'a mut deadpool_postgres::Client,
+        tenant_id: &str,
+    ) -> Result<Transaction<'a>, DatabaseError> {
+        let tx = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await?;
+        Ok(tx)
     }
 
     /// `contain` and `deactivate`: neither changes the bundle, so the event's

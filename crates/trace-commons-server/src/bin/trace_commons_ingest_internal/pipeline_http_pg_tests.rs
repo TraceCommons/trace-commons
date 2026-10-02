@@ -84,7 +84,7 @@ static PIPELINE_HTTP_DATABASE: tokio::sync::OnceCell<String> = tokio::sync::Once
 /// Two test processes pointed at the same `TRACE_COMMONS_PG_TEST_DATABASE_URL`
 /// at once would each force-drop the sibling database the other is mid-setup
 /// on or already running against -- do not run this suite that way.
-async fn pipeline_http_database_url() -> Option<String> {
+pub(super) async fn pipeline_http_database_url() -> Option<String> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok()?;
     Some(
         PIPELINE_HTTP_DATABASE
@@ -5895,7 +5895,7 @@ async fn model_training_envelope() -> TraceContributionEnvelope {
 
 /// `method uri` through `app()` with `headers` (and a JSON `body`), returning
 /// the status and the body, parsed as JSON when it is JSON.
-async fn route_request(
+pub(super) async fn route_request(
     state: Arc<AppState>,
     method: &str,
     uri: &str,
@@ -9087,7 +9087,7 @@ async fn routing_envelope(tool_name: &str) -> TraceContributionEnvelope {
 /// `POST /v1/traces` of the exact bytes `body` through a plain router over
 /// `state` (no worker, no listener), returning the status and the parsed
 /// body.
-async fn route_trace(
+pub(super) async fn route_trace(
     state: &Arc<AppState>,
     token: &str,
     body: &[u8],
