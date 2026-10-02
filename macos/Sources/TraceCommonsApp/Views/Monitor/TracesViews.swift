@@ -18,6 +18,17 @@ struct TracesTreeView: View {
     /// ignoring when the folder has sessions waiting. It carries the core's
     /// words for that folder, decoded when the change was asked for.
     @State private var confirming: Confirmation?
+    /// A tool switch change waiting on the core's explanation of what the
+    /// source declaration does.
+    @State private var sourceChange: SourceChange?
+
+    struct SourceChange {
+        let kind: SourceKind
+        /// True to watch a folder, false for "I do not use this tool".
+        let watch: Bool
+        let explanation: String
+        let action: String
+    }
 
     struct Confirmation {
         let folder: TracesTree.FolderNode
@@ -99,6 +110,43 @@ struct TracesTreeView: View {
             }
         } message: { pending in
             Text(pending.body)
+        }
+        .confirmationDialog(
+            sourceChange?.kind.displayName ?? "",
+            isPresented: Binding(get: { sourceChange != nil }, set: { if !$0 { sourceChange = nil } }),
+            titleVisibility: .visible,
+            presenting: sourceChange
+        ) { change in
+            Button(change.action) { applySource(change) }
+            Button("Cancel", role: .cancel) { sourceChange = nil }
+        } message: { change in
+            Text(change.explanation)
+        }
+    }
+
+    // MARK: Tool sources
+
+    /// A tool switch flipped. The declaration is written only after the
+    /// core's explanation of it is shown (`SourceSettingsCopy`), as Settings
+    /// shows it beside the same choice; with no copy nothing is written.
+    private func requestSource(_ tool: TracesTree.ToolNode, watch: Bool) {
+        guard let copy = TCSourceChecks.settingsCopy(), let entry = copy.tools[tool.kind.rawValue] else { return }
+        sourceChange = SourceChange(
+            kind: tool.kind,
+            watch: watch,
+            explanation: entry.explanation ?? copy.explanation,
+            action: watch ? (entry.chooseFolder ?? copy.chooseFolder) : entry.decline)
+    }
+
+    private func applySource(_ change: SourceChange) {
+        sourceChange = nil
+        if change.watch {
+            // `get_settings` never reports a path, so watching asks which
+            // folder, as Settings does.
+            guard let path = SourceRootRow.chooseFolder() else { return }
+            Task { await store.setSource(change.kind, .watch(path: path)) }
+        } else {
+            Task { await store.setSource(change.kind, .off) }
         }
     }
 
@@ -195,11 +243,12 @@ struct TracesTreeView: View {
             sub: Self.toolSub(tool),
             off: tool.mode == .off,
             expanded: tool.folders.isEmpty ? nil : isOpen(tool.id),
-            // The source declaration. Unset draws no switch: never off.
-            // Disabled until the contract carries a source-mode write, so it
-            // is not announced as a control that does nothing.
-            watched: tool.mode == .watch || tool.mode == .off ? .constant(tool.mode == .watch) : nil,
-            watchDisabled: true,
+            // The source declaration, written through `setSource` after the
+            // core's explanation. Unset and unknown draw no switch: never off.
+            watched: tool.mode == .watch || tool.mode == .off
+                ? Binding(get: { tool.mode == .watch }, set: { requestSource(tool, watch: $0) })
+                : nil,
+            watchDisabled: store.writing.contains(tool.kind.rawValue),
             watchLabel: tool.kind.displayName,
             expandLabel: tool.kind.displayName,
             onToggleExpand: { toggle(tool.id) }

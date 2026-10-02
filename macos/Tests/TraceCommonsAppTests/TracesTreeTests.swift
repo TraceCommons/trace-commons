@@ -138,6 +138,20 @@ final class TracesFolderModeTests: XCTestCase {
         XCTAssertNil(store.folderNotice)
     }
 
+    /// The tool switch writes the source declaration through `setSource`,
+    /// and the tree reloads from the core's answer.
+    func test_theToolSwitchWritesTheSourceDeclaration() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        await store.setSource(.codex, .off)
+        XCTAssertEqual(store.phase, .loaded)
+        XCTAssertTrue(store.writing.isEmpty)
+
+        // A watch with no folder is not an answer; the refusal is kept.
+        await store.setSource(.codex, .watch(path: ""))
+        guard case .failed = store.phase else { return XCTFail("\(store.phase)") }
+    }
+
     /// A refused write keeps its error and leaves the tree as the core has it.
     func test_aRefusedModeWriteKeepsItsError() async throws {
         let store = TracesStore(client: SampleDaemonClient(.coreDown))

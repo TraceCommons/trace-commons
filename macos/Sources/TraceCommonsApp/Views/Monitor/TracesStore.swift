@@ -89,6 +89,22 @@ final class TracesStore {
         }
     }
 
+    /// A tool's source declaration, from its switch after the core's
+    /// explanation was shown: `.off` is "I do not use this tool", `.watch`
+    /// names the folder chosen for it. The core's answer is reloaded.
+    func setSource(_ kind: SourceKind, _ choice: SourceChoice) async {
+        guard !writing.contains(kind.rawValue) else { return }
+        writing.insert(kind.rawValue)
+        defer { writing.remove(kind.rawValue) }
+        do {
+            _ = try await client.setSource(kind, choice)
+        } catch {
+            phase = .failed(error as? DaemonDataError ?? .undecodable(method: "set_settings"))
+            return
+        }
+        await load()
+    }
+
     /// A folder's mode, chosen from its three-way picker after any
     /// confirmation the view showed (arming, or ignoring a folder with
     /// sessions waiting). `promised` is the waiting count that confirmation
