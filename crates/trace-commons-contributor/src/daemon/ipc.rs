@@ -1620,6 +1620,8 @@ impl DaemonShared {
         let policy = self.policy.lock().expect("policy lock");
         let queue = self.queue.lock().expect("queue lock");
         let decisions_owed = super::queue::decisions_owed(&queue, &policy, scrub_check);
+        let contribution_override = contribution_override_value(&policy);
+        let contribution_mode = contribution_mode_value(&policy, &queue);
         drop(policy);
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -1699,6 +1701,14 @@ impl DaemonShared {
             // `witness_capacity` is. Always present, zero when none. It
             // releases on its own: nothing here is acknowledged.
             "automatic_contribution_held": automatic_contribution_held,
+            // Additive (#1173). The menu-bar pill's global override: `null`,
+            // or `{mode, since}` while one is in force.
+            "contribution_override": contribution_override,
+            // Additive (#1173). The pill's roll-up, so no shell computes it:
+            // `notify_only`, `auto_upload`, `ignore`, or `mixed`. The
+            // override's mode while one is in force; otherwise from every
+            // folder's own mode.
+            "contribution_mode": contribution_mode,
         })
     }
 
@@ -3106,6 +3116,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "project_label": disambiguated_label(key, entry.display_path.as_deref(), &known),
                 "project_path": display_path(shown),
                 "mode": policy.resolve(key),
+                "folder_mode": policy.folder_mode(key),
                 "added_at": entry.added_at,
                 "configured": true,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
@@ -3130,7 +3141,9 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 // K5: whether the arming left the backlog waiting
                 // (`set_project_mode` with `from_now: true`). Armed rows
                 // only, like the disclosure.
-                row["from_now"] = serde_json::Value::Bool(policy.is_armed_from_now(&key));
+                // Also true for a folder an "Auto contribute" override
+                // arms: its backlog waits the same way (#1173).
+                row["from_now"] = serde_json::Value::Bool(policy.armed_from_now_at(&key).is_some());
             }
             row
         })
@@ -3141,6 +3154,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "project_label": disambiguated_label(key, shown.as_deref(), &known),
                 "project_path": display_path(shown.as_deref().unwrap_or(key)),
                 "mode": policy.resolve(key),
+                "folder_mode": policy.folder_mode(key),
                 "added_at": serde_json::Value::Null,
                 "configured": false,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
@@ -3784,6 +3798,16 @@ fn contribution_override_value(policy: &ProjectPolicy) -> serde_json::Value {
     match &policy.contribution_override {
         None => serde_json::Value::Null,
         Some(o) => serde_json::json!({ "mode": mode_label(o.mode), "since": o.since }),
+    }
+}
+
+/// `status.contribution_mode`: the menu-bar pill's roll-up (#1173). The
+/// override's mode while one is in force; otherwise the one mode every
+/// folder shares, or `"mixed"`. See `ProjectPolicy::contribution_mode`.
+fn contribution_mode_value(policy: &ProjectPolicy, queue: &super::queue::Queue) -> &'static str {
+    match policy.contribution_mode(queue.all().iter().map(|e| e.project_key.as_str())) {
+        Some(mode) => mode_label(mode),
+        None => "mixed",
     }
 }
 
@@ -14961,5 +14985,44 @@ mod tests {
             ProjectMode::AutoUpload
         );
         assert_eq!(s.decisions_owed_value(), 1);
+    }
+
+    /// `status` reports the override and the pill's roll-up, `mixed` when
+    /// folders differ, and `list_projects` both modes of a folder.
+    #[test]
+    fn status_reports_the_override_and_a_mixed_roll_up() {
+        let s = enrolled_shared();
+        let status = s.status_value();
+        assert!(status["contribution_override"].is_null());
+        assert_eq!(status["contribution_mode"], "notify_only");
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/rollup-armed", ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        assert_eq!(s.status_value()["contribution_mode"], "auto_upload");
+        seed_entry(&s, "/tmp/rollup-asks");
+        assert_eq!(s.status_value()["contribution_mode"], "mixed");
+
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let status = s.status_value();
+        assert_eq!(status["contribution_mode"], "ignore");
+        assert_eq!(status["contribution_override"]["mode"], "ignore");
+        assert!(status["contribution_override"]["since"].is_string());
+        let armed = projects_of(&s)
+            .into_iter()
+            .find(|p| p["project_label"] == "rollup-armed")
+            .unwrap();
+        assert_eq!(armed["mode"], "ignore");
+        assert_eq!(armed["folder_mode"], "auto_upload");
+
+        handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        let status = s.status_value();
+        assert!(status["contribution_override"].is_null());
+        assert_eq!(status["contribution_mode"], "mixed");
     }
 }

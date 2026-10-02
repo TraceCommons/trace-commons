@@ -525,6 +525,41 @@ impl ProjectPolicy {
         cleared
     }
 
+    /// The menu-bar pill's roll-up (#1173): the override's mode while one is
+    /// in force; otherwise the one mode every folder shares, or `None` when
+    /// they differ ("Mixed").
+    ///
+    /// "Every folder" is every configured folder and every key in
+    /// `discovered` (the queue's), by its own mode ([`Self::folder_mode`]),
+    /// excluding the unknown bucket, which can never be armed and so would
+    /// make any all-automatic set read as mixed. With no folders it is
+    /// `NotifyOnly`, the default every unruled folder resolves to.
+    pub fn contribution_mode<'a>(
+        &self,
+        discovered: impl IntoIterator<Item = &'a str>,
+    ) -> Option<ProjectMode> {
+        if let Some(o) = &self.contribution_override {
+            return Some(o.mode);
+        }
+        // A folder counted twice changes nothing: only equality is asked.
+        let configured = self
+            .projects
+            .keys()
+            .map(|k| self.folder_mode_unless_unknown(k));
+        let queued = discovered
+            .into_iter()
+            .map(|k| self.folder_mode_unless_unknown(k));
+        let mut modes = configured.chain(queued).flatten();
+        let Some(first) = modes.next() else {
+            return Some(ProjectMode::NotifyOnly);
+        };
+        modes.all(|m| m == first).then_some(first)
+    }
+
+    fn folder_mode_unless_unknown(&self, project_key: &str) -> Option<ProjectMode> {
+        (project_key != UNKNOWN_PROJECT_KEY).then(|| self.folder_mode(project_key))
+    }
+
     /// The arming-from-now record that holds `project_key`'s backlog, if
     /// any: its own, or an `AutoUpload` override's when the folder is not
     /// armed by its own mode. At most one applies, because a folder with an
@@ -3117,5 +3152,31 @@ mod tests {
         let back: ProjectPolicy =
             serde_json::from_value(serde_json::to_value(&armed).unwrap()).unwrap();
         assert_eq!(back, armed, "the override round-trips");
+    }
+
+    /// The pill's roll-up: one shared mode, `None` ("Mixed") when folders
+    /// differ, the override's mode while one is in force, and the default
+    /// with no folders. The unknown bucket never makes it mixed.
+    #[test]
+    fn the_roll_up_reports_mixed_and_yields_to_the_override() {
+        use ProjectMode::*;
+        let p = ProjectPolicy::new();
+        assert_eq!(p.contribution_mode([]), Some(NotifyOnly));
+        let mut p = ProjectPolicy::new();
+        let at = t("2026-10-01T00:00:00Z");
+        p.set_mode("/w/a", AutoUpload, at).unwrap();
+        p.set_mode("/w/b", AutoUpload, at).unwrap();
+        assert_eq!(p.contribution_mode([UNKNOWN_PROJECT_KEY]), Some(AutoUpload));
+        assert_eq!(
+            p.contribution_mode(["/w/queued"]),
+            None,
+            "a discovered folder asks first"
+        );
+        p.set_mode("/w/b", Ignore, at).unwrap();
+        assert_eq!(p.contribution_mode([]), None);
+        p.set_contribution_override(NotifyOnly, at);
+        assert_eq!(p.contribution_mode([]), Some(NotifyOnly));
+        p.clear_contribution_override();
+        assert_eq!(p.contribution_mode([]), None);
     }
 }
