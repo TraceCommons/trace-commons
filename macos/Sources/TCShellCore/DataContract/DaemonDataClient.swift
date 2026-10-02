@@ -182,6 +182,11 @@ public protocol DaemonDataClient: Sendable {
 
     /// The daemon's events, for screens that refresh live. Each call returns
     /// a fresh stream. On `.resyncRequired`, refetch `status` and `listPending`.
+    ///
+    /// A stream that finishes means the core is down (or the app is tearing
+    /// down): an unreachable daemon ends it with no events at all, not with
+    /// an empty snapshot. Draw a finished stream as core-down, never as
+    /// "nothing to show".
     func events() -> AsyncStream<DaemonDataEvent>
 }
 
