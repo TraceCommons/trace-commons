@@ -369,16 +369,28 @@ public struct GlassToggleStyle: ToggleStyle {
         self.kind = kind
     }
 
+    /// The track colour when on.
+    static func onColor(_ kind: GlassSwitchKind) -> GlassRGBA {
+        switch kind {
+        case .standard: GlassTokens.Color.toggleOn
+        case .settings: GlassTokens.Color.toggleOnSettings
+        case .watch: GlassTokens.Color.watchOn
+        }
+    }
+
+    /// The knob: white, except on the bright watch green, where white is
+    /// about 1.8:1 and the knob takes the dark ink instead (over 9:1). Every
+    /// knob clears the 3:1 glyph floor against its track (SwitchContrastTests).
+    static func knob(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA {
+        kind == .watch && isOn ? GlassTokens.Color.textOnStatus : GlassTokens.Color.textOnAccent
+    }
+
     public func makeBody(configuration: Configuration) -> some View {
         let watch = kind == .watch
         let width = watch ? GlassTokens.Size.watchSwitchWidth : GlassTokens.Size.toggleWidth
         let height = watch ? GlassTokens.Size.watchSwitchHeight : GlassTokens.Size.toggleHeight
         let inset: CGFloat = watch ? 2 : 3
-        let onColor: GlassRGBA = switch kind {
-        case .standard: GlassTokens.Color.toggleOn
-        case .settings: GlassTokens.Color.toggleOnSettings
-        case .watch: GlassTokens.Color.watchOn
-        }
+        let onColor = Self.onColor(kind)
         return HStack(spacing: GlassTokens.Space.s6) {
             configuration.label
             Button {
@@ -388,7 +400,7 @@ public struct GlassToggleStyle: ToggleStyle {
                     Capsule()
                         .fill(configuration.isOn ? onColor.color : GlassTokens.Color.toggleOff.color)
                     Circle()
-                        .fill(Color.white)
+                        .fill(Self.knob(kind, isOn: configuration.isOn).color)
                         .frame(width: 18, height: 18)
                         .padding(inset)
                 }
