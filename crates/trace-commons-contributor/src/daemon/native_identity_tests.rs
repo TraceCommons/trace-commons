@@ -564,3 +564,36 @@ fn enrolled_upload_endpoint_resolves_to_account_origin() {
         "https://commons.example:8443"
     );
 }
+
+#[test]
+fn explicit_enrollment_host_policy_wins_over_environment_without_bypassing_signup_policy() {
+    const CHILD: &str = "TRACE_COMMONS_IDENTITY_HOST_POLICY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["daemon::native_identity::tests::explicit_enrollment_host_policy_wins_over_environment_without_bypassing_signup_policy","--exact"])
+            .env(CHILD,"1").env("TRACE_COMMONS_ALLOWED_HOSTS","environment-only.example")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    let (_dir, shared) = shared();
+    let cfg:crate::config::ContributorConfig=serde_json::from_value(json!({"schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,"issuer_url":"https://issuer.example","ingest_url":"https://commons.example/v1/traces","audience":"upload","tenant_id":"tenant-a","instance_id":"instance-a","user_subject":"device-a","device_key_id":"device-a","consent_scopes":[],"allowed_hosts":"commons.example"})).unwrap();
+    shared.store.save_config(&cfg).unwrap();
+    let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    let origin = resolve_origin(&shared.store, &json!({})).unwrap();
+    assert!(scoped_client(&shared.store, &snapshot, &origin, "synthetic").is_ok());
+    let (_other, store) = crate::config::tests_support::temp_store();
+    let snapshot = commons_credentials::snapshot(&store, Kind::Account).unwrap();
+    let origin = resolve_origin(&store, &json!({"ingest_url":"https://commons.example"})).unwrap();
+    assert!(scoped_client(&store, &snapshot, &origin, "synthetic").is_err());
+    let allowed = resolve_origin(
+        &store,
+        &json!({"ingest_url":"https://environment-only.example"}),
+    )
+    .unwrap();
+    assert!(scoped_client(&store, &snapshot, &allowed, "synthetic").is_ok());
+}

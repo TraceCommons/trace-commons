@@ -75,12 +75,10 @@ fn canonical_origin(input: &str) -> Result<String> {
     {
         bail!("account-origin-refused");
     }
-    let origin = url.origin().ascii_serialization();
-    let allowed = super::account_onboarding::signup_allowlist(&origin, &[])?;
-    allowed
-        .check(&url)
-        .map_err(|_| anyhow!("account-origin-refused"))?;
-    Ok(origin)
+    // Syntax normalization is independent of host policy. The captured
+    // configuration's explicit policy takes precedence over the environment;
+    // scoped_client applies that one policy immediately before the request.
+    Ok(url.origin().ascii_serialization())
 }
 
 pub(super) fn resolve_origin(store: &ConfigStore, params: &Value) -> Result<String> {
