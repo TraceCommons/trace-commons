@@ -1275,7 +1275,12 @@ pub const TITLE_MAX_CHARS: usize = 60;
 /// The session's title: the first non-empty line of its redacted opening
 /// prompt, cut at a word boundary to [`TITLE_MAX_CHARS`] with an ellipsis
 /// when cut. `None` when there is no task description.
-fn title_of(opening_prompt: &str) -> Option<String> {
+///
+/// `pub(crate)` so `daemon::queue::title_of` (K9) can apply the exact same
+/// cut/truncate rule to the queued title it builds from the raw transcript,
+/// rather than reimplementing it and risking the two definitions drifting
+/// apart.
+pub(crate) fn title_of(opening_prompt: &str) -> Option<String> {
     if opening_prompt == "No task description found." {
         return None;
     }

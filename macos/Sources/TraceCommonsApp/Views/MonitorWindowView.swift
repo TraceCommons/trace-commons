@@ -52,13 +52,34 @@ struct MonitorWindowView: View {
     /// The screens' data (C1). Sample data in this debug window until K1
     /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
     /// the set (`normalDay` by default).
-    @State private var traces = TracesStore(client: MonitorWindowView.dataClient())
+    @State private var traces = MonitorWindowView.tracesStore()
     /// The map's Private AI view and the Inference tab (R8).
     @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
 
+    /// The Traces store over the sample set `TRACE_COMMONS_SAMPLE` names. A
+    /// name that is not a set falls back to `normalDay`, and says so: the tab
+    /// marks the data as sample, and an unknown name both in the marker and
+    /// in the log.
+    static func tracesStore() -> TracesStore {
+        let choice = sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"])
+        if choice.unknown {
+            NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue)
+        }
+        return TracesStore(
+            client: DaemonDataWiring.sample(choice.set), sample: choice.set.rawValue, sampleUnknown: choice.unknown)
+    }
+
+    /// The sample client for the window's other stores, over the same set.
     static func dataClient() -> any DaemonDataClient {
-        let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] ?? ""
-        return DaemonDataWiring.sample(SampleDaemonClient.SampleSet(rawValue: name) ?? .normalDay)
+        DaemonDataWiring.sample(sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"]).set)
+    }
+
+    /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
+    /// none (unset or empty is the default, not unknown).
+    static func sampleChoice(_ name: String?) -> (set: SampleDaemonClient.SampleSet, unknown: Bool) {
+        guard let name, !name.isEmpty else { return (.normalDay, false) }
+        guard let set = SampleDaemonClient.SampleSet(rawValue: name) else { return (.normalDay, true) }
+        return (set, false)
     }
     /// False until this window has seeded the two preferences from its
     /// width (map from 1100pt, inspector from 900pt). After that the
@@ -75,7 +96,9 @@ struct MonitorWindowView: View {
                     model.daemonSettings?.privateInferenceState?.surfaceState,
                     calls: model.privateInferenceCalls),
                 tracesBadge: tracesBadge,
-                tracesDescription: Self.tracesDescription(traces.decisionsOwed),
+                tracesDot: traces.shield == .attention ? .ask : nil,
+                tracesDescription: Self.tracesDescription(
+                    traces.decisionsOwed, shield: traces.shield, secondLook: traces.words?.secondLookWaiting),
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() }
             ) {
@@ -122,9 +145,15 @@ struct MonitorWindowView: View {
 
     /// The Traces badge's text equivalent, from the core: "unavailable" for
     /// an unknown count, never zero; nil at zero, where there is no badge.
-    static func tracesDescription(_ decisionsOwed: Int?) -> String? {
-        guard let text = TCCoreCopy.decisionsOwedText(decisionsOwed), !text.isEmpty else { return nil }
-        return text
+    /// When something waiting is worth a second look, the core's words for
+    /// that follow, as the badge's amber dot shows it.
+    static func tracesDescription(
+        _ decisionsOwed: Int?, shield: QueueShieldState = .clear, secondLook: String? = nil
+    ) -> String? {
+        let count = TCCoreCopy.decisionsOwedText(decisionsOwed).flatMap { $0.isEmpty ? nil : $0 }
+        let flagged = shield == .attention ? secondLook : nil
+        let parts = [count, flagged].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
     /// The selected session, while it is still in the tree.
@@ -180,6 +209,8 @@ private struct MonitorMainPane<Content: View>: View {
     let inferenceDot: GlassStatus?
     let inferenceDescription: String?
     let tracesBadge: GlassBadgeValue?
+    /// Amber when something waiting is worth a second look.
+    let tracesDot: GlassStatus?
     let tracesDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
@@ -226,7 +257,7 @@ private struct MonitorMainPane<Content: View>: View {
                         GlassSegment(
                             item.title, value: item,
                             badgeValue: item == .traces ? tracesBadge : nil,
-                            dot: item == .inference ? inferenceDot : nil,
+                            dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
                             accessibilityValue: item == .inference
                                 ? inferenceDescription : item == .traces ? tracesDescription : nil)
                     })

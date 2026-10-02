@@ -2360,6 +2360,14 @@ char*       tc_monitor_traces_copy_json(void);
  */
 char*       tc_monitor_screens_copy_json(void);
 
+/* The grant screens' words for one disclosure the daemon chose and named
+ * (consent_copy::automatic_grant_copy_named): an armed folder's list_projects
+ * row carries automatic_disclosure ("patterns_only" or "model_scrubbed"),
+ * and this words that answer. NULL for a NULL or unknown name, and on a
+ * caught panic.
+ */
+char*       tc_automatic_grant_copy_json(const char* disclosure);
+
 /* The Traces badge's text equivalent (preview_copy::decisions_owed_text).
  * A negative decisions_owed is an unknown count, never zero. The EMPTY
  * STRING for zero. NULL only on a caught panic.
