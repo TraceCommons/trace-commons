@@ -170,12 +170,13 @@ answers `404` there. Do these steps in this order:
    `skipped_run_count`, `command_set_hash`), and appends one `vector_index`
    audit row. It creates no outcomes and no credit. It is safe to run again
    if it is interrupted: a repeat reports the entries it already wrote as
-   unchanged. A rebuild runs one tenant at a time per process: a second
-   request for a tenant whose rebuild is running is refused (`409`
+   unchanged. Each process runs at most one rebuild per tenant at a time: a
+   second request for a tenant whose rebuild is running is refused (`409`
    `pipeline_index_rebuild_in_progress`). A run's writes hold its rows for
    at most the smaller of the Settle lease and 30 seconds; past that, the
-   rebuild stops with `503` `index_unavailable`, and a rerun continues
-   where it left off.
+   rebuild stops with `503` `index_unavailable`. A rerun starts again from
+   the first run and reports the entries already written as unchanged; a
+   run whose writes take longer than that deadline fails on every rerun.
 
    A withdrawal during the rebuild is safe because of step 3, not because
    no withdrawal happens: withdrawals come from clients, from `main`'s

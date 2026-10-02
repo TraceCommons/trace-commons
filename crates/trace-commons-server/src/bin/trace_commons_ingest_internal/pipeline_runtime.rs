@@ -355,9 +355,9 @@ pub(crate) async fn pipeline_readiness_handler(
 /// no withdrawal happens: it is that the worker processes none of the
 /// tenant's invalidations while the rebuild writes (the restore runbook's
 /// step 3, `backup-restore.md`). A queued invalidation waits for a later
-/// worker. This holds for this process only: another replica that drains
-/// the tenant still processes its invalidations. Closing that (a committed
-/// rebuild fence that a withdrawal's invalidation reads) is PR 5's.
+/// worker. This holds for this process only: another replica that routes
+/// or drains the tenant still processes its invalidations. Closing that (a
+/// committed rebuild fence that a withdrawal's invalidation reads) is PR 5's.
 ///
 /// A rebuild that completes appends one index maintenance audit row, as the
 /// vector index worker route does (final review M4, ruling FR-7): `main`'s
@@ -482,9 +482,13 @@ impl PipelineIndexRebuilds {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         state.tasks.spawn(async move {
             // Dropped when the task ends, is aborted, or panics, so the
-            // tenant can be rebuilt again.
-            let _running = running;
-            let _ = sender.send(rebuild.await);
+            // tenant can be rebuilt again. Freed before the result is sent,
+            // so a client that retries as soon as it has its answer is not
+            // refused as still in progress.
+            let running = running;
+            let output = rebuild.await;
+            drop(running);
+            let _ = sender.send(output);
         });
         Ok(receiver)
     }
