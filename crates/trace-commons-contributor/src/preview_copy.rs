@@ -183,9 +183,197 @@ pub fn decisions_owed_text(decisions_owed: Option<u64>) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The glass monitor's other screens (#1173 R8-R13): the map, the Inference
+// tab, Home and History, Missions, and the menu-bar popover. One table, as
+// for the Traces tab, so no shell writes these words.
+
+/// Every fixed word of the monitor's screens after Traces. Single words and
+/// short labels; the screens' sentences come from their own copy tables.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorScreensCopy {
+    /// The map's hub: this computer.
+    pub computer: &'static str,
+    /// The map's library node.
+    pub commons: &'static str,
+    /// A count of sessions waiting.
+    pub waiting: &'static str,
+    /// A count of folders.
+    pub folders: &'static str,
+    /// A tool that is watched.
+    pub watched: &'static str,
+    /// Off: a tool, or Private AI.
+    pub off: &'static str,
+    /// On: watching, or Private AI.
+    pub on: &'static str,
+    /// A count of tools connected to Private AI.
+    pub connected: &'static str,
+    /// The map's zoom out.
+    pub reduce: &'static str,
+    /// The map's zoom in.
+    pub enlarge: &'static str,
+    /// Model calls.
+    pub calls: &'static str,
+    /// The per-model summary.
+    pub models: &'static str,
+    /// What calls were priced at (never billed).
+    pub priced: &'static str,
+    /// A value the core did not report.
+    pub unknown: &'static str,
+    /// IronWire's proof label `verified`: the only one that is proof.
+    pub proof_verified: &'static str,
+    /// `gateway_only`.
+    pub proof_gateway_only: &'static str,
+    /// `unattested`.
+    pub proof_unattested: &'static str,
+    /// `pending`.
+    pub proof_pending: &'static str,
+    /// `unavailable`.
+    pub proof_unavailable: &'static str,
+    /// `failed`, kept apart from the rest.
+    pub proof_failed: &'static str,
+    /// `outside`.
+    pub proof_outside: &'static str,
+    /// `unrecorded`, and any label a later daemon grows.
+    pub proof_unrecorded: &'static str,
+    /// Home's History.
+    pub history: &'static str,
+    /// A count of contributions accepted.
+    pub contributed: &'static str,
+    /// Watching N tools; the Watching pill.
+    pub watching: &'static str,
+    /// Watching is paused.
+    pub paused: &'static str,
+    /// The inspector's summary on Home.
+    pub summary: &'static str,
+    /// This week.
+    pub week: &'static str,
+    /// This month.
+    pub month: &'static str,
+    /// All time.
+    pub total: &'static str,
+    /// Held for privacy review: never rejected.
+    pub held: &'static str,
+    /// Taken back.
+    pub withdrawn: &'static str,
+    /// Credit.
+    pub credit: &'static str,
+    /// Credit settled.
+    pub credit_final: &'static str,
+    /// Credit not yet settled; shown only with its condition.
+    pub pending: &'static str,
+    /// Community standing.
+    pub community: &'static str,
+    /// Rank in the community.
+    pub rank: &'static str,
+    /// The standing's window.
+    pub window: &'static str,
+    /// A contribution the person approved.
+    pub approved: &'static str,
+    /// How a contribution was approved was not recorded; never said as approved.
+    pub unrecorded: &'static str,
+    /// Home's Missions.
+    pub missions: &'static str,
+    /// The menu-bar mode pill.
+    pub contribution_mode: &'static str,
+    /// Folders whose modes differ.
+    pub mixed: &'static str,
+    /// The graph's contributed series.
+    pub shared: &'static str,
+    /// The graph's kept series.
+    pub kept: &'static str,
+    /// The menu-bar popover's recent rows.
+    pub recent_activity: &'static str,
+    /// Sessions worth a second look.
+    pub flagged: &'static str,
+    /// Opens the folders' rules.
+    pub manage_rules: &'static str,
+    /// Opens Settings.
+    pub settings: &'static str,
+    /// Quits the app.
+    pub quit: &'static str,
+    /// The core did not answer; see [`MONITOR_CORE_UNREACHABLE`].
+    pub core_unreachable: &'static str,
+    /// A request failed; see [`MONITOR_REQUEST_FAILED`].
+    pub request_failed: &'static str,
+}
+
+/// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
+#[must_use]
+pub fn monitor_screens_copy() -> MonitorScreensCopy {
+    MonitorScreensCopy {
+        computer: "Computer",
+        commons: "Commons",
+        waiting: "Waiting",
+        folders: "Folders",
+        watched: "Watched",
+        off: "Off",
+        on: "On",
+        connected: "Connected",
+        reduce: "Reduce",
+        enlarge: "Enlarge",
+        calls: "Calls",
+        models: "Models",
+        priced: "Priced",
+        unknown: "Unknown",
+        proof_verified: "Verified",
+        proof_gateway_only: "Gateway",
+        proof_unattested: "Unattested",
+        proof_pending: "Pending",
+        proof_unavailable: "Unavailable",
+        proof_failed: "Failed",
+        proof_outside: "Outside",
+        proof_unrecorded: "Unrecorded",
+        history: "History",
+        contributed: "Contributed",
+        watching: "Watching",
+        paused: "Paused",
+        summary: "Summary",
+        week: "Week",
+        month: "Month",
+        total: "Total",
+        held: "Held",
+        withdrawn: "Withdrawn",
+        credit: "Credit",
+        credit_final: "Final",
+        pending: "Pending",
+        community: "Community",
+        rank: "Rank",
+        window: "Window",
+        approved: "Approved",
+        unrecorded: "Unrecorded",
+        missions: "Missions",
+        contribution_mode: "Contribution mode",
+        mixed: "Mixed",
+        shared: "shared",
+        kept: "kept",
+        recent_activity: "Recent activity",
+        flagged: "Flagged",
+        manage_rules: "Manage rules…",
+        settings: "Trace Commons Settings…",
+        quit: "Quit…",
+        core_unreachable: MONITOR_CORE_UNREACHABLE,
+        request_failed: MONITOR_REQUEST_FAILED,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_monitor_screens_copy_is_whole_and_shares_the_traces_lines() {
+        let copy = monitor_screens_copy();
+        let value = serde_json::to_value(&copy).unwrap();
+        for (key, word) in value.as_object().unwrap() {
+            assert!(!word.as_str().unwrap().is_empty(), "{key} is empty");
+        }
+        let traces = monitor_traces_copy();
+        assert_eq!(copy.core_unreachable, traces.core_unreachable);
+        assert_eq!(copy.request_failed, traces.request_failed);
+        // Not recorded is never said as approved.
+        assert_ne!(copy.unrecorded, copy.approved);
+    }
 
     #[test]
     fn the_monitor_traces_copy_is_whole_and_shares_customize_words() {

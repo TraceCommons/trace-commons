@@ -615,6 +615,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_monitor_traces_copy_json",
     ),
     (
+        "monitor screens words",
+        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TCCoreCopy.monitorScreensCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_monitor_screens_copy_json",
+    ),
+    (
         "monitor Traces badge words",
         "TraceCommonsApp/Views/MonitorWindowView.swift",
         "TCCoreCopy.decisionsOwedText",
