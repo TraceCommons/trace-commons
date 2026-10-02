@@ -524,11 +524,13 @@ enum TC {
     // MARK: Accents
 
     /// The brand accent: purple from the Trace logo (glass tokens, D3),
-    /// replacing the community green. Tints, the selected tab, a checked
-    /// box. Dark uses the glass accent-text purple (#C9B3FF, 8.4:1 on the
-    /// dark ground); light the brand purple (6.4:1 on the light ground).
-    /// Good standing is no longer this colour: see `statusOn`.
-    static let accent = dynamic(glass(GlassTokens.Color.purple), glass(GlassTokens.Color.purpleText))
+    /// replacing the community green. A FILL and TINT colour only -- the
+    /// window tint, a checked box, the prominent button -- so it is the brand
+    /// purple #6D14F3 in both schemes, carrying white glyphs at 6.9:1. The
+    /// lavender #C9B3FF is a text colour and lives only in `accentText`:
+    /// white on it is 1.85:1. Accent glyphs or text on the ground use
+    /// `accentText`. Good standing is not this colour: see `statusOn`.
+    static let accent = dynamic(glass(GlassTokens.Color.purple), glass(GlassTokens.Color.purple))
     /// Spec `blue.brand`, site `--blue`. Secondary. Held, ranked, in progress,
     /// and the mark's bottom-right bracket.
     ///
