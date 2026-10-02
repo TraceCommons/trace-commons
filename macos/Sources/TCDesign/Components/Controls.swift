@@ -39,8 +39,18 @@ private struct GlassButtonBody: View {
 
     var body: some View {
         label
-            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : GlassTokens.Opacity.disabled)
+            // Pressed is the fill a step darker (8% on a filled action, 6% on
+            // glass), not a fade: a faded consent button reads as disabled.
+            .brightness(configuration.isPressed && isEnabled ? -pressDarkening : 0)
+            .opacity(isEnabled ? 1 : GlassTokens.Opacity.disabled)
             .contentShape(Capsule())
+    }
+
+    private var pressDarkening: Double {
+        switch kind {
+        case .primary, .secondary: 0.08
+        case .glass, .submit, .link: 0.06
+        }
     }
 
     @ViewBuilder
@@ -214,7 +224,9 @@ public struct GlassKebab: View {
     private let open: Bool
     private let action: () -> Void
 
-    public init(_ label: String = "More", open: Bool = false, action: @escaping () -> Void) {
+    /// `label` names the button for VoiceOver and the help tag, from the
+    /// core's copy.
+    public init(_ label: String, open: Bool = false, action: @escaping () -> Void) {
         self.label = label
         self.open = open
         self.action = action
@@ -235,7 +247,6 @@ public struct GlassKebab: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
-        .accessibilityValue(open ? "open" : "closed")
         .help(label)
     }
 }
@@ -268,7 +279,11 @@ public struct GlassExpander: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityValue(isOpen ? "expanded" : "collapsed")
+        // A native disclosure for assistive tech, so the system says
+        // expanded or collapsed in the person's language.
+        .accessibilityRepresentation {
+            DisclosureGroup(isExpanded: $isOpen) { EmptyView() } label: { Text(title) }
+        }
     }
 }
 
@@ -296,7 +311,8 @@ public struct GlassPicker<Value: Hashable>: View {
     private let options: [GlassPickerOption<Value>]
     private let placeholder: String
 
-    public init(_ label: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>], placeholder: String = "Choose…") {
+    /// `placeholder` is shown while nothing is chosen, from the core's copy.
+    public init(_ label: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>], placeholder: String) {
         self.label = label
         self._selection = selection
         self.options = options
@@ -388,8 +404,11 @@ public struct GlassToggleStyle: ToggleStyle {
                 .frame(width: width, height: height)
             }
             .buttonStyle(.plain)
-            .accessibilityAddTraits(.isToggle)
-            .accessibilityValue(configuration.isOn ? "on" : "off")
+        }
+        // A native toggle for assistive tech, so the system states its
+        // value in the person's language.
+        .accessibilityRepresentation {
+            Toggle(isOn: configuration.$isOn) { configuration.label }
         }
         .accessibilityElement(children: .combine)
     }
@@ -400,9 +419,13 @@ public struct GlassToggleStyle: ToggleStyle {
 public struct GlassCheckboxStyle: ToggleStyle {
     /// A group checkbox whose children differ.
     private let mixed: Bool
+    /// What VoiceOver says for the mixed state, from the core's copy. A
+    /// native toggle has no mixed value of its own.
+    private let mixedValue: String?
 
-    public init(mixed: Bool = false) {
+    public init(mixed: Bool = false, mixedValue: String? = nil) {
         self.mixed = mixed
+        self.mixedValue = mixedValue
     }
 
     public func makeBody(configuration: Configuration) -> some View {
@@ -418,8 +441,10 @@ public struct GlassCheckboxStyle: ToggleStyle {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityAddTraits(.isToggle)
-        .accessibilityValue(mixed ? "mixed" : configuration.isOn ? "checked" : "unchecked")
+        .accessibilityRepresentation {
+            Toggle(isOn: configuration.$isOn) { configuration.label }
+                .accessibilityValue(mixed ? (mixedValue ?? "") : "")
+        }
     }
 }
 

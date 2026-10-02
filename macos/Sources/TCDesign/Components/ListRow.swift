@@ -19,6 +19,7 @@ public struct GlassListRow: View {
     private let watched: Binding<Bool>?
     private let watchLabel: String
     private let expandLabel: String?
+    private let menuLabel: String
     private let menuOpen: Bool
     private let onToggleExpand: (() -> Void)?
     private let onSelect: (() -> Void)?
@@ -28,8 +29,8 @@ public struct GlassListRow: View {
     /// `expanded` is nil for a row that cannot expand. `watched` is nil for
     /// a row with no switch of its own (a session). A nil `onSubmit` with a
     /// `submitTitle` shows the pill disabled. Every word is the caller's:
-    /// `watchLabel` names the switch and `expandLabel` the chevron, from the
-    /// core's copy; the components author no wording.
+    /// `watchLabel` names the switch, `expandLabel` the chevron and
+    /// `menuLabel` the row menu (the title when empty), from the core's copy; the components author no wording.
     public init(
         depth: Depth,
         tile: GlassToolTile.Kind,
@@ -44,6 +45,7 @@ public struct GlassListRow: View {
         watched: Binding<Bool>? = nil,
         watchLabel: String = "",
         expandLabel: String? = nil,
+        menuLabel: String = "",
         menuOpen: Bool = false,
         onToggleExpand: (() -> Void)? = nil,
         onSelect: (() -> Void)? = nil,
@@ -63,6 +65,7 @@ public struct GlassListRow: View {
         self.watched = watched
         self.watchLabel = watchLabel
         self.expandLabel = expandLabel
+        self.menuLabel = menuLabel
         self.menuOpen = menuOpen
         self.onToggleExpand = onToggleExpand
         self.onSelect = onSelect
@@ -81,8 +84,15 @@ public struct GlassListRow: View {
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(expandLabel ?? title)
-                    .accessibilityValue(expanded ? "expanded" : "collapsed")
+                    // A native disclosure for assistive tech, so the system
+                    // says expanded or collapsed in the person's language.
+                    .accessibilityRepresentation {
+                        DisclosureGroup(isExpanded: Binding(get: { expanded }, set: { _ in onToggleExpand() })) {
+                            EmptyView()
+                        } label: {
+                            Text(expandLabel ?? title)
+                        }
+                    }
                 } else {
                     Color.clear
                 }
@@ -117,7 +127,7 @@ public struct GlassListRow: View {
 
             Group {
                 if let onMenu {
-                    GlassKebab(open: menuOpen, action: onMenu)
+                    GlassKebab(menuLabel.isEmpty ? title : menuLabel, open: menuOpen, action: onMenu)
                 } else {
                     Color.clear
                 }
@@ -135,6 +145,15 @@ public struct GlassListRow: View {
         .opacity(off ? GlassTokens.Opacity.rowOff : 1)
         .contentShape(Rectangle())
         .onTapGesture { onSelect?() }
+        // Full Keyboard Access and VoiceOver reach the row too: focusable,
+        // Return or Space selects it, and its default action is the same.
+        .focusable(onSelect != nil)
+        .onKeyPress(keys: [.return, .space]) { _ in
+            guard let onSelect else { return .ignored }
+            onSelect()
+            return .handled
+        }
+        .accessibilityAction { onSelect?() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .accessibilityValue(sub ?? "")
