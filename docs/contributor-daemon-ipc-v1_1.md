@@ -4983,10 +4983,13 @@ matching must not trigger a person-specific fetch. An entry grants no execution,
 model spend, capture, sending or contribution permission.
 
 The catalogue currently supplies no daily assignments, completion rewards,
-levels, streaks, badges or pending-credit range. Z7's daily mission mechanism
-and ledger-of-record rules remain open in #1174/#1118; do not invent endpoints,
-reward arithmetic or a `missions[]` DTO with fabricated credits. Future pending
-credit must carry its condition and never be described as earned. Standing
+levels, streaks, badges or pending-credit range. The commons record is the
+settled ledger of record for pending credit (#1118); dollars remain a near.ai
+link-out. Daily mission economics and the credit-to-inference bridge remain
+unspecified in #1174/#1118. Build the configurable missions server with rewards
+off; do not invent reward arithmetic or a `missions[]` DTO with fabricated
+credits. Future pending credit must carry its condition and never be described
+as earned. Standing
 uses the existing `history_rollup.community` unchanged: absent object means no
 standing, nullable rank means unknown, and no percentile is implied by rank.
 

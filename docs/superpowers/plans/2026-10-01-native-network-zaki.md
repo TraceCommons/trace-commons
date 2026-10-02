@@ -7,6 +7,15 @@ Rust contributor core. Swift runs the platform passkey UI and consumes the same
 contracts; Ron owns screens and Kristi owns local matching/data.
 **Baseline:** `ba8a87777`; C3 lands without Rust or Swift behavior.
 
+**Mission mechanism source:** [Michael's original mechanism draft](https://docs.google.com/document/d/1PFdbc91S3_aTUFO4LoJCBhW0KB8jiZscAp_ee6HD06I/edit?tab=t.0)
+proposes daily missions, monthly Trace Activity, levels, streaks and badges;
+it leaves one daily mission versus activity-based assignment open. User decision:
+**“Build configurable server; rewards off.”** This authorizes the configurable
+server while daily economics remain unspecified. Matching stays on the Mac,
+missions grant no sending consent, and any future credit stays pending until
+commons settlement. The commons pending-credit ledger decision is settled;
+the credit-to-inference bridge remains unspecified.
+
 | Work | Deliverable / evidence boundary |
 |---|---|
 | C3 | Contract names, DTOs, SAMPLE JSON and support status before behavior |
@@ -16,7 +25,7 @@ contracts; Ron owns screens and Kristi owns local matching/data.
 | Z4 | Explicit billed-per-model unknown until actual provider source exists |
 | Z5 | Extend existing map additively with owned hub/route facts; no invented provider or remote dev-server discovery; coordinate K14 |
 | Z6 | Core disclosure plus read/write wrappers around existing hosting lifecycle |
-| Z7 | Daily assignment/completion/levels/streak/badges/credit mechanism and ledger rules unresolved in #1174/#1118; no reward semantics invented |
+| Z7 | Build the configurable missions server with rewards off. Commons pending-credit ledger is settled (#1118); daily economics and credit-to-inference bridge remain unspecified. Preserve #1174 M1–M4; no reward semantics invented. |
 | Z8 | IPC wrapper around existing anonymous skill-evaluation catalogue; local matching sends no profile/results |
 | Z9 | Existing `history_rollup.community` is authoritative; preserve rank and absence behavior |
 | Z10 | Existing non-redeeming issuer lookup over IPC; full invite URL, real unit, pending conditions |
