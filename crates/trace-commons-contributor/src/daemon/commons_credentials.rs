@@ -165,6 +165,17 @@ pub(crate) struct Snapshot {
     previous: Option<Vec<u8>>,
     kind: Kind,
 }
+impl Snapshot {
+    /// Configuration captured with this credential generation; never a later
+    /// config selected during an in-flight request or sign-out.
+    pub(crate) fn configuration(&self) -> Result<Option<ContributorConfig>> {
+        self.config
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(|_| unavailable())
+    }
+}
 pub(crate) fn snapshot(store: &ConfigStore, kind: Kind) -> Result<Snapshot> {
     let locks = coordination(store.dir())?;
     let _commit = locks.commit.lock()?;

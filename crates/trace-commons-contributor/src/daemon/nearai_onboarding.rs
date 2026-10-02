@@ -889,9 +889,9 @@ pub(super) async fn bind(shared: &DaemonShared) -> Result<serde_json::Value> {
     if shared.store.load_config()?.is_some() {
         bail!("account-already-enrolled");
     }
-    let origin = resolve_origin(&shared.store, &json!({}))?;
     let mut account = crate::account_auth::try_load_session_with_snapshot(&shared.store)?
         .ok_or_else(|| anyhow!("account-session-required"))?;
+    let origin = resolve_origin(&shared.store, &json!({}))?;
     let account_id = uuid::Uuid::parse_str(&account.session.account_id)
         .map_err(|_| anyhow!("account-bind-invalid"))?;
     let binding = authenticated(
@@ -974,6 +974,19 @@ async fn bind_prepared(
         .to_string();
     let finished: Finished =
         serde_json::from_value(result).map_err(|_| anyhow!("account-bind-invalid"))?;
+    let token_tenant = finished
+        .access_token
+        .strip_prefix("tcn1_")
+        .and_then(|s| s.split_once('.'))
+        .and_then(|(s, _)| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(s)
+                .ok()
+        })
+        .and_then(|s| String::from_utf8(s).ok());
+    if token_tenant.as_deref() != Some(finished.tenant_id.as_str()) {
+        bail!("account-bind-invalid");
+    }
     let returned_id =
         uuid::Uuid::parse_str(&finished.account_id).map_err(|_| anyhow!("account-bind-invalid"))?;
     match outcome.as_str() {
@@ -1038,4 +1051,137 @@ pub(super) fn bind_device_proof(
             account_id,
         ),
     ))
+}
+
+#[cfg(test)]
+mod native_bind_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn bind_http_preserves_account_or_switches_only_on_existing_account_without_consent() {
+        for outcome in [
+            "bound",
+            "existing_account",
+            "stale",
+            "wrong-account",
+            "wrong-device",
+            "wrong-tenant",
+        ] {
+            let (_dir, store) = crate::config::tests_support::temp_store();
+            let shared = DaemonShared::load(store).unwrap();
+            let near = super::super::settings::NearAiSession {
+                refresh_token: "rt_original".into(),
+                refresh_token_expires_at: None,
+                stored_at: Utc::now(),
+                user_agent: "test-agent".into(),
+            };
+            {
+                let mut settings = shared.settings.lock().unwrap();
+                settings.near_ai_session = Some(near.clone());
+                settings.save_for_test(&shared.store).unwrap();
+            }
+            let account_id = uuid::Uuid::new_v4();
+            let initial = json!({"access_token":"tcn1_original","expires_at":Utc::now()+chrono::Duration::hours(6),"account_id":account_id.to_string()});
+            let snapshot = super::super::commons_credentials::snapshot(
+                &shared.store,
+                super::super::commons_credentials::Kind::Account,
+            )
+            .unwrap();
+            super::super::commons_credentials::replace(
+                &shared.store,
+                &snapshot,
+                &serde_json::to_vec(&initial).unwrap(),
+                None,
+            )
+            .unwrap();
+            let account = crate::account_auth::try_load_session_with_snapshot(&shared.store)
+                .unwrap()
+                .unwrap();
+            let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
+            let device_id = identity.device_key_id.clone();
+            let public = base64::engine::general_purpose::STANDARD
+                .decode(&identity.public_key_b64)
+                .unwrap();
+            let challenge = Arc::new(Mutex::new(String::new()));
+            let saved_challenge = Arc::clone(&challenge);
+            let nonce = [9u8; 32];
+            let expires = Utc::now().timestamp() + 300;
+            let returned_id = if matches!(outcome, "existing_account" | "wrong-account") {
+                uuid::Uuid::new_v4()
+            } else {
+                account_id
+            };
+            let finished_id = returned_id.to_string();
+            let store = shared.store.clone();
+            let app = axum::Router::new()
+                .route("/v1/account/near-ai/provision/bind/start",axum::routing::post(move |axum::Json(value):axum::Json<Value>| {
+                    *saved_challenge.lock().unwrap()=value["code_challenge"].as_str().unwrap().into();
+                    async move { axum::Json(json!({"ceremony_id":"bind-ceremony","nonce":base64::engine::general_purpose::STANDARD.encode(nonce),"expires_at":expires})) }
+                }))
+                .route("/v1/account/near-ai/provision/bind/finish",axum::routing::post(move |axum::Json(value):axum::Json<Value>| {
+                    let challenge=challenge.lock().unwrap().clone();
+                    let public=public.clone(); let device_id=device_id.clone(); let finished_id=finished_id.clone(); let store=store.clone();
+                    async move {
+                        let device:[u8;32]=public.clone().try_into().unwrap();
+                        let proof=trace_commons_protocol::onboarding::near_ai_bind_device_bytes(&nonce,"bind-ceremony",&device,&challenge,expires,&account_id);
+                        let signature=base64::engine::general_purpose::STANDARD.decode(value["device_signature"].as_str().unwrap()).unwrap();
+                        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519,public).verify(&proof,&signature).unwrap();
+                        assert_eq!(value["access_token"],"near-access");
+                        if outcome=="stale" {super::super::commons_credentials::clear(&store,&[super::super::commons_credentials::Kind::Account]).unwrap();}
+                        let tenant=format!("nearai-{}","ab".repeat(32));
+                        axum::Json(json!({"access_token":format!("tcn1_{}.secret",base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(if outcome=="wrong-tenant" {"different-tenant"} else {&tenant})),"token_type":"Bearer","expires_in_secs":43200,"account_id":finished_id,"tenant_id":tenant,"device_key_id":if outcome=="wrong-device" {"wrong"} else {&device_id},"anchor_hash":format!("sha256:{}","ab".repeat(32)),"outcome":if outcome=="existing_account" {"existing_account"} else {"bound"},"binding_state":if outcome=="existing_account" {"legacy"} else {"bound"}}))
+                    }
+                }))
+                .route("/v1/users/me/access-tokens",axum::routing::post(||async {axum::Json(json!({"access_token":"near-access","refresh_token":"rt_rotated","refresh_token_expiration":Utc::now()+chrono::Duration::days(1)}))}));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let prepared=Prepared {commons:super::super::native_identity::client(&origin,"unauthenticated").unwrap(),session:near,issuer_url:"https://issuer.example".into(),audience:"trace-commons-upload".into(),witness:serde_json::from_value(json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap(),receipt_endpoint:None};
+            let result = bind_prepared(
+                &shared,
+                &CloudApi::for_test(&origin).unwrap(),
+                &origin,
+                account,
+                account_id,
+                prepared,
+            )
+            .await;
+            server.abort();
+            if matches!(
+                outcome,
+                "stale" | "wrong-account" | "wrong-device" | "wrong-tenant"
+            ) {
+                assert!(result.is_err(), "{outcome}");
+                assert!(shared.store.load_config().unwrap().is_none());
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result["outcome"], outcome);
+                assert!(!result.to_string().contains("secret"));
+                let cfg = shared.store.load_config().unwrap().unwrap();
+                assert!(cfg.consent_scopes.is_empty());
+                assert!(!cfg.consent_scopes_chosen);
+                assert_eq!(
+                    crate::account_auth::try_load_session_with_snapshot(&shared.store)
+                        .unwrap()
+                        .unwrap()
+                        .session
+                        .account_id,
+                    returned_id.to_string()
+                );
+            }
+            assert_eq!(
+                shared
+                    .settings
+                    .lock()
+                    .unwrap()
+                    .near_ai_session
+                    .as_ref()
+                    .unwrap()
+                    .refresh_token,
+                "rt_rotated"
+            );
+        }
+    }
 }

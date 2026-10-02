@@ -227,6 +227,7 @@ fn native_client(cfg: &ContributorConfig) -> Result<Client> {
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token(UNAUTHENTICATED_PLACEHOLDER)
+    .max_response_bytes(256 * 1024)
     .host_allowlist(config_allowlist(cfg))
     .build()
     .context("building the ingest client for native sign-in")

@@ -116,9 +116,38 @@ pub(super) fn client(origin: &str, token: &str) -> Result<Client> {
     let allowed = super::account_onboarding::signup_allowlist(origin, &[])?;
     Client::builder(origin, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
         .bearer_token(token)
+        .max_response_bytes(256 * 1024)
         .host_allowlist(allowed)
         .build()
         .map_err(|_| anyhow!("account-origin-refused"))
+}
+
+fn scoped_client(
+    store: &ConfigStore,
+    expected: &Snapshot,
+    origin: &str,
+    token: &str,
+) -> Result<Client> {
+    let result = if let Some(config) = expected.configuration()? {
+        let url = reqwest::Url::parse(origin).map_err(|_| anyhow!("account-origin-refused"))?;
+        let configured = reqwest::Url::parse(&config.ingest_url)
+            .map_err(|_| anyhow!("account-origin-refused"))?;
+        if url.origin() != configured.origin() {
+            bail!("account-origin-refused");
+        }
+        Client::builder(origin, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
+            .bearer_token(token)
+            .max_response_bytes(256 * 1024)
+            .host_allowlist(crate::config::config_allowlist(&config))
+            .build()
+            .map_err(|_| anyhow!("account-origin-refused"))?
+    } else {
+        client(origin, token)?
+    };
+    if commons_credentials::snapshot(store, Kind::Account)? != *expected {
+        bail!("account-session-changed");
+    }
+    Ok(result)
 }
 
 /// Persist rotation even on an HTTP refusal. A changed local authority wins.
@@ -133,15 +162,20 @@ pub(super) async fn authenticated(
     if commons_credentials::snapshot(&shared.store, Kind::Account)? != session.snapshot {
         bail!("account-session-changed");
     }
-    let response = client(origin, &session.session.access_token)?
-        .call_json_with_response_header::<Value, Value>(
-            method,
-            path,
-            &[],
-            body,
-            ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
-        )
-        .await;
+    let response = scoped_client(
+        &shared.store,
+        &session.snapshot,
+        origin,
+        &session.session.access_token,
+    )?
+    .call_json_with_response_header::<Value, Value>(
+        method,
+        path,
+        &[],
+        body,
+        ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+    )
+    .await;
     if let Some(token) = response.response_header {
         account_auth::store_rotated_token(&shared.store, session, token)
             .map_err(|_| anyhow!("account-session-changed"))?;
@@ -344,6 +378,7 @@ async fn begin(shared: &DaemonShared, action: Action, params: &Value) -> Result<
     if action == Action::Create && shared.store.load_config()?.is_some() {
         bail!("account-already-enrolled");
     }
+    let mut snapshot = commons_credentials::snapshot(&shared.store, Kind::Account)?;
     let origin = resolve_origin(&shared.store, params)?;
     let mut session = if action == Action::Add {
         Some(
@@ -353,7 +388,9 @@ async fn begin(shared: &DaemonShared, action: Action, params: &Value) -> Result<
     } else {
         None
     };
-    let mut snapshot = commons_credentials::snapshot(&shared.store, Kind::Account)?;
+    if commons_credentials::snapshot(&shared.store, Kind::Account)? != snapshot {
+        bail!("account-session-changed");
+    }
     let label = params
         .get("label")
         .filter(|v| !v.is_null())
@@ -385,7 +422,7 @@ async fn begin(shared: &DaemonShared, action: Action, params: &Value) -> Result<
         snapshot = session.snapshot.clone();
         value
     } else {
-        client(&origin, "unauthenticated")?
+        scoped_client(&shared.store, &snapshot, &origin, "unauthenticated")?
             .call_json::<Value, Value>(Method::POST, route(action, false), &[], Some(&body))
             .await
             .map_err(|_| anyhow!("passkey-start-refused"))?
@@ -499,10 +536,15 @@ async fn complete(shared: &DaemonShared, action: Action, params: &Value) -> Resu
         .await?;
         Ok(json!({"binding_state":binding(&result)?}))
     } else {
-        let result: Value = client(&pending.origin, "unauthenticated")?
-            .call_json(Method::POST, route(action, true), &[], Some(&body))
-            .await
-            .map_err(|_| anyhow!("passkey-finish-refused"))?;
+        let result: Value = scoped_client(
+            &shared.store,
+            &pending.snapshot,
+            &pending.origin,
+            "unauthenticated",
+        )?
+        .call_json(Method::POST, route(action, true), &[], Some(&body))
+        .await
+        .map_err(|_| anyhow!("passkey-finish-refused"))?;
         persist_session(&shared.store, &pending.snapshot, &pending.origin, &result)?;
         Ok(json!({"binding_state":binding(&result)?}))
     }
@@ -520,19 +562,25 @@ fn status(store: &ConfigStore) -> Value {
 async fn sign_out(shared: &DaemonShared) -> Result<Value> {
     // Clear first even when Keychain is unavailable. Durable invalidation also
     // rejects an already in-flight completion after restart.
-    let expected = commons_credentials::snapshot(&shared.store, Kind::Account)?;
-    let configured_origin = shared.store.load_config()?.map(|c| c.ingest_url);
-    commons_credentials::clear_expected(&shared.store, &expected)?;
+    let expected = commons_credentials::snapshot(&shared.store, Kind::Account).ok();
+    commons_credentials::clear(&shared.store, &[Kind::Account])?;
     shared
         .native_identity
         .lock()
         .map_err(|_| invalid())?
         .clear();
-    let raw = commons_credentials::removed_payload(&shared.store, &expected)
-        .ok()
-        .flatten();
+    let config = expected
+        .as_ref()
+        .and_then(|s| s.configuration().ok().flatten());
+    let raw = expected.as_ref().and_then(|s| {
+        commons_credentials::removed_payload(&shared.store, s)
+            .ok()
+            .flatten()
+    });
     let _ = commons_credentials::cleanup(&shared.store);
-    let origin = configured_origin
+    let origin = config
+        .as_ref()
+        .map(|c| c.ingest_url.clone())
         .or_else(|| {
             raw.as_ref()
                 .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
@@ -545,10 +593,23 @@ async fn sign_out(shared: &DaemonShared) -> Result<Value> {
         .and_then(|v| canonical_origin(&v).ok());
     if let (Some(origin), Some(raw)) = (origin, raw) {
         if let Ok(session) = serde_json::from_slice::<account_auth::AccountSession>(&raw) {
-            if let Ok(client) = client(&origin, &session.access_token) {
-                let _ = client
-                    .call_raw::<()>(Method::POST, "/v1/account/logout", &[], None)
-                    .await;
+            let allowed = config
+                .as_ref()
+                .map(crate::config::config_allowlist)
+                .map(Ok)
+                .unwrap_or_else(|| super::account_onboarding::signup_allowlist(&origin, &[]));
+            if let Ok(allowed) = allowed {
+                if let Ok(client) =
+                    Client::builder(&origin, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
+                        .bearer_token(session.access_token)
+                        .max_response_bytes(256 * 1024)
+                        .host_allowlist(allowed)
+                        .build()
+                {
+                    let _ = client
+                        .call_raw::<()>(Method::POST, "/v1/account/logout", &[], None)
+                        .await;
+                }
             }
         }
     }

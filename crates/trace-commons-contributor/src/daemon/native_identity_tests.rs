@@ -427,3 +427,140 @@ fn native_login_refuses_other_enrollment_tenant_and_account_without_replacing_cr
         "tenant-a"
     );
 }
+
+#[tokio::test]
+async fn corrupt_config_does_not_prevent_local_logout_or_restore_a_stale_finish() {
+    let (_dir, shared) = shared();
+    let fresh = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(&shared.store,&fresh,"https://commons.example",&json!({"access_token":"tcn1_secret","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"unbound"})).unwrap();
+    put_pending(
+        &shared,
+        "https://commons.example",
+        Action::Create,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let before = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    std::fs::write(shared.store.daemon_path("contributor.json"), b"not-json").unwrap();
+    let response = handle(&shared, &request("account_sign_out", json!({}))).await;
+    assert_eq!(response.result.unwrap()["signed_out"], true);
+    assert!(shared.native_identity.lock().unwrap().is_empty());
+    assert!(
+        !shared
+            .store
+            .daemon_path(crate::config::ACCOUNT_SESSION_FILE)
+            .exists()
+    );
+    assert!(commons_credentials::replace(&shared.store, &before, b"{}", None).is_err());
+}
+
+#[tokio::test]
+async fn captured_account_cannot_send_after_an_origin_and_authority_switch() {
+    let (_dir, shared) = shared();
+    let expected = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(&shared.store,&expected,"https://old.example",&json!({"access_token":"tcn1_old","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"unbound"})).unwrap();
+    let mut old = account_auth::try_load_session_with_snapshot(&shared.store)
+        .unwrap()
+        .unwrap();
+    persist_session(&shared.store,&old.snapshot,"https://new.example",&json!({"access_token":"tcn1_new","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"unbound"})).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let error = authenticated(
+        &shared,
+        &origin,
+        &mut old,
+        Method::GET,
+        "/v1/account/binding",
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.to_string(), "account-session-changed");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        account_auth::try_load_token(&shared.store)
+            .unwrap()
+            .as_deref(),
+        Some("tcn1_new")
+    );
+}
+
+#[tokio::test]
+async fn enrolled_host_policy_refuses_before_any_bearer_request() {
+    let (_dir, shared) = shared();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let cfg:crate::config::ContributorConfig=serde_json::from_value(json!({"schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,"issuer_url":"https://issuer.example","ingest_url":origin,"audience":"upload","tenant_id":"tenant-a","instance_id":"instance-a","user_subject":"device-a","device_key_id":"device-a","consent_scopes":[],"allowed_hosts":"allowed.example"})).unwrap();
+    shared.store.save_config(&cfg).unwrap();
+    let expected = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(&shared.store,&expected,&origin,&json!({"access_token":format!("tcn1_{}.secret",URL_SAFE_NO_PAD.encode("tenant-a")),"token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"bound"})).unwrap();
+    let mut session = account_auth::try_load_session_with_snapshot(&shared.store)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        authenticated(
+            &shared,
+            &origin,
+            &mut session,
+            Method::GET,
+            "/v1/account/binding",
+            None
+        )
+        .await
+        .unwrap_err()
+        .to_string(),
+        "account-origin-refused"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn oversized_http_completion_never_publishes_credentials_or_enrollment() {
+    let (_dir, shared) = shared();
+    let (origin, worker) = server_once("200 OK", json!({"large":"x".repeat(256*1024)}), None).await;
+    put_pending(
+        &shared,
+        &origin,
+        Action::Create,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let response = handle(
+        &shared,
+        &request("passkey_create_complete", registration_params()),
+    )
+    .await;
+    assert_eq!(response.error.unwrap().message, "passkey-finish-refused");
+    worker.await.unwrap();
+    assert!(
+        account_auth::try_load_token(&shared.store)
+            .unwrap()
+            .is_none()
+    );
+    assert!(shared.store.load_config().unwrap().is_none());
+}
+
+#[test]
+fn enrolled_upload_endpoint_resolves_to_account_origin() {
+    let (_dir, shared) = shared();
+    let cfg:crate::config::ContributorConfig=serde_json::from_value(json!({"schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,"issuer_url":"https://issuer.example","ingest_url":"https://commons.example:8443/v1/traces","audience":"upload","tenant_id":"tenant-a","instance_id":"instance-a","user_subject":"device-a","device_key_id":"device-a","consent_scopes":[],"allowed_hosts":"commons.example"})).unwrap();
+    shared.store.save_config(&cfg).unwrap();
+    assert_eq!(
+        resolve_origin(&shared.store, &json!({})).unwrap(),
+        "https://commons.example:8443"
+    );
+    assert_eq!(
+        resolve_origin(
+            &shared.store,
+            &json!({"ingest_url":"https://commons.example:8443/v1/traces"})
+        )
+        .unwrap(),
+        "https://commons.example:8443"
+    );
+}
