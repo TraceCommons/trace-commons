@@ -100,6 +100,11 @@ public protocol DaemonDataClient: Sendable {
     /// Z3.4, `account_session_status`.
     func accountState() async throws -> DaemonData.AccountState
 
+    /// Read-only shared trace_activity policy; no matching/profile input leaves the Mac.
+    func activityMissionsCatalogue() async throws -> DaemonData.ActivityMissionsCatalogue
+    /// Authenticated server contribution facts; unavailable never becomes zero progress.
+    func activityMissionsStatus() async throws -> DaemonData.ActivityMissionsStatus
+
     // MARK: Live updates
 
     /// The daemon's events, for screens that refresh live. Each call returns

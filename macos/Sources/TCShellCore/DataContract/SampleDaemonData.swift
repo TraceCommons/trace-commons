@@ -49,6 +49,9 @@ enum SampleDaemonData {
         case "invite_lookup": return inviteLookup
         case "passkey_state": return passkeyState(set)
         case "account_session_status": return accountState(set)
+        case "activity_missions_catalogue":
+            guard set != .unknownCounts else { return nil }
+            return #"{"catalogue":{"schema_version":1,"kind":"trace_activity","state":"unconfigured","policy_sha256":null,"policy":null,"rewards_enabled":false,"credit_points_pending":null,"credit_condition":"mission_credit_ledger_unavailable"},"disclosure":"SAMPLE: activity mission consent disclosure from the Rust core"}"#
         default: return nil
         }
     }

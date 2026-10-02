@@ -173,6 +173,14 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try call("account_session_status", as: DaemonData.AccountState.self)
     }
 
+    public func activityMissionsCatalogue() async throws -> DaemonData.ActivityMissionsCatalogue {
+        try call("activity_missions_catalogue", as: DaemonData.ActivityMissionsCatalogue.self)
+    }
+
+    public func activityMissionsStatus() async throws -> DaemonData.ActivityMissionsStatus {
+        try call("activity_missions_status", as: DaemonData.ActivityMissionsStatus.self)
+    }
+
     // MARK: Live updates
 
     /// A stream fed by `deliver(eventJSON:)`. The app's existing
