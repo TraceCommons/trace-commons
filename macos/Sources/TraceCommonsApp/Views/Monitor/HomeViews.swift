@@ -41,9 +41,6 @@ private struct HomeOverview: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                if let failure = store.failures["status"] {
-                    GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
-                }
                 watching
                 HStack(spacing: GlassTokens.Space.s3) {
                     GlassLegendCell(MonitorWords.waiting, value: HomeFormat.count(store.status?.decisionsOwed), status: .ask)
@@ -62,17 +59,39 @@ private struct HomeOverview: View {
     }
 
     /// Paused, or watching N tools, from the core's status and the tree.
+    /// The stack-wide state (ScreenState) for the watching row: the core's
+    /// line when it does not answer, a dash before the first read or when
+    /// the core did not say whether watching is paused, Paused, or
+    /// watching N tools. A missing signal is never drawn as watching.
+    private var state: ScreenState {
+        ScreenState.resolve(
+            failure: store.failures["status"], loaded: store.status != nil || store.failures["status"] != nil,
+            paused: store.status?.paused, known: store.status != nil)
+    }
+
     private var watching: some View {
-        let paused = store.status?.paused == true
         let tools = traces.tree.tools.filter { $0.mode == .watch }.count
+        let state = state
         return GlassCard {
             HStack(spacing: GlassTokens.Space.s4) {
-                GlassStatusDot(paused ? .ask : .on, ring: true)
-                Text(paused ? MonitorWords.paused : FlowMapScene.pair(MonitorWords.watching, tools))
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(GlassColor.textPrimary)
+                switch state {
+                case .ready:
+                    GlassStatusDot(.on, ring: true)
+                    Text(FlowMapScene.pair(MonitorWords.watching, tools))
+                case .paused:
+                    GlassStatusDot(.ask, ring: true)
+                    Text(MonitorWords.paused)
+                case .coreDown:
+                    GlassStatusDot(.outside, ring: true)
+                    Text(store.failures["status"].flatMap { MonitorWords.table?.line(for: $0) } ?? "—")
+                case .loading, .unknown:
+                    // No dot: unknown is never drawn as on, or as off.
+                    Text("—").accessibilityLabel(MonitorWords.unknown)
+                }
                 Spacer(minLength: 0)
             }
+            .glassType(GlassTokens.TypeScale.bodyStrong)
+            .foregroundStyle(GlassColor.textPrimary)
         }
         .accessibilityElement(children: .combine)
     }
@@ -110,7 +129,7 @@ private struct HistoryPage: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     if let failure = store.failures["list_history"] {
-                        GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
+                        GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                     }
                     if let rows = store.history {
                         if rows.isEmpty {
@@ -190,7 +209,7 @@ struct HomeSummaryInspector: View {
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
                 if let failure = store.failures["history_rollup"] {
-                    GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
+                    GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }
                 GlassEyebrowCard(MonitorWords.contributed) {
                     GlassKeyValueList([
@@ -295,24 +314,25 @@ enum HomeFormat {
     }
 }
 
+/// Home's and History's words, from the core's table (`MonitorWords.table`).
 extension MonitorWords {
-    static let history = "History"
-    static let contributed = "Contributed"
-    static let watching = "Watching"
-    static let paused = "Paused"
-    static let summary = "Summary"
-    static let week = "Week"
-    static let month = "Month"
-    static let allTime = "Total"
-    static let held = "Held"
-    static let withdrawn = "Withdrawn"
-    static let credit = "Credit"
-    static let final = "Final"
-    static let pending = "Pending"
-    static let community = "Community"
-    static let rank = "Rank"
-    static let window = "Window"
-    static let approved = "Approved"
-    static let unrecorded = "Unrecorded"
+    static var history: String { table?.history ?? "" }
+    static var contributed: String { table?.contributed ?? "" }
+    static var watching: String { table?.watching ?? "" }
+    static var paused: String { table?.paused ?? "" }
+    static var summary: String { table?.summary ?? "" }
+    static var week: String { table?.week ?? "" }
+    static var month: String { table?.month ?? "" }
+    static var allTime: String { table?.total ?? "" }
+    static var held: String { table?.held ?? "" }
+    static var withdrawn: String { table?.withdrawn ?? "" }
+    static var credit: String { table?.credit ?? "" }
+    static var final: String { table?.creditFinal ?? "" }
+    static var pending: String { table?.pending ?? "" }
+    static var community: String { table?.community ?? "" }
+    static var rank: String { table?.rank ?? "" }
+    static var window: String { table?.window ?? "" }
+    static var approved: String { table?.approved ?? "" }
+    static var unrecorded: String { table?.unrecorded ?? "" }
 }
 #endif
