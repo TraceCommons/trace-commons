@@ -52,6 +52,18 @@ class NativePasskeyEntitlementsTests(unittest.TestCase):
                     module.validate(self.entitlements, self.profile, 'ai.tracecommons.shell', True)
                 target[key] = original
 
+    def test_invalid_cli_uses_a_fixed_label_without_echoing_arguments(self):
+        import subprocess
+        marker = 'Bearer-CLI-SECRET-invite'
+        base = ['python3', str(SCRIPT), '--entitlements', 'unused',
+                '--profile', 'unused', '--bundle-id', 'ai.tracecommons.shell']
+        for tail in [['--' + marker], ['--entitlements']]:
+            result = subprocess.run(base + tail, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stderr, 'FAIL: native-entitlement-arguments-invalid\n')
+            self.assertEqual(result.stdout, '')
+            self.assertNotIn(marker, result.stderr)
+
     def test_cli_refuses_expired_or_malformed_metadata_without_traceback(self):
         import datetime
         import plistlib

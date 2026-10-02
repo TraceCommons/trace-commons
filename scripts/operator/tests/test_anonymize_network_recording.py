@@ -130,6 +130,19 @@ class AnonymizerTests(unittest.TestCase):
         fake = json.loads((root / 'ironwire-fake-local-projection.json').read_text())
         self.assertEqual(fake['source_kind'], 'synthetic')
 
+    def test_invalid_cli_never_echoes_secret_values_or_unknown_flags(self):
+        marker = 'Bearer-CLI-SECRET-invite'
+        base = ['python3', str(SCRIPT), '--input', 'unused', '--output', 'unused',
+                '--surface', 'invite_lookup', '--source-kind', 'synthetic',
+                '--capture-date', '2026-10-02']
+        for tail in [['--surface', marker], ['--source-kind', marker],
+                     ['--http-status', marker], ['--' + marker]]:
+            result = subprocess.run(base + tail, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stderr, 'FAIL: recording-refused\n')
+            self.assertEqual(result.stdout, '')
+            self.assertNotIn(marker, result.stderr)
+
     def test_no_output_on_refusal_or_missing_authorized_source_ack(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = pathlib.Path(tmp) / 'input.json'

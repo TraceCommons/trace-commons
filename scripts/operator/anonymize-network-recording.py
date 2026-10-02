@@ -361,8 +361,15 @@ def record(surface, value, source_kind, capture_date, http_status):
             'payload_sha256': hashlib.sha256(content).hexdigest(), 'payload': payload}
 
 
+class FixedLabelArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse's default error prints offending values/unknown flags.
+        # A mistaken token, invite or path must never reach operational logs.
+        self.exit(2, 'FAIL: recording-refused\n')
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = FixedLabelArgumentParser(description=__doc__)
     parser.add_argument('--input', type=pathlib.Path, required=True)
     parser.add_argument('--output', type=pathlib.Path, required=True)
     parser.add_argument('--surface', choices=SURFACES, required=True)

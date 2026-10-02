@@ -56,8 +56,15 @@ def validate(entitlements, profile, bundle_id, require_passkeys):
         raise Refusal('profile does not grant native webcredentials domain')
 
 
+class FixedLabelArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse's default error prints offending values/unknown flags.
+        # A mistaken token, invite or path must never reach operational logs.
+        self.exit(2, 'FAIL: native-entitlement-arguments-invalid\n')
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = FixedLabelArgumentParser(description=__doc__)
     parser.add_argument('--entitlements', type=pathlib.Path, required=True)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--profile', type=pathlib.Path, help='decoded profile plist')
