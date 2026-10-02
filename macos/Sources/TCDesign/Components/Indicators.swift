@@ -121,8 +121,19 @@ public struct GlassBadge: View {
         self.label = label
     }
 
+    /// The most the badge states; past it, `99+`, as the menu bar does
+    /// (`MenuBarStatus.badgeCap`).
+    public static let cap = 99
+
+    /// What the badge draws: the count up to `cap`, then `99+`; a dash for
+    /// unknown, never a number.
+    public static func text(for count: Int?) -> String {
+        guard let count else { return "—" }
+        return count > cap ? "\(cap)+" : String(count)
+    }
+
     public var body: some View {
-        Text(count.map(String.init) ?? "—")
+        Text(Self.text(for: count))
             .glassType(GlassTokens.TypeScale.micro)
             .monospacedDigit()
             .foregroundStyle(subtle ? GlassColor.textPrimary : GlassTokens.Color.textOnStatus.color)
@@ -131,7 +142,7 @@ public struct GlassBadge: View {
             .background(
                 Capsule().fill(subtle ? Color.white.opacity(0.16) : GlassTokens.Color.statusOutside.color)
             )
-            .accessibilityLabel(label ?? count.map(String.init) ?? "—")
+            .accessibilityLabel(label ?? Self.text(for: count))
     }
 }
 

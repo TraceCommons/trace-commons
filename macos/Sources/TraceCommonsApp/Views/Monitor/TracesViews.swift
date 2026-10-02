@@ -373,12 +373,15 @@ struct SessionInspectorView: View {
     /// no preview until it stops; `preview` is a full read-parse-redact pass
     /// the daemon cannot cancel.
     static let previewSettle: Duration = .milliseconds(300)
-    /// The consent gate, from the Rust core. Without it Contribute stays
-    /// disabled: the shell never words consent itself.
-    private let consent = TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
+    /// The consent gate, from the Rust core, decoded once by the store.
+    private var consent: ConsentCopy? { store.consent }
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // Above the selection, never inside it: selecting another
+            // session must not hide an Undo that can still take something
+            // back, and an Undo that failed is said here, beside it.
+            pendingUndo
             if let entry {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -416,11 +419,41 @@ struct SessionInspectorView: View {
                 }
                 .scrollIndicators(.never)
                 .task(id: entry.entryId) { await load(entry.entryId) }
-            } else if let kept = store.lastKept {
-                undoKeep(kept)
             } else {
-                Color.clear
+                Spacer(minLength: 0)
             }
+        }
+    }
+
+    /// The contribution and the keep that can still be taken back, each
+    /// with the core's words and any refusal of its undo.
+    @ViewBuilder
+    private var pendingUndo: some View {
+        if let contributed = store.lastContributed, let words {
+            GlassNotice(tone: .ask, title: contributed.toast.line) {
+                if contributed.toast.offerUndo {
+                    Button(words.undoContribute) {
+                        Task { await store.perform(.undoContribute, on: contributed.entryId) }
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .disabled(store.acting.contains(contributed.entryId))
+                }
+            }
+            refusal(for: contributed.entryId)
+        }
+        if let kept = store.lastKept, let words {
+            Button(words.undoKeep) { Task { await store.perform(.undoKeep, on: kept) } }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .disabled(store.acting.contains(kept))
+            refusal(for: kept)
+        }
+    }
+
+    /// The core's words for a refused action on `entryId`, if there is one.
+    @ViewBuilder
+    private func refusal(for entryId: String) -> some View {
+        if let refused = store.actionError, refused.entryId == entryId, let line = store.message(for: refused.error) {
+            GlassNotice(tone: .outside, title: line) { EmptyView() }
         }
     }
 
@@ -479,39 +512,52 @@ struct SessionInspectorView: View {
                 .foregroundStyle(GlassColor.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        if let refused = store.actionError, refused.entryId == entry.entryId {
-            GlassNotice(tone: .outside, title: refused.error.description) { EmptyView() }
+        // Why this session cannot be contributed, beside the disarmed
+        // button, in the shared table's words.
+        if let eligibility = TracesStore.eligibility(entry),
+            !EligibilitySurface.offersContribute(eligibility, calls: TracesStore.eligibilityCalls),
+            let reason = eligibility.reason,
+            let line = TracesStore.eligibilityCalls.reasonLine(reason)
+        {
+            Text(line)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        HStack(spacing: GlassTokens.Space.s4) {
-            Button(Self.dismissTitle) { act(.dismiss, entry) }
-                .buttonStyle(GlassButtonStyle(.glass))
-            Button(Self.keepTitle) { act(.keep, entry) }
-                .buttonStyle(GlassButtonStyle(.glass))
-            Spacer(minLength: 0)
-            Button(Self.contributeTitle) { act(.contribute, entry) }
-                .buttonStyle(GlassButtonStyle(.primary, small: true))
-                .disabled(summary == nil || consent == nil)
+        refusal(for: entry.entryId)
+        if let words {
+            HStack(spacing: GlassTokens.Space.s4) {
+                Button(words.dismiss) { act(.dismiss, entry) }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                Button(words.keep) { act(.keep, entry) }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                Spacer(minLength: 0)
+                Button(words.contribute) { act(.contribute, entry) }
+                    .buttonStyle(GlassButtonStyle(.primary, small: true))
+                    .disabled(!armed(entry))
+            }
+            .disabled(busy)
         }
-        .disabled(busy)
     }
 
-    private func undoKeep(_ entryId: String) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            Button(Self.undoTitle) { Task { await store.perform(.undoKeep, on: entryId) } }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(store.acting.contains(entryId))
-            Spacer(minLength: 0)
-        }
+    /// Contribute's gate for `entry`, on the preview asked for it.
+    private func armed(_ entry: DaemonData.QueueEntry) -> Bool {
+        TracesStore.contributeArmed(
+            enrolled: slot.summary(for: entry.entryId)?.enrolled, consent: consent,
+            eligibility: TracesStore.eligibility(entry), calls: TracesStore.eligibilityCalls)
     }
 
     private func act(_ action: TracesStore.ReviewAction, _ entry: DaemonData.QueueEntry) {
+        if action == .contribute {
+            // Asked again at the press, on the session as the tree now has
+            // it: the summary or the eligibility may have moved since the
+            // button was drawn.
+            guard let live = store.tree.allSessions.first(where: { $0.entryId == entry.entryId }),
+                armed(live)
+            else { return }
+        }
         Task { await store.perform(action, on: entry.entryId) }
     }
-
-    static let contributeTitle = "Contribute"
-    static let keepTitle = "Keep"
-    static let dismissTitle = "Dismiss"
-    static let undoTitle = "Undo"
 
     private func load(_ entryId: String) async {
         slot.begin(entryId)

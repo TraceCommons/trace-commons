@@ -1,4 +1,5 @@
 import TCBridge
+import TCDesign
 import TCShellCore
 import XCTest
 
@@ -126,10 +127,12 @@ final class TracesReviewTests: XCTestCase {
     /// The badge is `decisions_owed`; unknown stays unknown, never a count
     /// derived from the queue.
     func test_theBadgeIsDecisionsOwedOrUnknown() async {
-        let normal = TracesStore(client: SampleDaemonClient(.normalDay))
-        await normal.load()
-        XCTAssertEqual(normal.decisionsOwed, normal.status?.decisionsOwed)
-        XCTAssertNotNil(normal.decisionsOwed)
+        // The armed set owes one decision with three sessions waiting: the
+        // badge is the core's count, not the queue's depth.
+        let armed = TracesStore(client: SampleDaemonClient(.armedFolder))
+        await armed.load()
+        XCTAssertEqual(armed.decisionsOwed, 1)
+        XCTAssertEqual(armed.status?.queueDepth, 3)
 
         let unknown = TracesStore(client: SampleDaemonClient(.unknownCounts))
         await unknown.load()
@@ -142,16 +145,91 @@ final class TracesReviewTests: XCTestCase {
         XCTAssertNil(down.decisionsOwed)
     }
 
-    /// Keep offers its undo, and the undo withdraws it.
+    /// Keep offers its undo, and the undo withdraws it. The sample core's
+    /// queue does not move, so what is checked is that each answer was
+    /// taken and the tree reloaded from the core, with nothing refused.
     func test_keepOffersAnUndo() async throws {
         let store = TracesStore(client: SampleDaemonClient(.normalDay))
         await store.load()
         let id = try XCTUnwrap(store.tree.allSessions.first?.entryId)
         await store.perform(.keep, on: id)
         XCTAssertEqual(store.lastKept, id)
+        XCTAssertNil(store.actionError?.error)
+        XCTAssertEqual(store.phase, .loaded)
         await store.perform(.undoKeep, on: id)
         XCTAssertNil(store.lastKept)
+        XCTAssertNil(store.actionError?.error)
         XCTAssertTrue(store.acting.isEmpty)
+        XCTAssertTrue(store.tree.allSessions.contains { $0.entryId == id })
+    }
+
+    /// Contribute keeps the core's answer: its toast, and an Undo that is
+    /// `cancel`. The sample core refuses the cancel as not cancelable, and
+    /// that refusal is kept, not shown as an undone contribution.
+    func test_contributeShowsTheCoresToastAndUndoIsCancel() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let id = try XCTUnwrap(store.tree.allSessions.first?.entryId)
+        await store.perform(.contribute, on: id)
+        let contributed = try XCTUnwrap(store.lastContributed)
+        XCTAssertEqual(contributed.entryId, id)
+        XCTAssertTrue(contributed.toast.offerUndo)
+        XCTAssertFalse(contributed.toast.line.isEmpty)
+
+        await store.perform(.undoContribute, on: id)
+        XCTAssertEqual(store.actionError?.entryId, id)
+        XCTAssertEqual(store.actionError?.error, .daemon(code: "bad_params", message: "not-cancelable"))
+        XCTAssertNotNil(store.lastContributed, "a refused undo leaves the contribution standing")
+    }
+
+    /// A skipped approve throws `notApproved`: never success, and said in
+    /// the toast's words, not as the error's fixed label.
+    func test_aSkippedApproveIsNotSuccess() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let kept = try await client.listKept()
+        let id = try XCTUnwrap(kept.first?.entryId)
+        let store = TracesStore(client: client)
+        await store.load()
+        await store.perform(.contribute, on: id)
+        XCTAssertNil(store.lastContributed)
+        let refused = try XCTUnwrap(store.actionError)
+        XCTAssertEqual(refused.error, .notApproved(reasonLabel: "not-pending"))
+        let message = try XCTUnwrap(store.message(for: refused.error))
+        XCTAssertNotEqual(message, refused.error.description)
+        XCTAssertFalse(message.isEmpty)
+    }
+
+    /// Contribute arms only on a preview that pinned an enrollment, with the
+    /// core's consent words in hand and the session eligible; the summary is
+    /// the one asked for this session (`PreviewSlot`).
+    func test_contributeArmsOnlyOnAnEnrolledPreviewWithConsent() throws {
+        let consent = try XCTUnwrap(TracesStore(client: SampleDaemonClient(.normalDay)).consent)
+        let calls = TracesStore.eligibilityCalls
+        XCTAssertTrue(TracesStore.contributeArmed(enrolled: true, consent: consent, eligibility: nil, calls: calls))
+        XCTAssertFalse(TracesStore.contributeArmed(enrolled: false, consent: consent, eligibility: nil, calls: calls))
+        XCTAssertFalse(TracesStore.contributeArmed(enrolled: nil, consent: consent, eligibility: nil, calls: calls))
+        XCTAssertFalse(TracesStore.contributeArmed(enrolled: true, consent: nil, eligibility: nil, calls: calls))
+        XCTAssertFalse(TracesStore.contributeArmed(
+            enrolled: true, consent: consent,
+            eligibility: ContributionEligibility(state: "ineligible", reason: "attestation-missing"), calls: calls))
+
+        // Another session's summary never arms this one.
+        var slot = PreviewSlot()
+        slot.begin("B")
+        XCTAssertNil(slot.summary(for: "A")?.enrolled)
+    }
+
+    /// The badge has a text equivalent from the core, and caps at 99+ as
+    /// the menu bar does.
+    func test_theBadgeHasWordsAndACap() throws {
+        XCTAssertEqual(GlassBadge.text(for: 3), "3")
+        XCTAssertEqual(GlassBadge.text(for: 120), "\(MenuBarStatus.badgeCap)+")
+        XCTAssertEqual(GlassBadge.text(for: nil), "—")
+        XCTAssertEqual(GlassBadge.cap, MenuBarStatus.badgeCap)
+        let unknown = try XCTUnwrap(MonitorWindowView.tracesDescription(nil))
+        XCTAssertFalse(unknown.isEmpty)
+        XCTAssertNil(MonitorWindowView.tracesDescription(0))
+        XCTAssertEqual(MonitorWindowView.tracesDescription(3), TCCoreCopy.decisionsOwedText(3))
     }
 
     /// A refused action is kept against its session; nothing is applied.

@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -62,6 +63,7 @@ struct MonitorWindowView: View {
                     model.daemonSettings?.privateInferenceState?.surfaceState,
                     calls: model.privateInferenceCalls),
                 tracesBadge: tracesBadge,
+                tracesDescription: Self.tracesDescription(traces.decisionsOwed),
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() }
             ) {
@@ -94,6 +96,13 @@ struct MonitorWindowView: View {
     /// say, nothing at zero. Never queue depth.
     private var tracesBadge: GlassBadgeValue? {
         traces.decisionsOwed.map(GlassBadgeValue.count) ?? .unknown
+    }
+
+    /// The Traces badge's text equivalent, from the core: "unavailable" for
+    /// an unknown count, never zero; nil at zero, where there is no badge.
+    static func tracesDescription(_ decisionsOwed: Int?) -> String? {
+        guard let text = TCCoreCopy.decisionsOwedText(decisionsOwed), !text.isEmpty else { return nil }
+        return text
     }
 
     /// The selected session, while it is still in the tree.
@@ -149,6 +158,7 @@ private struct MonitorMainPane<Content: View>: View {
     let inferenceDot: GlassStatus?
     let inferenceDescription: String?
     let tracesBadge: GlassBadgeValue?
+    let tracesDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
     let onSettings: () -> Void
@@ -195,7 +205,8 @@ private struct MonitorMainPane<Content: View>: View {
                             item.rawValue, value: item,
                             badgeValue: item == .traces ? tracesBadge : nil,
                             dot: item == .inference ? inferenceDot : nil,
-                            accessibilityValue: item == .inference ? inferenceDescription : nil)
+                            accessibilityValue: item == .inference
+                                ? inferenceDescription : item == .traces ? tracesDescription : nil)
                     })
                 content()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

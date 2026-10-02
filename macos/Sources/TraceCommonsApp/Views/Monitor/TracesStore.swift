@@ -48,6 +48,30 @@ final class TracesStore {
     /// decoded once rather than on every redraw. Nil leaves a label out
     /// rather than writing one here.
     let words: MonitorTracesCopy? = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())
+    /// The consent gate's words, from the core, decoded once rather than on
+    /// every redraw. Without them Contribute stays disarmed: the shell never
+    /// words consent itself.
+    let consent: ConsentCopy? = TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
+
+    /// The shared eligibility table, as `AppModel` wires it.
+    static let eligibilityCalls = EligibilityCalls(
+        stateLine: { TCContributionEligibility.stateLine(state: $0) },
+        stateTone: { TCContributionEligibility.stateTone(state: $0) },
+        control: { TCContributionEligibility.control(state: $0) },
+        reasonLine: { TCContributionEligibility.reasonLine(reason: $0) },
+        withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) },
+        groupControl: { TCContributionEligibility.groupControl(pending: $0, contributable: $1) }
+    )
+
+    /// A Contribute the core took, while its hold lets it be taken back:
+    /// the core's toast for it, and whether Undo (`cancel`) is offered.
+    struct Contributed: Equatable {
+        let entryId: String
+        let toast: SubmitToast
+    }
+
+    /// The last contribution, until it is undone or another is made.
+    private(set) var lastContributed: Contributed?
 
     init(client: any DaemonDataClient) {
         self.client = client
@@ -113,7 +137,37 @@ final class TracesStore {
     // MARK: Review (R7)
 
     enum ReviewAction: Equatable {
-        case contribute, keep, undoKeep, dismiss
+        case contribute, undoContribute, keep, undoKeep, dismiss
+    }
+
+    /// Whether Contribute is armed, as the review sheet decides it: the
+    /// preview pinned an enrollment (`enrolled`, not merely a summary --
+    /// and the caller passes the summary asked for THIS session), the core's
+    /// consent words are in hand, and the session is one the shared table
+    /// offers Contribute for. Asked again when it is pressed.
+    static func contributeArmed(
+        enrolled: Bool?, consent: ConsentCopy?, eligibility: ContributionEligibility?, calls: EligibilityCalls
+    ) -> Bool {
+        consent != nil && ReadGate.canContribute(hasPinnedPreview: enrolled == true)
+            && EligibilitySurface.offersContribute(eligibility, calls: calls)
+    }
+
+    /// A queue entry's eligibility, as the shared table reads it; nil when
+    /// the daemon sent none (eligibility does not apply).
+    static func eligibility(_ entry: DaemonData.QueueEntry) -> ContributionEligibility? {
+        entry.eligibility.map { ContributionEligibility(state: $0, reason: entry.eligibilityReason) }
+    }
+
+    /// What the tab says for a refused action: a skipped approve in the
+    /// submit toast's words, anything else in the core's line. Never the
+    /// error's fixed label.
+    func message(for error: DaemonDataError) -> String? {
+        if case .notApproved(let reason) = error {
+            return SubmitToast.render(
+                approved: 0, redactions: 0, flagged: 0, skipped: reason.map { [$0] } ?? []
+            ).line
+        }
+        return words?.line(for: error)
     }
 
     /// One review action on one session, then a reload. Nothing is applied
@@ -126,7 +180,14 @@ final class TracesStore {
         do {
             switch action {
             case .contribute:
-                _ = try await client.approve(entryId: entryId)
+                // The core's answer is kept, not thrown away: its toast, and
+                // the hold Undo can still reach. A skipped approve throws
+                // `notApproved` and is said as a refusal, never as success.
+                let response = try await client.approve(entryId: entryId)
+                lastContributed = Contributed(entryId: entryId, toast: response.toast)
+            case .undoContribute:
+                try await client.cancel(entryId: entryId)
+                lastContributed = nil
             case .keep:
                 _ = try await client.keep(entryId: entryId)
                 lastKept = entryId

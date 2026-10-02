@@ -68,11 +68,16 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         if let dot = segment.dot {
                             GlassStatusDot(dot, size: 6)
                         }
-                        switch segment.badge {
-                        case .count(let count): GlassBadge(count: count, subtle: true)
-                        case .unknown: GlassBadge(count: nil, subtle: true)
-                        case nil: EmptyView()
+                        // With a text equivalent, the badge is not read on
+                        // its own: the segment's value says it in words.
+                        Group {
+                            switch segment.badge {
+                            case .count(let count): GlassBadge(count: count, subtle: true)
+                            case .unknown: GlassBadge(count: nil, subtle: true)
+                            case nil: EmptyView()
+                            }
                         }
+                        .accessibilityHidden(segment.accessibilityValue != nil)
                     }
                     .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
                     .foregroundStyle(selected ? GlassColor.textPrimary : (floating ? GlassColor.textSecondary : GlassColor.textTertiary))

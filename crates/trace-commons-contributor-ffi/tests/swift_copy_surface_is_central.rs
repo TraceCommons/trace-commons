@@ -615,6 +615,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_monitor_traces_copy_json",
     ),
     (
+        "monitor Traces badge words",
+        "TraceCommonsApp/Views/MonitorWindowView.swift",
+        "TCCoreCopy.decisionsOwedText",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_decisions_owed_text",
+    ),
+    (
         "consent gate",
         "TraceCommonsApp/Views/PreviewSheet.swift",
         "TCConsentCopy.copyJSON",
@@ -759,7 +766,6 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
 /// Bridge functions for surfaces macOS has not built yet. Each must still
 /// reach its export, so the screen that comes has the core's words to read.
 const BRIDGE_ONLY: &[(&str, &str)] = &[
-    ("TCBridge/TCCoreCopy.swift", "tc_decisions_owed_text"),
     (
         "TCBridge/TCCoreCopy.swift",
         "tc_legacy_migration_offer_json",
