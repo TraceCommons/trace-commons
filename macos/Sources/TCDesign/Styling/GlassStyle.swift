@@ -196,7 +196,7 @@ private struct GlassTierModifier: ViewModifier {
         // Clip the content and fill first; the edge's drop shadows fall
         // outside the shape and must not be clipped with them.
         return content
-            .background { tier.fill(in: shape) }
+            .background { tier.fill(in: shape).glassPressedFill() }
             .clipShape(shape)
             .glassEdge(tier.drawsOwnEdge(on: material) ? tier.edge : [], in: shape)
             .contentShape(shape)

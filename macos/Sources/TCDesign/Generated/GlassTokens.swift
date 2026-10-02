@@ -324,12 +324,20 @@ public enum GlassTokens {
         public static let fast: Double = 0.15
         public static let standard: Double = 0.22
         public static let slow: Double = 0.3
+        public static let easeX1: Double = 0.2
+        public static let easeY1: Double = 0.8
+        public static let easeX2: Double = 0.2
+        public static let easeY2: Double = 1
 
         /// Every motion token by its JSON name.
         public static let all: [String: Double] = [
             "fast": fast,
             "standard": standard,
             "slow": slow,
+            "easeX1": easeX1,
+            "easeY1": easeY1,
+            "easeX2": easeX2,
+            "easeY2": easeY2,
         ]
     }
 

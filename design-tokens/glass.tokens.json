@@ -225,6 +225,10 @@
   "motion": {
     "fast": 0.15,
     "standard": 0.22,
-    "slow": 0.3
+    "slow": 0.3,
+    "easeX1": 0.2,
+    "easeY1": 0.8,
+    "easeX2": 0.2,
+    "easeY2": 1
   }
 }
