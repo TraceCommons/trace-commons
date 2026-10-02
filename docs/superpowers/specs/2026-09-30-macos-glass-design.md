@@ -49,6 +49,10 @@ Checked against the PR heads on 2026-10-02: #1178 `e6e05ac2`, #1179
   leading-width formula, the 1100pt rule, 10pt padding and gaps, the 760×560
   minimum and the single ease curve with Reduce Motion (#1182). The easing
   control points are now in the JSON (#1182).
+- **Blur radii dropped.** The window, popover and scrim blur radii are no
+  longer required tokens. Ron blurs with the HUD material (panes) and
+  `GlassFloatingBlur` (floating surfaces) before 26, and with nothing under
+  Reduce Transparency. See "No blur tokens" under Tokens.
 
 ### First revision (2026-10-02)
 
@@ -88,7 +92,8 @@ missing.
   material before 26, painted controls inside panes. See "Tokens" and
   "Materials by OS".
 - **Kept as requirements** because the reviews found the code missing them:
-  the blur values, window radius 22, the ease curve, scene glows, the window
+  the blur values (since dropped for Ron's system materials; see the second
+  revision), window radius 22, the ease curve, scene glows, the window
   rim, own edges only before 26, pressed as a darker fill, the Reduce
   Transparency base, Increase Contrast,
   Reduce Motion, arrow-key lists, no hard-coded wording, traffic-light
@@ -283,9 +288,6 @@ Colours carry one (dark) value; there are no light fields (D2).
 optional; the #1181 and #1182 reviews found them missing. Each needs a token
 and a generated constant:
 
-- **Blur:** window 30 with 180% saturation, popover 24 with 170%, scrim 6.
-  SwiftUI has no public saturation control, so saturation is recorded but
-  may be unused (see Materials by OS); the radius is not optional.
 - **Window radius:** 22 (the JSON's `radius` group stops at pane 16).
 - **Scene glows:** `#3F6A8A`, `#6A3F7A`, `#2F6B5A` (the JSON has only
   `sceneBase` and `sceneWarm`).
@@ -294,6 +296,23 @@ and a generated constant:
   open: a parallel `highContrast` value on each affected token, or a rule
   applied in code. Either is acceptable if the generator and the drift test
   cover it.
+
+**No blur tokens.** #1146's CSS blur radii (window 30 at 180% saturation,
+popover 24 at 170%, scrim 6) are not carried into the JSON. Ron's code
+(#1180, #1181) blurs with system materials instead, which have no radius to
+set:
+
+- **Panes before 26:** the HUD material (`NSVisualEffectView`,
+  `.hudWindow`, blending behind the window), under `glassVeil` and the pane
+  sheen (`GlassBackdrop`, `GlassPaneFill`). On 26 the pane is
+  `NSGlassEffectView`.
+- **Floating surfaces before 26** (popovers, menus, node cards, controls
+  over the map): the painted tier over the HUD material blending within the
+  window, so it blurs what the surface floats on (`GlassFloatingBlur`). On
+  26 they are Liquid Glass through `glassSurface`.
+- **Reduce Transparency:** no material at all. A pane is the solid
+  `paneOpaque`; a floating surface is its painted tier alone.
+- **Scrim:** the system sheet dimming (see Components), so no scrim blur.
 
 ### Values taken from #1146
 
@@ -324,8 +343,8 @@ These are exact, from `tauri-desktop/frontend/src/design-system/tokens/` at
   - widths: left pane 400 (maximum; see Window and layout), inspector 300;
     window height 760.
 - **Tiers:** the fills and edges for scene, window rim, pane, card, well,
-  control and popover. The window blur is 30 with 180% saturation, the
-  popover blur 24 with 170%, and the scrim blur 6.
+  control and popover. #1146's blur radii are not carried over; see "No
+  blur tokens" above.
 
 ### Accent contrast floor
 
