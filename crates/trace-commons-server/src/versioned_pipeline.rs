@@ -8911,18 +8911,25 @@ impl PipelineService {
     /// connections only and does not wait for a rebuild whose client has
     /// gone, and the runtime drops that task when the process exits).
     ///
-    /// Settle's dispatch covers those two windows, and this rebuild does
-    /// not. Settle writes under a lease: it starts no write past the lease's
-    /// end or its 30-second dispatch budget (PR 3, b14d25e9 and 82d276c1),
-    /// and a withdrawal of a run still leased queues the invalidation no
-    /// earlier than that lease's end plus
-    /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`. The rebuild writes the
-    /// entries of `complete` runs, which hold no lease, so its writes have
-    /// no deadline and a withdrawal queues their invalidation at once. In
-    /// either window, that invalidation can complete before the rebuild's
-    /// last write lands and leave that write's entries in the index. The
-    /// same lack of a deadline means a slow index holds the run and
-    /// submission rows for as long as its calls take.
+    /// The rows are held no longer than a deadline, as Settle's dispatch
+    /// holds its rows (merge review I1; PR 3, 82d276c1): the smaller of
+    /// Settle's configured lease and `PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`
+    /// from the moment both locks are held. No upsert starts past it. At the
+    /// deadline the transaction rolls back at once, so the rows are free,
+    /// the rebuild waits at most `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`
+    /// for the call in flight, and it fails closed as `index_unavailable`
+    /// without writing the later runs. A rerun is safe: every upsert is
+    /// idempotent. So a slow index holds a withdrawal of the run (and the
+    /// session's uploads queued behind it) no longer than the deadline.
+    ///
+    /// What the rebuild does not have is Settle's fence on the withdrawal
+    /// side. A withdrawal of a run still leased queues its invalidation no
+    /// earlier than the lease's end plus the fence margin, but the rebuild
+    /// writes `complete` runs, which hold no lease, so a withdrawal queues
+    /// their invalidation at once. In the two windows above, and after a
+    /// deadline that passed with a call in flight, that invalidation can
+    /// complete before the rebuild's last write lands and leave that write's
+    /// entries in the index.
     pub async fn rebuild_index_run(
         &self,
         run: &PipelineRunRecord,
@@ -8951,11 +8958,22 @@ impl PipelineService {
             .keyed_entries(&tenant)
             .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
             .collect::<Vec<_>>();
+        // Merge review I1, as Settle's dispatch (PR 3, 82d276c1): the rows
+        // are held no longer than the smaller of Settle's lease and the
+        // dispatch budget from now, and no upsert starts past that deadline.
+        let deadline = Utc::now()
+            + self
+                .lease_config
+                .settle()
+                .min(Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS));
         let writer = writer.clone();
-        let (entry_count, unchanged_entry_count) = on_blocking_pool(move || {
+        let mut writes = tokio::task::spawn_blocking(move || {
             let mut entry_count = 0usize;
             let mut unchanged_entry_count = 0usize;
             for (key, embedding, content_hash) in &entries {
+                if Utc::now() >= deadline {
+                    return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
+                }
                 match writer.upsert(key, embedding, content_hash) {
                     Ok(IndexUpsertResult::Inserted) => {}
                     Ok(IndexUpsertResult::Unchanged) => unchanged_entry_count += 1,
@@ -8964,8 +8982,27 @@ impl PipelineService {
                 entry_count += 1;
             }
             Ok((entry_count, unchanged_entry_count))
-        })
-        .await?;
+        });
+        let budget = (deadline - Utc::now()).to_std().unwrap_or_default();
+        let (entry_count, unchanged_entry_count) =
+            match tokio::time::timeout(budget, &mut writes).await {
+                Ok(joined) => {
+                    joined.map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))??
+                }
+                Err(_) => {
+                    // Past the deadline: roll back at once, so the rows are
+                    // free, then wait (bounded by the fence margin) for the
+                    // call in flight to return, so the rebuild that reports
+                    // the failure has no write still running.
+                    drop(tx);
+                    drop(client);
+                    let margin = std::time::Duration::from_secs(
+                        PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
+                    );
+                    let _ = tokio::time::timeout(margin, writes).await;
+                    return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
+                }
+            };
         tx.commit().await?;
         Ok(PipelineIndexRebuildRun::Rebuilt {
             command_hash,

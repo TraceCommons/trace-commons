@@ -434,14 +434,25 @@ async fn rebuild_index_and_audit(
 }
 
 /// Maps `rebuild_index_from_authoritative_commands`'s anyhow errors to their
-/// HTTP shape. `index_command_invalid` is the one safe label the call
-/// returns on its own account -- a sealed command that failed validation
-/// against its run or its own committed Score evidence -- surfaced as 409
-/// Conflict, a state of the store rather than a transient service fault.
-/// Everything else falls back to the generic hash-only internal error.
+/// HTTP shape. `index_command_invalid` -- a sealed command that failed
+/// validation against its run or its own committed Score evidence -- is
+/// surfaced as 409 Conflict, a state of the store rather than a transient
+/// service fault, and `index_unavailable` -- a run's writes that passed
+/// their deadline -- as 503. Everything else falls back to the generic
+/// hash-only internal error.
 fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     if error.to_string() == "index_command_invalid" {
         return api_error(StatusCode::CONFLICT, "index_command_invalid");
+    }
+    // Merge review I1: a run's writes passed their deadline (the index is
+    // slow or down); the rows were freed and a rerun is safe.
+    if error.to_string()
+        == trace_commons_server::versioned_pipeline::PIPELINE_INDEX_UNAVAILABLE_LABEL
+    {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::versioned_pipeline::PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        );
     }
     internal_error(error)
 }

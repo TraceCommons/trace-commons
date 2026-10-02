@@ -28927,6 +28927,100 @@ async fn index_rebuild_writes_off_the_runtime_workers() {
     );
 }
 
+/// Merge review I1, the rebuild's copy of PR 3's L4-1 (82d276c1): a run's
+/// rebuild holds its run and submission rows no longer than its deadline,
+/// the smaller of Settle's lease and the dispatch budget from when it holds
+/// them. With a one-second Settle lease and a write held past it, the run
+/// row is free while the held call still runs; the rebuild waits for that
+/// call, writes no other entry, and fails closed as `index_unavailable`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_rebuild_past_its_deadline_releases_the_rows() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let (rebuilder, _, _) = held_index_test_service_with_leases(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap(),
+    )
+    .await;
+    let tenant = format!("index-rebuild-deadline-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (ready, evidence) = run_to_settle_ready(&service, &tenant).await;
+    let settled = settle_included(&service, &tenant, &ready).await;
+    let entry_count = service
+        .load_index_command(&settled, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command")
+        .keyed_entries(&tenant_ref)
+        .count();
+    assert!(entry_count >= 2, "the command has entries after the first");
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let (hold, mut held) = CallHold::new();
+    let writer: Arc<dyn IdentifiedIndexWriter> = Arc::new(BlockingIndexWriter {
+        inner: rebuilt.clone(),
+        hold,
+    });
+    let rebuild = tokio::spawn({
+        let rebuilder = rebuilder.clone();
+        let tenant = tenant.clone();
+        async move {
+            rebuilder
+                .rebuild_index_from_authoritative_commands(&tenant, writer)
+                .await
+        }
+    });
+    held.wait_until_entered().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+        .await
+        .unwrap();
+    tx.query_one(
+        "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+        &[&tenant, &settled.run_id],
+    )
+    .await
+    .expect("the run row is free once the rebuild's deadline passed");
+    tx.commit().await.unwrap();
+    drop(client);
+    assert!(
+        !rebuild.is_finished(),
+        "the rebuild waits for the call in flight"
+    );
+
+    held.release();
+    let error = tokio::time::timeout(HELD_CALL_BOUND, rebuild)
+        .await
+        .expect("the rebuild ends once released")
+        .expect("the rebuild task did not panic")
+        .expect_err("a rebuild past its deadline fails closed");
+    assert_eq!(error.to_string(), PIPELINE_INDEX_UNAVAILABLE_LABEL);
+    assert_eq!(
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        1,
+        "only the entry in flight at the deadline is written"
+    );
+}
+
 /// Rebase 10 review, M1: the sweep deletes a no-hash row's object only at
 /// the key the store derives from the row's own artifact, run and lease
 /// token (`pipeline_attempt_object_id`). A due no-hash row whose key names
