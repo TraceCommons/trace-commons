@@ -5058,6 +5058,7 @@ SAMPLE create/add begin result:
 {
   "ceremony": "SAMPLE-local-handle", "rp_id": "tracecommons.ai",
   "challenge": "AQID", "user_id": "BAUG", "user_name": "SAMPLE passkey",
+  "user_display_name": "SAMPLE passkey", "attestation": "none",
   "expires_in_secs": 180, "exclude_credentials": [],
   "user_verification": "preferred", "authenticator_attachment": "platform",
   "resident_key": "preferred", "algorithms": [-7]
@@ -5067,13 +5068,18 @@ SAMPLE create/add begin result:
 SAMPLE login begin result:
 
 ```json
-{"ceremony":"SAMPLE-local-handle","rp_id":"tracecommons.ai","challenge":"AQID","expires_in_secs":180,"user_verification":"preferred"}
+{"ceremony":"SAMPLE-local-handle","rp_id":"tracecommons.ai","challenge":"AQID","expires_in_secs":180,"user_verification":"preferred","allowed_credentials":[]}
 ```
 
 Verification/resident-key options are the validated server values
 `required|preferred|discouraged`, not permission for the app to downgrade them.
-`exclude_credentials` contains canonical credential IDs; creation uses the
-platform provider and algorithms the adapter actually supports (ES256 `-7`).
+`exclude_credentials` and login's `allowed_credentials` contain canonical
+credential IDs, with at most 128 entries per list. An empty login list selects
+a discoverable credential. `user_display_name` is the validated server display
+name, falling back to `user_name`; `attestation` preserves the validated server
+preference `none|direct|indirect`, defaulting to `none`. These three fields are
+additive to the original C3 begin options. Creation uses the platform provider
+and algorithms the adapter actually supports (ES256 `-7`).
 Refuse unsupported server options rather than silently weakening them.
 
 SAMPLE create/add complete request:
@@ -5097,6 +5103,10 @@ signed out and `unknown` when unreadable. `passkey_count` is nullable until
 an authenticated source answers; `near_ai_connected` is nullable unless an
 authenticated identity fact establishes it. Never infer a count of zero or
 connected status from a missing binding row.
+
+Native login is discoverable authentication: `user_handle` must contain the
+nonempty raw Apple user ID encoded as canonical base64url. A missing or empty
+handle is an incomplete credential and must not reach login completion.
 
 SAMPLE account status:
 
