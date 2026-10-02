@@ -124,8 +124,8 @@ private struct HistoryPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             GlassBreadcrumb(
-                [GlassCrumb(MonitorWindowView.Tab.home.rawValue, action: back), GlassCrumb(MonitorWords.history)],
-                backLabel: MonitorWindowView.Tab.home.rawValue, onBack: back)
+                [GlassCrumb(MonitorWindowView.Tab.home.title, action: back), GlassCrumb(MonitorWords.history)],
+                backLabel: MonitorWindowView.Tab.home.title, onBack: back)
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     if let failure = store.failures["list_history"] {
