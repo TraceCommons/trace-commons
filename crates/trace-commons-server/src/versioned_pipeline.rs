@@ -2449,14 +2449,20 @@ impl PgPipelineStore {
         };
         let row = tx
             .query_one(
+                // Multi-lens review L2-5: `clock_timestamp()`, not `NOW()`.
+                // A compatibility Score commits on the transaction it opened
+                // before its scorer ran, whose `NOW()` is that start: the
+                // stamps and the lease check must read the commit's time.
                 "UPDATE pipeline_runs
                  SET next_phase = 'settle', state = 'pending', attempt_count = 0,
                      index_command_ref = $3, index_command_hash = $4,
                      score_neighbor_ref = $5, score_neighbor_hash = $6,
                      lease_token = NULL, lease_expires_at = NULL,
-                     next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
+                     next_attempt_at = clock_timestamp(),
+                     phase_started_at = clock_timestamp(),
+                     updated_at = clock_timestamp()
                  WHERE tenant_id = $1 AND run_id = $2
-                   AND lease_token = $7 AND lease_expires_at > NOW()
+                   AND lease_token = $7 AND lease_expires_at > clock_timestamp()
                  RETURNING *",
                 &[
                     &run.tenant_id,
@@ -8321,9 +8327,11 @@ impl PipelineService {
         }
         let lease_live = lock
             .query_opt(
+                // Multi-lens review L2-5: the database clock now, not the
+                // transaction's start.
                 "SELECT 1 FROM pipeline_runs
                   WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
-                    AND lease_token = $3 AND lease_expires_at > NOW()",
+                    AND lease_token = $3 AND lease_expires_at > clock_timestamp()",
                 &[&run.tenant_id, &run.run_id, &required_lease_token(run)?],
             )
             .await?;

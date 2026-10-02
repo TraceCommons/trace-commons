@@ -23900,6 +23900,180 @@ async fn a_compatibility_score_reads_only_commands_still_to_apply() {
     );
 }
 
+/// The reference scorer, counting its own calls, each after `delay`.
+struct CountingScorer {
+    inner: ReferencePerplexityScorer,
+    calls: AtomicUsize,
+    delay: std::time::Duration,
+}
+
+impl trace_commons_gate_api::PerplexityScorer for CountingScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        trace_commons_gate_api::PerplexityScorer::score(&self.inner, plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<trace_commons_gate_api::ChunkPerplexity> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        trace_commons_gate_api::PerplexityScorer::score_chunk(&self.inner, chunk)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for CountingScorer {
+    fn dependency_identity(&self) -> &str {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::dependency_identity(&self.inner)
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::content_descriptor(&self.inner)
+    }
+}
+
+/// A compatibility service over `scorer` with `lease_config`.
+fn counting_compatibility_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    scorer: Arc<CountingScorer>,
+    lease_config: PipelineLeaseConfig,
+) -> Arc<PipelineService> {
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::compatibility_package(
+        &near_duplicate_config(),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build compatibility bundle package");
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let index = IsolatedPipelineIndex::new();
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend.clone(),
+            artifact_store(dir),
+            package,
+            index.clone(),
+            index,
+            SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+                .expect("build settlement adapter registry"),
+            uncapped_caps(&[InstrumentId::trace_credit().as_str()]),
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_authority(allow_all_authority())
+        .with_privacy(default_privacy_boundary())
+        .with_novelty_utility_checks(issuing_checks())
+        .with_lease_config(lease_config)
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// Multi-lens review L2-5 (with the PR 4 review): a Score whose tenant lock
+/// another Score holds past the Score's one-second lease never calls its
+/// scorer (counted by the scorer itself: `score_evaluations` is counted
+/// before the lock).
+#[tokio::test]
+async fn a_score_behind_a_held_tenant_lock_never_calls_its_scorer() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(CountingScorer {
+        inner: ReferencePerplexityScorer::new(),
+        calls: AtomicUsize::new(0),
+        delay: std::time::Duration::ZERO,
+    });
+    let service = counting_compatibility_service(
+        &backend,
+        &dir,
+        scorer.clone(),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+            chrono::Duration::seconds(300),
+        )
+        .unwrap(),
+    );
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(&service, &tenant, RECEIPT_PRINCIPAL, &first).await;
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let holder = backend.trace_pool_for_test().get().await.unwrap();
+    holder
+        .execute(
+            "SELECT pg_advisory_lock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    let held = service.process_run(&tenant, run_id).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    holder
+        .execute(
+            "SELECT pg_advisory_unlock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    assert!(held.is_some(), "the Score was claimed");
+    assert_eq!(
+        scorer.calls.load(Ordering::SeqCst),
+        0,
+        "the scorer was never called"
+    );
+}
+
+/// Multi-lens review L2-5: the Score commit's stamps (`phase_started_at`,
+/// `next_attempt_at`) use the database clock at the commit, not the start
+/// of the Score's transaction, which a compatibility Score opens before its
+/// scorer runs: after a slow scorer, Settle's phase starts when Score
+/// committed.
+#[tokio::test]
+async fn a_slow_score_commit_stamps_the_commit_time() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(CountingScorer {
+        inner: ReferencePerplexityScorer::new(),
+        calls: AtomicUsize::new(0),
+        delay: std::time::Duration::from_millis(1_200),
+    });
+    let service = counting_compatibility_service(
+        &backend,
+        &dir,
+        scorer.clone(),
+        PipelineLeaseConfig::default(),
+    );
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(&service, &tenant, RECEIPT_PRINCIPAL, &first).await;
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let before = chrono::Utc::now();
+    let scored = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    assert!(scorer.calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(
+        scored.phase_started_at >= before + chrono::Duration::milliseconds(1_000),
+        "Settle's phase starts at the Score commit, after the slow scorer: {} vs {before}",
+        scored.phase_started_at
+    );
+}
+
 /// Finding 12 on a pool of one: a compatibility Score reads its approved
 /// bytes before it opens the transaction that holds the tenant's Score
 /// lock, reads the unapplied index commands and commits on that same
