@@ -338,8 +338,9 @@ impl PgBackend {
         let ready = if authority == "invited" {
             true
         } else {
+            let allowance = account_effective_allowance(&tx, tenant, account_id, policy).await?;
             used.checked_add(policy.processing_cost_bound())
-                .is_some_and(|next| next <= policy.bounded_allowance())
+                .is_some_and(|next| next <= allowance.limit)
         };
         tx.commit().await.map_err(|_| database_refused())?;
         Ok(Some(AccountAdmissionStatus {
@@ -471,6 +472,15 @@ impl PgBackend {
             }
         }
         let charged = authority != "invited";
+        let allowance = if charged {
+            account_effective_allowance(&tx, tenant, account, &r.policy).await?
+        } else {
+            EffectiveAllowance {
+                limit: r.policy.bounded_allowance(),
+                tier: None,
+                digest: None,
+            }
+        };
         if charged {
             tx.execute("INSERT INTO trace_account_admission_budget(tenant_id,account_id,period_id,policy_version,cost_limit,cost_bound) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&tenant,&account,&period_id,&r.policy.version(),&r.policy.bounded_allowance(),&r.policy.processing_cost_bound()]).await.map_err(|_|database_refused())?;
             let budget = tx.query_one("SELECT cost_used,cost_limit,cost_bound,policy_version FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND period_id=$3 FOR UPDATE", &[&tenant,&account,&period_id]).await.map_err(|_|database_refused())?;
@@ -485,7 +495,7 @@ impl PgBackend {
             let next = total_used
                 .checked_add(r.policy.processing_cost_bound())
                 .ok_or_else(database_refused)?;
-            if next > r.policy.bounded_allowance() {
+            if next > allowance.limit {
                 return Ok(AccountAdmissionResult {
                     decision: AdmissionDecision::Exhausted,
                     authority: Some("bounded"),
@@ -504,11 +514,11 @@ impl PgBackend {
             .map_err(|_| database_refused())?
             .get(0);
         if prior.is_some() {
-            tx.execute("UPDATE trace_account_admission_submissions SET status='reserved',lease_id=$3,lease_expires_at=$4,last_cost_bound=$5,last_charged=$6,trust_version=$7,policy_version=$8,period_id=$9 WHERE tenant_id=$1 AND submission_id=$2",
-                &[&tenant,&r.submission_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&version,&r.policy.version(),&period_id]).await.map_err(|_|database_refused())?;
+            tx.execute("UPDATE trace_account_admission_submissions SET status='reserved',lease_id=$3,lease_expires_at=$4,last_cost_bound=$5,last_charged=$6,trust_version=$7,policy_version=$8,period_id=$9,earned_tier=$10,trust_evaluation_digest=$11 WHERE tenant_id=$1 AND submission_id=$2",
+                &[&tenant,&r.submission_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&version,&r.policy.version(),&period_id,&allowance.tier,&allowance.digest]).await.map_err(|_|database_refused())?;
         } else {
-            tx.execute("INSERT INTO trace_account_admission_submissions(tenant_id,submission_id,account_id,body_hash,authority_kind,trust_version,policy_version,period_id,status,lease_id,lease_expires_at,last_cost_bound,last_charged) VALUES($1,$2,$3,$4,'account',$5,$6,$7,'reserved',$8,$9,$10,$11)",
-                &[&tenant,&r.submission_id,&account,&r.body_hash,&version,&r.policy.version(),&period_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged]).await.map_err(|_|database_refused())?;
+            tx.execute("INSERT INTO trace_account_admission_submissions(tenant_id,submission_id,account_id,body_hash,authority_kind,trust_version,policy_version,period_id,status,lease_id,lease_expires_at,last_cost_bound,last_charged,earned_tier,trust_evaluation_digest) VALUES($1,$2,$3,$4,'account',$5,$6,$7,'reserved',$8,$9,$10,$11,$12,$13)",
+                &[&tenant,&r.submission_id,&account,&r.body_hash,&version,&r.policy.version(),&period_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&allowance.tier,&allowance.digest]).await.map_err(|_|database_refused())?;
         }
         tx.commit().await.map_err(|_| database_refused())?;
         Ok(AccountAdmissionResult {
@@ -611,6 +621,39 @@ impl PgBackend {
         Ok(changed)
     }
     /// Checks the runtime login itself, then the boolean-only fleet linkage seam.
+    /// Additional contract checks only required by an external growth policy.
+    pub async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|_| database_refused())?;
+        let ready: Option<bool> = client.query_one(r#"SELECT
+            NOT r.rolsuper AND NOT r.rolbypassrls
+            AND e.rolname IS NOT NULL AND NOT e.rolsuper AND NOT e.rolbypassrls AND NOT e.rolcanlogin
+            AND NOT pg_has_role(e.oid,to_regrole('trace_account_trust_worker'),'MEMBER')
+            AND has_function_privilege(e.oid,to_regprocedure('public.trace_account_trust_worker_accounts(text,uuid,bigint)'),'EXECUTE')
+            AND has_function_privilege(e.oid,to_regprocedure('public.trace_account_trust_evaluation_inputs(text,uuid)'),'EXECUTE')
+            AND has_function_privilege(e.oid,to_regprocedure('public.trace_account_trust_input_generation(text,uuid)'),'EXECUTE')
+            AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_lock_input_generation(text,uuid)'),'EXECUTE')
+            AND has_function_privilege(e.oid,f.oid,'EXECUTE')
+            AND f.prosecdef AND f.proowner=to_regrole('trace_account_trust_evaluation_guard')
+            AND NOT has_function_privilege(current_user,f.oid,'EXECUTE')
+            AND has_table_privilege(current_user,c.oid,'SELECT')
+            AND NOT has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE')
+            AND c.relrowsecurity AND c.relforcerowsecurity AND c.relowner<>r.oid
+            AND g.relrowsecurity AND g.relforcerowsecurity AND g.relowner<>r.oid
+            AND NOT has_table_privilege(e.oid,g.oid,'INSERT,UPDATE,DELETE')
+            AND NOT has_table_privilege(e.oid,c.oid,'INSERT,UPDATE,DELETE')
+            AND NOT has_table_privilege(current_user,g.oid,'INSERT,UPDATE,DELETE')
+            FROM pg_roles r LEFT JOIN pg_roles e ON e.rolname='trace_account_trust_evaluator'
+            LEFT JOIN pg_proc f ON f.oid=to_regprocedure('public.trace_record_external_account_trust_evaluation(text,uuid,uuid,text,text,timestamp with time zone,integer,bigint,text,bigint)')
+            LEFT JOIN pg_class c ON c.oid=to_regclass('public.trace_account_trust_evaluations')
+            LEFT JOIN pg_class g ON g.oid=to_regclass('public.trace_account_trust_frontiers')
+            WHERE r.rolname=current_user"#, &[]).await.map_err(|_| database_refused())?.get(0);
+        Ok(ready == Some(true))
+    }
+
     pub async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         let client = self
             .trace_pool()
@@ -827,4 +870,66 @@ impl PgBackend {
         tx.commit().await.map_err(|_| database_refused())?;
         Ok(changed)
     }
+}
+
+struct EffectiveAllowance {
+    limit: i64,
+    tier: Option<i32>,
+    digest: Option<String>,
+}
+
+/// Reads only the configured policy's applied evaluations, on the transaction
+/// clock. The budget's stored limit stays at the base: growth never erases spend.
+async fn account_effective_allowance(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    account: Uuid,
+    policy: &BoundedPolicy,
+) -> Result<EffectiveAllowance, DatabaseError> {
+    let mut allowance = EffectiveAllowance {
+        limit: policy.bounded_allowance(),
+        tier: None,
+        digest: None,
+    };
+    let Some(growth) = policy.external_growth() else {
+        return Ok(allowance);
+    };
+    allowance.tier = Some(0);
+    let generation: Option<i64> = tx
+        .query_one(
+            "SELECT trace_account_trust_lock_input_generation($1,$2)",
+            &[&tenant, &account],
+        )
+        .await
+        .map_err(|_| database_refused())?
+        .get(0);
+    let Some(generation) = generation else {
+        return Ok(allowance);
+    };
+    let row = tx
+        .query_opt(
+            "SELECT effective_allowance,tier,facts_digest,
+                extract(epoch FROM (transaction_timestamp()-as_of)) <= $4::bigint::numeric
+         FROM trace_account_trust_evaluations
+         WHERE tenant_id=$1 AND account_id=$2 AND growth_policy_version=$3 AND mode='applied'
+           AND as_of <= transaction_timestamp() AND isfinite(as_of) AND input_generation=$5
+         ORDER BY as_of DESC,recorded_at DESC,evaluation_id DESC LIMIT 1",
+            &[
+                &tenant,
+                &account,
+                &growth.policy_version,
+                &growth.evaluation_max_age_seconds,
+                &generation,
+            ],
+        )
+        .await
+        .map_err(|_| database_refused())?;
+    if let Some(row) = row.filter(|row| row.get::<_, bool>(3)) {
+        allowance.limit = row
+            .get::<_, i64>(0)
+            .clamp(policy.bounded_allowance(), growth.allowance_ceiling);
+        allowance.tier = Some(row.get(1));
+        allowance.digest = Some(row.get(2));
+    }
+    Ok(allowance)
 }

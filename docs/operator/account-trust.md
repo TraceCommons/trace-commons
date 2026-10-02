@@ -21,13 +21,14 @@ There are no default numeric allowances. The bound is a conservative unit of
 server processing work. It must be calibrated against enforced request size
 and work ceilings; it is not money, tokens, or NEAR credit. A fixed period has
 an advisory retry delay to its next boundary. A lifetime period has no reset
-time, so the API does not invent one. No quality-based growth is enabled.
+time, so the API does not invent one. Growth requires the explicit external
+evaluation configuration described below.
 
 V77 stores deduplicated, typed source facts for accepted credit events and
 gate evaluations. The database verifies the source row, account ownership,
-and outcome before recording a fact. No current acceptance/evaluator worker
-calls this seam, and admission never reads it. It is historical storage for a
-later reviewed growth policy, not earned allowance in this release.
+and outcome before recording a fact. Fact recording alone never increases
+admission: flat policies use the base allowance, and external policies consume
+only a matching, fresh applied evaluation.
 
 Grant the ingest login `trace_account_admission_runtime` after applying V77.
 The role cannot mint or revoke invite codes and has no `BYPASSRLS` privilege.
@@ -201,3 +202,73 @@ leases re-reserve through the account ledger and its current live-identity and
 budget checks. This recovery exception does not make expired evidence valid for
 a submission UUID that has never been reserved. The shared allowance health
 condition makes no promise that a lifetime budget will reset.
+
+## External evaluation contract
+
+V109 adds an optional `"growth_rule":"external"` policy mode. Keep `"none"`
+for a flat allowance. External mode additionally requires explicit
+`growth_policy_version`, `allowance_ceiling` and
+`evaluation_max_age_seconds`. The ceiling must be at least the base allowance;
+all cost values and the maximum age must be positive and bounded. A `none`
+policy must omit those external fields. This contract introduces no configured
+allowance values or activation defaults.
+
+Admission and contribution status use the same transaction-local decision:
+select the newest applied evaluation of the authenticated tenant/account and
+configured growth policy whose input generation still matches. Order by
+`as_of DESC, recorded_at DESC, evaluation_id DESC`. Future or nonfinite
+timestamps are excluded. An absent or stale evaluation yields the base
+allowance, tier zero, and no digest. A usable allowance is clamped between the
+base allowance and the ceiling. The stored budget limit remains the base
+allowance, and previously charged period spend survives changes in evaluation.
+Reservations record the actual tier and digest used. Invited authority retains
+its existing bypass and records no external evaluation attribution.
+
+The evaluator login needs only membership in `trace_account_trust_evaluator`,
+with `NOSUPERUSER NOBYPASSRLS`. Do not grant membership in the worker, admission,
+or guard roles. It can enumerate open accounts through
+`trace_account_trust_worker_accounts(TEXT,UUID,BIGINT)` and read facts through
+`trace_account_trust_evaluation_inputs(TEXT,UUID)`. Enumeration returns only
+account keys; every account read and write requires a transaction-local
+`trace_commons.trace_tenant_id` set to that account's tenant. It cannot record
+facts or directly modify evaluations, accounts, admission rows, or budgets.
+
+Inside a `REPEATABLE READ` transaction, read
+`trace_account_trust_input_generation(TEXT tenant, UUID account)` and the
+account's fact inputs from the same snapshot. The generation is a `BIGINT`,
+or `NULL` for missing/wrong-scope input. Obtain `as_of` from the database's
+`transaction_timestamp()`. Then write through:
+
+```sql
+trace_record_external_account_trust_evaluation(
+    TEXT tenant, UUID evaluation, UUID account,
+    TEXT policy_version, TEXT mode, TIMESTAMPTZ as_of,
+    INTEGER tier, BIGINT effective_allowance, TEXT facts_digest,
+    BIGINT expected_generation
+) RETURNS BOOLEAN
+```
+
+Mode is explicitly `shadow` or `applied`. The digest uses
+`sha256:` followed by lowercase hexadecimal. Evaluation IDs are unique per
+tenant. The returned boolean indicates a tier change within the same account,
+policy and mode; unchanged tiers still create an evaluation. The writer refuses
+closed accounts, future/nonfinite timestamps, wrong tenant scope, and changed
+input generations. Roll back the entire batch on a database failure or changed
+inputs; PostgreSQL serialization failures require a new snapshot. Do not reuse
+an evaluation computed from an earlier generation when retrying.
+
+The forced-RLS frontier table advances transactionally on fact mutations,
+account/principal mutations, and completed merge hooks. This includes merges
+with no newly copied facts. Admission holds a scoped definer frontier lock
+until reservation commit; the login gains no frontier write privilege. The
+writer locks account before frontier, matching admission's order. Legacy
+feature fields are nullable for compact rows; the original shadow writer and
+feature decoder continue to handle only complete legacy evaluations.
+
+External startup additionally checks the role, writer/read contract, grants and
+forced RLS. Missing controls refuse startup with
+`external_account_trust_contract_not_ready`; readiness errors use
+`external_account_trust_readiness_unavailable`. These controls prove the
+consumption boundary, not that all upstream outcomes have been recorded as
+facts. Operators must separately qualify recorder coverage before activating
+applied evaluations. This migration does not activate production admission.

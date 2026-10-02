@@ -1,0 +1,524 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+use chrono::{DateTime, Utc};
+use trace_commons_server::{
+    account_trust::{parse_bounded_policy, resolve_contribution_account},
+    admission_ledger::{AccountAdmissionReservation, AdmissionDecision},
+    config::{DatabaseConfig, SslMode},
+    db::{Database, postgres::PgBackend},
+};
+use uuid::Uuid;
+
+fn config(url: String) -> DatabaseConfig {
+    DatabaseConfig {
+        url: url.into(),
+        pool_size: 8,
+        ssl_mode: SslMode::Prefer,
+        login_resolver_url: None,
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
+async fn external_evaluation_scope_freshness_clamps_and_spend() {
+    let url = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL").unwrap();
+    let parsed = url.parse::<tokio_postgres::Config>().unwrap();
+    assert!(
+        matches!(parsed.get_hosts().first(), Some(tokio_postgres::config::Host::Tcp(host)) if host == "127.0.0.1")
+    );
+    assert!(parsed.get_dbname().unwrap().starts_with("admission_test"));
+    let admin_db = PgBackend::new(&config(url.clone())).await.unwrap();
+    admin_db.run_migrations().await.unwrap();
+    let admin = admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    admin.batch_execute("DO $$ BEGIN
+        IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='external_admission_login') THEN CREATE ROLE external_admission_login LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+        IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='external_evaluator_login') THEN CREATE ROLE external_evaluator_login LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+        END $$;
+        GRANT trace_account_admission_runtime TO external_admission_login;
+        GRANT trace_account_trust_evaluator TO external_evaluator_login;").await.unwrap();
+    let login_url = |name: &str| {
+        let mut url = reqwest::Url::parse(&url).unwrap();
+        url.set_username(name).unwrap();
+        String::from(url)
+    };
+    let runtime = PgBackend::new(&config(login_url("external_admission_login")))
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .external_account_trust_runtime_ready()
+            .await
+            .unwrap()
+    );
+    assert!(
+        !admin_db
+            .external_account_trust_runtime_ready()
+            .await
+            .unwrap()
+    );
+    admin.batch_execute("REVOKE EXECUTE ON FUNCTION trace_record_external_account_trust_evaluation(TEXT,UUID,UUID,TEXT,TEXT,TIMESTAMPTZ,INTEGER,BIGINT,TEXT,BIGINT) FROM trace_account_trust_evaluator").await.unwrap();
+    assert!(
+        !runtime
+            .external_account_trust_runtime_ready()
+            .await
+            .unwrap()
+    );
+    admin.batch_execute("GRANT EXECUTE ON FUNCTION trace_record_external_account_trust_evaluation(TEXT,UUID,UUID,TEXT,TEXT,TIMESTAMPTZ,INTEGER,BIGINT,TEXT,BIGINT) TO trace_account_trust_evaluator").await.unwrap();
+    let (mut evaluator, conn) = tokio_postgres::connect(
+        &login_url("external_evaluator_login"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        conn.await.unwrap();
+    });
+    let unsafe_role: bool = evaluator.query_one("SELECT rolsuper OR rolbypassrls OR pg_has_role(current_user,'trace_account_trust_worker','MEMBER') FROM pg_roles WHERE rolname=current_user", &[]).await.unwrap().get(0);
+    assert!(!unsafe_role);
+    for table in [
+        "trace_account_trust_facts",
+        "trace_accounts",
+        "trace_account_trust",
+        "trace_account_admission_budget",
+        "trace_account_admission_submissions",
+        "trace_account_trust_evaluations",
+        "trace_account_trust_frontiers",
+    ] {
+        let writable: bool = evaluator
+            .query_one(
+                "SELECT has_table_privilege(current_user,$1,'INSERT,UPDATE,DELETE')",
+                &[&table],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!writable, "unexpected writer on {table}");
+    }
+    let record_facts: bool = evaluator.query_one("SELECT has_function_privilege(current_user,'trace_record_account_trust_fact(text,uuid,text,uuid)','EXECUTE')", &[]).await.unwrap().get(0);
+    assert!(!record_facts);
+    let tenant = format!("near-{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let account_id = Uuid::new_v4();
+    let principal = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let device = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let anchor = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap();
+    admin.execute("INSERT INTO trace_near_account_anchors(tenant_id,account_id,anchor_hash,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,$4,'fixture-pepper','fixture-key')", &[&tenant,&account_id,&anchor,&serde_json::json!({"fixture":true})]).await.unwrap();
+    admin.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,'fixture-key',NULL,'near')", &[&device,&tenant]).await.unwrap();
+    admin.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)", &[&tenant,&account_id,&principal]).await.unwrap();
+    admin.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)", &[&tenant,&principal,&account_id,&device,&anchor]).await.unwrap();
+    let account = resolve_contribution_account(&runtime, &tenant, &principal)
+        .await
+        .unwrap();
+    let policy = parse_bounded_policy(r#"{"version":"external-fixture","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"external","growth_policy_version":"growth-fixture","allowance_ceiling":30,"evaluation_max_age_seconds":60}"#, &["external-fixture"]).unwrap();
+    let request = || AccountAdmissionReservation {
+        account: account.clone(),
+        principal_ref: principal.clone(),
+        expected_trust_version: None,
+        submission_id: Uuid::new_v4(),
+        body_hash: "a".repeat(64),
+        lease_id: Uuid::new_v4(),
+        policy: policy.clone(),
+        lease_seconds: 60,
+    };
+    let first = request();
+    assert_eq!(
+        runtime
+            .reserve_account_admission(&first)
+            .await
+            .unwrap()
+            .decision,
+        AdmissionDecision::Reserved
+    );
+    let evidence = admin.query_one("SELECT earned_tier,trust_evaluation_digest FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&first.submission_id]).await.unwrap();
+    assert_eq!(evidence.get::<_, Option<i32>>(0), Some(0));
+    assert_eq!(evidence.get::<_, Option<String>>(1), None);
+    assert!(
+        !runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready
+    );
+    // Writer fails closed for wrong tenant and future timestamps, without touching rows.
+    for (scope, offset) in [("other-tenant", 0_i64), (tenant.as_str(), 3600)] {
+        let tx = evaluator.transaction().await.unwrap();
+        tx.query_one(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&scope],
+        )
+        .await
+        .unwrap();
+        assert!(tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp()+make_interval(secs=>$4::bigint::double precision),1,30,$5,0)", &[&tenant,&Uuid::new_v4(),&account_id,&offset,&format!("sha256:{}","1".repeat(64))]).await.is_err());
+        tx.rollback().await.unwrap();
+    }
+    let tx = evaluator.transaction().await.unwrap();
+    tx.query_one(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    assert!(
+        tx.query(
+            "SELECT * FROM trace_account_trust_worker_accounts(NULL,NULL,10000)",
+            &[]
+        )
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.get::<_, Uuid>(1) == account_id)
+    );
+    assert!(
+        tx.query(
+            "SELECT * FROM trace_account_trust_evaluation_inputs($1,$2)",
+            &[&tenant, &account_id]
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    assert!(
+        tx.query(
+            "SELECT * FROM trace_account_trust_evaluation_inputs('other-tenant',$1)",
+            &[&account_id]
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    tx.commit().await.unwrap();
+    let generation: i64 = {
+        let tx = evaluator.transaction().await.unwrap();
+        tx.query_one(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+        let row = tx
+            .query_one(
+                "SELECT trace_account_trust_input_generation($1,$2)",
+                &[&tenant, &account_id],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        row.get(0)
+    };
+    // Wrong policy, shadow, stale and future rows cannot raise the base allowance.
+    let digest = format!("sha256:{}", "2".repeat(64));
+    for (version, mode, offset) in [
+        ("other-policy", "applied", 0_i64),
+        ("growth-fixture", "shadow", 0),
+        ("growth-fixture", "applied", -120),
+        ("growth-fixture", "applied", 3600),
+    ] {
+        admin.execute("INSERT INTO trace_account_trust_evaluations(tenant_id,evaluation_id,account_id,growth_policy_version,mode,as_of,tier,effective_allowance,facts_digest,input_generation) VALUES($1,$2,$3,$4,$5,clock_timestamp()+make_interval(secs=>$6::bigint::double precision),1,30,$7,$8)", &[&tenant,&Uuid::new_v4(),&account_id,&version,&mode,&offset,&digest,&generation]).await.unwrap();
+        assert_eq!(
+            runtime
+                .reserve_account_admission(&request())
+                .await
+                .unwrap()
+                .decision,
+            AdmissionDecision::Exhausted
+        );
+        assert!(
+            !runtime
+                .account_admission_status(&account, &principal, &policy)
+                .await
+                .unwrap()
+                .unwrap()
+                .ready
+        );
+    }
+    assert!(
+        runtime
+            .latest_account_trust_evaluation(&account, "growth-fixture", "shadow")
+            .await
+            .unwrap()
+            .is_none(),
+        "compact rows never enter the legacy feature decoder"
+    );
+    // Coherent same-timestamp evaluations use recorded_at and UUID tie breakers.
+    let as_of: DateTime<Utc> = admin
+        .query_one("SELECT clock_timestamp() - interval '1 second'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let mut ids = [Uuid::new_v4(), Uuid::new_v4()];
+    ids.sort();
+    let [low, high] = ids;
+    let high_digest = format!("sha256:{}", "3".repeat(64));
+    for (id, tier, allowance, hash) in [(high, 2_i32, 99_i64, &high_digest), (low, 1, 20, &digest)]
+    {
+        let tx = evaluator.transaction().await.unwrap();
+        tx.query_one(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+        tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',$4,$5,$6,$7,$8)", &[&tenant,&id,&account_id,&as_of,&tier,&allowance,&hash,&generation]).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    admin.execute("UPDATE trace_account_trust_evaluations SET recorded_at=$3 WHERE tenant_id=$1 AND evaluation_id IN ($2,$4)",&[&tenant,&low,&as_of,&high]).await.unwrap();
+    assert!(
+        runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready
+    );
+    // A repeatable-read batch cannot publish an evaluation over a changed identity.
+    let tx = evaluator
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .unwrap();
+    tx.query_one(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let old_generation: i64 = tx
+        .query_one(
+            "SELECT trace_account_trust_input_generation($1,$2)",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    admin.execute("UPDATE trace_account_principals SET unlinked_at=unlinked_at WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
+    assert!(tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),2,30,$4,$5)", &[&tenant,&Uuid::new_v4(),&account_id,&digest,&old_generation]).await.is_err());
+    tx.rollback().await.unwrap();
+    assert!(
+        !runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready,
+        "identity mutation invalidates fresh applied evidence"
+    );
+    let tx = evaluator.transaction().await.unwrap();
+    tx.query_one(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),2,30,$4,$5)", &[&tenant,&Uuid::new_v4(),&account_id,&digest,&(old_generation+1)]).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready
+    );
+    // New adverse facts also invalidate an evaluation, even with historical occurred_at.
+    let submission = Uuid::new_v4();
+    admin.execute("INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,redaction_pipeline_version,redaction_hash) VALUES($1,$2,$3,$4,'v1','v1','test','accepted','low','test',$5)", &[&tenant,&submission,&Uuid::new_v4(),&principal,&"a".repeat(64)]).await.unwrap();
+    admin.execute("INSERT INTO trace_account_trust_facts(tenant_id,account_id,source_kind,source_id,submission_id,outcome,occurred_at) VALUES($1,$2,'submission_revoked',$3,$3,'revoked',clock_timestamp()-interval '1 year')", &[&tenant,&account_id,&submission]).await.unwrap();
+    assert!(
+        !runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready,
+        "new historical adverse facts invalidate fresh evaluations"
+    );
+    // A consumed merge invalidates the survivor even without new facts or authority changes.
+    let absorbed = Uuid::new_v4();
+    let proposal = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &absorbed],
+        )
+        .await
+        .unwrap();
+    admin.execute("INSERT INTO trace_account_merge_proposals(tenant_id,proposal_id,surviving_account_id,absorbed_account_id,expires_at) VALUES($1,$2,$3,$4,clock_timestamp()+interval '1 hour')", &[&tenant,&proposal,&account_id,&absorbed]).await.unwrap();
+    let mut merge_client = admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let merge_tx = merge_client.transaction().await.unwrap();
+    merge_tx
+        .query_one(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    merge_tx.execute("UPDATE trace_account_merge_proposals SET consumed_at=clock_timestamp() WHERE tenant_id=$1 AND proposal_id=$2", &[&tenant,&proposal]).await.unwrap();
+    merge_tx
+        .query_one(
+            "SELECT trace_account_trust_merge($1,$2,$3,$4)",
+            &[&tenant, &account_id, &absorbed, &proposal],
+        )
+        .await
+        .unwrap();
+    merge_tx.commit().await.unwrap();
+    let refreshed_generation: i64=admin.query_one("SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap().get(0);
+    assert_eq!(refreshed_generation, old_generation + 3);
+    let tx = evaluator.transaction().await.unwrap();
+    tx.query_one(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    assert!(tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),2,30,$4,$5)", &[&tenant,&Uuid::new_v4(),&account_id,&digest,&old_generation]).await.is_err(),"stale batch generation refused without a repeatable-read transaction too");
+    tx.rollback().await.unwrap();
+    let tx = evaluator.transaction().await.unwrap();
+    tx.query_one(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),2,99,$4,$5)", &[&tenant,&Uuid::new_v4(),&account_id,&high_digest,&refreshed_generation]).await.unwrap();
+    tx.commit().await.unwrap();
+    let generation = refreshed_generation;
+    let second = request();
+    let third = request();
+    let (a, b) = tokio::join!(
+        runtime.reserve_account_admission(&second),
+        runtime.reserve_account_admission(&third)
+    );
+    assert_eq!(a.unwrap().decision, AdmissionDecision::Reserved);
+    assert_eq!(b.unwrap().decision, AdmissionDecision::Reserved);
+    assert_eq!(
+        runtime
+            .reserve_account_admission(&request())
+            .await
+            .unwrap()
+            .decision,
+        AdmissionDecision::Exhausted,
+        "ceiling is enforced"
+    );
+    let evidence=admin.query_one("SELECT earned_tier,trust_evaluation_digest FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&second.submission_id]).await.unwrap();
+    assert_eq!(evidence.get::<_, Option<i32>>(0), Some(2));
+    assert_eq!(evidence.get::<_, Option<String>>(1), Some(high_digest));
+    // A newer below-base evaluation cannot erase previously charged spend.
+    let tx = evaluator.transaction().await.unwrap();
+    tx.query_one(
+        "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),0,1,$4,$5)", &[&tenant,&Uuid::new_v4(),&account_id,&digest,&generation]).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        !runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready
+    );
+    assert_eq!(
+        runtime
+            .reserve_account_admission(&request())
+            .await
+            .unwrap()
+            .decision,
+        AdmissionDecision::Exhausted
+    );
+    let budget=admin.query_one("SELECT cost_used,cost_limit FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
+    assert_eq!(budget.get::<_, i64>(0), 30);
+    assert_eq!(
+        budget.get::<_, i64>(1),
+        10,
+        "stored base invariant remains unchanged"
+    );
+    // An invited account retains its bypass and no evaluation attribution.
+    admin.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,2)", &[&tenant,&account_id,&format!("sha256:{}","4".repeat(64))]).await.unwrap();
+    admin.execute("UPDATE trace_account_trust SET authority='invited',trust_version=2 WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
+    let invited = request();
+    assert_eq!(
+        runtime
+            .reserve_account_admission(&invited)
+            .await
+            .unwrap()
+            .authority,
+        Some("invited")
+    );
+    assert!(
+        runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready
+    );
+    let evidence=admin.query_one("SELECT earned_tier,trust_evaluation_digest,last_charged FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&invited.submission_id]).await.unwrap();
+    assert_eq!(evidence.get::<_, Option<i32>>(0), None);
+    assert_eq!(evidence.get::<_, Option<String>>(1), None);
+    assert!(!evidence.get::<_, bool>(2));
+    // Releasing unprocessed reservations is an explicit refund, not an evaluation reset.
+    for reservation in [&first, &second, &third] {
+        assert!(
+            runtime
+                .transition_account_admission(
+                    &tenant,
+                    &principal,
+                    account_id,
+                    reservation.submission_id,
+                    reservation.lease_id,
+                    "released"
+                )
+                .await
+                .unwrap()
+        );
+    }
+    admin.execute("UPDATE trace_account_invite_grants SET revoked_at=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
+    admin.execute("UPDATE trace_account_trust SET authority='bounded',trust_version=3 WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
+    assert!(
+        runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready,
+        "below-base evaluation is clamped up to the base"
+    );
+    assert_eq!(
+        runtime
+            .reserve_account_admission(&request())
+            .await
+            .unwrap()
+            .decision,
+        AdmissionDecision::Reserved
+    );
+}

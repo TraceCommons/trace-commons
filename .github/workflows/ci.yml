@@ -91,6 +91,7 @@ jobs:
         admission_test_onboarding
         admission_test_ledger
         admission_test_account_ledger
+        admission_test_account_trust_external
         admission_test_migration
         admission_test_ingest
         admission_test_invite
@@ -524,6 +525,10 @@ jobs:
         env:
           TRACE_COMMONS_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ledger
           TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_ledger
+      - name: account_trust_external_pg
+        run: cargo test -p trace-commons-server --test account_trust_external_pg -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_external
       - name: the invite-free path, end to end
         run: cargo test --bin trace-commons-ingest admission_pg_tests -- --ignored
         env:
