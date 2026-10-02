@@ -1,0 +1,134 @@
+import SwiftUI
+
+/// One glass pane: the app's outermost containment. Panes float with a gap
+/// between them; there is no window chrome around them.
+public struct GlassPane<Content: View>: View {
+    private let padding: CGFloat?
+    private let content: Content
+
+    /// `padding` defaults to the pane padding; pass 0 for edge-to-edge
+    /// content such as the Traces tree.
+    public init(padding: CGFloat? = GlassTokens.Space.panePadding, @ViewBuilder content: () -> Content) {
+        self.padding = padding
+        self.content = content()
+    }
+
+    public var body: some View {
+        content
+            .padding(padding ?? 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .glassTier(.pane)
+    }
+}
+
+/// Popover tier: the menu-bar panel, floating menus.
+public struct GlassPopover<Content: View>: View {
+    private let content: Content
+
+    public init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    public var body: some View {
+        content
+            .padding(GlassTokens.Space.s5)
+            .glassTier(.popover)
+    }
+}
+
+/// A sheet's body: "Exactly what would be sent" and the passkey steps.
+public struct GlassSheet<Content: View>: View {
+    private let title: String
+    private let subtitle: String?
+    private let content: Content
+
+    public init(title: String, subtitle: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content()
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                Text(title).glassType(GlassTokens.TypeScale.title).foregroundStyle(GlassColor.textPrimary)
+                if let subtitle {
+                    Text(subtitle).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textTertiary)
+                }
+            }
+            content
+        }
+        .padding(GlassTokens.Space.panePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassTier(.pane)
+    }
+}
+
+/// A floating menu (view options, a row's menu). Items are `GlassMenuItem`.
+public struct GlassMenu<Content: View>: View {
+    private let content: Content
+
+    public init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 0) { content }
+            .padding(5)
+            .frame(minWidth: 220, alignment: .leading)
+            .glassTier(.menu)
+            .accessibilityElement(children: .contain)
+    }
+}
+
+/// A menu row. `checked` makes it a checkbox item with a leading check.
+public struct GlassMenuItem: View {
+    private let title: String
+    private let checked: Bool?
+    private let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    public init(_ title: String, checked: Bool? = nil, action: @escaping () -> Void) {
+        self.title = title
+        self.checked = checked
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            HStack(spacing: GlassTokens.Space.s4) {
+                if let checked {
+                    Text(checked ? "✓" : "").frame(width: 12).accessibilityHidden(true)
+                }
+                Text(title)
+                Spacer(minLength: 0)
+            }
+            .glassType(GlassTokens.TypeScale.body)
+            .foregroundStyle(isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary)
+            .padding(.horizontal, GlassTokens.Space.s5)
+            .padding(.vertical, GlassTokens.Space.s2)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(hovering && isEnabled ? GlassTokens.Color.menuHover.color : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityAddTraits(checked == true ? .isSelected : [])
+    }
+}
+
+public struct GlassMenuSeparator: View {
+    public init() {}
+
+    public var body: some View {
+        Rectangle()
+            .fill(GlassTokens.Color.menuSeparator.color)
+            .frame(height: 1)
+            .padding(.horizontal, GlassTokens.Space.s4)
+            .padding(.vertical, GlassTokens.Space.s2)
+            .accessibilityHidden(true)
+    }
+}

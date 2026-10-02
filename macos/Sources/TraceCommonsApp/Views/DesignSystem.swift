@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TCDesign
 
 /// The one place the shell's visual decisions live.
 ///
@@ -443,6 +444,11 @@ enum TC {
         }
     }()
 
+    /// A glass token as an AppKit colour, for `dynamic`.
+    private static func glass(_ token: GlassRGBA) -> NSColor {
+        hex(token.rgb, alpha: token.alpha)
+    }
+
     private static func hex(_ value: UInt32, alpha: Double = 1) -> NSColor {
         NSColor(
             srgbRed: Double((value >> 16) & 0xFF) / 255,
@@ -517,9 +523,12 @@ enum TC {
 
     // MARK: Accents
 
-    /// Spec `green.brand`, site `--green`. Primary. Good standing, the app's
-    /// accent, and the mark's top-left bracket.
-    static let green = dynamic(hex(0x178F70), hex(0x3FBE9A))
+    /// The brand accent: purple from the Trace logo (glass tokens, D3),
+    /// replacing the community green. Tints, the selected tab, a checked
+    /// box. Dark uses the glass accent-text purple (#C9B3FF, 8.4:1 on the
+    /// dark ground); light the brand purple (6.4:1 on the light ground).
+    /// Good standing is no longer this colour: see `statusOn`.
+    static let accent = dynamic(glass(GlassTokens.Color.purple), glass(GlassTokens.Color.purpleText))
     /// Spec `blue.brand`, site `--blue`. Secondary. Held, ranked, in progress,
     /// and the mark's bottom-right bracket.
     ///
@@ -569,32 +578,14 @@ enum TC {
     /// See `redactionChipBackground`.
     static let redactionChipForeground = dynamic(hex(0x202426), hex(0xF0EBDD))
 
-    // Fill-safe counterparts for a FILLED primary action.
-    //
-    // `green` is tuned to be read *on* the ground, not to be a fill with a
-    // label on top of it, and the difference is not cosmetic. A white label
-    // on the dark-mode mint measures 2.32:1 -- below even the 3:1 large-text
-    // floor -- and on the light green 4.04:1, below the 4.5:1 normal-text
-    // floor. That is the same failure this file already refuses for gold
-    // warning text, and it was sitting on Contribute: the one irreversible
-    // control in the product, the button that moves a private transcript to
-    // a public commons. A consent action nobody can read is not a consent
-    // action.
-    //
-    // So the filled action carries its own pair, measured rather than
-    // eyeballed:
-    //   light  #137C61 fill + white label -> 5.14:1
-    //   dark   #3FBE9A fill + #0B1F19 ink -> 7.39:1
-    // Light darkens the fill (the hue survives; the site's green is still
-    // recognisably the accent) and dark flips the label instead of dulling
-    // the mint, because the mint is what makes the dark scheme feel like the
-    // same product.
-    /// Spec `green.fill`. Fill for a filled primary action. Not the same value
-    /// as `green`.
-    static let primaryFill = dynamic(hex(0x137C61), hex(0x3FBE9A))
-    /// Spec `on.accent`. Label colour that sits on `primaryFill` at >= 4.5:1 in
-    /// both schemes. Light was `#FFFFFF`; the mockups state `#FEFEFE`.
-    static let primaryLabel = dynamic(hex(0xFEFEFE), hex(0x0B1F19))
+    // The filled primary action (Contribute, the one irreversible control).
+    // A consent action nobody can read is not a consent action, so the pair
+    // is measured: white on the brand purple #6D14F3 is 6.9:1 in both
+    // schemes. It replaces the community green pair (#137C61 / #3FBE9A).
+    /// Spec `on.accent` fill. The glass brand purple.
+    static let primaryFill = dynamic(glass(GlassTokens.Color.purple), glass(GlassTokens.Color.purple))
+    /// Spec `on.accent`. White on `primaryFill`, 6.9:1 in both schemes.
+    static let primaryLabel = dynamic(glass(GlassTokens.Color.textOnAccent), glass(GlassTokens.Color.textOnAccent))
     /// Spec `on.accent`, under the spec's own name. Text or glyph on any
     /// filled accent, not only the primary button.
     static let onAccent = primaryLabel
@@ -609,8 +600,14 @@ enum TC {
     // strokes and borders keep the site's exact value. The hue is preserved;
     // only the lightness moves, so the family resemblance survives and the
     // text is legible.
-    /// Spec `green.text`.
-    static let greenText = dynamic(hex(0x0F7256), hex(0x5CD3AF))
+    /// The accent as small text: #5A10CC on the light ground (8.2:1), the
+    /// glass accent-text purple in dark (8.4:1).
+    static let accentText = dynamic(hex(0x5A10CC), glass(GlassTokens.Color.purpleText))
+    /// The glass status green: watching, automatic, clear. Glyph and label
+    /// only, never a fill (glass design system). Light mode darkens it for
+    /// text: #1C7A45 on #F6F7F4 is 4.98:1; the dark value is the token.
+    static let statusOn = dynamic(hex(0x1C7A45), glass(GlassTokens.Color.statusOn))
+    static let statusOnText = statusOn
     /// Spec `gold.text`.
     static let goldText = dynamic(hex(0x8A5F12), hex(0xE2B75C))
     /// Spec `coral.text`. Dark is not drawn in the mockups; derived here.
@@ -686,7 +683,7 @@ enum TC {
             switch self {
             case .neutral: return .secondary
             case .attention: return TC.gold
-            case .clear: return TC.green
+            case .clear: return TC.statusOn
             case .held: return TC.blue
             case .refused: return TC.coral
             }
@@ -697,7 +694,7 @@ enum TC {
             switch self {
             case .neutral: return .secondary
             case .attention: return TC.goldText
-            case .clear: return TC.greenText
+            case .clear: return TC.statusOnText
             case .held: return TC.blueText
             case .refused: return TC.coralText
             }
@@ -755,7 +752,7 @@ private struct TCScreen: ViewModifier {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(TC.ground)
-            .tint(TC.green)
+            .tint(TC.accent)
             .environment(\.colorScheme, TC.forcedColorScheme ?? systemScheme)
     }
 }
@@ -918,7 +915,7 @@ struct TCReadGateCheckbox: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: TC.Radius.checkbox)
-            .fill(checked ? TC.green : Color.clear)
+            .fill(checked ? TC.accent : Color.clear)
             .overlay {
                 if checked {
                     Image(systemName: "checkmark")

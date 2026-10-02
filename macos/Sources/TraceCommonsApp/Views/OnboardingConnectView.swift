@@ -153,7 +153,7 @@ struct OnboardingConnectContent: View {
             HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
                 Image(systemName: TC.Tone.clear.symbol)
                     .imageScale(.small)
-                    .foregroundStyle(TC.green)
+                    .foregroundStyle(TC.accent)
                     .accessibilityHidden(true)
                 Text("This device is already connected.")
                     .font(.callout)

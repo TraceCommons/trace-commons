@@ -48,7 +48,7 @@ struct OnboardingDoneContent: View {
             HStack(spacing: TC.Space.s) {
                 Image(systemName: TC.Tone.clear.symbol)
                     .font(.system(size: 18))
-                    .foregroundStyle(TC.green)
+                    .foregroundStyle(TC.accent)
                     .accessibilityHidden(true)
                 Text("You're set up. Nothing has been sent.")
                     .font(TC.Font_.sectionTitle)

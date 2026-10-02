@@ -56,6 +56,21 @@ let package = Package(
             dependencies: ["TCUpdates"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // The glass design system: generated tokens, the SwiftUI components
+        // every screen is built from, and their preview gallery. SwiftUI
+        // only -- no FFI dylib, no AppKit model -- so it builds, previews
+        // and tests on its own. Tokens are generated from
+        // design-tokens/glass.tokens.json by scripts/design-tokens/generate.py;
+        // TCDesignTests fails if the two drift.
+        .target(
+            name: "TCDesign",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TCDesignTests",
+            dependencies: ["TCDesign"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         // State-directory resolution and the shell's refusal rules. Carved
         // out for the same reason TCUpdates was: keep logic that needs
         // neither the FFI dylib nor AppKit in a target that can be tested
@@ -81,6 +96,7 @@ let package = Package(
             name: "TraceCommonsApp",
             dependencies: [
                 "TCBridge",
+                "TCDesign",
                 "TCShellCore",
                 "TCUpdates",
                 .product(name: "Sparkle", package: "Sparkle"),

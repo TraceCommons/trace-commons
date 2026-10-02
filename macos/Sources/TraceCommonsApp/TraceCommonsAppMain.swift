@@ -38,7 +38,7 @@ struct TraceCommonsShell: App {
         MenuBarExtra {
             MenuBarContent(navigation: navigation)
                 .environmentObject(model)
-                .tint(TC.green)
+                .tint(TC.accent)
         } label: {
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts)
@@ -58,7 +58,7 @@ struct TraceCommonsShell: App {
                 // green carries a meaning here (good standing) that the
                 // system blue does not. Everything else about the controls
                 // -- shape, focus ring, keyboard behaviour -- stays stock.
-                .tint(TC.green)
+                .tint(TC.accent)
         }
         .defaultSize(width: 940, height: 660)
         // Cmd-1..7 for the seven destinations, and Cmd-Shift-M for the one
