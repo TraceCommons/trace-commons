@@ -136,6 +136,11 @@ extension DaemonData {
         public let declaredSource: String?
         public let projectId: String
         public let projectLabel: String
+        /// The session's title (K9): the first line of its opening prompt,
+        /// through the deterministic redaction pass only. On the queue only:
+        /// receipts and history rows never carry it. `nil` for an entry
+        /// queued before titles existed, or a task with no description.
+        public let title: String?
         public let projectPath: String?
         public let sessionPath: String?
         public let sizeBytes: Int?
@@ -189,6 +194,7 @@ extension DaemonData {
             case declaredSource = "declared_source"
             case projectId = "project_id"
             case projectLabel = "project_label"
+            case title
             case projectPath = "project_path"
             case sessionPath = "session_path"
             case sizeBytes = "size_bytes"
