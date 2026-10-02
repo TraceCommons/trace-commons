@@ -1,6 +1,8 @@
+#if DEBUG
 import SwiftUI
 
-/// Every component of the glass design system, live. The C2 contract's
+/// Every component of the glass design system, live. Debug builds only:
+/// the shipping app does not carry it. The C2 contract's
 /// preview gallery: open it in Xcode's canvas, or show it from a debug
 /// build. Placeholders are single words and token names on purpose: this
 /// shell authors no sentences (ShellWordingTests), and real wording reaches
@@ -145,7 +147,7 @@ public struct GlassGallery: View {
                     GlassToolbarButton("inspector", systemImage: "sidebar.right", pressed: true) {}
                 }
                 GlassFolderButton("folder") {}
-                GlassKebab {}
+                GlassKebab("menu") {}
                 GlassPicker(
                     "rule",
                     selection: $rule,
@@ -153,7 +155,8 @@ public struct GlassGallery: View {
                         GlassPickerOption("Watch", value: "watch", dot: .on),
                         GlassPickerOption("Ask", value: "ask", dot: .ask),
                         GlassPickerOption("Never", value: "never", dot: .off),
-                    ]
+                    ],
+                    placeholder: "rule"
                 )
             }
             HStack(spacing: 14) {
@@ -276,3 +279,4 @@ public struct GlassGallery: View {
 #Preview("GlassGallery") {
     GlassGallery()
 }
+#endif

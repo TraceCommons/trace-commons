@@ -50,14 +50,14 @@ struct TraceCommonsShell: App {
                 .environmentObject(model)
                 .environment(compute)
                 .frame(minWidth: 760, minHeight: 520)
-                // The community site's primary is green, not the platform
-                // blue. Overriding the user's chosen accent colour is a real
-                // departure from macOS convention and it is made on purpose:
-                // this app and `community/public` are one product, the
-                // accent is the single strongest cue that they are, and the
-                // green carries a meaning here (good standing) that the
-                // system blue does not. Everything else about the controls
-                // -- shape, focus ring, keyboard behaviour -- stays stock.
+                // The brand purple (D3), not the platform blue. Overriding the
+                // user's chosen accent colour is a real departure from macOS
+                // convention and it is made on purpose: the accent is the
+                // single strongest cue that this app is the Trace product.
+                // It tints fills (prominent buttons, checked boxes), so it is
+                // the purple that carries white at 6.9:1 in both schemes.
+                // Everything else about the controls -- shape, focus ring,
+                // keyboard behaviour -- stays stock.
                 .tint(TC.accent)
         }
         .defaultSize(width: 940, height: 660)
