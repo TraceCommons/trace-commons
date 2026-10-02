@@ -5201,6 +5201,37 @@ fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
 }
 
 #[test]
+fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
+    use trace_commons_contributor::daemon::settings::{self, DaemonSettings, settings_ranges};
+    use trace_commons_contributor_ffi::tc_settings_ranges_json;
+
+    let ranges = json_owned(tc_settings_ranges_json());
+    assert_eq!(ranges, serde_json::to_value(settings_ranges()).unwrap());
+
+    // The exported ceiling is not a number this test invented separately: a
+    // value one past it is the exact value `apply_settings_object` refuses,
+    // and a value at it is the exact value accepted. A drift between the
+    // exported range and the enforced one would show up here as one of
+    // these two assertions failing, not as a silently wrong control bound.
+    let max_uploads = ranges["max_uploads_per_day"]["max"].as_u64().unwrap();
+    let mut s = DaemonSettings::default();
+    assert_eq!(
+        settings::apply_settings_object(
+            &mut s,
+            &serde_json::json!({ "max_uploads_per_day": max_uploads + 1 }),
+        ),
+        Err(settings::ERR_SETTINGS_INVALID_VALUE)
+    );
+    assert_eq!(
+        settings::apply_settings_object(
+            &mut s,
+            &serde_json::json!({ "max_uploads_per_day": max_uploads }),
+        ),
+        Ok(true)
+    );
+}
+
+#[test]
 fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
     use trace_commons_contributor::consent_copy::automatic_contribution_copy;
     use trace_commons_contributor_ffi::tc_automatic_contribution_copy_json;

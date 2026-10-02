@@ -2936,14 +2936,36 @@ when older settings load. Watch reads direct `.json` children exported with
 records version support and routing limits, and the declaration grants neither
 body capture nor remote submission.
 
-`approval_hold_secs` takes a non-negative integer: how long an approval is
+`approval_hold_secs` takes a non-negative integer no greater than 300
+(five minutes): how long an approval is
 held before the uploader will touch it, which sets the duration of the
 contributor's undo; the default is 10, while `0` disables the hold and makes `approve` report
 `hold_until: null` so a client knows to offer no undo. It is read at each
 upload pass, so a change applies to approvals already sitting in the queue,
 and a shortened hold can release an entry a client is still counting down
 for -- treat the `hold_until` from `approve` as authoritative for the
-approval it accompanied, and do not change this setting mid-countdown.
+approval it accompanied, and do not change this setting mid-countdown. A
+value outside `0..=300` is `bad_params` / `settings-invalid-value`.
+
+`quiescence_secs` and `digest_interval_secs` are likewise bounded, not open
+`u64` fields: `quiescence_secs` to `0..=14_400` (zero is meaningful -- a
+session counts as finished the instant it stops growing -- and 14,400
+seconds is four hours, past which "done" never realistically arrives for a
+session still being written) and `digest_interval_secs` to `3_600..=86_400`
+(one hour to one day). Each used to accept any value, with only the Tauri
+shell's own command layer clamping before the call ever reached
+`set_settings`; a raw caller had no such floor. Both are now validated in
+`apply_settings_object` itself, so every caller gets the same bound with the
+same label-only `settings-invalid-value` the other numeric fields already
+use.
+
+Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`,
+`digest_interval_secs`, `max_uploads_per_day` and `max_bytes_per_day`, all in
+the unit `set_settings` itself stores and validates (seconds or bytes, never
+a shell's own minute/hour/megabyte control granularity) -- are available
+without guessing or hard-coding a second copy: the C ABI's
+`tc_settings_ranges_json` returns them as one JSON object, so a shell can
+draw its controls' bounds from the same numbers this method enforces.
 
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user

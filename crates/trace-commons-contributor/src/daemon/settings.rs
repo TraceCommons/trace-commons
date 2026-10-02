@@ -89,6 +89,92 @@ const DEFAULT_CANARY_INTERVAL_SECS: u64 = 3600;
 /// `approve` reports no `hold_until`.
 const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
 
+/// How patient the watcher may be told to be, in seconds. Above the ceiling
+/// "done" never arrives in any practical session -- an unbounded value would
+/// let a session sit in `Writing` forever, which is the open-ended footgun
+/// this range exists to close. Zero is in range: a session counts as
+/// finished the instant it stops growing, which a test harness relies on to
+/// avoid racing a real-time window (`a_claude_root_override_is_scanned_from_
+/// the_first_tick`), and which is merely eager, not unsafe, for a real
+/// contributor. A shell's own minute-granularity control (1..=240 minutes)
+/// is free to offer a coarser minimum than this.
+pub const QUIESCENCE_SECS_MIN: u64 = 0;
+pub const QUIESCENCE_SECS_MAX: u64 = 14_400;
+/// How long an approved upload may be held before the uploader touches it.
+/// Zero is in range -- see `DEFAULT_APPROVAL_HOLD_SECS`'s doc for why zero
+/// disables the hold rather than being refused -- and five minutes is far
+/// past any undo a person could need to press.
+pub const APPROVAL_HOLD_SECS_MIN: u64 = 0;
+pub const APPROVAL_HOLD_SECS_MAX: u64 = 300;
+/// How often a digest notification may repeat, on `DigestSchedule::Interval`.
+/// Mirrors a shell's hour-granularity control (1..=24 hours).
+pub const DIGEST_INTERVAL_SECS_MIN: u64 = 3_600;
+pub const DIGEST_INTERVAL_SECS_MAX: u64 = 86_400;
+/// The floor for `max_bytes_per_day`: non-zero, same as `max_uploads_per_day`
+/// -- a contributor throttling their own uploads down to almost nothing is
+/// self-throttling, not the runaway-client case the ceiling exists for, and
+/// is deliberately allowed (`a_cap_below_the_default_is_allowed_as_self_throttling`).
+/// Only `MAX_BYTES_PER_DAY_CEILING` is a real safety bound; a shell's own
+/// megabyte-granularity control is free to offer a coarser minimum than this.
+pub const MAX_BYTES_PER_DAY_MIN: u64 = 1;
+
+/// A validated numeric setting's bounds, in the unit `set_settings` itself
+/// stores and checks -- seconds or bytes, never the minutes, hours or
+/// megabytes a shell's control is scaled in. One definition, read by every
+/// shell's control instead of each one transcribing its own copy of the
+/// same two numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SettingRange {
+    pub min: u64,
+    pub max: u64,
+}
+
+impl SettingRange {
+    const fn new(min: u64, max: u64) -> Self {
+        Self { min, max }
+    }
+
+    /// Whether `value` is in `self.min..=self.max`.
+    fn contains(&self, value: u64) -> bool {
+        (self.min..=self.max).contains(&value)
+    }
+
+    /// `value`, pulled inside `self.min..=self.max` if it is not already
+    /// there. Used to repair a value already on disk from before this range
+    /// existed; a *write* refuses an out-of-range value outright (see
+    /// `parse_ranged_u64`) rather than silently rewriting what a caller
+    /// asked for.
+    fn clamp(&self, value: u64) -> u64 {
+        value.clamp(self.min, self.max)
+    }
+}
+
+/// Every numeric setting's range, for a shell to draw its control's bounds
+/// from -- the ranges [`apply_settings_object`] itself enforces, so a shell
+/// cannot offer a control wider than what `set_settings` will actually
+/// accept.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SettingsRanges {
+    pub quiescence_secs: SettingRange,
+    pub approval_hold_secs: SettingRange,
+    pub digest_interval_secs: SettingRange,
+    pub max_uploads_per_day: SettingRange,
+    pub max_bytes_per_day: SettingRange,
+}
+
+/// The ranges [`apply_settings_object`] validates every numeric setting
+/// against. See [`SettingsRanges`].
+#[must_use]
+pub fn settings_ranges() -> SettingsRanges {
+    SettingsRanges {
+        quiescence_secs: SettingRange::new(QUIESCENCE_SECS_MIN, QUIESCENCE_SECS_MAX),
+        approval_hold_secs: SettingRange::new(APPROVAL_HOLD_SECS_MIN, APPROVAL_HOLD_SECS_MAX),
+        digest_interval_secs: SettingRange::new(DIGEST_INTERVAL_SECS_MIN, DIGEST_INTERVAL_SECS_MAX),
+        max_uploads_per_day: SettingRange::new(1, MAX_UPLOADS_PER_DAY_CEILING as u64),
+        max_bytes_per_day: SettingRange::new(MAX_BYTES_PER_DAY_MIN, MAX_BYTES_PER_DAY_CEILING),
+    }
+}
+
 /// A minted NEAR AI inference credential, as persisted.
 ///
 /// The service returns the plaintext key exactly once, at creation, so there
@@ -990,7 +1076,29 @@ impl DaemonSettings {
             .is_none_or(serde_json::Value::is_null);
         settings.absorb_legacy_roots();
         settings.validate_digest_schedule();
+        settings.clamp_numeric_ranges();
         Ok(settings)
+    }
+
+    /// Pull `quiescence_secs`, `approval_hold_secs` and `digest_interval_secs`
+    /// back into the ranges [`apply_settings_object`] enforces on a write,
+    /// for a value a FILE already holds from before those ranges existed, or
+    /// from a hand edit, or from a future build with a wider range than
+    /// this one knows.
+    ///
+    /// Clamped, not refused: refusing here would mean a value `set_settings`
+    /// used to accept -- and which is sitting in a real contributor's file
+    /// right now -- bricks every `load` from here on, including the very
+    /// next `set_settings` call that would have fixed it. A write is a
+    /// choice being made right now and is held to the range; a load is
+    /// reading back a choice that was already made, by this build or an
+    /// older one, and the honest repair is to bring it inside the range this
+    /// build enforces, not to make the whole settings file unreadable.
+    fn clamp_numeric_ranges(&mut self) {
+        let ranges = settings_ranges();
+        self.quiescence_secs = ranges.quiescence_secs.clamp(self.quiescence_secs);
+        self.approval_hold_secs = ranges.approval_hold_secs.clamp(self.approval_hold_secs);
+        self.digest_interval_secs = ranges.digest_interval_secs.clamp(self.digest_interval_secs);
     }
 
     /// Refuse an evening `hour` outside 0..=23 read from the file (a hand
@@ -1239,10 +1347,16 @@ pub fn apply_settings_object(
         // replaces.
         match key.as_str() {
             "quiescence_secs" => {
-                settings.quiescence_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                settings.quiescence_secs = parse_ranged_u64(
+                    value,
+                    SettingRange::new(QUIESCENCE_SECS_MIN, QUIESCENCE_SECS_MAX),
+                )?;
             }
             "digest_interval_secs" => {
-                settings.digest_interval_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                settings.digest_interval_secs = parse_ranged_u64(
+                    value,
+                    SettingRange::new(DIGEST_INTERVAL_SECS_MIN, DIGEST_INTERVAL_SECS_MAX),
+                )?;
             }
             // `{"mode":"interval"}` or `{"mode":"evening","hour":0..=23}`.
             // See `DigestSchedule`; K9 (#1118), open decision #5.
@@ -1250,7 +1364,10 @@ pub fn apply_settings_object(
                 settings.digest_schedule = parse_digest_schedule(value)?;
             }
             "approval_hold_secs" => {
-                settings.approval_hold_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                settings.approval_hold_secs = parse_ranged_u64(
+                    value,
+                    SettingRange::new(APPROVAL_HOLD_SECS_MIN, APPROVAL_HOLD_SECS_MAX),
+                )?;
             }
             "local_notifications" => {
                 settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -1361,24 +1478,37 @@ pub fn apply_settings_object(
     Ok(changed)
 }
 
-/// `max_uploads_per_day`: a non-zero `u32` at most `MAX_UPLOADS_PER_DAY_CEILING`.
+/// A `u64` field restricted to `range` (inclusive both ends). Every numeric
+/// field `apply_settings_object` accepts is validated through this one
+/// function, so there is one definition of "a valid range" rather than one
+/// embedded in each match arm.
+fn parse_ranged_u64(
+    value: &serde_json::Value,
+    range: SettingRange,
+) -> std::result::Result<u64, &'static str> {
+    let n = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+    if range.contains(n) {
+        Ok(n)
+    } else {
+        Err(ERR_SETTINGS_INVALID_VALUE)
+    }
+}
+
+/// `max_uploads_per_day`: a `u32` in `settings_ranges().max_uploads_per_day`.
 /// Zero is refused -- see the call site's doc for why a cap of zero is not
 /// this method's way to stop uploads.
 fn parse_max_uploads_per_day(value: &serde_json::Value) -> std::result::Result<u32, &'static str> {
-    let n = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
-    if n == 0 || n > MAX_UPLOADS_PER_DAY_CEILING as u64 {
-        return Err(ERR_SETTINGS_INVALID_VALUE);
-    }
-    Ok(n as u32)
+    let range = SettingRange::new(1, MAX_UPLOADS_PER_DAY_CEILING as u64);
+    Ok(parse_ranged_u64(value, range)? as u32)
 }
 
-/// `max_bytes_per_day`: a non-zero `u64` at most `MAX_BYTES_PER_DAY_CEILING`.
+/// `max_bytes_per_day`: a `u64` in `settings_ranges().max_bytes_per_day` --
+/// at least `MAX_BYTES_PER_DAY_MIN` (the smallest amount a shell's
+/// megabyte-granularity control can express) and at most
+/// `MAX_BYTES_PER_DAY_CEILING`.
 fn parse_max_bytes_per_day(value: &serde_json::Value) -> std::result::Result<u64, &'static str> {
-    let n = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
-    if n == 0 || n > MAX_BYTES_PER_DAY_CEILING {
-        return Err(ERR_SETTINGS_INVALID_VALUE);
-    }
-    Ok(n)
+    let range = SettingRange::new(MAX_BYTES_PER_DAY_MIN, MAX_BYTES_PER_DAY_CEILING);
+    parse_ranged_u64(value, range)
 }
 
 /// `null` clears the override (falls back to the conventional per-user
@@ -2582,6 +2712,148 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert_eq!(s.approval_hold_secs, 30, "a rejected value changes nothing");
+    }
+
+    /// `quiescence_secs`, `digest_interval_secs` and `approval_hold_secs`
+    /// used to accept any `u64`, with only Tauri's command layer clamping to
+    /// a sane range before the call ever reached `set_settings`. A raw
+    /// caller -- another shell, or a future one -- had no such floor between
+    /// it and the daemon. Each is now bounded in the core itself, and at the
+    /// value exactly one past its exported ceiling, not a value this test
+    /// invented separately.
+    #[test]
+    fn quiescence_digest_and_approval_hold_are_bounded_in_the_core() {
+        let ranges = settings_ranges();
+        let mut s = DaemonSettings::default();
+        for (field, range) in [
+            ("quiescence_secs", ranges.quiescence_secs),
+            ("digest_interval_secs", ranges.digest_interval_secs),
+            ("approval_hold_secs", ranges.approval_hold_secs),
+        ] {
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({ field: range.max + 1 })),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{field} accepted a value past its exported ceiling"
+            );
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({ field: range.max })),
+                Ok(true),
+                "{field} refused its own exported ceiling"
+            );
+        }
+    }
+
+    /// Zero is explicitly in range for `quiescence_secs` (instant) and
+    /// `approval_hold_secs` (no hold); both are meaningful, not accidents of
+    /// an absent floor. One past `digest_interval_secs`' floor is refused.
+    #[test]
+    fn a_meaningful_zero_stays_valid_and_digests_floor_is_enforced() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"quiescence_secs": 0})),
+            Ok(true)
+        );
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"approval_hold_secs": 0})),
+            Ok(true)
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_interval_secs": DIGEST_INTERVAL_SECS_MIN - 1}),
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_interval_secs": DIGEST_INTERVAL_SECS_MIN}),
+            ),
+            Ok(true)
+        );
+    }
+
+    /// The exported ranges are not a second, hand-maintained copy of the
+    /// bounds `apply_settings_object` enforces -- they are read from the
+    /// same constants, so this just pins the shape and the two upload/byte
+    /// caps' floors at 1 (self-throttling is allowed; see
+    /// `a_cap_below_the_default_is_allowed_as_self_throttling`).
+    #[test]
+    fn exported_ranges_match_the_constants_set_settings_enforces() {
+        let ranges = settings_ranges();
+        assert_eq!(ranges.quiescence_secs, SettingRange::new(0, 14_400));
+        assert_eq!(ranges.approval_hold_secs, SettingRange::new(0, 300));
+        assert_eq!(
+            ranges.digest_interval_secs,
+            SettingRange::new(3_600, 86_400)
+        );
+        assert_eq!(ranges.max_uploads_per_day, SettingRange::new(1, 1_000));
+        assert_eq!(
+            ranges.max_bytes_per_day,
+            SettingRange::new(1, 5 * 1024 * 1024 * 1024)
+        );
+    }
+
+    /// A value already on disk from before these ranges existed, or from a
+    /// hand edit, must not brick the file: `load` repairs it into range
+    /// rather than erroring. Covers all three bounded fields, one over each
+    /// end of its range.
+    #[test]
+    fn load_clamps_an_out_of_range_saved_value_into_range() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        let ranges = settings_ranges();
+        v["quiescence_secs"] = serde_json::json!(ranges.quiescence_secs.max + 1_000);
+        v["approval_hold_secs"] = serde_json::json!(ranges.approval_hold_secs.max + 1_000);
+        // Below the floor, not just above the ceiling: digest_interval_secs'
+        // floor is non-zero, unlike the other two.
+        v["digest_interval_secs"] = serde_json::json!(ranges.digest_interval_secs.min - 1);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+
+        let loaded = DaemonSettings::load(&store).expect("a saved out-of-range value still loads");
+        assert_eq!(loaded.quiescence_secs, ranges.quiescence_secs.max);
+        assert_eq!(loaded.approval_hold_secs, ranges.approval_hold_secs.max);
+        assert_eq!(loaded.digest_interval_secs, ranges.digest_interval_secs.min);
+    }
+
+    /// Clamping a saved value on load must not make `set_settings` quietly
+    /// rewrite an *unrelated* field's out-of-range value back into range --
+    /// the gate on a write stays a refusal (see
+    /// `quiescence_digest_and_approval_hold_are_bounded_in_the_core`), and
+    /// nothing about loading changes that. This also proves the clamp is
+    /// load-time repair, not a standing exception swallowed by every write.
+    #[test]
+    fn a_write_still_refuses_out_of_range_even_after_a_clamped_load() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        let ranges = settings_ranges();
+        v["quiescence_secs"] = serde_json::json!(ranges.quiescence_secs.max + 1_000);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+
+        let mut loaded = DaemonSettings::load(&store).expect("loads, clamped");
+        assert_eq!(loaded.quiescence_secs, ranges.quiescence_secs.max);
+
+        // An unrelated write must still see the now-clamped value, and must
+        // still refuse an out-of-range value of its own.
+        assert_eq!(
+            apply_settings_object(
+                &mut loaded,
+                &serde_json::json!({"local_notifications": true})
+            ),
+            Ok(true)
+        );
+        assert_eq!(loaded.quiescence_secs, ranges.quiescence_secs.max);
+        assert_eq!(
+            apply_settings_object(
+                &mut loaded,
+                &serde_json::json!({"quiescence_secs": ranges.quiescence_secs.max + 1}),
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
     }
 
     #[test]

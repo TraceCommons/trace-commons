@@ -751,6 +751,32 @@ pub unsafe extern "C" fn tc_daemon_attach(
     })
 }
 
+/// Every numeric setting's valid range, in the unit `set_settings` itself
+/// stores and validates -- seconds or bytes, never the minutes, hours or
+/// megabytes a shell's own control is scaled in. A shell draws its
+/// slider/stepper bounds from this rather than hard-coding a second copy of
+/// the numbers `daemon::settings::apply_settings_object` enforces, which is
+/// exactly the drift this call exists to prevent.
+///
+/// ```json
+/// {"quiescence_secs":{"min":0,"max":14400},
+///  "approval_hold_secs":{"min":0,"max":300},
+///  "digest_interval_secs":{"min":3600,"max":86400},
+///  "max_uploads_per_day":{"min":1,"max":1000},
+///  "max_bytes_per_day":{"min":1,"max":5368709120}}
+/// ```
+///
+/// Reads nothing and writes nothing; the same object for every caller on
+/// this build. Returns an owned string; free it with [`tc_string_free`].
+/// NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let ranges = trace_commons_contributor::daemon::settings::settings_ranges();
+        Ok(to_owned_cstring(&serde_json::to_string(&ranges)?))
+    })
+}
+
 /// Fixed labels `tc_daemon_start_with_settings` can report via `*err` /
 /// `tc_last_error` for a failure specific to `settings_json`, distinct from
 /// `ERR_DAEMON_START_FAILED` (which stays opaque for the reason stated on
