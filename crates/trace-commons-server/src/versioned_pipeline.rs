@@ -8927,10 +8927,20 @@ impl PipelineService {
     /// side. A withdrawal of a run still leased queues its invalidation no
     /// earlier than the lease's end plus the fence margin, but the rebuild
     /// writes `complete` runs, which hold no lease, so a withdrawal queues
-    /// their invalidation at once. In the two windows above, and after a
-    /// deadline that passed with a call in flight, that invalidation can
+    /// their invalidation at once. In the windows above, and after a
+    /// deadline that passed with a call in flight, that invalidation could
     /// complete before the rebuild's last write lands and leave that write's
-    /// entries in the index.
+    /// entries in the index. Withdrawals come from clients, from `main`'s
+    /// retention maintenance and from the revocation-propagation reconciler,
+    /// so the guarantee is not that none happens: it is that no worker
+    /// processes the tenant's invalidations while the rebuild runs. The
+    /// restore runbook starts every process with both tenant lists unset for
+    /// the rebuild (`backup-restore.md`, step 3), and ingest's rebuild route
+    /// refuses a tenant its own process routes or drains
+    /// (`pipeline_index_rebuild_tenant_active`, merge review M1). A queued
+    /// invalidation then runs only after the rebuild. Closing the window
+    /// without that configuration needs a committed fence that the
+    /// withdrawal's invalidation reads, which is PR 5's.
     pub async fn rebuild_index_run(
         &self,
         run: &PipelineRunRecord,

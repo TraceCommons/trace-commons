@@ -347,6 +347,18 @@ pub(crate) async fn pipeline_readiness_handler(
 /// (Envelope tenant fields are attribution only; auth derives the tenant
 /// that is actually read and written).
 ///
+/// It refuses, with `409` `pipeline_index_rebuild_tenant_active`, a tenant
+/// this process routes or drains (merge review M1). A withdrawal of a
+/// complete run queues its invalidation at once, and it can come from the
+/// client, from `main`'s retention maintenance, or from the
+/// revocation-propagation reconciler, so the route's guarantee is not that
+/// no withdrawal happens: it is that the worker processes none of the
+/// tenant's invalidations while the rebuild writes (the restore runbook's
+/// step 3, `backup-restore.md`). A queued invalidation waits for a later
+/// worker. This holds for this process only: another replica that drains
+/// the tenant still processes its invalidations. Closing that (a committed
+/// rebuild fence that a withdrawal's invalidation reads) is PR 5's.
+///
 /// A rebuild that completes appends one index maintenance audit row, as the
 /// vector index worker route does (final review M4, ruling FR-7): `main`'s
 /// `vector_index` event with the fixed purpose `pipeline_index_rebuild`
@@ -375,6 +387,16 @@ pub(crate) async fn pipeline_index_rebuild_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
     require_pipeline_service(state.as_ref())?;
+    // Merge review M1: a rebuild is safe from a withdrawal's removal racing
+    // its writes only while the worker processes no invalidation of the
+    // tenant, so it runs only for a tenant this process neither routes nor
+    // drains (`backup-restore.md`, step 3).
+    if pipeline_worker_tenant_ids(state.as_ref()).contains(&tenant.tenant_id) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            PIPELINE_INDEX_REBUILD_TENANT_ACTIVE_LABEL,
+        ));
+    }
     let tenant_id = tenant.tenant_id.clone();
     let rebuild = state
         .pipeline_index_rebuilds
@@ -390,6 +412,13 @@ pub(crate) async fn pipeline_index_rebuild_handler(
         .map_err(|_| internal_error("pipeline_index_rebuild_task_failed"))?
 }
 
+/// Safe label of a rebuild request for a tenant this process routes
+/// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) or drains
+/// (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`): its worker processes the
+/// tenant's invalidations, so one could remove a run's entries before the
+/// rebuild's last write lands (merge review M1).
+pub(crate) const PIPELINE_INDEX_REBUILD_TENANT_ACTIVE_LABEL: &str =
+    "pipeline_index_rebuild_tenant_active";
 /// Safe label of a rebuild request for a tenant whose rebuild is already
 /// running in this process (`PipelineIndexRebuilds::start`).
 pub(crate) const PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL: &str =

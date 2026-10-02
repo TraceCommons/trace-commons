@@ -3856,6 +3856,11 @@ async fn the_operator_route_requeues_the_tenants_failed_invalidations() {
 /// `vector_index` action, the fixed purpose `pipeline_index_rebuild` as a
 /// hash, and the report's counts, with no run or submission id. A
 /// contributor is refused and appends nothing.
+///
+/// Merge review M1: the route also refuses, and appends nothing for, a
+/// tenant this process drains (or routes), with `409`
+/// `pipeline_index_rebuild_tenant_active`; the rebuild runs once the tenant
+/// is on neither list, as the restore runbook's step 3 sets it up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_index_rebuild_route_appends_an_audit_row() {
     let Some(fixture) = product_fixture().await else {
@@ -3877,6 +3882,48 @@ async fn the_index_rebuild_route_appends_an_audit_row() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "a contributor is refused");
 
+    assert!(
+        state.pipeline_drain_tenant_ids.contains(tenant),
+        "the product fixture drains its tenant"
+    );
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"], "pipeline_index_rebuild_tenant_active",
+        "{body}"
+    );
+    let mut routed = state.clone();
+    let routed_mut = Arc::make_mut(&mut routed);
+    routed_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::new());
+    routed_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant],
+    );
+    let (status, body) = route_request(
+        routed,
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"], "pipeline_index_rebuild_tenant_active",
+        "a routed tenant is refused too: {body}"
+    );
+
+    // The restore runbook's step 3: the tenant on neither list.
+    let mut quiet = state.clone();
+    Arc::make_mut(&mut quiet).pipeline_drain_tenant_ids = Arc::new(BTreeSet::new());
+    let state = &quiet;
     let (status, body) = route_request(
         state.clone(),
         "POST",

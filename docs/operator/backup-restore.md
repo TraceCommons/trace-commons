@@ -153,7 +153,9 @@ answers `404` there. Do these steps in this order:
 3. Start every `trace-commons-ingest` process with
    `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
    `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` both unset. The pipeline
-   runtime still starts, and the rebuild route still serves every tenant.
+   runtime still starts, and the rebuild route serves every tenant (it
+   refuses a tenant on either list, `409`
+   `pipeline_index_rebuild_tenant_active`).
    The worker reads both lists once, at start, so it drains no tenant: it
    scores no pending run, and it pays and invalidates nothing. Keep these
    processes out of client traffic until step 5: while a tenant is on
@@ -168,15 +170,26 @@ answers `404` there. Do these steps in this order:
    `skipped_run_count`, `command_set_hash`), and appends one `vector_index`
    audit row. It creates no outcomes and no credit. It is safe to run again
    if it is interrupted: a repeat reports the entries it already wrote as
-   unchanged. A withdrawal during the rebuild is safe too: a run withdrawn
-   before its entries are written is skipped, and a withdrawal of a run
-   whose entries are being written waits for them and then queues their
-   removal. The exception is a rebuild whose database session is lost, or
-   whose process exits, while it writes a run's entries: the withdrawal no
-   longer waits, and its removal can run before the last entry lands.
-   Settle's own index writes stop at their lease for this reason; a rebuild
-   writes complete runs, which have no lease. Keeping client traffic away
-   (step 3) keeps withdrawals away too.
+   unchanged. A rebuild runs one tenant at a time per process: a second
+   request for a tenant whose rebuild is running is refused (`409`
+   `pipeline_index_rebuild_in_progress`). A run's writes hold its rows for
+   at most the smaller of the Settle lease and 30 seconds; past that, the
+   rebuild stops with `503` `index_unavailable`, and a rerun continues
+   where it left off.
+
+   A withdrawal during the rebuild is safe because of step 3, not because
+   no withdrawal happens: withdrawals come from clients, from `main`'s
+   retention maintenance, and from the revocation-propagation reconciler,
+   and keeping client traffic away stops only the first. A run withdrawn
+   before its entries are written is skipped. A withdrawal of a run whose
+   entries are being written usually waits for them, but not always (a lost
+   database session, a stopped rebuild, a process exit), and it queues the
+   run's removal at once. With both lists unset, no worker processes that
+   removal until step 5, so it always runs after the rebuild's last write.
+   Run the rebuild only in step 3's configuration, on every process: a
+   process that drains or routes the tenant would process the removal
+   during the rebuild. A fence that closes this without step 3 (a committed
+   rebuild marker that the withdrawal's removal reads) is PR 5 work.
 5. Restart every `trace-commons-ingest` process with both lists set back to
    their values before the restore. The worker then resumes the pending
    runs, and processes the queued invalidations and payouts, against the
