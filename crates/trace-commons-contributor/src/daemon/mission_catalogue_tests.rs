@@ -70,6 +70,9 @@ fn persisted_files(dir: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+// This file is included by a test-only parent; make the fixture scope explicit
+// for the per-file production QueueEntry constructor guard as well.
+#[cfg(test)]
 #[tokio::test]
 async fn mission_catalogue_relays_exact_page_anonymously_without_mutating_consent() {
     let calls = Arc::new(AtomicUsize::new(0));
