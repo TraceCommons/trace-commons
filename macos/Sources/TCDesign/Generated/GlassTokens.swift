@@ -62,6 +62,11 @@ public enum GlassTokens {
         public static let mapNodeOff: GlassRGBA = GlassRGBA(0x5D5D63, alpha: 1)
         public static let mapFieldInner: GlassRGBA = GlassRGBA(0x1E2A3A, alpha: 1)
         public static let mapFieldOuter: GlassRGBA = GlassRGBA(0x131A24, alpha: 1)
+        public static let mapRuleAutoFill: GlassRGBA = GlassRGBA(0x12321F, alpha: 1)
+        public static let mapRuleAskFill: GlassRGBA = GlassRGBA(0x2B2412, alpha: 1)
+        public static let mapRuleIgnoreFill: GlassRGBA = GlassRGBA(0x3A3A3E, alpha: 1)
+        public static let mapRuleUnsetFill: GlassRGBA = GlassRGBA(0x2A2A2C, alpha: 1)
+        public static let mapCredentialOn: GlassRGBA = GlassRGBA(0x2C7A5B, alpha: 1)
         public static let consentFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.25)
         public static let fieldFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.25)
         public static let tintOn: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 0.18)
@@ -119,6 +124,11 @@ public enum GlassTokens {
             "mapNodeOff": mapNodeOff,
             "mapFieldInner": mapFieldInner,
             "mapFieldOuter": mapFieldOuter,
+            "mapRuleAutoFill": mapRuleAutoFill,
+            "mapRuleAskFill": mapRuleAskFill,
+            "mapRuleIgnoreFill": mapRuleIgnoreFill,
+            "mapRuleUnsetFill": mapRuleUnsetFill,
+            "mapCredentialOn": mapCredentialOn,
             "consentFill": consentFill,
             "fieldFill": fieldFill,
             "tintOn": tintOn,

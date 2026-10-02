@@ -168,7 +168,8 @@ public enum GlassTool: Sendable, Equatable {
         }
     }
 
-    var initials: String {
+    /// The tool's two-letter mark, for a surface with no logo artwork.
+    public var initials: String {
         switch self {
         case .claudeCode: "CC"
         case .codex: "Cx"

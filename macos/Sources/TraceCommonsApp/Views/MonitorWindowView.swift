@@ -42,6 +42,8 @@ struct MonitorWindowView: View {
     /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
     /// the set (`normalDay` by default).
     @State private var traces = TracesStore(client: MonitorWindowView.dataClient())
+    /// The map's Private AI view and the Inference tab (R8).
+    @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
 
     static func dataClient() -> any DaemonDataClient {
         let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] ?? ""
@@ -61,24 +63,34 @@ struct MonitorWindowView: View {
             ) {
                 switch tab {
                 case .traces: TracesTreeView(store: traces, selection: $selectedSession)
-                case .home, .inference: Spacer(minLength: 0)
+                case .inference: InferenceTabView(store: inference)
+                case .home: Spacer(minLength: 0)
                 }
             }
         } map: {
-            MonitorMapPane(mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination)
+            MonitorMapPane(
+                mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination,
+                traces: traces, inference: inference,
+                sentence: { HarnessSurface.stateSentence($0, calls: model.harnessCalls) })
         } inspector: {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
-                if tab == .traces {
+                switch tab {
+                case .traces:
                     SessionInspectorView(store: traces, entry: selectedEntry)
-                } else {
+                case .inference:
+                    PrivateAIInspectorView(
+                        store: inference, destinationLabel: model.privateInferenceCopy?.destination,
+                        sentence: { HarnessSurface.stateSentence($0, calls: model.harnessCalls) })
+                case .home:
                     Color.clear
                 }
             }
         }
         .glassWindow()
         .task { await traces.run() }
+        .task { await inference.run() }
     }
 
     /// The Traces badge (R7): decisions owed, a dash when the core did not
@@ -166,23 +178,58 @@ private struct MonitorMainPane<Content: View>: View {
     }
 }
 
-/// The map: the field, with its tabs floating on it. The map itself is R8.
+/// The map (R8): the field, the flow map drawn on it, and the view
+/// selector floating at its upper trailing edge (spec, "Flow map"). The
+/// selector changes the map's view only, never the main tab, consent or
+/// routing, and keeps its choice while the map is hidden.
 private struct MonitorMapPane: View {
     @Binding var mapTab: MonitorWindowView.MapTab
     let privateAILabel: String?
+    let traces: TracesStore
+    let inference: InferenceStore
+    /// The core's sentence for a tool's Private AI state.
+    let sentence: (HarnessRow) -> String?
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
         GlassPane(padding: 0) {
-            ZStack(alignment: .topLeading) {
+            ZStack(alignment: .topTrailing) {
                 RadialGradient(
                     colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
                     center: .center, startRadius: 20, endRadius: 520)
+                map
                 GlassFloatingGroup {
                     GlassSegmentedTabs("Map", selection: $mapTab, segments: segments, floating: true)
                         .padding(GlassTokens.Space.panePadding)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var map: some View {
+        switch shownTab {
+        case .traces:
+            FlowMapView(
+                scene: .traces(traces.tree), legend: [.autoUpload, .ask, .ignore], zoomable: true,
+                accessibilityName: MonitorWindowView.Tab.traces.rawValue)
+        case .privateAI:
+            if let harnesses = inference.harnesses, let privateAILabel {
+                FlowMapView(
+                    scene: .privateAI(
+                        harnesses, destinationLabel: privateAILabel, sentence: sentence,
+                        answering: { HarnessSurface.state($0, calls: model.harnessCalls) == .answering }),
+                    legend: [], zoomable: false, accessibilityName: privateAILabel)
+            } else {
+                Color.clear
+            }
+        }
+    }
+
+    /// The Private AI view needs the core's name for it; until the core
+    /// has said it, the map stays on Traces without changing the choice.
+    private var shownTab: MonitorWindowView.MapTab {
+        privateAILabel == nil ? .traces : mapTab
     }
 
     /// Traces, and the Private AI tab once the Rust core has said what it is
