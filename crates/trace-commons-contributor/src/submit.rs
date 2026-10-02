@@ -611,16 +611,6 @@ pub struct SubmitContext<'a> {
     /// `daemon::uploader` from the queue entry, and [`submit_sessions`] (the
     /// CLI's `submit`, run by a person) with `false` and its `--verdict`.
     upload_provenance: Option<(bool, Option<String>)>,
-    /// The queue entry's own title (K9) for the submission about to run
-    /// (`QueueEntry::title`), set by `daemon::uploader` before every
-    /// `submit_loaded`, via [`Self::set_upload_title`], and taken once at
-    /// the top of `submit_loaded` exactly like `upload_provenance` above --
-    /// a value left behind would land on whatever session came next.
-    ///
-    /// `None` for a caller that never sets it (a direct CLI submission, say,
-    /// which was never queued and so has no title to carry), and the
-    /// receipt then records no title rather than inventing one.
-    upload_title: Option<String>,
     /// The delay a saturated witness asked for on the last submission, in
     /// seconds; zero for none. Reset at the start of each submission, like
     /// `last_receipt_shipped`. Atomic only because `witness_envelope`
@@ -696,7 +686,6 @@ impl<'a> SubmitContext<'a> {
             last_sent_witness: None,
             background_witness: false,
             upload_provenance: None,
-            upload_title: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             receipt_override: None,
@@ -1353,19 +1342,6 @@ impl<'a> SubmitContext<'a> {
         self.upload_provenance = Some((approved_unattended, approved_verdict));
     }
 
-    /// Record the queue entry's title (K9) for the very next submission this
-    /// context runs. One-shot, like [`Self::set_upload_provenance`]: taken at
-    /// the top of `submit_loaded` so it cannot leak onto whatever session
-    /// comes after this one.
-    ///
-    /// `daemon::uploader::upload_entry` calls this immediately before
-    /// `submit_loaded`, with the entry's own `title`, so the receipt this
-    /// call produces -- and, from it, the history row -- can carry the same
-    /// title the queue showed for this session.
-    pub fn set_upload_title(&mut self, title: Option<String>) {
-        self.upload_title = title;
-    }
-
     /// The delay, in seconds, a saturated witness asked for on the most
     /// recent submission, or `None` if the witness was not saturated.
     /// Meaningful immediately after a submission returns `Failed` with
@@ -1433,9 +1409,6 @@ impl<'a> SubmitContext<'a> {
             Some((unattended, verdict)) => (Some(unattended), verdict),
             None => (None, None),
         };
-        // Same one-shot rule as the provenance pair above: taken here so it
-        // cannot apply to a later submission this context happens to run.
-        let title = self.upload_title.take();
         let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
         let hold_unless_scrub_clear = self.hold_unless_scrub_clear.take();
 
@@ -1809,7 +1782,6 @@ impl<'a> SubmitContext<'a> {
                         status: "submitted".into(),
                         approved_unattended: provenance_unattended,
                         approved_verdict: provenance_verdict.clone(),
-                        title: title.clone(),
                     };
                     self.store.append_receipt(&receipt)?;
                     self.receipts.push(receipt);
@@ -1849,7 +1821,6 @@ impl<'a> SubmitContext<'a> {
                     status: receipt.status.clone(),
                     approved_unattended: provenance_unattended,
                     approved_verdict: provenance_verdict.clone(),
-                    title: title.clone(),
                 };
                 match self.store.append_receipt(&r) {
                     Ok(()) => {
@@ -4038,73 +4009,6 @@ mod tests {
         assert_eq!(receipts[1].approved_verdict, None);
     }
 
-    /// K9: `set_upload_title` is what lets a history row show the same
-    /// title the queue showed for this session. `daemon::uploader` calls
-    /// this with the entry's own `title` immediately before every
-    /// `submit_loaded`.
-    #[tokio::test]
-    async fn upload_title_lands_on_the_written_receipt() {
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
-        let (_dir, store) = crate::config::tests_support::temp_store();
-        let device = DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions {
-            machine_readable: true,
-            ..Default::default()
-        };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        ctx.set_upload_title(Some("add a rate limiter".to_string()));
-        let (source, session_ref) = fixture_selection().remove(0);
-
-        let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
-        assert!(
-            matches!(outcome, SubmitOutcome::Submitted { .. }),
-            "got {outcome:?}"
-        );
-
-        let receipts = store.load_receipts().unwrap();
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].title.as_deref(), Some("add a rate limiter"));
-    }
-
-    /// One-shot, exactly like `upload_provenance`: a title set for one
-    /// submission must not leak onto the next call this context happens to
-    /// run.
-    #[tokio::test]
-    async fn upload_title_does_not_leak_onto_a_later_submission() {
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
-        let (_dir, store) = crate::config::tests_support::temp_store();
-        let device = DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions {
-            machine_readable: true,
-            ..Default::default()
-        };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-
-        let trajectory_dir = tempfile::tempdir().unwrap();
-        write_test_trajectory(&trajectory_dir.path().join("a.json"), "first session");
-        write_test_trajectory(&trajectory_dir.path().join("b.json"), "second session");
-        let mut selection = trajectory_selection(trajectory_dir.path());
-        let (source_a, ref_a) = selection.remove(0);
-        let (source_b, ref_b) = selection.remove(0);
-
-        ctx.set_upload_title(Some("fix the login race".to_string()));
-        ctx.submit_one(source_a.as_ref(), &ref_a).await.unwrap();
-        // Nothing set for this call: must not inherit the previous one's.
-        ctx.submit_one(source_b.as_ref(), &ref_b).await.unwrap();
-
-        let receipts = store.load_receipts().unwrap();
-        assert_eq!(receipts.len(), 2);
-        assert_eq!(receipts[0].title.as_deref(), Some("fix the login race"));
-        assert_eq!(
-            receipts[1].title, None,
-            "a title must not leak onto a later submission"
-        );
-    }
-
     /// K7 review: the CLI's `submit --verdict` is a person approving, and
     /// the verdict they passed is recorded on the receipt rather than
     /// dropped.
@@ -4968,7 +4872,6 @@ mod tests {
                 status: "submitted".to_string(),
                 approved_unattended: None,
                 approved_verdict: None,
-                title: None,
             })
             .unwrap();
 

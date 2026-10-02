@@ -11310,7 +11310,6 @@ mod tests {
             withdrawn_at: None,
             approved_unattended: None,
             approved_verdict: None,
-            title: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(

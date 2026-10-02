@@ -706,15 +706,6 @@ pub struct Receipt {
     /// `#[serde(default)]` for the same reason as `approved_unattended`.
     #[serde(default)]
     pub approved_verdict: Option<String>,
-    /// The session's title (K9), carried from `QueueEntry::title` and set
-    /// once, at upload time, by whoever drove the upload -- the same
-    /// provenance as `approved_unattended` and `approved_verdict` above.
-    /// `None` when the task named no description, or when this receipt
-    /// predates the field.
-    ///
-    /// `#[serde(default)]` for the same reason as `approved_unattended`.
-    #[serde(default)]
-    pub title: Option<String>,
 }
 
 /// The state directory's name under whichever per-user base the platform uses.
@@ -1623,7 +1614,6 @@ mod tests {
             status: "accepted".into(),
             approved_unattended: None,
             approved_verdict: None,
-            title: None,
         };
         store.append_receipt(&r).unwrap();
         // Simulate a corrupt line.
@@ -1660,27 +1650,6 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].approved_unattended, None);
         assert_eq!(loaded[0].approved_verdict, None);
-    }
-
-    /// K9: a receipts line written before `title` existed must still load.
-    #[test]
-    fn a_receipt_line_written_before_title_existed_still_loads() {
-        let (_d, store) = store();
-        let old_line = serde_json::json!({
-            "submission_id": uuid::Uuid::new_v4(),
-            "session_hash": "sha256:aa",
-            "source": "claude-code",
-            "submitted_at": chrono::Utc::now(),
-            "status": "accepted",
-        });
-        std::fs::write(
-            store_path(&store, "receipts.jsonl"),
-            format!("{}\n", serde_json::to_string(&old_line).unwrap()),
-        )
-        .unwrap();
-        let loaded = store.load_receipts().unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].title, None);
     }
 
     #[test]

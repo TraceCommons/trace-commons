@@ -111,16 +111,6 @@ pub struct HistoryRecord {
     /// verdict was given, or when this row predates the field.
     #[serde(default)]
     pub approved_verdict: Option<String>,
-    /// The session's title (K9), carried from `Receipt::title`, itself set
-    /// once at upload time from the queue entry's own `QueueEntry::title`.
-    /// `None` when the task named no description, when the session was
-    /// never queued (a direct CLI submission), or when this row predates
-    /// the field.
-    ///
-    /// `#[serde(default)]` so a cache line written before this field existed
-    /// still parses.
-    #[serde(default)]
-    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -256,9 +246,6 @@ pub fn join(
                 // opinion about it.
                 approved_unattended: r.approved_unattended,
                 approved_verdict: r.approved_verdict.clone(),
-                // The receipt's own, set once at upload time -- see
-                // `HistoryRecord::title`.
-                title: r.title.clone(),
                 // Carried from the cache being replaced: see this function's
                 // doc.
                 withdrawn_at: withdrawn.get(&r.submission_id).copied(),
@@ -341,7 +328,6 @@ pub fn merge_new_receipts(
             withdrawn_at: None,
             approved_unattended: r.approved_unattended,
             approved_verdict: r.approved_verdict.clone(),
-            title: r.title.clone(),
         });
         added = true;
     }
@@ -514,7 +500,6 @@ mod tests {
             status: status.into(),
             approved_unattended,
             approved_verdict: approved_verdict.map(str::to_string),
-            title: None,
         }
     }
 
@@ -538,6 +523,22 @@ mod tests {
         }
     }
 
+    /// K9: a queue entry's title is the one bulk exception to the preview
+    /// content boundary, and only while the entry is queued. It is never
+    /// carried onto a receipt or a history row, which outlive the entry
+    /// (see "The preview content boundary" in the IPC doc). A field named
+    /// `title` on either fails this.
+    #[test]
+    fn receipts_and_history_rows_never_carry_a_title() {
+        let id = Uuid::new_v4();
+        let receipt =
+            serde_json::to_value(receipt(id, "sha256:aa", "accepted", "2026-09-30T09:00:00Z"))
+                .unwrap();
+        assert!(receipt.get("title").is_none(), "{receipt}");
+        let row = serde_json::to_value(record("accepted", "2026-09-30T09:00:00Z")).unwrap();
+        assert!(row.get("title").is_none(), "{row}");
+    }
+
     fn record(status: &str, when: &str) -> HistoryRecord {
         HistoryRecord {
             submission_id: Uuid::new_v4(),
@@ -555,7 +556,6 @@ mod tests {
             withdrawn_at: None,
             approved_unattended: None,
             approved_verdict: None,
-            title: None,
         }
     }
 
@@ -964,7 +964,6 @@ mod tests {
             withdrawn_at: None,
             approved_unattended: None,
             approved_verdict: None,
-            title: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("proj_"), "expected an opaque id: {json}");
@@ -1011,25 +1010,6 @@ mod tests {
             "unrecorded, never \"you approved\""
         );
         assert_eq!(loaded.approved_verdict, None);
-    }
-
-    /// K9: a row written before `title` existed must still parse.
-    #[test]
-    fn a_history_record_written_before_title_existed_still_loads() {
-        let value = serde_json::json!({
-            "submission_id": Uuid::new_v4(),
-            "submitted_at": Utc::now(),
-            "project_id": "proj_aa",
-            "project_label": "repo",
-            "source": "claude_code",
-            "session_hash": "sha256:abc",
-            "status": "accepted",
-            "consent_scopes": [],
-            "credit_points_pending": 0.0,
-            "explanations": [],
-        });
-        let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
-        assert_eq!(loaded.title, None);
     }
 
     /// K7: `join` carries the receipt's own provenance onto the history row
@@ -1127,39 +1107,6 @@ mod tests {
             .find(|r| r.submission_id == sent_unattended)
             .unwrap();
         assert_eq!(unattended.approved_unattended, Some(true));
-    }
-
-    /// K9: a receipt's title -- set once at upload time from the queue
-    /// entry it was minted for -- lands on the history row `join` builds.
-    #[test]
-    fn join_carries_the_title_from_the_receipt() {
-        let id = Uuid::new_v4();
-        let titled = Receipt {
-            title: Some("add a rate limiter".to_string()),
-            ..receipt(id, "sha256:aa", "submitted", "2026-08-08T10:00:00Z")
-        };
-        let recs = join(
-            &[titled],
-            &[],
-            &BTreeMap::new(),
-            &[],
-            at("2026-08-08T12:00:00Z"),
-        );
-        assert_eq!(recs[0].title.as_deref(), Some("add a rate limiter"));
-    }
-
-    /// The same, through the cheap local merge `merge_new_receipts` runs
-    /// instead of a server read-back.
-    #[test]
-    fn merge_new_receipts_carries_the_title_from_the_receipt() {
-        let id = Uuid::new_v4();
-        let titled = Receipt {
-            title: Some("add a rate limiter".to_string()),
-            ..receipt(id, "sha256:aa", "submitted", "2026-08-08T10:00:00Z")
-        };
-        let mut records = Vec::new();
-        merge_new_receipts(&mut records, &[titled], &BTreeMap::new());
-        assert_eq!(records[0].title.as_deref(), Some("add a rate limiter"));
     }
 
     /// K7 review: a withdrawn row lands in the `withdrawn` bucket and in
