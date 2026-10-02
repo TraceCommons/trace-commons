@@ -715,6 +715,14 @@ async fn drain_approved(
                     returned.push(e.entry_id)
                 }
                 policy::ProjectMode::AutoUpload => {}
+                // Ignored by a contribution override, not by the folder's
+                // own mode: back to waiting rather than refused, so clearing
+                // the override restores it (#1173).
+                policy::ProjectMode::Ignore
+                    if policy.folder_mode(&e.project_key) != policy::ProjectMode::Ignore =>
+                {
+                    returned.push(e.entry_id)
+                }
                 policy::ProjectMode::Ignore => ignored.push(e.entry_id),
                 policy::ProjectMode::NotifyOnly => returned.push(e.entry_id),
             }

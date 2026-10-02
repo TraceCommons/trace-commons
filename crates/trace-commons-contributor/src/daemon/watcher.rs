@@ -1153,7 +1153,15 @@ fn visit_session(
         policy.resolve(&project_key)
     };
     let mode = if mode == ProjectMode::NotifyOnly {
-        arm_by_default(shared, ctx, source, &project_key, &obs.path)
+        // The grant arms the folder's own mode; what is in force is then
+        // read again, so a contribution override ("Ask me") still governs
+        // a folder the grant has just armed (#1173).
+        arm_by_default(shared, ctx, source, &project_key, &obs.path);
+        shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .resolve(&project_key)
     } else {
         mode
     };
