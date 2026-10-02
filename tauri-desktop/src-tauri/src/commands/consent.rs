@@ -204,40 +204,27 @@ pub(crate) async fn acknowledge_legacy_invite_migration(
     .await
 }
 
-/// What the Tauri shell can check before asking for the Flow 1 grant.
-///
-/// A first line only: the daemon's `grant_automatic` refuses on its own
-/// without a recorded scope choice (`automatic-grant-scopes-not-chosen`) or
-/// when the witness is not the one shown. The shell refuses before asking
+/// What the Tauri shell checks before asking for the Flow 1 grant: the
+/// contributor core's `flow1::grant_precondition`, a first line only (the
+/// daemon's `grant_automatic` refuses on its own). It refuses before asking
 /// when the contributor has not confirmed the grant screens, is not
-/// enrolled, or never chose scopes through the picker. A saved scope list is
-/// not a choice: `validate_scopes` always adds the floor scope, so an invite
-/// enrollee holds one before the picker runs. The labels are fixed and
-/// carry no content.
+/// enrolled, or never chose scopes through the picker; the choice and its
+/// fixed labels are the core's.
 fn grant_precondition(
     confirmed: bool,
     config: Option<&ContributorConfig>,
 ) -> Result<(), &'static str> {
-    if !confirmed {
-        return Err("automatic-grant-confirmation-required");
-    }
-    let Some(config) = config else {
-        return Err("automatic-grant-not-enrolled");
-    };
-    if !config.consent_scopes_chosen || config.consent_scopes.is_empty() {
-        return Err("automatic-grant-scope-required");
-    }
-    Ok(())
+    trace_commons_contributor::flow1::grant_precondition(confirmed, config)
 }
 
 pub(crate) fn load_config(
     state: &State<'_, AppState>,
 ) -> Result<Option<ContributorConfig>, String> {
     let store = ConfigStore::open(state_directory(state)?)
-        .map_err(|_| "contributor-config-unreadable".to_owned())?;
+        .map_err(|_| trace_commons_contributor::flow1::CONFIG_UNREADABLE.to_owned())?;
     store
         .load_config()
-        .map_err(|_| "contributor-config-unreadable".to_owned())
+        .map_err(|_| trace_commons_contributor::flow1::CONFIG_UNREADABLE.to_owned())
 }
 
 /// Whether the Flow 1 grant is in force, as the daemon reports it.
