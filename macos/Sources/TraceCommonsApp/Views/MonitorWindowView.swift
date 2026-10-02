@@ -38,7 +38,7 @@ struct MonitorWindowView: View {
     var body: some View {
         GlassThreePane(showsMap: showsMap, showsInspector: showsInspector) {
             MonitorMainPane(
-                tab: $tab, inferenceDot: inferenceDot,
+                tab: $tab, inferenceDot: Self.inferenceDot(settings: model.daemonSettings),
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() })
         } map: {
@@ -53,9 +53,9 @@ struct MonitorWindowView: View {
 
     /// Inference's dot: Private AI on or off, and none while the daemon has
     /// not said. Unknown is never drawn as off.
-    private var inferenceDot: GlassStatus? {
-        guard let settings = model.daemonSettings else { return nil }
-        return settings.privateInferenceOn ? .on : .off
+    static func inferenceDot(settings: DaemonSettingsView?) -> GlassStatus? {
+        guard let on = settings?.privateInference else { return nil }
+        return on ? .on : .off
     }
 }
 
