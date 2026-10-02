@@ -210,12 +210,28 @@ final class SessionPublicationTests: XCTestCase {
         XCTAssertFalse(copy.permittedUsesUnavailable.isEmpty)
     }
 
-    func testServerPreAcceptanceStatesUseTheNonDistributedWithdrawalCopy() {
+    func testServerPreAcceptanceStatesUseTheNonDistributedWithdrawalCopy() throws {
         for status in ["received", "quarantined", "awaiting_pii_backstop", "rejected"] {
-            let confirmation = WithdrawalCopy.confirmation(for: .init(status: status))
+            let confirmation = try XCTUnwrap(WithdrawalCopy.confirmation(for: .init(status: status)), status)
             XCTAssertNil(confirmation.ambiguity, status)
             XCTAssertEqual(confirmation.bodies, [WithdrawalCopy.canonicalNotDistributed], status)
         }
+    }
+
+    /// K3 (#1173): a status this build does not know is confirmed with the
+    /// core's prompt, the one the other shells show, weighted as the gravest,
+    /// and with no heading or credit line of this shell's own beside it.
+    func testAnUnknownStatusIsConfirmedWithTheCorePrompt() throws {
+        let confirmation = try XCTUnwrap(WithdrawalCopy.confirmation(for: .init(status: "future_state")))
+        let prompt = try XCTUnwrap(TCCoreCopy.withdrawalConfirmationPrompt())
+        XCTAssertEqual(confirmation.bodies, [prompt])
+        XCTAssertEqual(confirmation.gravest, 0)
+        XCTAssertNil(confirmation.question)
+        XCTAssertNil(confirmation.ambiguity)
+        XCTAssertNil(confirmation.credit)
+        XCTAssertTrue(prompt.contains("cannot be recalled"), prompt)
+        XCTAssertTrue(prompt.contains(WithdrawalCopy.creditNote), prompt)
+        XCTAssertEqual(WithdrawalCopyCheck.failures(), [])
     }
 
     func testEveryTerminalContributionStateSuppressesWithdrawal() {

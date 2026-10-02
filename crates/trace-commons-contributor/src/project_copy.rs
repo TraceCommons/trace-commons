@@ -141,6 +141,127 @@ pub fn customize_copy() -> CustomizeCopy {
     }
 }
 
+/// Every word of the ignore-project control and its confirmation, for one
+/// project with `pending` sessions waiting. One table so a shell renders it
+/// whole rather than assembling the title and body itself.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct IgnoreProjectCopy {
+    pub title: String,
+    pub body: String,
+    pub button: &'static str,
+    pub tooltip: &'static str,
+}
+
+/// The ignore-project words for `project` with `pending` sessions waiting.
+#[must_use]
+pub fn ignore_project_copy(project: &str, pending: usize) -> IgnoreProjectCopy {
+    IgnoreProjectCopy {
+        title: ignore_project_title(project),
+        body: ignore_project_body(pending),
+        button: IGNORE_PROJECT,
+        tooltip: IGNORE_PROJECT_TOOLTIP,
+    }
+}
+
+/// Every word of the arming offer and the arming confirmation, for one
+/// project the contributor has contributed from `count` times.
+///
+/// `body` is the from-now confirmation and `body_with_backlog` the one for
+/// `include_backlog`; `customize` is Customize's table (K5). DRAFT, NEEDS
+/// APPROVAL where [`ARMING_BODY`] and [`customize_copy`] say so.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct ArmingOfferCopy {
+    pub evidence: String,
+    pub question: String,
+    pub confirm: &'static str,
+    pub decline: &'static str,
+    pub body: &'static str,
+    pub body_with_backlog: &'static str,
+    pub customize: CustomizeCopy,
+}
+
+/// The arming words for `project_label`, contributed from `count` times.
+#[must_use]
+pub fn arming_offer_copy(project_label: &str, count: u32) -> ArmingOfferCopy {
+    ArmingOfferCopy {
+        evidence: arming_offer_evidence(project_label, count),
+        question: arming_offer_question(project_label),
+        confirm: ARMING_OFFER_CONFIRM,
+        decline: ARMING_OFFER_DECLINE,
+        body: ARMING_BODY,
+        body_with_backlog: ARMING_BODY_WITH_BACKLOG,
+        customize: customize_copy(),
+    }
+}
+
+#[cfg(test)]
+mod copy_table_tests {
+    use super::*;
+
+    #[test]
+    fn the_ignore_table_carries_the_project_and_the_count() {
+        let copy = ignore_project_copy("api", 3);
+        assert_eq!(copy.title, "Ignore api?");
+        assert_eq!(copy.body, ignore_project_body(3));
+        assert!(copy.body.contains("3 waiting traces"));
+        assert_eq!(copy.button, IGNORE_PROJECT);
+        assert_eq!(copy.tooltip, IGNORE_PROJECT_TOOLTIP);
+        assert!(
+            ignore_project_copy("api", 1)
+                .body
+                .contains("1 waiting trace ")
+        );
+        assert!(!ignore_project_copy("api", 0).body.contains("waiting trace"));
+    }
+
+    #[test]
+    fn the_ignore_table_serializes_the_keys_the_shells_read() {
+        let value = serde_json::to_value(ignore_project_copy("api", 2)).unwrap();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys.len(), 4);
+        for key in ["title", "body", "button", "tooltip"] {
+            assert!(value[key].is_string(), "{key}");
+        }
+    }
+
+    #[test]
+    fn the_arming_table_names_the_project_and_its_evidence() {
+        let copy = arming_offer_copy("api", 5);
+        assert_eq!(copy.evidence, "You've contributed from api 5 times.");
+        assert_eq!(
+            arming_offer_copy("api", 1).evidence,
+            "You've contributed from api once."
+        );
+        assert_eq!(copy.question, "Contribute from api automatically?");
+        assert_eq!(copy.confirm, ARMING_OFFER_CONFIRM);
+        assert_eq!(copy.decline, ARMING_OFFER_DECLINE);
+        assert_eq!(copy.body, ARMING_BODY);
+        assert_eq!(copy.body_with_backlog, ARMING_BODY_WITH_BACKLOG);
+        assert_eq!(copy.customize, customize_copy());
+    }
+
+    #[test]
+    fn the_arming_table_serializes_the_keys_the_shells_read() {
+        let value = serde_json::to_value(arming_offer_copy("api", 2)).unwrap();
+        for key in [
+            "evidence",
+            "question",
+            "confirm",
+            "decline",
+            "body",
+            "body_with_backlog",
+        ] {
+            assert!(value[key].is_string(), "{key}");
+        }
+        assert!(value["customize"]["keep"].is_string());
+    }
+}
+
 #[cfg(test)]
 mod arming_body_tests {
     use super::{ARMING_BODY, ARMING_BODY_WITH_BACKLOG, customize_copy};
