@@ -1,0 +1,15 @@
+{
+  "posture_state": "unknown",
+  "commons_settlement": null,
+  "commons_settlement_explanation": null,
+  "commons_graded": null,
+  "points_state": "unknown",
+  "commons_points_earned_this_period": null,
+  "commons_points_lifetime_earned": null,
+  "commons_pending_review": null,
+  "commons_currency_code": null,
+  "commons_currency_earned_this_period": null,
+  "commons_period_start": null,
+  "commons_period_end": null,
+  "observed_at": "<observed_at>"
+}

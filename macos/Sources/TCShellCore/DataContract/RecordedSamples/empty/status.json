@@ -1,0 +1,51 @@
+{
+  "schema_version": "trace_commons.daemon.v1_1",
+  "logged_in": false,
+  "tenant_id": null,
+  "consent_scopes": [],
+  "paused": false,
+  "queue_depth": 0,
+  "decisions_owed": 0,
+  "next_digest_at": null,
+  "health": {
+    "last_error_label": null,
+    "since": null
+  },
+  "daily_budget": {
+    "bytes_today": 0,
+    "max_bytes_per_day": 209715200,
+    "bytes_remaining": 209715200,
+    "uploads_today": 0,
+    "max_uploads_per_day": 50,
+    "uploads_remaining": 50,
+    "resets_at": "<resets_at>",
+    "blocked": false,
+    "blocked_entries": 0,
+    "blocked_bytes": 0
+  },
+  "routing": {
+    "state": "not_declared",
+    "derived": false,
+    "last_refresh_at": null,
+    "unreadable_rows": 0
+  },
+  "private_inference_state": {
+    "state": "off",
+    "port": null
+  },
+  "grant_voids": [],
+  "witness_capacity": {
+    "waiting_sessions": 0,
+    "next_retry_at": null
+  },
+  "legacy_invite_migration": {
+    "offered": false,
+    "notice": null
+  },
+  "arming_rewordings": [],
+  "automatic_contribution_held": {
+    "held_sessions": 0,
+    "reasons": [],
+    "projects": []
+  }
+}
