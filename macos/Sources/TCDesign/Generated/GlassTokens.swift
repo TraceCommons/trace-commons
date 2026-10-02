@@ -277,6 +277,8 @@ public enum GlassTokens {
         public static let glyph: CGFloat = 16
         public static let toolTile: CGFloat = 22
         public static let toolTileLarge: CGFloat = 30
+        public static let toolLogo: CGFloat = 15
+        public static let toolLogoLarge: CGFloat = 20
         public static let listRow: CGFloat = 40
         public static let paneLeftWidth: CGFloat = 400
         public static let mapWidth: CGFloat = 600
@@ -308,6 +310,8 @@ public enum GlassTokens {
             "glyph": glyph,
             "toolTile": toolTile,
             "toolTileLarge": toolTileLarge,
+            "toolLogo": toolLogo,
+            "toolLogoLarge": toolLogoLarge,
             "listRow": listRow,
             "paneLeftWidth": paneLeftWidth,
             "mapWidth": mapWidth,
