@@ -58,9 +58,10 @@ public extension View {
 
 public extension View {
     /// Size an SF Symbol or a mark inside a control of fixed size: a
-    /// chevron, a check, a tool's initials in a 22pt tile. Glyphs keep their
-    /// points because the control around them does; words never use this,
-    /// they use `glassType(_:)` and follow the system text size.
+    /// chevron, a check, the initials a tool with no logo shows in its 22pt
+    /// tile. Glyphs keep their points because the control around them does;
+    /// words never use this, they use `glassType(_:)` and follow the system
+    /// text size.
     func glassGlyph(_ size: CGFloat, weight: GlassWeight = .regular) -> some View {
         font(.system(size: size, weight: weight.font))
     }
