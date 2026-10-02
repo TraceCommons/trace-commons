@@ -2354,6 +2354,12 @@ char*       tc_legacy_migration_refusal_text(const char* label);
  */
 char*       tc_monitor_traces_copy_json(void);
 
+/* The glass monitor's other screens' words
+ * (preview_copy::monitor_screens_copy): the map, Inference, Home, History,
+ * Missions and the menu-bar popover. NULL only on a caught panic.
+ */
+char*       tc_monitor_screens_copy_json(void);
+
 /* The Traces badge's text equivalent (preview_copy::decisions_owed_text).
  * A negative decisions_owed is an unknown count, never zero. The EMPTY
  * STRING for zero. NULL only on a caught panic.

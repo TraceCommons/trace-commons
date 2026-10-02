@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -15,8 +16,11 @@ struct InferenceTabView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                // The stack-wide rule (ScreenState): a core that is down or a
+                // failed read is said in the core's words over the last page,
+                // never as the error's fixed label and never as current.
                 if let failure = store.failures["inference_calls"] {
-                    GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
+                    GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }
                 if let page = store.calls {
                     if page.readable {
@@ -196,7 +200,7 @@ struct PrivateAIInspectorView: View {
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
                 if let failure = store.failures["harness_list"] {
-                    GlassNotice(tone: .outside, title: failure.description) { EmptyView() }
+                    GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }
                 if let harnesses = store.harnesses {
                     ForEach(harnesses.harnesses) { row in
@@ -233,17 +237,19 @@ struct PrivateAIInspectorView: View {
 /// The single words the map and the Inference tab show, beside the names
 /// the core reports and the core's sentences (`ShellWordingTests`).
 enum InferenceWords {
-    /// IronWire's proof label, as one word. Only `verified` is proof.
+    /// IronWire's proof label, as one word from the core. Only `verified` is
+    /// proof.
     static func proof(_ label: DaemonData.ProofLabel) -> String {
+        guard let words = MonitorWords.table else { return "" }
         switch label {
-        case .verified: "Verified"
-        case .gatewayOnly: "Gateway"
-        case .unattested: "Unattested"
-        case .pending: "Pending"
-        case .unavailable: "Unavailable"
-        case .failed: "Failed"
-        case .outside: "Outside"
-        case .unrecorded: "Unrecorded"
+        case .verified: return words.proofVerified
+        case .gatewayOnly: return words.proofGatewayOnly
+        case .unattested: return words.proofUnattested
+        case .pending: return words.proofPending
+        case .unavailable: return words.proofUnavailable
+        case .failed: return words.proofFailed
+        case .outside: return words.proofOutside
+        case .unrecorded: return words.proofUnrecorded
         }
     }
 
@@ -252,23 +258,25 @@ enum InferenceWords {
     }
 }
 
-/// The single words the map, the Inference tab and the screens after it
-/// show. The Traces tab's words moved to the core (`MonitorTracesCopy`,
-/// `780d562a`); these are pending the same move, and stay single words
-/// until then (`ShellWordingTests`).
+/// The monitor screens' words, read from the core's table
+/// (`MonitorScreensCopy`, `tc_monitor_screens_copy_json`). This shell holds
+/// none of its own: with no table a word is empty, never a Swift fallback.
 enum MonitorWords {
-    static let computer = "Computer"
-    static let commons = "Commons"
-    static let waiting = "Waiting"
-    static let folders = "Folders"
-    static let watched = "Watched"
-    static let off = "Off"
-    static let connected = "Connected"
-    static let reduce = "Reduce"
-    static let enlarge = "Enlarge"
-    static let calls = "Calls"
-    static let models = "Models"
-    static let priced = "Priced"
-    static let unknown = "Unknown"
+    /// The core's table, decoded once.
+    static let table: MonitorScreensCopy? = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())
+
+    static var computer: String { table?.computer ?? "" }
+    static var commons: String { table?.commons ?? "" }
+    static var waiting: String { table?.waiting ?? "" }
+    static var folders: String { table?.folders ?? "" }
+    static var watched: String { table?.watched ?? "" }
+    static var off: String { table?.off ?? "" }
+    static var connected: String { table?.connected ?? "" }
+    static var reduce: String { table?.reduce ?? "" }
+    static var enlarge: String { table?.enlarge ?? "" }
+    static var calls: String { table?.calls ?? "" }
+    static var models: String { table?.models ?? "" }
+    static var priced: String { table?.priced ?? "" }
+    static var unknown: String { table?.unknown ?? "" }
 }
 #endif
