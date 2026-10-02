@@ -19,9 +19,8 @@ import Foundation
 ///   with the same plain `JSONDecoder` the existing `ProjectRow` and
 ///   `HarnessList` already use (`DaemonDataDecoding.decoder()`).
 ///
-/// Types marked `// PROVISIONAL: shape owned by Zaki's C3` describe network
-/// methods that do not exist on main yet; C3 writes their real shape into
-/// the IPC doc and these follow it.
+/// Network models follow the finalized C3 contract, including the upstream
+/// summary grouping and the separate skill-evaluation catalogue wrapper.
 public enum DaemonData {}
 
 // MARK: - Decoding
@@ -820,70 +819,132 @@ extension DaemonData {
     }
 }
 
-// MARK: - Network methods that do not exist yet (Zaki's C3)
+// MARK: - Network methods (finalized C3 contract)
 
 extension DaemonData {
-    /// Z1.1: per-model calls, cost and proof counts from IronWire's
-    /// `/_ironwire/summary`, which nothing reads today.
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// `inference_summary`: unreadable is never an observed empty window.
     public struct InferenceSummary: Codable, Equatable, Sendable {
-        /// Same meaning as `InferenceCallPage.readable`.
         public let readable: Bool
         public let windowHours: Int?
-        public let models: [ModelSummary]
+        public let observedAt: Date?
+        public let summary: InferenceSummaryView?
 
         public enum CodingKeys: String, CodingKey {
-            case readable, models
+            case readable, summary
             case windowHours = "window_hours"
+            case observedAt = "observed_at"
         }
     }
 
-    // PROVISIONAL: shape owned by Zaki's C3
-    public struct ModelSummary: Codable, Equatable, Sendable, Identifiable {
-        public let model: String
-        public let family: String?
-        public let calls: Int?
-        /// Priced, not billed (see `PricedCost`).
-        public let pricedMicros: Int64?
-        /// Calls per `ProofLabel` raw value.
-        public let proofCounts: [String: Int]?
+    /// The Cargo-pinned IronWire `/_ironwire/summary` reply, unchanged.
+    public struct InferenceSummaryView: Codable, Equatable, Sendable {
+        /// Disabled capture is not an observed empty window.
+        public let enabled: Bool
+        /// The receipts setting, not a claim that every call is verified.
+        public let receipts: Bool
+        public let since: Date
+        public let groups: [InferenceSummaryGroup]
+        public let routed: InferenceRouteTotal
+        public let outside: InferenceRouteTotal
+        public let unknown: InferenceRouteTotal
+    }
 
-        public var id: String { model }
+    public struct InferenceSummaryGroup: Codable, Equatable, Sendable, Identifiable {
+        public let model: String?
+        /// A backend label, not verified provider identity.
+        public let backend: String
+        public let route: String
+        /// No classification source exists today; this remains nil.
+        public let workKind: String?
+        public let calls: Int64
+        public let pricedCalls: Int64
+        /// Registry-priced USD over priced calls only, never billed spend.
+        public let costUSD: Double
+        public let proof: InferenceProofCounts
+
+        public struct GroupID: Hashable, Sendable {
+            public let model: String?
+            public let backend: String
+            public let route: String
+            public let workKind: String?
+        }
+
+        public var id: GroupID {
+            GroupID(model: model, backend: backend, route: route, workKind: workKind)
+        }
 
         public enum CodingKeys: String, CodingKey {
-            case model, family, calls
-            case pricedMicros = "priced_micros"
-            case proofCounts = "proof_counts"
+            case model, backend, route, calls, proof
+            case workKind = "work_kind"
+            case pricedCalls = "priced_calls"
+            case costUSD = "cost_usd"
         }
     }
 
-    /// Z1.2: `inference_call_proof`, a proof's detail.
-    // PROVISIONAL: shape owned by Zaki's C3
+    public struct InferenceRouteTotal: Codable, Equatable, Sendable {
+        public let calls: Int64
+        public let pricedCalls: Int64
+        /// Registry-priced, not billed. `pricedCalls < calls` is incomplete pricing.
+        public let costUSD: Double
+        public let proof: InferenceProofCounts
+
+        public enum CodingKeys: String, CodingKey {
+            case calls, proof
+            case pricedCalls = "priced_calls"
+            case costUSD = "cost_usd"
+        }
+    }
+
+    /// Only `verified` is model proof; failed and gateway-only remain distinct.
+    public struct InferenceProofCounts: Codable, Equatable, Sendable {
+        public let verified: Int64
+        public let gatewayOnly: Int64
+        public let unattested: Int64
+        public let pending: Int64
+        public let unavailable: Int64
+        public let failed: Int64
+        public let outside: Int64
+        public let unrecorded: Int64
+
+        public enum CodingKeys: String, CodingKey {
+            case verified, unattested, pending, unavailable, failed, outside, unrecorded
+            case gatewayOnly = "gateway_only"
+        }
+    }
+
+    /// `inference_call_proof`: a stored label, not a new verification.
     public struct InferenceProofDetail: Codable, Equatable, Sendable {
         public let callId: Int64
         public let proof: String
+        /// The current source records neither timestamp nor detailed checks.
         public let checkedAt: Date?
-        /// Fixed labels describing what was checked; the copy comes from the core.
         public let checks: [String]?
+        public let readable: Bool
+        public let found: Bool
 
         public enum CodingKeys: String, CodingKey {
-            case proof, checks
+            case proof, checks, readable, found
             case callId = "call_id"
             case checkedAt = "checked_at"
         }
     }
 
-    /// Z1.3: billed spend per model. Today only `harness_list.spend` (a day's
-    /// total) is billed.
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// `model_spend`: unknown until an authoritative per-model debit source exists.
     public struct ModelSpend: Codable, Equatable, Sendable {
         /// `false` is not zero.
         public let known: Bool
         public let since: Date?
+        /// Empty while unknown; this does not imply a zero balance.
         public let models: [ModelBilled]
+        public let reasonLabel: String
+
+        public enum CodingKeys: String, CodingKey {
+            case known, since, models
+            case reasonLabel = "reason_label"
+        }
     }
 
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// Reserved for a future source; the current contract never emits billed rows.
     public struct ModelBilled: Codable, Equatable, Sendable {
         public let model: String
         public let billedMicros: Int64?
@@ -894,65 +955,72 @@ extension DaemonData {
         }
     }
 
-    /// Z1.5: the Private AI on/off switch, with its disclosure from the core.
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// Requested setting and actual owned-proxy state are separate facts.
     public struct PrivateAISwitch: Codable, Equatable, Sendable {
-        /// `nil` when the daemon cannot say.
         public let on: Bool?
-        /// The `private_inference_state.state` label.
         public let state: String?
-        public let disclosure: String?
+        public let port: Int?
+        /// Supplied by the Rust core; Swift does not author release consent copy.
+        public let disclosure: String
     }
 
-    /// Z2.2: the mission catalogue, the same request for every contributor.
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// `mission_catalogue`: public skill-evaluation packages, with no daily rewards.
     public struct MissionCatalogue: Codable, Equatable, Sendable {
-        public let missions: [Mission]
-        public let fetchedAt: Date?
-        /// Settlement posture, so pending credit carries its condition (D8).
-        public let posture: CreditPosture?
+        public let kind: String
+        public let catalogue: MissionCatalogPage
+        public let disclosure: String
+    }
+
+    /// Mirrors protocol `MissionCatalogPage`; entries grant no execution or consent.
+    public struct MissionCatalogPage: Codable, Equatable, Sendable {
+        public let schemaVersion: UInt32
+        public let entries: [MissionCatalogEntry]
+        public let nextCursor: String?
 
         public enum CodingKeys: String, CodingKey {
-            case missions, posture
-            case fetchedAt = "fetched_at"
+            case entries
+            case schemaVersion = "schema_version"
+            case nextCursor = "next_cursor"
         }
     }
 
-    // PROVISIONAL: shape owned by Zaki's C3
-    public struct Mission: Codable, Equatable, Sendable, Identifiable {
-        public let id: String
-        public let title: String
-        public let summary: String?
-        /// Always pending, never earned (D8).
-        public let creditRange: CreditRange?
+    public struct MissionCatalogEntry: Codable, Equatable, Sendable, Identifiable {
+        public let missionId: String
+        public let programId: String
+        public let packageSHA256: String
+        public let offerVersionHash: String
+        /// Bounded plaintext, not HTML.
+        public let taskPreview: String
+        public let publishedAt: Date
+
+        public var id: String { missionId }
 
         public enum CodingKeys: String, CodingKey {
-            case id, title, summary
-            case creditRange = "credit_range"
+            case missionId = "mission_id"
+            case programId = "program_id"
+            case packageSHA256 = "package_sha256"
+            case offerVersionHash = "offer_version_hash"
+            case taskPreview = "task_preview"
+            case publishedAt = "published_at"
         }
     }
 
-    /// Mirrors `trace_commons_protocol::CreditPosture`.
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// Protocol `CreditPosture`; catalogue entries do not supply credit ranges.
     public struct CreditPosture: Codable, Equatable, Sendable {
-        /// `http`, `dry_run`, or `disabled`.
         public let settlement: String
         public let graded: Bool
         public let explanation: String
     }
 
-    /// Mirrors `trace_commons_protocol::invite_lookup::CreditRange`.
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// Invite operator's estimated credit per accepted trace, not yet settled.
     public struct CreditRange: Codable, Equatable, Sendable {
         public let min: Int
         public let max: Int
-        /// `points` today.
+        /// `points_per_accepted_trace`.
         public let unit: String
     }
 
-    /// Z3.1: invite lookup, mirroring the server's `InviteLookupResponse`.
-    /// The pay range is pending credit (D8).
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// Mirrors protocol `InviteLookupResponse`.
     public struct InviteLookup: Codable, Equatable, Sendable {
         public let valid: Bool
         public let issuerDisplayName: String?
@@ -967,11 +1035,10 @@ extension DaemonData {
         }
     }
 
-    /// Z3.2: passkey binding state.
-    // PROVISIONAL: shape owned by Zaki's C3
     public struct PasskeyState: Codable, Equatable, Sendable {
-        /// A fixed label, for example `none`, `bound`.
+        /// `none`, `unknown`, or binding labels `unbound|bound|closed|legacy`.
         public let state: String
+        /// Neither count nor connection is inferred from a missing binding row.
         public let passkeyCount: Int?
         public let nearAiConnected: Bool?
 
@@ -982,15 +1049,18 @@ extension DaemonData {
         }
     }
 
-    /// Z3.4: `account_session_status`.
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// `account_session_status`: unreadable storage is unknown, never signed out.
     public struct AccountState: Codable, Equatable, Sendable {
+        public let state: String
         public let signedIn: Bool?
         public let accountId: String?
+        public let expiresAt: Date?
 
         public enum CodingKeys: String, CodingKey {
+            case state
             case signedIn = "signed_in"
             case accountId = "account_id"
+            case expiresAt = "expires_at"
         }
     }
 }

@@ -41,7 +41,7 @@ final class DaemonDataContractTests: XCTestCase {
                 _ = try await client.inferenceCallProof(callId: 414)
                 _ = try await client.modelSpend()
                 _ = try await client.privateAI()
-                _ = try await client.setPrivateAI(on: true)
+                _ = try await client.setPrivateAI(on: true, confirmed: true)
                 _ = try await client.missionCatalogue()
                 _ = try await client.lookupInvite(code: "c")
                 _ = try await client.passkeyState()
@@ -207,7 +207,7 @@ final class DaemonDataContractTests: XCTestCase {
             ("inferenceCallProof", { _ = try await client.inferenceCallProof(callId: 1) }),
             ("modelSpend", { _ = try await client.modelSpend() }),
             ("privateAI", { _ = try await client.privateAI() }),
-            ("setPrivateAI", { _ = try await client.setPrivateAI(on: false) }),
+            ("setPrivateAI", { _ = try await client.setPrivateAI(on: false, confirmed: false) }),
             ("missionCatalogue", { _ = try await client.missionCatalogue() }),
             ("lookupInvite", { _ = try await client.lookupInvite(code: "c") }),
             ("passkeyState", { _ = try await client.passkeyState() }),
@@ -282,16 +282,16 @@ final class DaemonDataContractTests: XCTestCase {
         }
     }
 
-    func testLiveClientThrowsNotAvailableYetForProvisionalMethods() async {
-        let transport = FakeTransport(response: #"{"id":1,"result":{}}"#)
+    func testLiveClientKeepsUnknownMethodForAnOlderDaemon() async {
+        let transport = FakeTransport(response: #"{"id":1,"error":{"code":"unknown_method","message":"unknown-method"}}"#)
         let client = LiveDaemonClient(transport: transport)
         do {
             _ = try await client.missionCatalogue()
-            XCTFail("a provisional method answered")
+            XCTFail("an unsupported method answered")
         } catch {
-            XCTAssertEqual(error as? DaemonDataError, .notAvailableYet(method: "mission_catalogue"))
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "unknown_method", message: "unknown-method"))
         }
-        XCTAssertTrue(transport.calls.isEmpty, "nothing is sent for a method the daemon does not have")
+        XCTAssertEqual(transport.calls.first?.method, "mission_catalogue")
     }
 
     func testLiveEventsDeliverParsedFrames() async {

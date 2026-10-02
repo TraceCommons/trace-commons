@@ -170,7 +170,7 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("inference_calls", as: DaemonData.InferenceCallPage.self)
     }
 
-    // MARK: PROVISIONAL network methods (Zaki's C3)
+    // MARK: SAMPLE network methods (C3)
 
     public func inferenceSummary() async throws -> DaemonData.InferenceSummary {
         try serve("inference_summary", as: DaemonData.InferenceSummary.self)
@@ -188,8 +188,12 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
     }
 
-    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
-        try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
+    public func setPrivateAI(on: Bool, confirmed: Bool) async throws -> DaemonData.PrivateAISwitch {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        guard !on || confirmed else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "confirmation-required")
+        }
+        return try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
     }
 
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {

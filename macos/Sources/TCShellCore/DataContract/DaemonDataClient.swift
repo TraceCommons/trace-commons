@@ -14,9 +14,9 @@ import Foundation
 /// replacing it: K1 moves the remaining calls across, and Ron's screens
 /// are written against this one from the start.
 ///
-/// One `async throws` method per IPC method a screen needs. Methods marked
-/// PROVISIONAL are network methods that do not exist on main yet (Zaki's C3);
-/// the live client throws `DaemonDataError.notAvailableYet` for them.
+/// One `async throws` method per IPC method a screen needs. Unsupported
+/// daemon methods retain the daemon's `unknown_method` refusal; no sample
+/// data substitutes for unavailable live data.
 public protocol DaemonDataClient: Sendable {
     // MARK: Status and the queue
 
@@ -77,25 +77,27 @@ public protocol DaemonDataClient: Sendable {
     /// `inference_calls`. `limit` 1-200; `cursor` is the previous page's `nextCursor`.
     func inferenceCalls(limit: Int, cursor: String?) async throws -> DaemonData.InferenceCallPage
 
-    // MARK: PROVISIONAL network methods (Zaki's C3)
+    // MARK: Network methods (C3)
 
-    /// Z1.1, per-model summary. PROVISIONAL.
+    /// Z1.1, upstream grouped summary; registry-priced cost is not billed spend.
     func inferenceSummary() async throws -> DaemonData.InferenceSummary
-    /// Z1.2, `inference_call_proof`. PROVISIONAL.
+    /// Z1.2, `inference_call_proof`.
     func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail
-    /// Z1.3, billed spend per model. PROVISIONAL.
+    /// Z1.3, billed spend per model.
     func modelSpend() async throws -> DaemonData.ModelSpend
-    /// Z1.5, the Private AI switch's state and disclosure. PROVISIONAL.
+    /// Z1.5, the Private AI switch's state and disclosure.
     func privateAI() async throws -> DaemonData.PrivateAISwitch
-    /// Z1.5, turning Private AI on or off. PROVISIONAL.
-    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
-    /// Z2.2, the mission catalogue. PROVISIONAL.
+    /// Z1.5, turning Private AI on or off.
+    /// `confirmed` is the caller's explicit answer after the core disclosure.
+    /// Enabling with false is refused; no implicit acknowledgement is supplied.
+    func setPrivateAI(on: Bool, confirmed: Bool) async throws -> DaemonData.PrivateAISwitch
+    /// Z2.2, the mission catalogue.
     func missionCatalogue() async throws -> DaemonData.MissionCatalogue
-    /// Z3.1, invite lookup. PROVISIONAL.
+    /// Z3.1, invite lookup. `code` carries the full invite URL.
     func lookupInvite(code: String) async throws -> DaemonData.InviteLookup
-    /// Z3.2, passkey binding state. PROVISIONAL.
+    /// Z3.2, passkey binding state.
     func passkeyState() async throws -> DaemonData.PasskeyState
-    /// Z3.4, `account_session_status`. PROVISIONAL.
+    /// Z3.4, `account_session_status`.
     func accountState() async throws -> DaemonData.AccountState
 
     // MARK: Live updates

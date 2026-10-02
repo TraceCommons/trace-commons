@@ -14,10 +14,9 @@ public protocol DaemonTransport: AnyObject {
 
 /// The real `DaemonDataClient`, over `tc_call`.
 ///
-/// Wired for every method that exists on main. The PROVISIONAL network
-/// methods (Zaki's C3) throw `notAvailableYet` until their IPC lands;
-/// `previewUnsureSpans` does too, because the synchronous `tc_call` entry
-/// point refuses it (`preview-unsure-spans-requires-async`) and its ABI
+/// Wired for the established methods and finalized C3 network contract.
+/// `previewUnsureSpans` still throws `notAvailableYet`, because the
+/// synchronous `tc_call` entry point refuses it (`preview-unsure-spans-requires-async`) and its ABI
 /// twin `tc_preview_unsure_spans_json` is routed in K1.
 ///
 /// `@unchecked Sendable`: the only state is the transport, and the C ABI
@@ -136,42 +135,42 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try call("inference_calls", params: params, as: DaemonData.InferenceCallPage.self)
     }
 
-    // MARK: PROVISIONAL network methods (Zaki's C3): not on main yet
+    // MARK: Network methods (C3)
 
     public func inferenceSummary() async throws -> DaemonData.InferenceSummary {
-        throw DaemonDataError.notAvailableYet(method: "inference_summary")
+        try call("inference_summary", as: DaemonData.InferenceSummary.self)
     }
 
     public func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail {
-        throw DaemonDataError.notAvailableYet(method: "inference_call_proof")
+        try call("inference_call_proof", params: ["call_id": callId], as: DaemonData.InferenceProofDetail.self)
     }
 
     public func modelSpend() async throws -> DaemonData.ModelSpend {
-        throw DaemonDataError.notAvailableYet(method: "model_spend")
+        try call("model_spend", as: DaemonData.ModelSpend.self)
     }
 
     public func privateAI() async throws -> DaemonData.PrivateAISwitch {
-        throw DaemonDataError.notAvailableYet(method: "private_ai")
+        try call("private_ai", as: DaemonData.PrivateAISwitch.self)
     }
 
-    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
-        throw DaemonDataError.notAvailableYet(method: "set_private_ai")
+    public func setPrivateAI(on: Bool, confirmed: Bool) async throws -> DaemonData.PrivateAISwitch {
+        try call("set_private_ai", params: ["on": on, "confirmed": confirmed], as: DaemonData.PrivateAISwitch.self)
     }
 
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
-        throw DaemonDataError.notAvailableYet(method: "mission_catalogue")
+        try call("mission_catalogue", as: DaemonData.MissionCatalogue.self)
     }
 
     public func lookupInvite(code: String) async throws -> DaemonData.InviteLookup {
-        throw DaemonDataError.notAvailableYet(method: "invite_lookup")
+        try call("invite_lookup", params: ["code": code], as: DaemonData.InviteLookup.self)
     }
 
     public func passkeyState() async throws -> DaemonData.PasskeyState {
-        throw DaemonDataError.notAvailableYet(method: "passkey_state")
+        try call("passkey_state", as: DaemonData.PasskeyState.self)
     }
 
     public func accountState() async throws -> DaemonData.AccountState {
-        throw DaemonDataError.notAvailableYet(method: "account_session_status")
+        try call("account_session_status", as: DaemonData.AccountState.self)
     }
 
     // MARK: Live updates
