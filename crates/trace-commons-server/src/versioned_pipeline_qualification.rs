@@ -987,6 +987,13 @@ impl PipelineQualificationStore {
     /// the corpus report or the input it ran on, so nothing here can
     /// recompute either digest from `evidence`. Binding them needs signed
     /// results that carry those digests, which is PR 5's.
+    ///
+    /// A recorded qualification covers the signed package and its
+    /// dependency profile, not the deployment's bindings (merge review M2).
+    /// `main`'s gate configuration (`pipeline_runtime_main_gate_config_mismatch`)
+    /// and the pipeline credit issuer (`pipeline_credit_issuer_principal_missing`)
+    /// are startup checks of every bundle a routed or drained tenant may run,
+    /// not terms of this record, and PR 5's activation must keep them.
     pub async fn qualify_bundle(
         &self,
         tenant_id: &str,

@@ -354,6 +354,14 @@ leaves out the evaluation time, so the two agree. A successful call records
 one append-only row per `(tenant_id, bundle_id)` in
 `pipeline_bundle_qualifications` (migration V107).
 
+A recorded qualification covers the signed package and its dependency
+profile, not the deployment's bindings. `main`'s gate configuration
+(`pipeline_runtime_main_gate_config_mismatch`) and the pipeline credit
+issuer (`pipeline_credit_issuer_principal_missing`) are startup checks of
+every bundle a routed or drained tenant may run (see
+[pipeline-activation.md](pipeline-activation.md), "Each tenant's bundles at
+startup"), not terms of the record, and PR 5's activation must keep them.
+
 Calling `qualify_bundle` over HTTP, and using its record to activate a
 bundle for a tenant's live traffic, are PR 5 work. See
 [pipeline-activation.md](pipeline-activation.md) for what activation adds
