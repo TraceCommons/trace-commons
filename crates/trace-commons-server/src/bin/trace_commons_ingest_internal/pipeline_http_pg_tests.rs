@@ -4222,6 +4222,120 @@ async fn mains_legacy_review_routes_leave_pipeline_submissions_out() {
     }
 }
 
+/// An embedder whose descriptor no test runtime registers.
+struct UnregisteredEmbedder;
+
+impl trace_commons_gate_api::Embedder for UnregisteredEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        trace_commons_gate_api::Embedder::embed(&ReferenceEmbedder::new(), plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedEmbedder for UnregisteredEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "unregistered_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "unregistered-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"unregistered-embedder-test-only.v1".to_vec()
+    }
+}
+
+/// Zaki's approval, follow-up ZA-1: boot is refused when a routed or
+/// drained tenant's bundle is not the default package and today's runtime
+/// cannot run it (`validate_pipeline_tenant_bundles`, which ingest runs
+/// before it serves): here an earlier runtime bound the tenant to a package
+/// over an embedder today's runtime does not hold. A drained tenant on
+/// today's default bundle boots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boot_refuses_a_tenant_bundle_the_runtime_cannot_run() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        local_artifacts(&dir),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_boot_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-boot-unrunnable-{suffix}");
+    let earlier = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: true,
+            variant: None,
+        },
+        &ReferencePerplexityScorer::new(),
+        &UnregisteredEmbedder,
+    )
+    .expect("build the earlier package");
+    let store = PgPipelineStore::new(runtime.clone());
+    store.register_bundle(&tenant, &earlier).await.unwrap();
+    store
+        .activate_bundle_if_none(&tenant, &earlier.bundle_id)
+        .await
+        .unwrap();
+
+    for (routed, drained) in [
+        (
+            TraceTenantRolloutGates::default(),
+            BTreeSet::from([tenant.clone()]),
+        ),
+        (
+            TraceTenantRolloutGates::for_feature(
+                TraceTenantRolloutFeature::PipelineReceipts,
+                &[tenant.as_str()],
+            ),
+            BTreeSet::new(),
+        ),
+    ] {
+        let error = pipeline_runtime::validate_pipeline_tenant_bundles(
+            &service,
+            &routed,
+            &drained,
+            &TEST_MAIN_GATE,
+            true,
+        )
+        .await
+        .err()
+        .expect("boot is refused");
+        assert_eq!(
+            error.to_string(),
+            "pipeline_tenant_bundle_dependency_missing"
+        );
+    }
+
+    let current = format!("tenant-boot-current-{suffix}");
+    service.register_default_bundle(&current).await.unwrap();
+    pipeline_runtime::validate_pipeline_tenant_bundles(
+        &service,
+        &TraceTenantRolloutGates::default(),
+        &BTreeSet::from([current]),
+        &TEST_MAIN_GATE,
+        true,
+    )
+    .await
+    .expect("a tenant on today's default bundle boots");
+}
+
 /// The review routes through the router, against a real runtime:
 ///
 /// - Another reviewer's live claim answers a second reviewer's claim `409`.
