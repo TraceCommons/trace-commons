@@ -12760,6 +12760,21 @@ fn pipeline_receipt_lock(tenant_id: &str, request_idempotency_key: &str) -> Stri
     format!("pipeline-receipt:{tenant_id}:{request_idempotency_key}")
 }
 
+/// The `hashtextextended` seed of the routing lock. A seed names a lock
+/// class: the receipt lock uses 0, the quota and bundle registry locks use 1,
+/// so a tenant's routing lock key can never collide with one of those.
+/// Exclusive holders (`PipelineActivationStore`) and shared holders (a
+/// receipt's transactions) both bind this constant, so they cannot disagree.
+pub(crate) const PIPELINE_ROUTING_LOCK_SEED: i64 = 2;
+
+/// The transaction-scoped advisory lock key of a tenant's routing. A routing
+/// change takes it exclusively; a receipt's staging and commit transactions
+/// take it shared, so a routing change waits for the receipts in those
+/// transactions and no later receipt misses it.
+pub(crate) fn pipeline_routing_lock(tenant_id: &str) -> String {
+    format!("pipeline-routing:{tenant_id}")
+}
+
 /// Builds the `trace_object_refs` write for the approved content a Review
 /// approval stores. The object ref id is derived from the run id alone, so a
 /// retry after a crash between the artifact write and the commit records the

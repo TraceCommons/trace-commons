@@ -51,6 +51,10 @@ use trace_commons_server::trace_corpus_storage::{
     TraceObjectArtifactKind, TraceObjectRefWrite, TraceSourceSessionStatus, TraceSubmissionWrite,
 };
 use trace_commons_server::versioned_pipeline::*;
+use trace_commons_server::versioned_pipeline_activation::{
+    ACTIVATION_ACTOR_INVALID_LABEL, ACTIVATION_STATE_INVALID_LABEL, ActivationAction,
+    PipelineActivationStore, ReceiptOwner, ReceiptOwnership, RoutingState,
+};
 use trace_commons_server::versioned_pipeline_authority::{
     PipelineAuthorityProvider, PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
 };
@@ -31239,4 +31243,449 @@ async fn a_submission_with_a_withdrawal_time_is_not_operable_for_score() {
         scored.last_error_label.as_deref(),
         Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
     );
+}
+
+// Routing, containment, and receipt ownership (delivery PR 5, Task 2). Each
+// test uses a fresh tenant, so the tests do not share rows.
+
+/// A credential's `principal_ref`: `principal_sha256:` and 64 hex digits.
+fn routing_actor() -> String {
+    format!("principal_sha256:{}", "ab".repeat(32))
+}
+
+fn routing_tenant(tag: &str) -> String {
+    format!("routing-{tag}-{}", uuid::Uuid::new_v4())
+}
+
+/// Counts the rows of `table` that the runtime login can see while the
+/// tenant setting names `tenant_id`.
+async fn visible_rows(backend: &Arc<PgBackend>, tenant_id: &str, table: &str) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .unwrap();
+    let count: i64 = tx
+        .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+#[tokio::test]
+async fn a_tenant_without_a_row_has_no_routing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend);
+    let tenant = routing_tenant("none");
+    assert_eq!(store.routing(&tenant).await.unwrap(), None);
+    assert!(store.events(&tenant, 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn containment_and_deactivation_write_the_row_and_an_event() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend);
+    let tenant = routing_tenant("contain");
+    let actor = routing_actor();
+
+    // A deactivation needs a row to deactivate: a tenant with no row is
+    // refused, and no event records the refusal.
+    let unrouted = store
+        .deactivate(&tenant, &actor, "return_to_legacy")
+        .await
+        .expect_err("a tenant with no row cannot be deactivated");
+    assert!(
+        matches!(&unrouted, DatabaseError::Constraint(label) if label == ACTIVATION_STATE_INVALID_LABEL),
+        "unexpected error: {unrouted:?}"
+    );
+    assert_eq!(store.routing(&tenant).await.unwrap(), None);
+    assert!(store.events(&tenant, 10).await.unwrap().is_empty());
+
+    let contained = store
+        .contain(&tenant, &actor, "contain_first_rollout")
+        .await
+        .expect("contain a tenant with no row");
+    assert_eq!(contained.routing_state, RoutingState::Contained);
+    assert_eq!(contained.actor_principal_ref, actor);
+    assert_eq!(contained.reason_code, "contain_first_rollout");
+    assert_eq!(
+        store.routing(&tenant).await.unwrap(),
+        Some(contained.clone())
+    );
+
+    let events = store.events(&tenant, 10).await.unwrap();
+    assert_eq!(events.len(), 1);
+    let first = &events[0];
+    assert_eq!(first.action, ActivationAction::Contain);
+    assert_eq!(first.previous_state, None);
+    assert_eq!(first.resulting_state, RoutingState::Contained);
+    assert_eq!(first.previous_bundle_id, None);
+    assert_eq!(first.resulting_bundle_id, None);
+    assert_eq!(first.actor_principal_ref, actor);
+    assert_eq!(first.reason_code, "contain_first_rollout");
+    // The evidence hash is a function of the action, the tenant, and the
+    // reason, and nothing else.
+    let expected_hash = format!(
+        "sha256:{:x}",
+        Sha256::digest(
+            format!("trace_commons.pipeline_contain.v1\0{tenant}\0contain_first_rollout")
+                .as_bytes()
+        )
+    );
+    assert_eq!(first.evidence_hash, expected_hash);
+    assert_eq!(contained.evidence_hash, expected_hash);
+
+    let legacy = store
+        .deactivate(&tenant, &actor, "return_to_legacy")
+        .await
+        .expect("deactivate a contained tenant");
+    assert_eq!(legacy.routing_state, RoutingState::Legacy);
+    assert_eq!(legacy.reason_code, "return_to_legacy");
+    assert_ne!(legacy.activation_record_id, contained.activation_record_id);
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(legacy.clone()));
+
+    // Newest first.
+    let events = store.events(&tenant, 10).await.unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].action, ActivationAction::Deactivate);
+    assert_eq!(events[0].previous_state, Some(RoutingState::Contained));
+    assert_eq!(events[0].resulting_state, RoutingState::Legacy);
+    assert_eq!(events[0].previous_bundle_id, None);
+    assert_eq!(events[0].resulting_bundle_id, None);
+    assert_eq!(events[0].reason_code, "return_to_legacy");
+    assert_eq!(events[1].action, ActivationAction::Contain);
+    assert_eq!(events[1].event_id, first.event_id);
+    assert_ne!(events[0].event_id, events[1].event_id);
+    let newest = store.events(&tenant, 1).await.unwrap();
+    assert_eq!(newest.len(), 1);
+    assert_eq!(newest[0].event_id, events[0].event_id);
+
+    // A second deactivation finds a Legacy row: refused, no event, and the
+    // row is as it was.
+    let again = store
+        .deactivate(&tenant, &actor, "return_to_legacy")
+        .await
+        .expect_err("a Legacy tenant cannot be deactivated");
+    assert!(
+        matches!(&again, DatabaseError::Constraint(label) if label == ACTIVATION_STATE_INVALID_LABEL),
+        "unexpected error: {again:?}"
+    );
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 2);
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(legacy));
+
+    // An invalid actor or reason is refused with its own label and writes
+    // nothing.
+    for (bad_actor, bad_reason) in [("", "contain_again"), (actor.as_str(), "Bad Reason")] {
+        let invalid = store
+            .contain(&tenant, bad_actor, bad_reason)
+            .await
+            .expect_err("an invalid actor or reason is refused");
+        assert!(
+            matches!(&invalid, DatabaseError::Constraint(label) if label == ACTIVATION_ACTOR_INVALID_LABEL),
+            "unexpected error: {invalid:?}"
+        );
+    }
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 2);
+}
+
+/// Containment changes no bundle: the event carries the active bundle in
+/// both bundle columns, and the active bundle row is as it was.
+#[tokio::test]
+async fn containment_records_the_active_bundle_in_both_bundle_columns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("bundle");
+    let actor = routing_actor();
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let pipeline_store = PgPipelineStore::new(backend);
+    assert_eq!(
+        pipeline_store.active_bundle_id(&tenant).await.unwrap(),
+        Some(run.bundle_id.clone())
+    );
+
+    store
+        .contain(&tenant, &actor, "contain_first_rollout")
+        .await
+        .unwrap();
+    store
+        .deactivate(&tenant, &actor, "return_to_legacy")
+        .await
+        .unwrap();
+
+    let events = store.events(&tenant, 10).await.unwrap();
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert_eq!(
+            event.previous_bundle_id.as_deref(),
+            Some(run.bundle_id.as_str())
+        );
+        assert_eq!(
+            event.resulting_bundle_id.as_deref(),
+            Some(run.bundle_id.as_str())
+        );
+    }
+    assert_eq!(
+        pipeline_store.active_bundle_id(&tenant).await.unwrap(),
+        Some(run.bundle_id)
+    );
+}
+
+#[tokio::test]
+async fn routing_is_tenant_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant_a = routing_tenant("scope-a");
+    let tenant_b = routing_tenant("scope-b");
+    let actor = routing_actor();
+    store
+        .contain(&tenant_a, &actor, "contain_first_rollout")
+        .await
+        .unwrap();
+    let submission_id = uuid::Uuid::new_v4();
+    store
+        .claim_legacy_receipt(&tenant_a, submission_id)
+        .await
+        .unwrap();
+
+    assert_eq!(store.routing(&tenant_b).await.unwrap(), None);
+    assert!(store.events(&tenant_b, 10).await.unwrap().is_empty());
+    assert_eq!(
+        store.ownership(&tenant_b, submission_id).await.unwrap(),
+        None
+    );
+
+    // The same holds in the database: with tenant B's setting, the runtime
+    // login sees none of tenant A's rows. A's own setting sees them, so the
+    // zero is not an empty table.
+    for table in [
+        "pipeline_tenant_routing",
+        "pipeline_activation_events",
+        "pipeline_receipt_ownership",
+    ] {
+        assert_eq!(visible_rows(&backend, &tenant_b, table).await, 0, "{table}");
+        assert_eq!(visible_rows(&backend, &tenant_a, table).await, 1, "{table}");
+    }
+}
+
+#[tokio::test]
+async fn a_legacy_claim_is_permanent_and_idempotent() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("claim");
+    let submission_id = uuid::Uuid::new_v4();
+    assert_eq!(store.ownership(&tenant, submission_id).await.unwrap(), None);
+
+    assert_eq!(
+        store
+            .claim_legacy_receipt(&tenant, submission_id)
+            .await
+            .unwrap(),
+        ReceiptOwner::Legacy
+    );
+    assert_eq!(
+        store
+            .claim_legacy_receipt(&tenant, submission_id)
+            .await
+            .unwrap(),
+        ReceiptOwner::Legacy
+    );
+    assert_eq!(
+        store.ownership(&tenant, submission_id).await.unwrap(),
+        Some(ReceiptOwnership {
+            owner: ReceiptOwner::Legacy,
+            submission_id,
+            run_id: None,
+        })
+    );
+    assert_eq!(
+        visible_rows(&backend, &tenant, "pipeline_receipt_ownership").await,
+        1
+    );
+
+    // A claim never takes a receipt from its owner: a receipt the pipeline
+    // owns stays with the pipeline, and the claim returns that owner.
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner, run_id)
+             VALUES ($1, $2, 'pipeline', $3)",
+            &[&tenant, &run.submission_id, &run.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(
+        store
+            .claim_legacy_receipt(&tenant, run.submission_id)
+            .await
+            .unwrap(),
+        ReceiptOwner::Pipeline
+    );
+    assert_eq!(
+        store.ownership(&tenant, run.submission_id).await.unwrap(),
+        Some(ReceiptOwnership {
+            owner: ReceiptOwner::Pipeline,
+            submission_id: run.submission_id,
+            run_id: Some(run.run_id),
+        })
+    );
+    assert_eq!(
+        visible_rows(&backend, &tenant, "pipeline_receipt_ownership").await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn the_runtime_role_cannot_change_an_event_or_an_ownership_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("immutable");
+    let actor = routing_actor();
+    store
+        .contain(&tenant, &actor, "contain_first_rollout")
+        .await
+        .unwrap();
+    let event_id = store.events(&tenant, 1).await.unwrap()[0].event_id;
+    let submission_id = uuid::Uuid::new_v4();
+    store
+        .claim_legacy_receipt(&tenant, submission_id)
+        .await
+        .unwrap();
+
+    // The runtime holds only SELECT and INSERT on both tables, so each
+    // attempt is refused by privilege, inside the tenant-scoped transaction
+    // the store itself would open.
+    let attempts: [(&str, &str, uuid::Uuid); 4] = [
+        (
+            "UPDATE pipeline_activation_events SET reason_code = 'tampered'
+              WHERE tenant_id = $1 AND event_id = $2",
+            "pipeline_activation_events",
+            event_id,
+        ),
+        (
+            "DELETE FROM pipeline_activation_events WHERE tenant_id = $1 AND event_id = $2",
+            "pipeline_activation_events",
+            event_id,
+        ),
+        (
+            "UPDATE pipeline_receipt_ownership SET recorded_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            "pipeline_receipt_ownership",
+            submission_id,
+        ),
+        (
+            "DELETE FROM pipeline_receipt_ownership WHERE tenant_id = $1 AND submission_id = $2",
+            "pipeline_receipt_ownership",
+            submission_id,
+        ),
+    ];
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    for (statement, table, id) in attempts {
+        let tx = client.transaction().await.unwrap();
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+        let error = tx
+            .execute(statement, &[&tenant, &id])
+            .await
+            .expect_err("the runtime may not change an activation record");
+        assert!(
+            db_error_message(&error).contains(&format!("permission denied for table {table}")),
+            "unexpected runtime error for {statement}: {error:?}"
+        );
+        drop(tx);
+    }
+    drop(client);
+
+    // Nothing changed.
+    let events = store.events(&tenant, 10).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].reason_code, "contain_first_rollout");
+    assert_eq!(
+        store.ownership(&tenant, submission_id).await.unwrap(),
+        Some(ReceiptOwnership {
+            owner: ReceiptOwner::Legacy,
+            submission_id,
+            run_id: None,
+        })
+    );
+}
+
+/// A routing change takes the tenant's routing lock exclusively before it
+/// reads or writes, so it waits for a receipt transaction that holds the
+/// lock shared (the key and the seed are the contract `PipelineService`
+/// uses), and it waits for nothing of another tenant.
+#[tokio::test]
+async fn a_routing_change_waits_for_a_receipt_holding_the_routing_lock() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend);
+    let tenant = routing_tenant("lock");
+    let other_tenant = routing_tenant("lock-other");
+    let actor = routing_actor();
+
+    let mut holder = owner_client().await;
+    let held = holder.transaction().await.unwrap();
+    held.execute(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 2))",
+        &[&format!("pipeline-routing:{tenant}")],
+    )
+    .await
+    .unwrap();
+
+    let mut contain = tokio::spawn({
+        let store = store.clone();
+        let tenant = tenant.clone();
+        let actor = actor.clone();
+        async move {
+            store
+                .contain(&tenant, &actor, "contain_first_rollout")
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut contain)
+            .await
+            .is_err(),
+        "the routing change must wait for the shared holder"
+    );
+    // It has written nothing while it waits.
+    assert_eq!(store.routing(&tenant).await.unwrap(), None);
+    // Another tenant's routing change does not wait.
+    store
+        .contain(&other_tenant, &actor, "contain_first_rollout")
+        .await
+        .expect("another tenant's lock is another lock");
+
+    held.commit().await.unwrap();
+    let contained = contain
+        .await
+        .expect("the routing change task ends")
+        .expect("the routing change completes once the lock is free");
+    assert_eq!(contained.routing_state, RoutingState::Contained);
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 1);
 }
