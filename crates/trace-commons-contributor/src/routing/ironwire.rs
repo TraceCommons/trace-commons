@@ -291,6 +291,13 @@ impl IronWireLedger {
     /// - A snapshot whose highest id is below the baseline is a proxy whose
     ///   ledger started over. Its rows cannot be told apart from ones
     ///   already seen, so it re-baselines and hands out nothing.
+    /// - Known gap: a ledger that started over *and* climbed past the old
+    ///   baseline between two ticks cannot be told from one that only grew.
+    ///   Its rows above the old baseline are handed out as new, and its rows
+    ///   at or below it are never announced. Nothing in a row says the
+    ///   ledger restarted, so this is accepted rather than guessed at; the
+    ///   event is a pulse, and `tool_destinations`' counts, which re-read the
+    ///   whole window, stay exact.
     /// - A refresh that failed leaves the snapshot as it was, so nothing
     ///   new comes out of it.
     #[must_use]

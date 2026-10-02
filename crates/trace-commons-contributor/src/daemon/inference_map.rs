@@ -97,10 +97,27 @@ struct ToolSpec {
     /// `/anthropic` and speaks Messages; Codex is pointed at `/openai/v1`
     /// with `wire_api = "responses"`. Empty for a tool nothing here
     /// connects.
+    ///
+    /// Claude Code's `/v1/messages/count_tokens` is listed on purpose: a
+    /// token count is a call the tool made through the proxy, so it is
+    /// counted in `counts.inference_calls`, listed by `inference_calls` and
+    /// announced by `inference_call_added` like any other. Leaving it out
+    /// would not drop those rows -- it would move them to
+    /// `unattributed_calls`.
     endpoints: &'static [(&'static str, &'static str)],
     name: &'static str,
 }
 
+/// The tools the map draws.
+///
+/// No row for Antigravity. It has no adapter (an imported conversation is
+/// staged as a trajectory file and read by the `trajectory` adapter), no
+/// watch declaration and no harness this daemon connects, so a row would
+/// read `not_watched` while counting sessions, which is a contradiction the
+/// `watch` labels cannot express without a new value -- a wire change, not
+/// a counting fix. Its sessions are counted under their declared source
+/// (see [`session_marks`]), so they count nowhere here today, and a future
+/// row picks them up once each, never alongside a `trajectory` count.
 const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         source: crate::source::SOURCE_CLAUDE_CODE,
@@ -291,7 +308,8 @@ pub struct DestinationFacts {
     pub folders: (usize, usize, usize),
 }
 
-/// One session the window saw: the adapter that read it and its hash.
+/// One session the window saw: the tool it reads as (see [`session_marks`])
+/// and its hash.
 ///
 /// Held only long enough to count; the hash never leaves this module.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -361,8 +379,14 @@ pub fn tool_counts(
         }
     }
     if let Some(sessions) = sessions {
-        let unique: BTreeSet<&SessionMark> = sessions.iter().collect();
-        for mark in unique {
+        // Once per session hash, whatever its marks are labelled: the first
+        // mark for a hash names it (the queue's, which [`session_marks`]
+        // puts first), so one session can never count under two tools.
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for mark in sessions {
+            if !seen.insert(mark.session_hash.as_str()) {
+                continue;
+            }
             if let Some(count) = counts.iter_mut().find(|count| count.tool == mark.source) {
                 *count.sessions.get_or_insert(0) += 1;
             }
@@ -525,29 +549,60 @@ pub fn handle_destinations(shared: &DaemonShared, req: &Request) -> Response {
 /// reads only. `None` when the history cache cannot be read.
 fn window_sessions(shared: &DaemonShared) -> Option<Vec<SessionMark>> {
     let since: DateTime<Utc> = Utc::now() - chrono::Duration::hours(ACTIVITY_WINDOW_HOURS);
-    let mut marks: Vec<SessionMark> = {
-        let queue = shared.queue.lock().expect("queue lock");
-        queue
-            .all()
-            .iter()
-            .filter(|entry| entry.observed_modified_at.unwrap_or(entry.discovered_at) >= since)
-            .map(|entry| SessionMark {
-                source: entry.source.clone(),
-                session_hash: entry.session_hash.clone(),
-            })
-            .collect()
-    };
+    // Read from disk before taking the queue lock, so the lock is held only
+    // for the in-memory pass.
     let history = super::history::HistoryCache::load(&shared.store).ok()?;
+    let queue = shared.queue.lock().expect("queue lock");
+    Some(session_marks(queue.all(), &history, since))
+}
+
+/// The sessions inside the window, from queue entries and history records.
+///
+/// Each mark is labelled with the tool the session reads as --
+/// [`QueueEntry::displayed_source`](super::queue::QueueEntry::displayed_source),
+/// the declared source when discovery knew one, else the adapter -- the same
+/// rule `commands::displayed_source` and `list_projects` apply. A history
+/// record carries only the adapter (`HistoryRecord` has no declared source,
+/// because `Receipt` has none), so it takes its label from the queue entry
+/// with the same session hash, looked up across the whole queue rather than
+/// only the window's slice of it. The queue keeps uploaded entries (only
+/// `Superseded` is compacted), so a twin is almost always there; a record
+/// with none -- a CLI `submit`, say -- falls back to its adapter.
+///
+/// Queue marks come first, so [`tool_counts`], which counts a hash once
+/// under its first mark, names a session by the queue's label.
+#[must_use]
+pub fn session_marks(
+    queue: &[super::queue::QueueEntry],
+    history: &[super::history::HistoryRecord],
+    since: DateTime<Utc>,
+) -> Vec<SessionMark> {
+    let labels: std::collections::BTreeMap<&str, &str> = queue
+        .iter()
+        .map(|entry| (entry.session_hash.as_str(), entry.displayed_source()))
+        .collect();
+    let mut marks: Vec<SessionMark> = queue
+        .iter()
+        .filter(|entry| entry.observed_modified_at.unwrap_or(entry.discovered_at) >= since)
+        .map(|entry| SessionMark {
+            source: entry.displayed_source().to_string(),
+            session_hash: entry.session_hash.clone(),
+        })
+        .collect();
     marks.extend(
         history
-            .into_iter()
+            .iter()
             .filter(|record| record.submitted_at >= since)
             .map(|record| SessionMark {
-                source: record.source,
-                session_hash: record.session_hash,
+                source: labels
+                    .get(record.session_hash.as_str())
+                    .copied()
+                    .unwrap_or(record.source.as_str())
+                    .to_string(),
+                session_hash: record.session_hash.clone(),
             }),
     );
-    Some(marks)
+    marks
 }
 
 /// A recorded model name, or `unknown` when it is not shaped like one.
@@ -666,6 +721,11 @@ fn attribute(row: &RoutedExchange, speakers: &[(&'static str, &'static str)]) ->
         let Some(tool) = endpoint_tool(facade, path) else {
             return UNKNOWN;
         };
+        // Unreachable in production today: `TOOLS` has one connectable tool
+        // per family (Claude Code for `anthropic`, Codex for `openai`), so no
+        // *other* connected speaker of the family can exist. Kept so a second
+        // connectable tool in a family makes its endpoints `unknown` rather
+        // than silently crediting the first.
         let contested = speakers
             .iter()
             .any(|(source, family)| *family == facade && *source != tool);
@@ -1341,6 +1401,87 @@ mod tests {
         assert_eq!(value["unattributed_calls"], serde_json::Value::Null);
     }
 
+    fn history_record(
+        source: &str,
+        hash: &str,
+        at: DateTime<Utc>,
+    ) -> super::super::history::HistoryRecord {
+        super::super::history::HistoryRecord {
+            submission_id: uuid::Uuid::new_v4(),
+            submitted_at: at,
+            project_id: "p".to_string(),
+            project_label: "p".to_string(),
+            source: source.to_string(),
+            session_hash: hash.to_string(),
+            status: "accepted".to_string(),
+            consent_scopes: vec![],
+            credit_points_pending: 0.0,
+            credit_points_final: None,
+            explanations: vec![],
+            last_refreshed_at: None,
+            withdrawn_at: None,
+            approved_unattended: None,
+            approved_verdict: None,
+        }
+    }
+
+    /// An imported Antigravity conversation is stored by the `trajectory`
+    /// adapter and declares itself `antigravity`. Its queue entry and its
+    /// history record (which carries only the adapter) are one session, so
+    /// they must come out under one key -- the declared one, the rule
+    /// `commands::displayed_source` and `list_projects` use -- and never
+    /// under two.
+    #[test]
+    fn an_imported_antigravity_session_counts_under_one_key_never_twice() {
+        let now = Utc::now();
+        let hash = "sha256:imported";
+        let entry = super::super::queue::QueueEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            session_hash: hash.to_string(),
+            source: crate::source::SOURCE_TRAJECTORY.to_string(),
+            declared_source: Some("antigravity".to_string()),
+            discovered_at: now,
+            ..Default::default()
+        };
+        let history = vec![history_record(crate::source::SOURCE_TRAJECTORY, hash, now)];
+        let marks = session_marks(
+            std::slice::from_ref(&entry),
+            &history,
+            now - chrono::Duration::hours(1),
+        );
+        let keys: BTreeSet<(&str, &str)> = marks
+            .iter()
+            .map(|m| (m.source.as_str(), m.session_hash.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from([("antigravity", hash)]),
+            "one session, one key, named by what it declared: {marks:?}"
+        );
+
+        // The queue twin labels the history record even when the entry
+        // itself was last seen outside the window.
+        let mut old = entry;
+        old.discovered_at = now - chrono::Duration::days(3);
+        let marks = session_marks(&[old], &history, now - chrono::Duration::hours(1));
+        assert_eq!(marks, vec![mark("antigravity", hash)]);
+    }
+
+    /// A session hash is one session however its marks are labelled: two
+    /// marks for one hash can never be counted under two tools.
+    #[test]
+    fn one_session_hash_is_counted_once_even_under_two_labels() {
+        let sessions = vec![mark("claude-code", "sha256:x"), mark("codex", "sha256:x")];
+        let (counts, _) = tool_counts(None, &[], Some(&sessions));
+        let total: usize = counts.iter().filter_map(|c| c.sessions).sum();
+        assert_eq!(total, 1, "{counts:?}");
+        // The first mark -- the queue's, which carries the declared source
+        // -- names it.
+        let get = |id: &str| counts.iter().find(|c| c.tool == id).unwrap().sessions;
+        assert_eq!(get("claude-code"), Some(1));
+        assert_eq!(get("codex"), Some(0));
+    }
+
     /// The event carries the list's labels for the row, and none of the
     /// row's identifiers, bodies or endpoint.
     #[test]
@@ -1599,6 +1740,40 @@ mod tests {
         let value = r.result.expect("destinations");
         assert_eq!(tool(&value, "claude-code")["counts"]["sessions"], 2);
         assert_eq!(tool(&value, "codex")["counts"]["sessions"], 1);
+    }
+
+    /// Over the dispatcher: a session in the queue and in history under
+    /// different labels is counted once, under the queue's label.
+    #[test]
+    fn tool_destinations_counts_a_session_once_under_the_queues_label() {
+        let (_dir, s) = shared();
+        let now = Utc::now();
+        s.queue
+            .lock()
+            .unwrap()
+            .upsert(
+                super::super::queue::QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:both".to_string(),
+                    source: "claude-code".to_string(),
+                    discovered_at: now,
+                    ..Default::default()
+                },
+                100,
+            )
+            .unwrap();
+        super::super::history::HistoryCache::save(
+            &s.store,
+            &[history_record("codex", "sha256:both", now)],
+        )
+        .unwrap();
+        let r = super::super::ipc::handle_request(
+            &s,
+            &call("tool_destinations", serde_json::json!({})),
+        );
+        let value = r.result.expect("destinations");
+        assert_eq!(tool(&value, "claude-code")["counts"]["sessions"], 1);
+        assert_eq!(tool(&value, "codex")["counts"]["sessions"], 0);
     }
 
     #[test]

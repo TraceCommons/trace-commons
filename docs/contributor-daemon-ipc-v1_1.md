@@ -2850,6 +2850,17 @@ fetched.
   records submitted inside it. An entry still in the queue and its history
   record are one session. `null` when the history cache cannot be read; a
   count from the queue alone would undercount.
+
+  A session counts under the tool it reads as: its declared source when
+  discovery knew one, else the adapter that read it -- the rule
+  `list_projects.tools` and the CLI's session table use. So an imported
+  Antigravity conversation (read by the `trajectory` adapter, declaring
+  `antigravity`) counts as `antigravity`, never as `trajectory`, and never
+  under both. A history record names only the adapter, so it takes its label
+  from the queue entry with the same session hash; one with no queue twin (a
+  CLI `submit`, say) falls back to the adapter. There is no `antigravity`
+  row on this map -- it has no adapter, watch declaration or connection of
+  its own -- so those sessions are not counted on any tool row today.
 - `inference_calls` counts exactly the rows `inference_calls` lists (rows
   with a ledger id) by the `tool` it names for them, so the map and the
   Inference tab cannot disagree. `null` when no ledger has answered
@@ -2944,6 +2955,25 @@ own 24 hours.
   same API at the same facade as a connected one, cannot be told apart in the
   row and reads as that tool. The endpoint is read for this and never passed
   through. `family` is `anthropic`, `openai` or `unknown`.
+
+  **Limit: endpoint attribution does not check who set up the proxy.** Any
+  `/anthropic` + `/v1/messages` call reads `claude-code`, and any `/openai`
+  + `/v1/responses` call reads `codex`, whether or not this daemon connected
+  that tool, and whether or not this daemon owns the proxy at all. An agent
+  routed through IronWire's own catalog, or by another program that manages
+  the same proxy, is counted as Claude Code or Codex, and the "different
+  connected tool" check above cannot see it, because only tools this daemon
+  connects are speakers. The label means "called the endpoint Claude Code's
+  connection writes", not "came from Claude Code".
+
+  `/v1/messages/count_tokens` calls are included: they are listed, counted
+  in `tool_destinations.counts.inference_calls` and announced by
+  `inference_call_added` like any other call.
+
+  The "different connected tool speaks the same family" case cannot arise
+  today, since each family has exactly one tool this daemon connects; it is
+  there so a second one in a family turns that family's endpoints
+  `unknown` rather than crediting the first.
 - `model` is **free text, not a fixed label**: the served model as recorded,
   else the requested one, passed through when it is at most 128 characters of
   `[A-Za-z0-9._:/@-]` and names no URL; else `unknown`. It comes from a proxy
@@ -4920,7 +4950,10 @@ no poll of its own, so a call is announced on the first tick after it lands
 - The first window a ledger reads is the backlog and is not announced; it
   sets the baseline. A ledger rebuilt for a new endpoint starts over the
   same way, and so does one whose ids went backwards (a proxy whose own
-  ledger started over).
+  ledger started over). A ledger that started over and climbed past the old
+  highest id within one tick cannot be told from one that only grew: its
+  rows above the old id are announced, and the rest are never announced.
+  Counts on `tool_destinations` are unaffected.
 - Rows without an id (a proxy too old to expose one) are never announced.
 - At most 64 per tick, the newest kept, so a burst cannot push a subscriber
   into `resync_required`. Re-read `tool_destinations` for exact counts.
