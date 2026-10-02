@@ -1461,6 +1461,27 @@ mod tests {
         assert!(added(&mut rx).is_empty(), "a call is announced once");
     }
 
+    /// Every event `hello` lists has a row in the contract's events table,
+    /// and K14's fields are written down where a shell reads them.
+    #[test]
+    fn the_events_hello_lists_and_the_map_counts_are_documented() {
+        let contract = include_str!("../../../../docs/contributor-daemon-ipc-v1_1.md");
+        let hello =
+            super::super::ipc::handle_request(&shared().1, &call("hello", serde_json::json!({})));
+        for event in hello.result.unwrap()["events"].as_array().unwrap() {
+            let row = format!("| `{}` |", event.as_str().unwrap());
+            assert!(contract.contains(&row), "events table lacks {row}");
+        }
+        for field in [
+            "\"unattributed_calls\"",
+            "\"counts\": { \"sessions\"",
+            "`{id, tool, model, proof}`",
+            "| `openai` | `/v1/responses`",
+        ] {
+            assert!(contract.contains(field), "undocumented: {field}");
+        }
+    }
+
     fn shared() -> (tempfile::TempDir, DaemonShared) {
         let (dir, store) = crate::config::tests_support::temp_store();
         (dir, DaemonShared::load(store).unwrap())
