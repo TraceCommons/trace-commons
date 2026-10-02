@@ -297,6 +297,7 @@ struct SettingsContent: View {
                     checkRow(Notifier.copy?.notificationDenied ?? "", false)
                     Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
                         .font(TC.Font_.body)
+                        .tint(TC.accentText)
                 case .notDetermined:
                     checkRow(Notifier.copy?.notificationNotAsked ?? "", false)
                     Button(Notifier.copy?.notificationAllow ?? "") {
@@ -313,6 +314,7 @@ struct SettingsContent: View {
                 @unknown default:
                     Text(Notifier.copy?.notificationUnknown ?? "")
                     Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
+                        .tint(TC.accentText)
                 }
             }
         }
@@ -1003,6 +1005,7 @@ struct SettingsContent: View {
                     // way to say so.
                     Button(copy.lookAgain) { model.discoverRouting() }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                 }
 
                 // The port and folder are the override, and they are live
@@ -1079,6 +1082,7 @@ struct SettingsContent: View {
                             }
                         }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                         .accessibilityLabel(copy.folderTitle)
                         // The chosen folder, shown so the answer is
                         // visible. Empty until one is chosen, which is the
@@ -1268,6 +1272,7 @@ struct SettingsContent: View {
                 if let state, WitnessSurface.offersClear(state) {
                     Button(copy.clear) { model.clearWitness() }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                         .disabled(model.witnessBusy)
                     Text(copy.clearNote)
                         .font(TC.Font_.meta)
