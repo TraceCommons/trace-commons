@@ -1,3 +1,4 @@
+import TCBridge
 import TCShellCore
 import XCTest
 
@@ -110,7 +111,7 @@ final class TracesFolderModeTests: XCTestCase {
         await store.setFolderMode(folder, .ignore, promised: folder.sessions.count)
         XCTAssertEqual(
             store.folderNotice,
-            ProjectIgnoreCopy.reconciliation(project: folder.label, promised: folder.sessions.count, purged: 0))
+            TCCoreCopy.projectIgnoreReconciled(project: folder.label, promised: folder.sessions.count, purged: 0))
         XCTAssertNotNil(store.folderNotice)
 
         // When they agree, nothing is said.

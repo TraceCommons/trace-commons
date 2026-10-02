@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import TCBridge
 import TCShellCore
 
 /// The Traces tab's data (R6 of #1173), read through `DaemonDataClient`.
@@ -23,7 +24,8 @@ final class TracesStore {
 
     let client: any DaemonDataClient
     /// The last folder change whose result differed from what the
-    /// confirmation promised, in the core's words (`ProjectIgnoreCopy`).
+    /// confirmation promised, in the core's words
+    /// (`tc_project_ignore_reconciled_text`).
     private(set) var folderNotice: String?
     /// Each load's number; a load that finishes after a newer one started is
     /// dropped, so an older read never overwrites a newer tree.
@@ -81,7 +83,7 @@ final class TracesStore {
         do {
             let result = try await client.setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
             if mode == .ignore {
-                folderNotice = ProjectIgnoreCopy.reconciliation(
+                folderNotice = TCCoreCopy.projectIgnoreReconciled(
                     project: folder.label, promised: promised, purged: result.purged ?? promised)
             }
         } catch {

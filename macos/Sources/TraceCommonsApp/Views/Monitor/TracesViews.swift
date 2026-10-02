@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -14,8 +15,34 @@ struct TracesTreeView: View {
 
     @State private var collapsed: Set<String> = []
     /// A mode change waiting on the core's confirmation: arming always,
-    /// ignoring when the folder has sessions waiting.
-    @State private var confirming: (folder: TracesTree.FolderNode, mode: ProjectMode)?
+    /// ignoring when the folder has sessions waiting. It carries the core's
+    /// words for that folder, decoded when the change was asked for.
+    @State private var confirming: Confirmation?
+
+    struct Confirmation {
+        let folder: TracesTree.FolderNode
+        let mode: ProjectMode
+        let words: Words
+
+        enum Words {
+            case ignore(ProjectIgnoreCopy)
+            case arm(ProjectArmingCopy)
+        }
+
+        var title: String {
+            switch words {
+            case .ignore(let copy): copy.title
+            case .arm(let copy): copy.question
+            }
+        }
+
+        var body: String {
+            switch words {
+            case .ignore(let copy): copy.body
+            case .arm(let copy): copy.body
+            }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -56,42 +83,42 @@ struct TracesTreeView: View {
             }
         }
         .confirmationDialog(
-            confirming.map(Self.confirmationTitle) ?? "",
+            confirming?.title ?? "",
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
             titleVisibility: .visible,
             presenting: confirming
         ) { pending in
-            if pending.mode == .ignore {
-                Button(ProjectIgnoreCopy.buttonLabel, role: .destructive) { apply(pending.folder, pending.mode) }
-                Button(ProjectArmingCopy.cancel, role: .cancel) { confirming = nil }
-            } else {
-                Button(ProjectArmingCopy.confirm) { apply(pending.folder, pending.mode) }
-                Button(ProjectArmingCopy.cancel, role: .cancel) { confirming = nil }
+            switch pending.words {
+            case .ignore(let copy):
+                Button(copy.button, role: .destructive) { apply(pending.folder, pending.mode) }
+                // The system's word, as the Waiting screen's ignore uses.
+                Button("Cancel", role: .cancel) { confirming = nil }
+            case .arm(let copy):
+                Button(copy.confirm) { apply(pending.folder, pending.mode) }
+                Button(copy.decline, role: .cancel) { confirming = nil }
             }
         } message: { pending in
-            if pending.mode == .ignore {
-                Text(ProjectIgnoreCopy.confirmationBody(project: pending.folder.label, pendingCount: pending.folder.sessions.count))
-            } else {
-                Text(ProjectArmingCopy.confirmationBody)
-            }
+            Text(pending.body)
         }
     }
 
     // MARK: Folder modes
 
-    private static func confirmationTitle(_ pending: (folder: TracesTree.FolderNode, mode: ProjectMode)) -> String {
-        pending.mode == .ignore
-            ? ProjectIgnoreCopy.confirmationTitle(project: pending.folder.label)
-            : ProjectArmingCopy.confirmationTitle(project: pending.folder.label)
-    }
-
     /// The three modes, as Settings offers them. Arming always asks first,
     /// in the core's words; ignoring asks when it would clear waiting
-    /// sessions, with their count. Asking first is a direct call.
+    /// sessions, with their count. Asking first is a direct call. With no
+    /// words from the core a change that needs them is not made: the
+    /// confirmation is never shown without what it says.
     private func request(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
         guard mode != folder.mode else { return }
-        if mode == .autoUpload || (mode == .ignore && !folder.sessions.isEmpty) {
-            confirming = (folder, mode)
+        if mode == .autoUpload {
+            guard let copy = ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
+                project: folder.label, count: 0)) else { return }
+            confirming = Confirmation(folder: folder, mode: mode, words: .arm(copy))
+        } else if mode == .ignore && !folder.sessions.isEmpty {
+            guard let copy = ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(
+                project: folder.label, pending: folder.sessions.count)) else { return }
+            confirming = Confirmation(folder: folder, mode: mode, words: .ignore(copy))
         } else {
             apply(folder, mode)
         }
