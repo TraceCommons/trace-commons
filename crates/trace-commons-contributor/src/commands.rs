@@ -397,22 +397,45 @@ pub async fn account_login(store: &ConfigStore, no_browser: bool, json: bool) ->
 }
 
 /// Report whether a live account session is stored, WITHOUT printing it.
-pub fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
-    let expires_at = crate::account_auth::session_status(store);
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema_version": "trace_commons.account_status.v1",
-                "signed_in": expires_at.is_some(),
-                "expires_at": expires_at,
-            }))?
+pub(crate) async fn account_status_value(store: &ConfigStore) -> Result<serde_json::Value> {
+    let loaded =
+        crate::daemon::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(store))?;
+    let Some(loaded) = loaded else {
+        return Ok(
+            serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":false, "expires_at":null, "contribution_status":null}),
         );
-    } else {
-        match expires_at {
-            Some(at) => println!("signed in; session expires {at}"),
-            None => println!("not signed in; run `account login`"),
+    };
+    let scope = crate::daemon::commons_credentials::scope_for_snapshot(&loaded.snapshot)?;
+    let status = match store.load_config()? {
+        Some(cfg) => {
+            let operation = crate::account_contribution::Operation::open(store, &cfg).await?;
+            if operation.scope != scope {
+                anyhow::bail!("account-session-changed");
+            }
+            Some(operation.status().await?)
         }
+        None => None,
+    };
+    Ok(
+        serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":true, "expires_at":loaded.session.expires_at, "contribution_status":status}),
+    )
+}
+pub async fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
+    let value = account_status_value(store).await?;
+    print_account_status(value, json)
+}
+fn print_account_status(value: serde_json::Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if let Ok(status) = serde_json::from_value::<
+        crate::account_contribution::ContributionStatus,
+    >(value["contribution_status"].clone())
+    {
+        println!("{}", status.line());
+    } else if value["signed_in"] == true {
+        println!("signed in; session expires {}", value["expires_at"]);
+    } else {
+        println!("not signed in; run `account login`");
     }
     Ok(())
 }
@@ -2428,6 +2451,7 @@ mod tests {
             success: None,
         };
         let mut t = crate::source::SessionTranscript {
+            source_session: None,
             source: std::borrow::Cow::Borrowed("claude-code"),
             agent_version: None,
             model: None,
@@ -4917,4 +4941,21 @@ pub fn daemon_token_storage(
             println!("{line}");
         }
     })
+}
+
+pub async fn account_redeem(
+    store: &ConfigStore,
+    code: &str,
+    key: uuid::Uuid,
+    json: bool,
+) -> Result<()> {
+    let cfg = store
+        .load_config()?
+        .context("account-enrollment-required")?;
+    let operation = crate::account_contribution::Operation::open(store, &cfg).await?;
+    let status = operation.redeem_and_status(code, key).await?;
+    print_account_status(
+        serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":true, "expires_at":operation.expires_at, "contribution_status":status}),
+        json,
+    )
 }

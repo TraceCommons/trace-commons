@@ -117,6 +117,7 @@ struct SettingsContent: View {
     /// Discovery candidates are suggestions, never the configured path.
     /// The daemon reports modes only; Settings therefore displays modes.
     @State private var sourceCandidates: [SourceCandidate] = []
+    @State private var contributionInviteCode = ""
     @State private var sourceBusy = false
     @State private var sourceSaveFailed = false
 
@@ -131,6 +132,7 @@ struct SettingsContent: View {
         // 28 this screen used before.
         VStack(alignment: .leading, spacing: TC.Space.lg) {
             connection
+            contributionAccount
             loginItem
             notifications
             updatesSection
@@ -168,6 +170,25 @@ struct SettingsContent: View {
             GoPublicDialog(onDismiss: { showingGoPublic = false })
                 .environmentObject(model)
         }
+    }
+
+    private var contributionAccount: some View {
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            TCSectionHeader(title: "Account contributions")
+            Text(model.contributionLine).font(TC.Font_.meta)
+            Button("Refresh status") { Task { await model.updateContributionAccount() } }
+            SecureField("Invite code", text: $contributionInviteCode)
+                .textFieldStyle(.roundedBorder)
+            Button("Redeem invite") {
+                Task {
+                    if await model.updateContributionAccount(inviteCode: contributionInviteCode) {
+                        contributionInviteCode = ""
+                    }
+                }
+            }.disabled(contributionInviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Text(model.privateInferenceCopy?.accountContributionPendingCredit ?? "")
+                .font(TC.Font_.meta).foregroundStyle(.secondary)
+        }.disabled(model.contributionBusy)
     }
 
     // MARK: - Connection (spec §5.4)

@@ -178,6 +178,10 @@ pub struct PgBackend {
 /// see the exclusion notes at the bottom of
 /// `migrations/V56__community_withdrawal_eviction_rls.sql` for why that is
 /// opt-in published data and does not change the answer.
+/// Global internal lock state; these tables have guard-only forced RLS and
+/// deliberately carry no tenant-readable rows or ordinary login grants.
+pub const TRACE_COMMONS_INTERNAL_RLS_TABLES: &[&str] = &["trace_account_trust_dependency_locks"];
+
 pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",
@@ -232,6 +236,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
     "trace_account_trust_evaluations",
+    "trace_account_trust_frontiers",
     "trace_source_sessions",
     "trace_submission_sessions",
     "trace_account_inference_connections",
@@ -1678,6 +1683,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_attempt_artifacts",
         include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
     ),
+    (
+        109,
+        "external_account_trust_evaluations",
+        include_str!("../../../../migrations/V109__external_account_trust_evaluations.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
@@ -1939,6 +1949,10 @@ impl Database for PgBackend {
     > {
         self.participant_reward_history(tenant, account, query)
             .await
+    }
+
+    async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::external_account_trust_runtime_ready(self).await
     }
 
     async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
@@ -7801,6 +7815,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V109__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
@@ -7840,6 +7855,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V109__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];

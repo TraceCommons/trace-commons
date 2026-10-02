@@ -5080,3 +5080,32 @@ per folder, `legacy-invite-migrated`), and
 through its copy commands, macOS and Windows through
 `tc_legacy_migration_notice`, GTK directly; each passes the `notice` object
 through unread and acknowledges with `acknowledge_legacy_invite_migration`.
+
+### Explicit account contribution controls
+
+`status` includes nullable `account_scope`, an opaque local account lifecycle and
+configuration identifier. It changes on sign-in/replacement (including a new
+sign-in to the same account), logout, or configuration changes, and stays stable
+through token rotation. It contains no account name, token, or raw credential.
+Existing opaque credential records remain usable. The daemon publishes
+`status_changed` when this scope changes, including without armed folders; this
+local notification does not request contribution status from the server.
+
+`account_contribution_status` accepts optional `account_scope` and fetches fresh
+authenticated contribution readiness even when no automatic folder is armed.
+When supplied, the scope must still match the local session/configuration before
+the request. Its result contains `status` (`authority`, `policy_version`, `ready`,
+`refusal_label`, and `retry_after_seconds`), the shared user-facing `line`, and
+`account_scope`. It does not report a numeric remaining allowance. Shells clear
+cached readiness and invite attempts when the observed scope changes and discard
+responses whose scope does not match the current status.
+
+`account_invite_redeem` takes `invite_code`, a UUID `idempotency_key`, and optional
+`account_scope`. Keep the same key when retrying the same code in the same scope
+after an uncertain transport outcome. On success the daemon refreshes contribution
+status and returns the same status shape. Redemption and its refresh share one
+operation scope: token rotation is accepted, while account lifecycle or
+configuration changes between POST and GET refuse the combined result. Both
+methods require an account session and discard responses when the local account
+or ingest configuration changes. Neither returns an invite code or session token.
+Acceptance can earn pending credit; this is not credit redemption.

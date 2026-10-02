@@ -2301,7 +2301,7 @@ impl PgPipelineStore {
             let resolved_admission_reason = admission_reason
                 .as_ref()
                 .is_some_and(|reason| resolved.iter().any(|item| item.as_str() == reason));
-            if !resolved_admission_reason && !(admission_reason.is_none() && !resolved.is_empty()) {
+            if !resolved_admission_reason && (admission_reason.is_some() || resolved.is_empty()) {
                 return Err(DatabaseError::Constraint(
                     "quarantine reason is unresolved".to_string(),
                 ));

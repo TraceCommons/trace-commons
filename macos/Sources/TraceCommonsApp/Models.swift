@@ -248,6 +248,7 @@ struct DaemonStatus: Decodable, Equatable {
     let schemaVersion: String
     let loggedIn: Bool
     let tenantID: String?
+    var accountScope: String?
     var consentScopes: [String]
     let paused: Bool
     let queueDepth: Int
@@ -286,6 +287,7 @@ struct DaemonStatus: Decodable, Equatable {
         case schemaVersion = "schema_version"
         case loggedIn = "logged_in"
         case tenantID = "tenant_id"
+        case accountScope = "account_scope"
         case consentScopes = "consent_scopes"
         case paused
         case queueDepth = "queue_depth"
@@ -305,6 +307,7 @@ struct DaemonStatus: Decodable, Equatable {
         schemaVersion: String,
         loggedIn: Bool,
         tenantID: String?,
+        accountScope: String? = nil,
         consentScopes: [String],
         paused: Bool,
         queueDepth: Int,
@@ -322,6 +325,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
         self.tenantID = tenantID
+        self.accountScope = accountScope
         self.consentScopes = consentScopes
         self.paused = paused
         self.queueDepth = queueDepth
@@ -342,6 +346,7 @@ struct DaemonStatus: Decodable, Equatable {
         schemaVersion = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? ""
         loggedIn = try c.decodeIfPresent(Bool.self, forKey: .loggedIn) ?? false
         tenantID = try c.decodeIfPresent(String.self, forKey: .tenantID)
+        accountScope = try c.decodeIfPresent(String.self, forKey: .accountScope)
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         queueDepth = try c.decodeIfPresent(Int.self, forKey: .queueDepth) ?? 0
