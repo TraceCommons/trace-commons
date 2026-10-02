@@ -1527,6 +1527,12 @@ const PHASE_OUTCOME_IMMUTABILITY_TRIGGERS: [&str; 2] = [
     "phase_outcomes_reject_delete",
 ];
 
+/// The `pg_trigger.tgtype` each immutability trigger must have (V92), in
+/// the order of `PHASE_OUTCOME_IMMUTABILITY_TRIGGERS`: a row trigger (1)
+/// that fires before (2) the update (16) or the delete (8). An `AFTER` or a
+/// statement trigger would let the change through (Zaki review 3, Z3-L5).
+const PHASE_OUTCOME_IMMUTABILITY_TRIGGER_TYPES: [i16; 2] = [1 | 2 | 16, 1 | 2 | 8];
+
 /// The function both immutability triggers call (V92).
 const PHASE_OUTCOME_IMMUTABILITY_FUNCTION: &str = "reject_phase_outcome_mutation";
 
@@ -1550,10 +1556,20 @@ pub struct PipelineControlHealth {
 ///   role cannot bypass it. A name the catalog does not hold there, a
 ///   `USING (true)` policy, a superuser or `BYPASSRLS` role, and an empty
 ///   list each fail it.
+///   Zaki review 3, Z3-L5: it also fails when a table has a permissive
+///   policy besides the tenant policy that applies to the current role
+///   (to `PUBLIC` or a role it is a member of), which PostgreSQL would OR
+///   with the tenant policy. A policy for another role (V105's
+///   `trace_gate_driver_cross_tenant_read`) does not open the current
+///   role's reads.
 /// - Audit immutability passes only when both of `phase_outcomes`'
 ///   immutability triggers exist on that table in the current schema, fire
 ///   for ordinary sessions (`tgenabled` `O` or `A`: not disabled, not
-///   replica-only), and call `reject_phase_outcome_mutation`.
+///   replica-only), are row triggers that fire before the change
+///   (`tgtype`, Zaki review 3, Z3-L5), and call
+///   `reject_phase_outcome_mutation`. A function whose body was replaced is
+///   not checked: the database owner can replace any function, and the
+///   runbook says so.
 ///
 /// Public only so the runtime suite can check it against a catalog it
 /// changed in a transaction it rolls back; `operational_summary` is its one
@@ -1565,27 +1581,51 @@ pub async fn pipeline_control_health(
 ) -> Result<PipelineControlHealth, DatabaseError> {
     let isolation =
         crate::db::postgres::trace_corpus_rls_catalog_diagnostics(tx, rls_tables).await?;
+    let no_extra_permissive_policy: bool = tx
+        .query_one(
+            "SELECT NOT EXISTS (
+                SELECT 1 FROM pg_policy p
+                  JOIN pg_class c ON c.oid = p.polrelid
+                 WHERE c.relname = ANY($1)
+                   AND c.relnamespace = to_regnamespace(current_schema())
+                   AND p.polpermissive
+                   AND p.polname <> 'trace_corpus_tenant_isolation'
+                   AND (
+                       0::OID = ANY(p.polroles)
+                       OR EXISTS (
+                           SELECT 1 FROM unnest(p.polroles) AS r(role_oid)
+                            WHERE r.role_oid <> 0
+                              AND pg_has_role(current_user, r.role_oid, 'MEMBER')
+                       )
+                   )
+             )",
+            &[&rls_tables],
+        )
+        .await?
+        .get(0);
     let row = tx
         .query_one(
             "SELECT COUNT(*) = 2 AS audit_immutability_passed
                FROM pg_trigger t
                JOIN pg_class c ON c.oid = t.tgrelid
                JOIN pg_proc f ON f.oid = t.tgfoid
+               JOIN unnest($1::TEXT[], $3::SMALLINT[]) AS expected(tgname, tgtype)
+                 ON expected.tgname = t.tgname AND expected.tgtype = t.tgtype
               WHERE c.relname = 'phase_outcomes'
                 AND c.relnamespace = to_regnamespace(current_schema())
                 AND NOT t.tgisinternal
                 AND t.tgenabled IN ('O', 'A')
-                AND t.tgname = ANY($1)
                 AND f.proname = $2
                 AND f.pronamespace = to_regnamespace(current_schema())",
             &[
                 &PHASE_OUTCOME_IMMUTABILITY_TRIGGERS.as_slice(),
                 &PHASE_OUTCOME_IMMUTABILITY_FUNCTION,
+                &PHASE_OUTCOME_IMMUTABILITY_TRIGGER_TYPES.as_slice(),
             ],
         )
         .await?;
     Ok(PipelineControlHealth {
-        tenant_isolation_passed: isolation.tables_isolated(),
+        tenant_isolation_passed: isolation.tables_isolated() && no_extra_permissive_policy,
         audit_immutability_passed: row.get("audit_immutability_passed"),
     })
 }

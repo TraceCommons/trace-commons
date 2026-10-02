@@ -21513,6 +21513,10 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
 /// - an immutability trigger made to call another function (one that
 ///   returns the row) fails it;
 /// - a `USING (true)` tenant policy fails the isolation control;
+/// - Zaki review 3, Z3-L5: an immutability trigger made to fire after the
+///   change, or once per statement, fails the audit control (`tgtype`), and
+///   an extra permissive policy beside the tenant policy (which PostgreSQL
+///   ORs with it) fails the isolation control;
 /// - a role that bypasses row-level security (the owner superuser here)
 ///   fails the isolation control, whatever the tables' flags.
 #[tokio::test]
@@ -21542,6 +21546,25 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
              CREATE POLICY trace_corpus_tenant_isolation ON pipeline_runs
                  USING (true) WITH CHECK (true);",
         ),
+        (
+            "AFTER trigger",
+            "DROP TRIGGER phase_outcomes_reject_update ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_update
+                 AFTER UPDATE ON phase_outcomes
+                 FOR EACH ROW EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
+        (
+            "statement trigger",
+            "DROP TRIGGER phase_outcomes_reject_delete ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_delete
+                 BEFORE DELETE ON phase_outcomes
+                 FOR EACH STATEMENT EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
+        (
+            "extra permissive policy",
+            "CREATE POLICY pipeline_control_test_open ON pipeline_runs
+                 USING (true) WITH CHECK (true);",
+        ),
     ] {
         let tx = owner.transaction().await.unwrap();
         tx.batch_execute(change)
@@ -21551,7 +21574,7 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
             .await
             .unwrap();
         let controls = pipeline_control_health(&tx, &tables).await.unwrap();
-        if case == "USING (true) policy" {
+        if case == "USING (true) policy" || case == "extra permissive policy" {
             assert!(!controls.tenant_isolation_passed, "{case}");
             assert!(controls.audit_immutability_passed, "{case}");
         } else {
