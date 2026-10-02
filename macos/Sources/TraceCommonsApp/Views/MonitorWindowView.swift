@@ -65,7 +65,10 @@ struct MonitorWindowView: View {
                 onSettings: { openSettings() }
             ) {
                 switch tab {
-                case .traces: TracesTreeView(store: traces, selection: $selectedSession)
+                case .traces:
+                    TracesTreeView(store: traces, selection: $selectedSession) { entryId in
+                        Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
+                    }
                 case .home, .inference: Spacer(minLength: 0)
                 }
             }
@@ -89,6 +92,14 @@ struct MonitorWindowView: View {
     /// The selected session, while it is still in the tree.
     private var selectedEntry: DaemonData.QueueEntry? {
         traces.tree.allSessions.first { $0.entryId == selectedSession }
+    }
+
+    /// A session's Review: select it and show the inspector, where its
+    /// review is. With the inspector hidden, selecting alone did nothing a
+    /// person could see.
+    static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
+        selection = entryId
+        showsInspector = true
     }
 
     /// The first time this window lays out, open the panes its width suits.

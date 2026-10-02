@@ -12,6 +12,9 @@ import TCShellCore
 struct TracesTreeView: View {
     let store: TracesStore
     @Binding var selection: String
+    /// A session's Review pill: select it and show the inspector its review
+    /// lives in, so Review is never a press that does nothing visible.
+    var onReview: (String) -> Void = { _ in }
 
     @State private var collapsed: Set<String> = []
     /// A mode change waiting on the core's confirmation: arming always,
@@ -75,15 +78,24 @@ struct TracesTreeView: View {
                     .padding(.top, GlassTokens.Space.s10)
                     .accessibilityLabel(MonitorWindowView.Tab.traces.rawValue)
             } else {
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(store.tree.tools) { tool in
-                            toolRow(tool)
-                            if isOpen(tool.id) {
-                                ForEach(tool.folders) { folderRows($0) }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(store.tree.tools) { tool in
+                                toolRow(tool)
+                                if isOpen(tool.id) {
+                                    ForEach(tool.folders) { folderRows($0) }
+                                }
                             }
+                            ForEach(store.tree.unplaced) { folderRows($0) }
                         }
-                        ForEach(store.tree.unplaced) { folderRows($0) }
+                    }
+                    // The keyboard moves the selection; keep it on screen.
+                    .onChange(of: selection) { _, selected in
+                        guard !selected.isEmpty else { return }
+                        withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
+                            proxy.scrollTo(selected)
+                        }
                     }
                 }
                 .scrollIndicators(.never)
@@ -287,8 +299,9 @@ struct TracesTreeView: View {
             // D10 default: a session's pill opens its review.
             submitTitle: Self.reviewTitle,
             onSelect: { selection = entry.entryId },
-            onSubmit: { selection = entry.entryId }
+            onSubmit: { onReview(entry.entryId) }
         )
+        .id(entry.entryId)
     }
 
     static let reviewTitle = MonitorWords.review
