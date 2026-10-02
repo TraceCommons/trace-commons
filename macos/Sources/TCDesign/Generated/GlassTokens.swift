@@ -328,7 +328,7 @@ public enum GlassTokens {
 
     public enum TypeScale {
         public static let micro: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .bold, lineHeight: 13, tracking: 0, design: .default, uppercase: false, tabular: false)
-        public static let eyebrow: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .bold, lineHeight: 14, tracking: 0.8, design: .default, uppercase: true, tabular: false)
+        public static let eyebrow: GlassTypeStyle = GlassTypeStyle(textStyle: .caption2, size: 10, weight: .semibold, lineHeight: 14, tracking: 0.8, design: .default, uppercase: true, tabular: false)
         public static let caption: GlassTypeStyle = GlassTypeStyle(textStyle: .subheadline, size: 11, weight: .regular, lineHeight: 16, tracking: 0, design: .default, uppercase: false, tabular: false)
         public static let label: GlassTypeStyle = GlassTypeStyle(textStyle: .callout, size: 12, weight: .medium, lineHeight: 16, tracking: 0, design: .default, uppercase: false, tabular: false)
         public static let body: GlassTypeStyle = GlassTypeStyle(textStyle: .body, size: 13, weight: .regular, lineHeight: 18, tracking: 0, design: .default, uppercase: false, tabular: false)
