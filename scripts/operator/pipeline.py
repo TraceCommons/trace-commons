@@ -13,9 +13,11 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -38,6 +40,7 @@ from pipeline_tooling.checks import (
 from pipeline_tooling.corpus import (
     DEFAULT_CORPUS,
     PIN_SCHEMA,
+    evidence_digests,
     export_hf_corpus,
     load_direct_corpus,
     load_pin,
@@ -48,7 +51,12 @@ from pipeline_tooling.environment import ROOT, Environment, Run, child_environme
 from pipeline_tooling.errors import StepFailed, ToolingError, require
 from pipeline_tooling.files import atomic_write, sha256_digest
 from pipeline_tooling.report import REPORT_NAME, SAFE_BLOCKERS, corpus_run_input, write_report
-from pipeline_tooling.results import load_results, require_current_pass_results, validate_evidence
+from pipeline_tooling.results import (
+    load_results,
+    require_attestations,
+    require_current_pass_results,
+    validate_evidence,
+)
 
 # Where routine outputs go (the latest bounded report of each kind), and the
 # catalog `--archive` writes (P4-D19). One name so the self-tests can move it.
@@ -59,7 +67,19 @@ LOCAL_DIR = ROOT / ".local"
 INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
 CORPUS_HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
 PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
+# `qualify --signing-key` and `keygen` (P5-D13): the signing step and the key
+# writer, two more ignored tests beside the package writer.
+ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
+KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
 BUNDLES = ("minimal", "compatibility")
+
+# The maximum age a signed result carries when `--evidence-max-age-seconds` is
+# not given, and the longest the server accepts
+# (`QUALIFICATION_EVIDENCE_DEFAULT_MAX_AGE_SECONDS` and
+# `QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS`; a self-test reads both out of
+# the Rust source).
+DEFAULT_EVIDENCE_AGE_SECONDS = 24 * 60 * 60
+EVIDENCE_AGE_CEILING_SECONDS = 7 * 24 * 60 * 60
 
 # `restore-drill`: the two ignored tests around the dump, the restore, and
 # the artifact copy, and the one check the resume emits.
@@ -108,6 +128,8 @@ QUALIFY_CORPUS_RUNS = (
 
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+# A public key: 32 bytes, 43 characters of unpadded base64url.
+_PUBLIC_KEY = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _FAILURE_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 # A bare `scheme://` anywhere in an argument. `--postgres-admin-url` is the
@@ -210,7 +232,49 @@ def build_parser():
         default=None,
         help="Use this existing PostgreSQL server instead of starting a container.",
     )
+    qualify_parser.add_argument(
+        "--signing-key",
+        dest="signing_key",
+        default=None,
+        help="After a passing run, sign each result with this Ed25519 PKCS#8 DER key (needs --signing-key-id).",
+    )
+    qualify_parser.add_argument(
+        "--signing-key-id",
+        dest="signing_key_id",
+        default=None,
+        help="The id the check trust store holds the signing key's public key under.",
+    )
+    qualify_parser.add_argument(
+        "--evidence-max-age-seconds",
+        dest="evidence_max_age_seconds",
+        type=int,
+        default=DEFAULT_EVIDENCE_AGE_SECONDS,
+        help=(
+            "How long a signed result stays current (default 86400; the server refuses more than 604800). "
+            "Only used with --signing-key."
+        ),
+    )
     qualify_parser.set_defaults(handler=qualify)
+
+    keygen_parser = subparsers.add_parser(
+        "keygen", help="Generate a check-signing key and its trusted key (this trusts it nowhere)"
+    )
+    keygen_parser.add_argument(
+        "--output", required=True, help="Where to write the new Ed25519 PKCS#8 DER key (mode 0600; never overwritten)."
+    )
+    keygen_parser.add_argument("--key-id", dest="key_id", required=True, help="The new key's id.")
+    keygen_parser.add_argument(
+        "--trusted-key-output",
+        dest="trusted_key_output",
+        required=True,
+        help="Where to write the trusted key (key id and public key; never overwritten).",
+    )
+    keygen_parser.set_defaults(handler=keygen)
+
+    revision_parser = subparsers.add_parser(
+        "revision", help="Print the code revision hash of the working tree (the one a qualification run records)"
+    )
+    revision_parser.set_defaults(handler=revision)
 
     return parser
 
@@ -435,6 +499,9 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
         )
     evidence = _read_json(run.results_dir / f"{check_id}.evidence.json", "corpus_evidence_malformed")
     validate_evidence(evidence)
+    # The corpus loaded and the requests posted (P5-D14): recomputed from the
+    # report, so an attestation never signs a value the report does not back.
+    corpus_digest, input_digest = evidence_digests(report)
     require(
         evidence
         == {
@@ -444,6 +511,8 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
             "changed_content_refused": report["changed_content_refused_count"],
             "tenant_isolation": True,
             "report_hash": sha256_digest(report_bytes),
+            "corpus_digest": corpus_digest,
+            "input_digest": input_digest,
         },
         "corpus_evidence_mismatch",
     )
@@ -496,6 +565,44 @@ def run_package(args, run):
     )
     require(key_output.is_file(), "package_trusted_key_missing")
     print(f"PipelinePackageOK: bundle={bundle_id} package={package_hash}")
+
+
+def keygen(args, run):
+    """Generates a check-signing key and its trusted key by starting the
+    ignored test `pipeline_signing_key_write`. It refuses an existing output
+    before anything starts; the key is written with mode 0600. It prints the
+    key id and no path: the paths go to the test's environment only."""
+    require(_KEY_ID.fullmatch(args.key_id) is not None, "signing_key_id_invalid")
+    output = Path(args.output).resolve()
+    trusted_output = Path(args.trusted_key_output).resolve()
+    require(output != trusted_output, "keygen_outputs_must_differ")
+    require(not (os.path.lexists(output) or os.path.lexists(trusted_output)), "signing_key_output_exists")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    trusted_output.parent.mkdir(parents=True, exist_ok=True)
+    extra = {
+        "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_OUTPUT": str(output),
+        "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_KEY_ID": args.key_id,
+        "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_TRUSTED_KEY_OUTPUT": str(trusted_output),
+    }
+    cargo_test(run, "keygen", INGEST_TEST_ARGS, KEY_WRITER, child_environment(extra), exact=True, ignored=True)
+
+    require(output.is_file() and stat.S_IMODE(output.stat().st_mode) & 0o077 == 0, "signing_key_mode_invalid")
+    trusted = _read_json(trusted_output, "trusted_key_invalid")
+    require(
+        isinstance(trusted, dict)
+        and set(trusted) == {"key_id", "public_key_base64url"}
+        and trusted["key_id"] == args.key_id
+        and isinstance(trusted["public_key_base64url"], str)
+        and _PUBLIC_KEY.fullmatch(trusted["public_key_base64url"]) is not None,
+        "trusted_key_invalid",
+    )
+    print(f"PipelineKeygenOK: key_id={args.key_id}")
+
+
+def revision(args, run):
+    """Prints the code revision hash of the working tree: the value `run`
+    holds for a command that credits evidence to it (`Run.create`)."""
+    print(run.code_revision_hash)
 
 
 def _artifact_files(root):
@@ -771,6 +878,53 @@ def _shown(path):
     return path.relative_to(ROOT) if path.is_relative_to(ROOT) else path.name
 
 
+class Signing(NamedTuple):
+    """`qualify --signing-key`: the key file (resolved), the id its public key
+    is trusted under, and the maximum age each signed result carries."""
+
+    key_path: Path
+    key_id: str
+    maximum_age_seconds: int
+
+
+def signing_options(args):
+    """The signing options of `qualify`, or `None` without `--signing-key`.
+    Every flag is checked before any step runs. The two key flags go
+    together (`signing_key_incomplete`); the maximum age is at least one
+    second and at most the server's ceiling (`evidence_max_age_invalid`,
+    `evidence_max_age_above_ceiling`); the key file must exist
+    (`signing_key_unreadable`). The key path appears in no label."""
+    require((args.signing_key is None) == (args.signing_key_id is None), "signing_key_incomplete")
+    require(args.evidence_max_age_seconds >= 1, "evidence_max_age_invalid")
+    require(args.evidence_max_age_seconds <= EVIDENCE_AGE_CEILING_SECONDS, "evidence_max_age_above_ceiling")
+    if args.signing_key is None:
+        return None
+    require(_KEY_ID.fullmatch(args.signing_key_id) is not None, "signing_key_id_invalid")
+    key_path = Path(args.signing_key).resolve()
+    require(key_path.is_file() and os.access(key_path, os.R_OK), "signing_key_unreadable")
+    return Signing(key_path, args.signing_key_id, args.evidence_max_age_seconds)
+
+
+def attest_results(run, results, signing):
+    """The signing step: starts the ignored test
+    `pipeline_check_attestations_write`, which signs every result file of the
+    run and verifies what it wrote, then checks the files it left (one for
+    each result, no other). Runs only for a result set that passed
+    `require_current_pass_results`. The key path goes to the test's
+    environment and nowhere else (the test's own output goes to the step's
+    log). Returns the number of attestations."""
+    extra = {
+        "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
+        "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH": str(signing.key_path),
+        "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID": signing.key_id,
+        "TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS": str(signing.maximum_age_seconds),
+    }
+    cargo_test(
+        run, "check_attestations", INGEST_TEST_ARGS, ATTESTATION_WRITER, child_environment(extra), exact=True, ignored=True
+    )
+    return require_attestations(run, results, signing.key_id, signing.maximum_age_seconds)
+
+
 def qualify(args, run):
     """Runs every required check (binding checks by exit status, then each
     database check, corpus run, and the restore drill in its own scenario of
@@ -782,7 +936,14 @@ def qualify(args, run):
     `status: fail` and the safe label, then raises: a tooling failure under
     its own label, an interrupt (Ctrl-C) as `qualify_interrupted`, anything
     else as `qualify_internal_error`. Only a report that itself cannot be
-    written is left out."""
+    written is left out.
+
+    With `--signing-key` (P5-D13), a run whose every required check passed
+    then signs each result (`attest_results`), before the report: the
+    attestation files, `<check_id>.attestation.json`, are what the server's
+    `qualify_bundle_attested` reads. The report says `attested` and counts
+    them. Flags that are wrong are refused before anything runs."""
+    signing = signing_options(args)
     inputs = {
         "code_revision_hash": run.code_revision_hash,
         "contract_manifest_digest": None,
@@ -790,13 +951,19 @@ def qualify(args, run):
         "corpus_runs": [],
     }
     catalog_path = None
+    attested = 0
     (LOCAL_DIR / REPORT_NAME).unlink(missing_ok=True)
     try:
         results = _run_required_checks(args, run, inputs)
+        # After `require_current_pass_results` (the end of
+        # `_run_required_checks`) and before the tree check, so a tree edited
+        # while the results were signed fails the run too.
+        if signing is not None:
+            attested = attest_results(run, results, signing)
         # Before the report: a tree edited during the run writes a failed
         # report under `code_revision_changed`, never a pass.
         run.require_code_revision_unchanged()
-        report_path = write_report(run, results, inputs, local_dir=LOCAL_DIR)
+        report_path = write_report(run, results, inputs, local_dir=LOCAL_DIR, attestation_count=attested)
         if args.archive:
             catalog_path = LOCAL_DIR / CATALOG_NAME
             update_catalog(catalog_path, report_path, records=corpus_records(run))
@@ -810,6 +977,8 @@ def qualify(args, run):
         _write_failed_report(run, inputs, "qualify_internal_error")
         raise
     line = f"PipelineQualificationOK: report={_shown(report_path)} checks={len(results)}"
+    if attested:
+        line += f" attested={attested}"
     if catalog_path is not None:
         line += f" catalog={_shown(catalog_path)}"
     print(line)

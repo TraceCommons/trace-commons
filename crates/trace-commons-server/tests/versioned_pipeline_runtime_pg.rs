@@ -78,14 +78,17 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineProductStore, pipeline_control_health,
 };
 use trace_commons_server::versioned_pipeline_qualification::{
-    BundlePackageTrustStore, BundleQualificationMetadata, DrillEvidence,
-    PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL, PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL,
-    PACKAGE_SIGNATURE_INVALID_LABEL, PACKAGE_SIGNER_UNTRUSTED_LABEL, PROMOTION_PACKAGE_CHECKS,
-    PROMOTION_REQUIRED_CHECKS, PipelineCheckEmitter, PipelineCheckResult, PipelineCheckStatus,
+    BundlePackageTrustStore, BundleQualificationMetadata, BundleQualificationRecord,
+    CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL, CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
+    CheckResultTrustStore, DrillEvidence, PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL,
+    PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL, PACKAGE_SIGNATURE_INVALID_LABEL,
+    PACKAGE_SIGNER_UNTRUSTED_LABEL, PROMOTION_PACKAGE_CHECKS, PROMOTION_REQUIRED_CHECKS,
+    PipelineCheckAttestation, PipelineCheckEmitter, PipelineCheckResult, PipelineCheckStatus,
     PipelineQualificationStore, ProductionAdapterKind, ProductionDependencyProfile,
     ProductionInfrastructureProfile, PromotionDecision,
     QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL, QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS,
-    evaluate_promotion, package_digests, sign_bundle_package, trusted_key_for_pkcs8,
+    SignedBundlePackage, evaluate_promotion, package_digests, sign_bundle_package,
+    sign_check_result, trusted_key_for_pkcs8,
 };
 
 use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
@@ -27795,7 +27798,9 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
     let tenant_a = format!("qualify-bundle-{}", uuid::Uuid::new_v4());
 
     let record = store
-        .qualify_bundle(&tenant_a, &signed, &trust, &metadata, &profile, &evidence)
+        .qualify_bundle(
+            &tenant_a, &signed, &trust, &metadata, &profile, &evidence, None,
+        )
         .await
         .expect("a fully qualified, trusted, production package qualifies");
     assert_eq!(record.bundle_id, package.bundle_id);
@@ -27808,7 +27813,9 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
     assert_eq!(record.metadata, metadata);
 
     let repeat = store
-        .qualify_bundle(&tenant_a, &signed, &trust, &metadata, &profile, &evidence)
+        .qualify_bundle(
+            &tenant_a, &signed, &trust, &metadata, &profile, &evidence, None,
+        )
         .await
         .expect("a repeat call with identical inputs answers the existing row");
     assert_eq!(repeat, record);
@@ -27823,6 +27830,7 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
             &different_metadata,
             &profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("a repeat call with different metadata for the same bundle is refused");
@@ -27971,6 +27979,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &metadata,
             &profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("an untrusted signer is refused");
@@ -27989,7 +27998,9 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
         .expect("package has artifacts")
         .push(0);
     let tampered_error = store
-        .qualify_bundle(&tenant, &tampered, &trust, &metadata, &profile, &evidence)
+        .qualify_bundle(
+            &tenant, &tampered, &trust, &metadata, &profile, &evidence, None,
+        )
         .await
         .expect_err("a tampered package is refused");
     assert!(
@@ -28023,6 +28034,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &metadata,
             &profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("a development-dependency package is refused");
@@ -28051,6 +28063,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &metadata,
             &profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("a non-compatibility package is refused");
@@ -28070,6 +28083,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &invalid_metadata,
             &profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("malformed metadata is refused");
@@ -28105,6 +28119,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &metadata,
             &profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("a profile built for a different package is refused");
@@ -28126,6 +28141,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &configuration_mismatched_metadata,
             &profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("a configuration digest that does not match the package is refused");
@@ -28146,6 +28162,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &mismatched_metadata,
             &profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("a runtime dependency digest that does not match the profile is refused");
@@ -28176,6 +28193,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
             &metadata,
             &blocked_profile,
             &evidence,
+            None,
         )
         .await
         .expect_err("a profile with a blocker is refused");
@@ -28287,6 +28305,7 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
                 refused_metadata,
                 &profile,
                 refused_evidence,
+                None,
             )
             .await
             .expect_err("evidence that does not back the metadata is refused");
@@ -28411,7 +28430,9 @@ async fn qualify_bundle_refuses_a_package_whose_configuration_is_not_qualifiable
     assert!(hand_built.blockers().is_empty());
     for (profile, case) in [(&profile, "derived"), (&hand_built, "hand-built")] {
         let error = PipelineQualificationStore::new(backend.clone())
-            .qualify_bundle(&tenant, &signed, &trust, &metadata, profile, &evidence)
+            .qualify_bundle(
+                &tenant, &signed, &trust, &metadata, profile, &evidence, None,
+            )
             .await
             .expect_err("a package whose configuration is not qualifiable is refused");
         assert!(
@@ -28423,6 +28444,464 @@ async fn qualify_bundle_refuses_a_package_whose_configuration_is_not_qualifiable
         count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
         0
     );
+}
+
+// ---------------------------------------------------------------------------
+// Task 8 of PR 5: signed check results (`qualify_bundle_attested`).
+// ---------------------------------------------------------------------------
+
+const ATTESTATION_KEY_ID: &str = "qualification-check-key";
+
+/// What a signed qualification needs: a production-qualified package and its
+/// dependency profile, the package signed and trusted, a check key and the
+/// store that trusts it, and a full set of passing results for the package
+/// in the shape a real run has (`evidence_from_check_results`).
+struct AttestedQualification {
+    package: BundlePackage,
+    profile: ProductionDependencyProfile,
+    signed: SignedBundlePackage,
+    package_trust: BundlePackageTrustStore,
+    check_pkcs8: Vec<u8>,
+    check_trust: CheckResultTrustStore,
+    evidence: Vec<DrillEvidence>,
+}
+
+async fn attested_qualification(
+    backend: Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+) -> AttestedQualification {
+    let (service, package) = qualified_production_service(backend, dir).await;
+    let profile = ProductionDependencyProfile::for_bundle(
+        &service,
+        &package,
+        all_production_infrastructure(),
+    )
+    .expect("the fully qualified service resolves the package cleanly");
+    assert!(profile.blockers().is_empty(), "{:?}", profile.blockers());
+    let random = ring::rand::SystemRandom::new();
+    let package_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+    let signed = sign_bundle_package(
+        package.clone(),
+        "qualification-release-key",
+        package_pkcs8.as_ref(),
+    )
+    .expect("package signs");
+    let package_trust = BundlePackageTrustStore::new([trusted_key_for_pkcs8(
+        "qualification-release-key",
+        package_pkcs8.as_ref(),
+    )
+    .expect("trusted key builds")])
+    .unwrap();
+    let check_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random)
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    let check_trust =
+        CheckResultTrustStore::new([
+            trusted_key_for_pkcs8(ATTESTATION_KEY_ID, &check_pkcs8).expect("check key builds")
+        ])
+        .unwrap();
+    let evidence = evidence_from_check_results(&package, &sha256_prefixed(b"code-revision"), None);
+    AttestedQualification {
+        package,
+        profile,
+        signed,
+        package_trust,
+        check_pkcs8,
+        check_trust,
+        evidence,
+    }
+}
+
+/// Every result of `evidence`, signed with `pkcs8` as `pipeline.py qualify
+/// --signing-key` signs them: each of the three corpus checks carries its
+/// corpus and input digests, no other check carries one.
+fn attest_all(
+    evidence: &[DrillEvidence],
+    pkcs8: &[u8],
+    key_id: &str,
+    maximum_age_seconds: u64,
+) -> Vec<PipelineCheckAttestation> {
+    evidence
+        .iter()
+        .map(|item| {
+            let check_id = item.check.check_id.as_str();
+            let corpus = check_id.starts_with("pipeline_http_corpus_");
+            sign_check_result(
+                item.check.clone(),
+                maximum_age_seconds,
+                corpus.then(|| sha256_prefixed(format!("corpus:{check_id}").as_bytes())),
+                corpus.then(|| sha256_prefixed(format!("input:{check_id}").as_bytes())),
+                key_id,
+                pkcs8,
+            )
+            .expect("the check result signs")
+        })
+        .collect()
+}
+
+fn attested_metadata(
+    qualification: &AttestedQualification,
+    corpus_digest: &str,
+    input_digest: &str,
+) -> BundleQualificationMetadata {
+    BundleQualificationMetadata {
+        corpus_digest: corpus_digest.to_string(),
+        input_digest: input_digest.to_string(),
+        configuration_digest: package_digests(&qualification.package)
+            .expect("package digests compute")
+            .configuration_digest,
+        code_revision_hash: sha256_prefixed(b"code-revision"),
+        runtime_dependency_digest: qualification
+            .profile
+            .runtime_identity_digest()
+            .expect("runtime identity digest computes"),
+        evidence_hash: promotion_now(&qualification.evidence).evidence_hash,
+    }
+}
+
+fn assert_refused(result: Result<BundleQualificationRecord, DatabaseError>, label: &str) {
+    match result {
+        Err(DatabaseError::Constraint(ref refused)) if refused == label => {}
+        other => panic!("expected the refusal {label}, got {other:?}"),
+    }
+}
+
+/// Review Focus 3, the database part (P5-D13, P5-D14): `qualify_bundle_attested`
+/// qualifies a bundle from signed results only, and the metadata's two
+/// digests are the server's. A result changed after signing, a signature by a
+/// key the check store does not trust, and a maximum age above the server's
+/// ceiling (signed that way) are each refused, and none leaves a row.
+#[tokio::test]
+async fn an_unsigned_or_altered_result_cannot_qualify_a_bundle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let qualification = attested_qualification(backend.clone(), &dir).await;
+    let store = PipelineQualificationStore::new(backend.clone());
+    let tenant = format!("qualify-attested-{}", uuid::Uuid::new_v4());
+    let code_revision = sha256_prefixed(b"code-revision");
+    let attestations = attest_all(
+        &qualification.evidence,
+        &qualification.check_pkcs8,
+        ATTESTATION_KEY_ID,
+        3_600,
+    );
+    assert_eq!(attestations.len(), PROMOTION_REQUIRED_CHECKS.len());
+    let attest = |attestations: &[PipelineCheckAttestation]| {
+        let store = &store;
+        let qualification = &qualification;
+        let tenant = &tenant;
+        let code_revision = &code_revision;
+        let attestations = attestations.to_vec();
+        async move {
+            store
+                .qualify_bundle_attested(
+                    tenant,
+                    &qualification.signed,
+                    &qualification.package_trust,
+                    &qualification.check_trust,
+                    &qualification.profile,
+                    &attestations,
+                    code_revision,
+                )
+                .await
+        }
+    };
+
+    // One result changed after it was signed: a failed result made to pass,
+    // and a stale one given a fresh `observed_at`. Unaltered, each is a
+    // signed result that does not qualify a bundle (not ready); altered, it
+    // is not a signed result at all.
+    let mut failing = qualification.evidence.clone();
+    failing[3].check.status = PipelineCheckStatus::Fail;
+    let failing = attest_all(
+        &failing,
+        &qualification.check_pkcs8,
+        ATTESTATION_KEY_ID,
+        3_600,
+    );
+    assert_refused(
+        attest(&failing).await,
+        "bundle_qualification_promotion_not_ready",
+    );
+    let mut flipped = failing.clone();
+    flipped[3].result.status = PipelineCheckStatus::Pass;
+    assert_refused(
+        attest(&flipped).await,
+        CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL,
+    );
+
+    let mut aged = qualification.evidence.clone();
+    aged[7].check.observed_at -= chrono::Duration::hours(2);
+    let aged = attest_all(&aged, &qualification.check_pkcs8, ATTESTATION_KEY_ID, 3_600);
+    assert_refused(
+        attest(&aged).await,
+        "bundle_qualification_promotion_not_ready",
+    );
+    let mut redated = aged.clone();
+    redated[7].result.observed_at += chrono::Duration::hours(2);
+    assert_refused(
+        attest(&redated).await,
+        CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL,
+    );
+
+    // The same set with one attestation altered after signing.
+    let edits: [(&str, fn(&mut PipelineCheckAttestation)); 4] = [
+        ("maximum_age_seconds", |a| {
+            a.maximum_age_seconds = QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS
+        }),
+        ("corpus_digest", |a| {
+            a.corpus_digest = Some(sha256_prefixed(b"another-corpus"))
+        }),
+        ("input_digest", |a| {
+            a.input_digest = Some(sha256_prefixed(b"another-input"))
+        }),
+        ("evidence_hash", |a| {
+            a.result.evidence_hash = sha256_prefixed(b"another-evidence")
+        }),
+    ];
+    for (what, edit) in edits {
+        // `pipeline_http_corpus_compatibility` carries both digests.
+        let index = attestations
+            .iter()
+            .position(|a| a.result.check_id == "pipeline_http_corpus_compatibility")
+            .unwrap();
+        let mut altered = attestations.clone();
+        edit(&mut altered[index]);
+        match attest(&altered).await {
+            Err(DatabaseError::Constraint(ref label))
+                if label == CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL => {}
+            other => panic!("altering {what} must break the signature, got {other:?}"),
+        }
+    }
+
+    // A check trust store of another key does not know the signer.
+    let other_pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let other_trust = CheckResultTrustStore::new([trusted_key_for_pkcs8(
+        "another-check-key",
+        other_pkcs8.as_ref(),
+    )
+    .unwrap()])
+    .unwrap();
+    assert_refused(
+        store
+            .qualify_bundle_attested(
+                &tenant,
+                &qualification.signed,
+                &qualification.package_trust,
+                &other_trust,
+                &qualification.profile,
+                &attestations,
+                &code_revision,
+            )
+            .await,
+        CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
+    );
+    // The package's signing key is not a check key either.
+    let package_key_store = CheckResultTrustStore::new(std::iter::empty()).unwrap();
+    assert_refused(
+        store
+            .qualify_bundle_attested(
+                &tenant,
+                &qualification.signed,
+                &qualification.package_trust,
+                &package_key_store,
+                &qualification.profile,
+                &attestations,
+                &code_revision,
+            )
+            .await,
+        CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
+    );
+
+    // A maximum age above the ceiling, signed that way (the signer chose it,
+    // and the server still bounds it).
+    let above_ceiling = attest_all(
+        &qualification.evidence,
+        &qualification.check_pkcs8,
+        ATTESTATION_KEY_ID,
+        QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS + 1,
+    );
+    assert_refused(
+        attest(&above_ceiling).await,
+        QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL,
+    );
+
+    // Results that are not all there are not ready, however they are signed.
+    assert_refused(
+        attest(&attestations[1..]).await,
+        "bundle_qualification_promotion_not_ready",
+    );
+    // The code revision the caller names is the evidence's, or it is refused.
+    assert_refused(
+        store
+            .qualify_bundle_attested(
+                &tenant,
+                &qualification.signed,
+                &qualification.package_trust,
+                &qualification.check_trust,
+                &qualification.profile,
+                &attestations,
+                &sha256_prefixed(b"another-revision"),
+            )
+            .await,
+        "bundle_qualification_code_revision_mismatch",
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
+        0,
+        "no row exists after every refused call above"
+    );
+
+    // The control: the unaltered, signed, passing set qualifies the bundle.
+    // The metadata's two digests are the server's (computed from the
+    // verified attestations), the revision is the argument, and the evidence
+    // hash is `evaluate_promotion`'s.
+    let verified = qualification
+        .check_trust
+        .verify_all(&attestations)
+        .expect("the signed set verifies");
+    let record = attest(&attestations)
+        .await
+        .expect("a signed, passing, current set qualifies the bundle");
+    assert_eq!(record.bundle_id, qualification.package.bundle_id);
+    assert_eq!(record.metadata.corpus_digest, verified.corpus_digest);
+    assert_eq!(record.metadata.input_digest, verified.input_digest);
+    assert_eq!(record.metadata.code_revision_hash, code_revision);
+    assert_eq!(
+        record.metadata.evidence_hash,
+        promotion_now(&qualification.evidence).evidence_hash
+    );
+    assert_eq!(
+        record.metadata,
+        attested_metadata(
+            &qualification,
+            &verified.corpus_digest,
+            &verified.input_digest
+        )
+    );
+    assert_ne!(
+        record.metadata.corpus_digest, record.metadata.input_digest,
+        "the two digests are different values"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
+        1
+    );
+    // A repeat of the same signed call answers the row it recorded.
+    assert_eq!(
+        attest(&attestations).await.expect("the repeat answers"),
+        record
+    );
+}
+
+/// The store API `qualify_bundle` takes the verified digests of a signed set
+/// (`verified: Some((corpus, input))`) and refuses metadata that does not
+/// carry exactly those. The bare API (`None`) still takes the metadata as its
+/// caller gives it.
+#[tokio::test]
+async fn qualify_bundle_refuses_metadata_that_the_attestations_do_not_back() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let qualification = attested_qualification(backend.clone(), &dir).await;
+    let store = PipelineQualificationStore::new(backend.clone());
+    let tenant = format!("qualify-metadata-{}", uuid::Uuid::new_v4());
+    let attestations = attest_all(
+        &qualification.evidence,
+        &qualification.check_pkcs8,
+        ATTESTATION_KEY_ID,
+        3_600,
+    );
+    let verified = qualification
+        .check_trust
+        .verify_all(&attestations)
+        .expect("the signed set verifies");
+    let other = sha256_prefixed(b"a-digest-no-attestation-backs");
+    let qualify = |metadata: BundleQualificationMetadata, backed: Option<(String, String)>| {
+        let store = &store;
+        let qualification = &qualification;
+        let tenant = &tenant;
+        async move {
+            store
+                .qualify_bundle(
+                    tenant,
+                    &qualification.signed,
+                    &qualification.package_trust,
+                    &metadata,
+                    &qualification.profile,
+                    &qualification.evidence,
+                    backed
+                        .as_ref()
+                        .map(|(corpus, input)| (corpus.as_str(), input.as_str())),
+                )
+                .await
+        }
+    };
+    let backed = || {
+        Some((
+            verified.corpus_digest.clone(),
+            verified.input_digest.clone(),
+        ))
+    };
+
+    assert_refused(
+        qualify(
+            attested_metadata(&qualification, &other, &verified.input_digest),
+            backed(),
+        )
+        .await,
+        "bundle_qualification_corpus_mismatch",
+    );
+    assert_refused(
+        qualify(
+            attested_metadata(&qualification, &verified.corpus_digest, &other),
+            backed(),
+        )
+        .await,
+        "bundle_qualification_input_mismatch",
+    );
+    assert_refused(
+        qualify(attested_metadata(&qualification, &other, &other), backed()).await,
+        "bundle_qualification_corpus_mismatch",
+    );
+    // Digests that are not even digests are refused for their shape first.
+    assert_refused(
+        qualify(
+            attested_metadata(&qualification, "not-a-digest", &verified.input_digest),
+            backed(),
+        )
+        .await,
+        "bundle_qualification_metadata_invalid",
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
+        0,
+        "no row exists after the refused calls"
+    );
+
+    // The metadata the attestations back is recorded.
+    let record = qualify(
+        attested_metadata(
+            &qualification,
+            &verified.corpus_digest,
+            &verified.input_digest,
+        ),
+        backed(),
+    )
+    .await
+    .expect("metadata that carries the verified digests qualifies");
+    assert_eq!(record.metadata.corpus_digest, verified.corpus_digest);
+    assert_eq!(record.metadata.input_digest, verified.input_digest);
+
+    // The bare API (`None`) records whatever digests its caller names; that
+    // is why no route calls it. Here it answers a conflict for the bundle
+    // already recorded with other digests, not a mismatch.
+    let conflict = qualify(attested_metadata(&qualification, &other, &other), None).await;
+    assert_refused(conflict, "bundle_qualification_identity_conflict");
 }
 
 // ---------------------------------------------------------------------------

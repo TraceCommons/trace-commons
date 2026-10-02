@@ -24,6 +24,21 @@ from .files import sha256_digest
 
 SCHEMA = "trace_commons.pipeline_check_result.v1"
 
+# The envelope that signs a result (P5-D13), as
+# `PipelineCheckAttestation` in `versioned_pipeline_qualification.rs`: the
+# result stays exactly `SCHEMA`. This tooling cannot verify an Ed25519
+# signature with the standard library, so it checks the shape of what the
+# signing step wrote; the step itself verifies every file with the trust store
+# the server uses, before it ends.
+ATTESTATION_SCHEMA = "trace_commons.pipeline_check_attestation.v1"
+ATTESTATION_ALGORITHM = "Ed25519"
+_ATTESTATION_KEYS = frozenset(
+    {"schema", "result", "maximum_age_seconds", "corpus_digest", "input_digest", "signature"}
+)
+_SIGNATURE_KEYS = frozenset({"algorithm", "key_id", "package_hash", "signature_base64url"})
+# An Ed25519 signature is 64 bytes: 86 characters of unpadded base64url.
+_SIGNATURE_BYTES = re.compile(r"[A-Za-z0-9_-]{86}\Z")
+
 _LABEL = re.compile(r"[a-z0-9_]{1,64}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _STATUSES = ("pass", "fail", "blocked")
@@ -221,6 +236,57 @@ def load_results(run):
             safe_blockers=tuple(raw["safe_blockers"]),
         )
     return results
+
+
+def _attested_digests(evidence):
+    """The two digests an attestation carries for a check whose evidence is
+    `evidence`: both when the evidence holds both keys, neither otherwise
+    (the signing step refuses an evidence that holds only one)."""
+    if isinstance(evidence, dict) and "corpus_digest" in evidence and "input_digest" in evidence:
+        return evidence["corpus_digest"], evidence["input_digest"]
+    return None, None
+
+
+def require_attestations(run, results, key_id, maximum_age_seconds):
+    """After the signing step: one `<check_id>.attestation.json` for each
+    result (a map of check id to `CheckResult`, as `load_results` returns it)
+    and no other, each exactly the envelope the server reads: the schema, the
+    result file's own value, the maximum age the step was given, the two
+    digests of the check's evidence (or none), and a signature of the
+    algorithm and key id that were asked for. Returns the count. Problems
+    are `check_attestation_count_mismatch` (a missing or extra file) and
+    `check_attestation_invalid`; neither names a path."""
+    results_dir = run.results_dir
+    require(
+        {path.name for path in results_dir.glob("*.attestation.json")}
+        == {f"{check_id}.attestation.json" for check_id in results},
+        "check_attestation_count_mismatch",
+    )
+    for check_id in sorted(results):
+        raw = _read_json_file(results_dir / f"{check_id}.attestation.json", "check_attestation_invalid")
+        result = _read_json_file(results_dir / f"{check_id}.result.json", "check_result_schema_invalid")
+        evidence = _read_json_file(results_dir / f"{check_id}.evidence.json", "check_evidence_malformed")
+        require(isinstance(raw, dict) and set(raw) == _ATTESTATION_KEYS, "check_attestation_invalid")
+        require(raw["schema"] == ATTESTATION_SCHEMA, "check_attestation_invalid")
+        require(raw["result"] == result, "check_attestation_invalid")
+        require(
+            type(raw["maximum_age_seconds"]) is int and raw["maximum_age_seconds"] == maximum_age_seconds,
+            "check_attestation_invalid",
+        )
+        require((raw["corpus_digest"], raw["input_digest"]) == _attested_digests(evidence), "check_attestation_invalid")
+        signature = raw["signature"]
+        require(
+            isinstance(signature, dict)
+            and set(signature) == _SIGNATURE_KEYS
+            and signature["algorithm"] == ATTESTATION_ALGORITHM
+            and signature["key_id"] == key_id
+            and isinstance(signature["package_hash"], str)
+            and _HASH.fullmatch(signature["package_hash"]) is not None
+            and isinstance(signature["signature_base64url"], str)
+            and _SIGNATURE_BYTES.fullmatch(signature["signature_base64url"]) is not None,
+            "check_attestation_invalid",
+        )
+    return len(results)
 
 
 def require_one_package(results):

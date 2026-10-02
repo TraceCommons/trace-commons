@@ -17,6 +17,11 @@ port's declared drills:
   carries (a pass result's blockers are promotion blockers).
 - `status` (`pass`, or `fail` with the safe `failure` label), and
   `evidence_hash`, the SHA-256 of the canonical `{"inputs", "checks"}`.
+- `attested` and `attestation_count`: whether `qualify --signing-key` signed
+  the results (P5-D13), and how many attestation files it wrote (one for each
+  check of a pass report). Neither is under `evidence_hash`: the attestations
+  are separate files, signed and verified on their own. A failed report is
+  never attested.
 
 Not carried from the port: `base_revision_hash` (the code revision hash
 already binds the tree) and the fixed `acceptance_layers` list, which no
@@ -69,6 +74,8 @@ _REPORT_KEYS = frozenset(
         "external_payout_enabled",
         "safe_blockers",
         "run_id",
+        "attested",
+        "attestation_count",
         "inputs",
         "checks",
         "evidence_hash",
@@ -168,10 +175,11 @@ def _report_blockers(checks):
     return [*SAFE_BLOCKERS, *extra]
 
 
-def build_report(run, checks, inputs, *, failure=None):
+def build_report(run, checks, inputs, *, failure=None, attestation_count=0):
     """The report value. `inputs` holds `code_revision_hash`,
     `contract_manifest_digest`, `inventory_digest` (each `None` when a failed
-    run never reached it), and `corpus_runs`."""
+    run never reached it), and `corpus_runs`. `attestation_count` is how many
+    attestation files the signing step wrote (0 when it did not run)."""
     inputs = {
         "code_revision_hash": inputs.get("code_revision_hash"),
         "contract_manifest_digest": inputs.get("contract_manifest_digest"),
@@ -188,6 +196,8 @@ def build_report(run, checks, inputs, *, failure=None):
         "external_payout_enabled": False,
         "safe_blockers": _report_blockers(checks),
         "run_id": run.run_id,
+        "attested": attestation_count > 0,
+        "attestation_count": attestation_count,
         "inputs": inputs,
         "checks": checks,
         "evidence_hash": sha256_digest(canonical({"inputs": inputs, "checks": checks})),
@@ -228,6 +238,11 @@ def _validate(report):
         "qualification_report_invalid",
     )
     require(_is_label(report["run_id"]), "qualification_report_invalid")
+    count = report["attestation_count"]
+    require(
+        type(count) is int and count >= 0 and report["attested"] is (count > 0) and (passed or count == 0),
+        "qualification_report_invalid",
+    )
 
     inputs = report["inputs"]
     require(isinstance(inputs, dict) and set(inputs) == {*_INPUT_HASHES, "corpus_runs"}, "qualification_report_invalid")
@@ -284,6 +299,8 @@ def _validate(report):
             "qualification_report_incomplete",
         )
         _require_one_package(checks)
+        # An attested pass report has one attestation for each check.
+        require(count in (0, len(checks)), "qualification_report_invalid")
 
 
 def _require_one_package(checks):
@@ -308,14 +325,16 @@ def _require_one_package(checks):
     require(len(packages) <= 1, "qualification_evidence_mixed_package")
 
 
-def write_report(run, results, inputs, *, failure=None, local_dir=None):
+def write_report(run, results, inputs, *, failure=None, local_dir=None, attestation_count=0):
     """Builds and validates the report, writes it to the run directory and
     to `<local_dir>/pipeline-qualification-report.json` (the latest report;
     `local_dir` defaults to `.local/`), and returns the latter path. With a
     `failure` label the report says `status: fail`, and a result whose
-    evidence no longer validates is left out instead of raising."""
+    evidence no longer validates is left out instead of raising.
+    `attestation_count` is how many attestations the run signed (a failed
+    report has none)."""
     checks = check_entries(run, results, strict=failure is None)
-    report = build_report(run, checks, inputs, failure=failure)
+    report = build_report(run, checks, inputs, failure=failure, attestation_count=attestation_count)
     validate_qualification_report(report)
     data = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False).encode() + b"\n"
     atomic_write(run.run_dir / RUN_REPORT_NAME, data)

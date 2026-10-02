@@ -58,11 +58,33 @@ pub const QUALIFICATION_EVIDENCE_PACKAGE_MISSING_LABEL: &str =
 pub const QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL: &str =
     "qualification_evidence_package_unexpected";
 /// The longest maximum age `PipelineQualificationStore::qualify_bundle`
-/// accepts for a check result: seven days. A result's maximum age is the
-/// caller's input until PR 5 signs results, so the server bounds it.
+/// accepts for a check result: seven days. A signed attestation carries its
+/// maximum age ([`PipelineCheckAttestation::maximum_age_seconds`], under the
+/// signature) and the signer chooses it, so the server bounds it whichever
+/// way a result arrives: `qualify_bundle_attested`, the path a route takes,
+/// and the bare `qualify_bundle` both refuse a larger age.
 pub const QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL: &str =
     "bundle_qualification_evidence_age_above_ceiling";
+/// The maximum age `pipeline.py qualify --signing-key` gives a result it
+/// signs when `--evidence-max-age-seconds` is not given: one day.
+pub const QUALIFICATION_EVIDENCE_DEFAULT_MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
+
+/// The schema of the envelope that signs a check result (P5-D13). The result
+/// inside stays exactly [`PIPELINE_CHECK_RESULT_SCHEMA`].
+pub const PIPELINE_CHECK_ATTESTATION_SCHEMA: &str = "trace_commons.pipeline_check_attestation.v1";
+/// An attestation whose signature does not verify: an altered field, another
+/// key behind a known key id, an algorithm other than Ed25519, or a signature
+/// that is not one.
+pub const CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL: &str = "check_attestation_signature_invalid";
+/// An attestation signed under a key id the check trust store does not hold
+/// (or a check key that the trust store refuses to hold).
+pub const CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL: &str = "check_attestation_signer_untrusted";
+/// An attestation that is not well formed whatever its signature says: a
+/// schema other than [`PIPELINE_CHECK_ATTESTATION_SCHEMA`], a result that
+/// fails [`PipelineCheckResult::validate`], a maximum age of zero, a digest
+/// that is not a `sha256:` digest, or two attestations for one check.
+pub const CHECK_ATTESTATION_INVALID_LABEL: &str = "check_attestation_invalid";
 
 /// The checks that must pass for promotion: one current result for each
 /// (see [`evaluate_promotion`]). Exactly the ids in
@@ -435,6 +457,10 @@ pub struct PromotionDecision {
     /// package rule of [`PROMOTION_PACKAGE_CHECKS`] (a candidate check
     /// without the package, a mechanics check with one): the decision then
     /// names no package, whatever else it says.
+    ///
+    /// A decision that is blocked only by a missing, failed, or stale result
+    /// can still carry `Some(package)`: those blockers do not touch the
+    /// package rule. So `package.is_some()` is not readiness. `ready` is.
     pub package: Option<PromotionPackage>,
 }
 
@@ -634,21 +660,34 @@ pub struct BundlePackageTrustStore {
     keys: BTreeMap<String, Vec<u8>>,
 }
 
+/// The public keys of `keys` by key id: a trust store holds no key whose id
+/// is not a safe identifier, whose bytes are not base64url of a 32-byte
+/// Ed25519 public key, or whose id repeats. `refused` is the label of the
+/// store that asks (a package store and a check store each use their own).
+fn trusted_public_keys(
+    keys: impl IntoIterator<Item = TrustedBundleKey>,
+    refused: &str,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut trusted = BTreeMap::new();
+    for key in keys {
+        if !is_safe_identifier(&key.key_id) {
+            return Err(refused.to_string());
+        }
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(key.public_key_base64url)
+            .map_err(|_| refused.to_string())?;
+        if bytes.len() != 32 || trusted.insert(key.key_id, bytes).is_some() {
+            return Err(refused.to_string());
+        }
+    }
+    Ok(trusted)
+}
+
 impl BundlePackageTrustStore {
     pub fn new(keys: impl IntoIterator<Item = TrustedBundleKey>) -> Result<Self, String> {
-        let mut trusted = BTreeMap::new();
-        for key in keys {
-            if !is_safe_identifier(&key.key_id) {
-                return Err(PACKAGE_SIGNER_UNTRUSTED_LABEL.to_string());
-            }
-            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(key.public_key_base64url)
-                .map_err(|_| PACKAGE_SIGNER_UNTRUSTED_LABEL.to_string())?;
-            if bytes.len() != 32 || trusted.insert(key.key_id, bytes).is_some() {
-                return Err(PACKAGE_SIGNER_UNTRUSTED_LABEL.to_string());
-            }
-        }
-        Ok(Self { keys: trusted })
+        Ok(Self {
+            keys: trusted_public_keys(keys, PACKAGE_SIGNER_UNTRUSTED_LABEL)?,
+        })
     }
 
     pub fn verify(&self, signed: &SignedBundlePackage) -> Result<(), String> {
@@ -715,6 +754,215 @@ pub fn trusted_key_for_pkcs8(key_id: &str, pkcs8: &[u8]) -> anyhow::Result<Trust
         public_key_base64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(key_pair.public_key().as_ref()),
     })
+}
+
+/// A check result and the signature of the key that vouches for it (P5-D13).
+/// The result stays exactly [`PIPELINE_CHECK_RESULT_SCHEMA`]; this envelope
+/// adds the one thing a result file lacks, who made it. The signature covers
+/// every other field ([`attestation_hash`]): the result, the maximum age
+/// the signer gives its evidence, and the two digests of the corpus run that
+/// produced it. Any change after signing breaks the signature.
+///
+/// `signature.package_hash` holds the hash that was signed (the signature
+/// type is shared with package signatures; the name is the package one's).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineCheckAttestation {
+    pub schema: String,
+    pub result: PipelineCheckResult,
+    pub maximum_age_seconds: u64,
+    pub corpus_digest: Option<String>,
+    pub input_digest: Option<String>,
+    pub signature: BundlePackageSignature,
+}
+
+impl PipelineCheckAttestation {
+    /// What an attestation must be whatever its signature says; each failure
+    /// is [`CHECK_ATTESTATION_INVALID_LABEL`]. Both [`sign_check_result`]
+    /// and [`CheckResultTrustStore::verify_all`] read it, so nothing is
+    /// signed that verification would refuse for its shape.
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.schema != PIPELINE_CHECK_ATTESTATION_SCHEMA
+            || self.result.validate().is_err()
+            || self.maximum_age_seconds == 0
+            || [&self.corpus_digest, &self.input_digest]
+                .into_iter()
+                .flatten()
+                .any(|digest| !is_sha256(digest))
+        {
+            return Err(CHECK_ATTESTATION_INVALID_LABEL.to_string());
+        }
+        Ok(())
+    }
+}
+
+/// The hash an attestation's signature covers: every field but the
+/// signature, as canonical JSON.
+fn attestation_hash(attestation: &PipelineCheckAttestation) -> Result<String, String> {
+    let result = serde_json::to_value(&attestation.result)
+        .map_err(|_| CHECK_ATTESTATION_INVALID_LABEL.to_string())?;
+    evidence_hash(&serde_json::json!({
+        "schema": attestation.schema,
+        "result": result,
+        "maximum_age_seconds": attestation.maximum_age_seconds,
+        "corpus_digest": attestation.corpus_digest,
+        "input_digest": attestation.input_digest,
+    }))
+    .map_err(|_| CHECK_ATTESTATION_INVALID_LABEL.to_string())
+}
+
+/// Signs `result` with a PKCS#8-encoded Ed25519 private key, as
+/// [`sign_bundle_package`] signs a package: the attestation is built with an
+/// empty signature, [`attestation_hash`] is computed over it, and the ASCII
+/// bytes of that hash are signed (the same algorithm label and base64url
+/// encoding). `corpus_digest` and `input_digest` are the digests of the
+/// corpus run behind the result, `None` for a check that has none. Refuses
+/// what verification would refuse for its shape (`check_attestation_invalid`)
+/// and a key that is not PKCS#8 Ed25519 (`check_attestation_signing_key_invalid`).
+pub fn sign_check_result(
+    result: PipelineCheckResult,
+    maximum_age_seconds: u64,
+    corpus_digest: Option<String>,
+    input_digest: Option<String>,
+    key_id: &str,
+    pkcs8: &[u8],
+) -> anyhow::Result<PipelineCheckAttestation> {
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8)
+        .map_err(|_| anyhow::anyhow!("check_attestation_signing_key_invalid"))?;
+    if !is_safe_identifier(key_id) {
+        anyhow::bail!(CHECK_ATTESTATION_INVALID_LABEL);
+    }
+    let mut attestation = PipelineCheckAttestation {
+        schema: PIPELINE_CHECK_ATTESTATION_SCHEMA.to_string(),
+        result,
+        maximum_age_seconds,
+        corpus_digest,
+        input_digest,
+        signature: BundlePackageSignature {
+            algorithm: PACKAGE_SIGNATURE_ALGORITHM.to_string(),
+            key_id: key_id.to_string(),
+            package_hash: String::new(),
+            signature_base64url: String::new(),
+        },
+    };
+    attestation
+        .validate_shape()
+        .map_err(|label| anyhow::anyhow!(label))?;
+    let hash = attestation_hash(&attestation).map_err(|label| anyhow::anyhow!(label))?;
+    let signature = key_pair.sign(hash.as_bytes());
+    attestation.signature.package_hash = hash;
+    attestation.signature.signature_base64url =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_ref());
+    Ok(attestation)
+}
+
+/// The keys whose signatures make a check result count toward a
+/// qualification. A different type from [`BundlePackageTrustStore`] on
+/// purpose (P5-D13): a route holds both, and a key trusted to sign packages
+/// is not thereby trusted to vouch for check results, nor the reverse.
+#[derive(Debug, Clone, Default)]
+pub struct CheckResultTrustStore {
+    keys: BTreeMap<String, Vec<u8>>,
+}
+
+/// What [`CheckResultTrustStore::verify_all`] returns for a set of
+/// attestations whose signatures all verified: the results (each with the
+/// maximum age its signer gave it), and the two digests that name the
+/// corpora and inputs behind them (P5-D14). `corpus_digest` is the canonical
+/// hash of the object `{check_id: corpus_digest}` over every attestation
+/// that carries one, `input_digest` the same for `input_digest`; with none
+/// carrying one, each is the hash of the empty object.
+#[derive(Debug, Clone)]
+pub struct VerifiedEvidence {
+    pub evidence: Vec<DrillEvidence>,
+    pub corpus_digest: String,
+    pub input_digest: String,
+}
+
+impl CheckResultTrustStore {
+    /// Takes the keys [`BundlePackageTrustStore::new`] takes and refuses the
+    /// ones it refuses, under [`CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL`].
+    pub fn new(keys: impl IntoIterator<Item = TrustedBundleKey>) -> Result<Self, String> {
+        Ok(Self {
+            keys: trusted_public_keys(keys, CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL)?,
+        })
+    }
+
+    /// Verifies every attestation, in order, and refuses the whole set at
+    /// the first that fails. For each: its shape (`check_attestation_invalid`:
+    /// the schema, the result, a nonzero maximum age, each digest it carries
+    /// a `sha256:` digest); then its signature algorithm and key id shape
+    /// (`check_attestation_signature_invalid`); then that the key id is one
+    /// this store holds (`check_attestation_signer_untrusted`); then that
+    /// the hash it records is [`attestation_hash`] and that the key's
+    /// signature over that hash verifies
+    /// (`check_attestation_signature_invalid`). A second attestation for
+    /// one check is `check_attestation_invalid`: it would otherwise hide a
+    /// digest from the two this returns.
+    ///
+    /// Nothing here judges whether the results qualify a bundle
+    /// ([`evaluate_promotion`] does, over `evidence`), and the maximum age
+    /// is the signer's: [`PipelineQualificationStore::qualify_bundle`]
+    /// bounds it.
+    pub fn verify_all(
+        &self,
+        attestations: &[PipelineCheckAttestation],
+    ) -> Result<VerifiedEvidence, String> {
+        let mut seen = BTreeSet::new();
+        let mut corpus_digests = BTreeMap::new();
+        let mut input_digests = BTreeMap::new();
+        let mut evidence = Vec::with_capacity(attestations.len());
+        for attestation in attestations {
+            self.verify_one(attestation)?;
+            let check_id = &attestation.result.check_id;
+            if !seen.insert(check_id.clone()) {
+                return Err(CHECK_ATTESTATION_INVALID_LABEL.to_string());
+            }
+            if let Some(digest) = &attestation.corpus_digest {
+                corpus_digests.insert(check_id.clone(), digest.clone());
+            }
+            if let Some(digest) = &attestation.input_digest {
+                input_digests.insert(check_id.clone(), digest.clone());
+            }
+            evidence.push(DrillEvidence {
+                check: attestation.result.clone(),
+                maximum_age_seconds: attestation.maximum_age_seconds,
+            });
+        }
+        let digest_of = |digests: &BTreeMap<String, String>| {
+            evidence_hash(&serde_json::json!(digests))
+                .map_err(|_| CHECK_ATTESTATION_INVALID_LABEL.to_string())
+        };
+        Ok(VerifiedEvidence {
+            corpus_digest: digest_of(&corpus_digests)?,
+            input_digest: digest_of(&input_digests)?,
+            evidence,
+        })
+    }
+
+    fn verify_one(&self, attestation: &PipelineCheckAttestation) -> Result<(), String> {
+        attestation.validate_shape()?;
+        let signature = &attestation.signature;
+        if signature.algorithm != PACKAGE_SIGNATURE_ALGORITHM
+            || !is_safe_identifier(&signature.key_id)
+        {
+            return Err(CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL.to_string());
+        }
+        let public_key = self
+            .keys
+            .get(&signature.key_id)
+            .ok_or_else(|| CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL.to_string())?;
+        let hash = attestation_hash(attestation)?;
+        if signature.package_hash != hash {
+            return Err(CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL.to_string());
+        }
+        let signature_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&signature.signature_base64url)
+            .map_err(|_| CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL.to_string())?;
+        UnparsedPublicKey::new(&ED25519, public_key)
+            .verify(hash.as_bytes(), &signature_bytes)
+            .map_err(|_| CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL.to_string())
+    }
 }
 
 /// Which of the four kinds of production infrastructure a runtime holds for
@@ -931,9 +1179,13 @@ pub fn validate_production_package(package: &BundlePackage) -> Result<(), String
 /// [`BundleQualificationRecord`]'s package and signature identity. Every
 /// field must be a `sha256:` digest. `qualify_bundle` binds
 /// `configuration_digest`, `runtime_dependency_digest`, `evidence_hash` and
-/// `code_revision_hash` to the package, the profile and the evidence;
-/// `corpus_digest` and `input_digest` are the caller's input until PR 5
-/// (see `qualify_bundle`).
+/// `code_revision_hash` to the package, the profile and the evidence.
+/// `corpus_digest` and `input_digest` are the server's values when the
+/// qualification comes through `qualify_bundle_attested` (P5-D14): it
+/// computes both from the verified attestations
+/// ([`VerifiedEvidence`]) and `qualify_bundle` then requires the metadata to
+/// carry exactly those. Through the bare `qualify_bundle` with no verified
+/// digests, they are the caller's input, checked for shape and recorded.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BundleQualificationMetadata {
     pub corpus_digest: String,
@@ -1027,8 +1279,9 @@ impl PipelineQualificationStore {
     ///   evidence blocks; a malformed result is refused with its own label).
     ///   A result's maximum age above `QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS`
     ///   (seven days) is refused (`bundle_qualification_evidence_age_above_ceiling`):
-    ///   until PR 5 signs results, the result files, their `observed_at` and
-    ///   their maximum age are the caller's input.
+    ///   a signer chooses the age its attestation carries, and the bare API
+    ///   takes the results as its caller gives them, so the server bounds it
+    ///   either way.
     ///   The decision must be ready (`bundle_qualification_promotion_not_ready`),
     ///   its evidence hash must be the metadata's
     ///   (`bundle_qualification_evidence_mismatch`), its one code revision the
@@ -1040,13 +1293,25 @@ impl PipelineQualificationStore {
     /// went stale is refused as `bundle_qualification_promotion_not_ready`,
     /// not answered with the existing row (fail closed; fix round 2).
     ///
-    /// `metadata.corpus_digest` and `metadata.input_digest` are the caller's
-    /// input until PR 5, as the result files are (Zaki's re-review of #1166,
-    /// Minor): they are checked for shape and recorded, not derived. A check
-    /// result carries only the hash of its evidence (`evidence_hash`), not
-    /// the corpus report or the input it ran on, so nothing here can
-    /// recompute either digest from `evidence`. Binding them needs signed
-    /// results that carry those digests, which is PR 5's.
+    /// `verified` is what binds `metadata.corpus_digest` and
+    /// `metadata.input_digest` (P5-D14; Zaki's re-review of #1166, Minor). A
+    /// check result carries only the hash of its evidence, not the corpus
+    /// report or the input it ran on, so nothing here can recompute either
+    /// digest from `evidence`; signed attestations carry them, and
+    /// [`CheckResultTrustStore::verify_all`] computes the two digests from
+    /// the attestations it verified ([`VerifiedEvidence`]). With
+    /// `Some((corpus_digest, input_digest))` the metadata's two values must
+    /// equal those (`bundle_qualification_corpus_mismatch`,
+    /// `bundle_qualification_input_mismatch`; the shape check comes first).
+    /// With `None` they are the caller's input, checked for shape and
+    /// recorded, as `evidence` is: a result file is a file anyone who can
+    /// write one can make.
+    ///
+    /// The path a route takes is [`Self::qualify_bundle_attested`], which
+    /// verifies signed results, derives the metadata's digests itself, and
+    /// calls this with `Some`. This bare API with `None` is not reachable
+    /// from a route: no ingest route calls it, and a caller that passes
+    /// `None` vouches for its own evidence.
     ///
     /// A recorded qualification covers the signed package and its
     /// dependency profile, not the deployment's bindings (merge review M2).
@@ -1054,6 +1319,7 @@ impl PipelineQualificationStore {
     /// and the pipeline credit issuer (`pipeline_credit_issuer_principal_missing`)
     /// are startup checks of every bundle a routed or drained tenant may run,
     /// not terms of this record, and PR 5's activation must keep them.
+    #[allow(clippy::too_many_arguments)]
     pub async fn qualify_bundle(
         &self,
         tenant_id: &str,
@@ -1062,6 +1328,7 @@ impl PipelineQualificationStore {
         metadata: &BundleQualificationMetadata,
         dependencies: &ProductionDependencyProfile,
         evidence: &[DrillEvidence],
+        verified: Option<(&str, &str)>,
     ) -> Result<BundleQualificationRecord, DatabaseError> {
         trust.verify(signed).map_err(DatabaseError::Constraint)?;
         validate_production_package(&signed.package).map_err(DatabaseError::Constraint)?;
@@ -1071,6 +1338,18 @@ impl PipelineQualificationStore {
             ));
         }
         metadata.validate().map_err(DatabaseError::Constraint)?;
+        if let Some((corpus_digest, input_digest)) = verified {
+            if metadata.corpus_digest != corpus_digest {
+                return Err(DatabaseError::Constraint(
+                    "bundle_qualification_corpus_mismatch".to_string(),
+                ));
+            }
+            if metadata.input_digest != input_digest {
+                return Err(DatabaseError::Constraint(
+                    "bundle_qualification_input_mismatch".to_string(),
+                ));
+            }
+        }
         let digests = package_digests(&signed.package).map_err(DatabaseError::Constraint)?;
         if dependencies.bundle.bundle_id != signed.package.bundle_id
             || dependencies.bundle.dependency_digest != digests.dependency_digest
@@ -1097,8 +1376,9 @@ impl PipelineQualificationStore {
         if !blockers.is_empty() {
             return Err(DatabaseError::Constraint(blockers[0].clone()));
         }
-        // A result's maximum age is the caller's input (fix round 2), so a
-        // qualification accepts none above the server's ceiling.
+        // A result's maximum age is its signer's or its caller's choice (fix
+        // round 2), so a qualification accepts none above the server's
+        // ceiling.
         if evidence
             .iter()
             .any(|item| item.maximum_age_seconds > QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS)
@@ -1172,6 +1452,64 @@ impl PipelineQualificationStore {
         }
         tx.commit().await?;
         Ok(record)
+    }
+
+    /// Qualifies `signed` from signed check results only (P5-D13, P5-D14): the
+    /// path a route takes. `check_trust` verifies every attestation
+    /// ([`CheckResultTrustStore::verify_all`]: `check_attestation_invalid`,
+    /// `check_attestation_signer_untrusted`,
+    /// `check_attestation_signature_invalid`), so a result that no trusted
+    /// key signed, or that changed after signing, qualifies nothing. The
+    /// promotion is evaluated over the verified results at the current time
+    /// ([`evaluate_promotion`]) for its evidence hash; the metadata is then
+    /// built here, never taken from the caller: `corpus_digest` and
+    /// `input_digest` are the two digests of the verified attestations,
+    /// `configuration_digest` the signed package's own,
+    /// `runtime_dependency_digest` the profile's, `evidence_hash` the
+    /// promotion's, and `code_revision_hash` the argument (the revision the
+    /// deployed code was built from; the promotion must name the same one,
+    /// `bundle_qualification_code_revision_mismatch`). Everything else is
+    /// [`Self::qualify_bundle`]'s, which this calls with the verified digests:
+    /// the package trust and production shape, the dependency profile, a
+    /// ready promotion for this package, the age ceiling, and the
+    /// append-only record. No row is left behind by a failed call.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn qualify_bundle_attested(
+        &self,
+        tenant_id: &str,
+        signed: &SignedBundlePackage,
+        package_trust: &BundlePackageTrustStore,
+        check_trust: &CheckResultTrustStore,
+        dependencies: &ProductionDependencyProfile,
+        attestations: &[PipelineCheckAttestation],
+        code_revision_hash: &str,
+    ) -> Result<BundleQualificationRecord, DatabaseError> {
+        let verified = check_trust
+            .verify_all(attestations)
+            .map_err(DatabaseError::Constraint)?;
+        let digests = package_digests(&signed.package).map_err(DatabaseError::Constraint)?;
+        let promotion = evaluate_promotion(&verified.evidence, Utc::now())
+            .map_err(DatabaseError::Constraint)?;
+        let metadata = BundleQualificationMetadata {
+            corpus_digest: verified.corpus_digest.clone(),
+            input_digest: verified.input_digest.clone(),
+            configuration_digest: digests.configuration_digest,
+            code_revision_hash: code_revision_hash.to_string(),
+            runtime_dependency_digest: dependencies
+                .runtime_identity_digest()
+                .map_err(DatabaseError::Constraint)?,
+            evidence_hash: promotion.evidence_hash,
+        };
+        self.qualify_bundle(
+            tenant_id,
+            signed,
+            package_trust,
+            &metadata,
+            dependencies,
+            &verified.evidence,
+            Some((&verified.corpus_digest, &verified.input_digest)),
+        )
+        .await
     }
 }
 
@@ -2305,6 +2643,574 @@ mod tests {
                 require_promotion_backs(promotion, metadata, digests),
                 Err(label)
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Signed check results (P5-D13, P5-D14).
+    // -----------------------------------------------------------------------
+
+    const CHECK_KEY_ID: &str = "check-key";
+
+    fn generated_pkcs8() -> ring::pkcs8::Document {
+        Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap()
+    }
+
+    /// A fresh check key and a check trust store that trusts exactly it.
+    fn check_signer() -> (ring::pkcs8::Document, CheckResultTrustStore) {
+        let pkcs8 = generated_pkcs8();
+        let store =
+            CheckResultTrustStore::new([
+                trusted_key_for_pkcs8(CHECK_KEY_ID, pkcs8.as_ref()).expect("trusted key builds")
+            ])
+            .expect("check trust store builds");
+        (pkcs8, store)
+    }
+
+    fn sign_sample(
+        pkcs8: &ring::pkcs8::Document,
+        corpus_digest: Option<String>,
+        input_digest: Option<String>,
+    ) -> PipelineCheckAttestation {
+        sign_check_result(
+            sample_check_result(),
+            3_600,
+            corpus_digest,
+            input_digest,
+            CHECK_KEY_ID,
+            pkcs8.as_ref(),
+        )
+        .expect("the sample result signs")
+    }
+
+    /// A passing result for `check_id` that names no package.
+    fn attested_result(check_id: &str) -> PipelineCheckResult {
+        sample_check(check_id, PipelineCheckStatus::Pass, Utc::now())
+    }
+
+    #[test]
+    fn an_attestation_round_trips_through_the_check_trust_store() {
+        let (pkcs8, store) = check_signer();
+        let result = sample_check_result();
+        let attestation = sign_check_result(
+            result.clone(),
+            3_600,
+            None,
+            None,
+            CHECK_KEY_ID,
+            pkcs8.as_ref(),
+        )
+        .expect("the sample result signs");
+        assert_eq!(attestation.schema, PIPELINE_CHECK_ATTESTATION_SCHEMA);
+        assert_eq!(attestation.result, result);
+        assert_eq!(attestation.maximum_age_seconds, 3_600);
+        assert_eq!(attestation.signature.algorithm, PACKAGE_SIGNATURE_ALGORITHM);
+        assert_eq!(attestation.signature.key_id, CHECK_KEY_ID);
+
+        let verified = store
+            .verify_all(std::slice::from_ref(&attestation))
+            .expect("a signed attestation verifies");
+        assert_eq!(verified.evidence.len(), 1);
+        assert_eq!(verified.evidence[0].check, result);
+        assert_eq!(verified.evidence[0].maximum_age_seconds, 3_600);
+
+        // As a file: written as JSON, read back, and verified again, with
+        // both digests set.
+        let with_digests = sign_sample(
+            &pkcs8,
+            Some(sha256_prefixed(b"corpus")),
+            Some(sha256_prefixed(b"input")),
+        );
+        let bytes = serde_json::to_vec(&with_digests).expect("the attestation serializes");
+        let read_back: PipelineCheckAttestation =
+            serde_json::from_slice(&bytes).expect("the attestation deserializes");
+        assert_eq!(read_back, with_digests);
+        store
+            .verify_all(&[read_back])
+            .expect("the attestation verifies after a JSON round trip");
+
+        // The key and its public half are not the same bytes: a signature
+        // made with one key does not verify under another's public key.
+        let other = generated_pkcs8();
+        let other_store =
+            CheckResultTrustStore::new([
+                trusted_key_for_pkcs8(CHECK_KEY_ID, other.as_ref()).unwrap()
+            ])
+            .unwrap();
+        assert_eq!(
+            other_store.verify_all(&[attestation]).unwrap_err(),
+            CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL
+        );
+    }
+
+    /// Review Focus 3, the unit part: nothing that was changed after signing,
+    /// signed by a key the store does not trust, or not signed at all
+    /// verifies. A result that no key signed is no input to a qualification.
+    #[test]
+    fn an_unsigned_or_altered_result_cannot_qualify_a_bundle() {
+        let (pkcs8, store) = check_signer();
+        let corpus = Some(sha256_prefixed(b"corpus"));
+        let input = Some(sha256_prefixed(b"input"));
+        let signed = sign_sample(&pkcs8, corpus.clone(), input.clone());
+        store
+            .verify_all(std::slice::from_ref(&signed))
+            .expect("the unaltered attestation verifies");
+        let unsigned_digests = sign_sample(&pkcs8, None, None);
+
+        // Altered after signing: each fails as an invalid signature.
+        let mut altered: Vec<(&str, PipelineCheckAttestation)> = Vec::new();
+        let mut change = |what: &'static str,
+                          base: &PipelineCheckAttestation,
+                          edit: &dyn Fn(&mut PipelineCheckAttestation)| {
+            let mut attestation = base.clone();
+            edit(&mut attestation);
+            assert_ne!(&attestation, base, "{what} changes the attestation");
+            altered.push((what, attestation));
+        };
+        change("observed_at", &signed, &|a| {
+            a.result.observed_at += Duration::seconds(1)
+        });
+        change("status", &signed, &|a| {
+            a.result.status = PipelineCheckStatus::Fail
+        });
+        change("maximum_age_seconds", &signed, &|a| {
+            a.maximum_age_seconds += 1
+        });
+        change("a changed corpus_digest", &signed, &|a| {
+            a.corpus_digest = Some(sha256_prefixed(b"another-corpus"))
+        });
+        change("a removed corpus_digest", &signed, &|a| {
+            a.corpus_digest = None
+        });
+        change("an added corpus_digest", &unsigned_digests, &|a| {
+            a.corpus_digest = Some(sha256_prefixed(b"corpus"))
+        });
+        change("a changed input_digest", &signed, &|a| {
+            a.input_digest = Some(sha256_prefixed(b"another-input"))
+        });
+        change("an added input_digest", &unsigned_digests, &|a| {
+            a.input_digest = Some(sha256_prefixed(b"input"))
+        });
+        change("check_id", &signed, &|a| {
+            a.result.check_id = "pipeline_lease_renewal".to_string()
+        });
+        change("run_id", &signed, &|a| a.result.run_id = "q9999abcd".into());
+        change("code_revision_hash", &signed, &|a| {
+            a.result.code_revision_hash = sha256_prefixed(b"another-revision")
+        });
+        change("evidence_hash", &signed, &|a| {
+            a.result.evidence_hash = sha256_prefixed(b"another-evidence")
+        });
+        change("package_hash", &signed, &|a| {
+            a.result.package_hash = Some(sha256_prefixed(b"another-package"))
+        });
+        change("a removed package digest", &signed, &|a| {
+            a.result.dependency_digest = None
+        });
+        change("safe_blockers", &signed, &|a| {
+            a.result.safe_blockers = Vec::new()
+        });
+        change("the signature's own hash", &signed, &|a| {
+            a.signature.package_hash = sha256_prefixed(b"another-hash")
+        });
+        change("a blank signature", &signed, &|a| {
+            a.signature.signature_base64url = String::new()
+        });
+        change("a signature that is not base64", &signed, &|a| {
+            a.signature.signature_base64url = "!!not base64!!".to_string()
+        });
+        change("an algorithm other than Ed25519", &signed, &|a| {
+            a.signature.algorithm = "HS256".to_string()
+        });
+        for (what, attestation) in altered {
+            assert_eq!(
+                store.verify_all(&[attestation]).unwrap_err(),
+                CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL,
+                "{what}"
+            );
+        }
+
+        // One altered attestation among good ones refuses the whole set.
+        let mut tampered = signed.clone();
+        tampered.result.status = PipelineCheckStatus::Fail;
+        let other_check = sign_check_result(
+            attested_result("pipeline_lease_renewal"),
+            3_600,
+            None,
+            None,
+            CHECK_KEY_ID,
+            pkcs8.as_ref(),
+        )
+        .unwrap();
+        assert!(
+            store
+                .verify_all(&[other_check.clone(), signed.clone()])
+                .is_ok()
+        );
+        assert_eq!(
+            store
+                .verify_all(&[other_check.clone(), tampered])
+                .unwrap_err(),
+            CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL
+        );
+
+        // Signed by a key the store does not know: untrusted, whether the key
+        // id is new or the same id names another key (the second is an
+        // invalid signature: the id is known and its key does not verify).
+        let other_pkcs8 = generated_pkcs8();
+        let stranger = sign_check_result(
+            sample_check_result(),
+            3_600,
+            None,
+            None,
+            "another-key",
+            other_pkcs8.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.verify_all(&[stranger]).unwrap_err(),
+            CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL
+        );
+        let impostor = sign_check_result(
+            sample_check_result(),
+            3_600,
+            None,
+            None,
+            CHECK_KEY_ID,
+            other_pkcs8.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.verify_all(&[impostor]).unwrap_err(),
+            CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL
+        );
+        let empty_store = CheckResultTrustStore::new(std::iter::empty()).unwrap();
+        assert_eq!(
+            empty_store
+                .verify_all(std::slice::from_ref(&signed))
+                .unwrap_err(),
+            CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL
+        );
+
+        // A schema other than the constant, a result that is not valid, a
+        // maximum age of zero, and a digest that is not a `sha256:` digest
+        // are refused before the signature is read: they are invalid
+        // attestations, not bad signatures.
+        let invalid = |edit: &dyn Fn(&mut PipelineCheckAttestation)| {
+            let mut attestation = signed.clone();
+            edit(&mut attestation);
+            store.verify_all(&[attestation]).unwrap_err()
+        };
+        for (what, label) in [
+            (
+                "a schema string other than the constant",
+                invalid(&|a| a.schema = "trace_commons.pipeline_check_attestation.v2".into()),
+            ),
+            (
+                "a result that is not valid",
+                invalid(&|a| a.result.run_id = "Not A Label".into()),
+            ),
+            (
+                "the result schema",
+                invalid(&|a| a.result.schema = "bogus_schema".into()),
+            ),
+            (
+                "a maximum age of zero",
+                invalid(&|a| a.maximum_age_seconds = 0),
+            ),
+            (
+                "a corpus digest that is not a digest",
+                invalid(&|a| a.corpus_digest = Some("not-a-digest".into())),
+            ),
+            (
+                "an input digest that is not a digest",
+                invalid(&|a| a.input_digest = Some("sha256:short".into())),
+            ),
+        ] {
+            assert_eq!(label, CHECK_ATTESTATION_INVALID_LABEL, "{what}");
+        }
+
+        // An unknown JSON field does not deserialize, and a bare result (no
+        // attestation around it) is not an attestation.
+        let mut with_extra = serde_json::to_value(&signed).unwrap();
+        with_extra
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<PipelineCheckAttestation>(with_extra).is_err());
+        let bare = serde_json::to_value(sample_check_result()).unwrap();
+        assert!(serde_json::from_value::<PipelineCheckAttestation>(bare).is_err());
+
+        // The same check id twice is refused, as is anything else that would
+        // let one attestation hide another from the digests.
+        assert_eq!(
+            store
+                .verify_all(&[other_check.clone(), other_check])
+                .unwrap_err(),
+            CHECK_ATTESTATION_INVALID_LABEL
+        );
+    }
+
+    #[test]
+    fn signing_refuses_a_result_or_a_key_that_verification_would_refuse() {
+        let pkcs8 = generated_pkcs8();
+        let mut bad_result = sample_check_result();
+        bad_result.run_id = "Not A Label".to_string();
+        assert!(
+            sign_check_result(bad_result, 3_600, None, None, CHECK_KEY_ID, pkcs8.as_ref()).is_err()
+        );
+        assert!(
+            sign_check_result(
+                sample_check_result(),
+                0,
+                None,
+                None,
+                CHECK_KEY_ID,
+                pkcs8.as_ref()
+            )
+            .is_err()
+        );
+        assert!(
+            sign_check_result(
+                sample_check_result(),
+                3_600,
+                Some("not-a-digest".to_string()),
+                None,
+                CHECK_KEY_ID,
+                pkcs8.as_ref()
+            )
+            .is_err()
+        );
+        assert!(
+            sign_check_result(
+                sample_check_result(),
+                3_600,
+                None,
+                None,
+                CHECK_KEY_ID,
+                b"not a pkcs8 document"
+            )
+            .is_err()
+        );
+        assert!(
+            sign_check_result(
+                sample_check_result(),
+                3_600,
+                None,
+                None,
+                "key id with spaces",
+                pkcs8.as_ref()
+            )
+            .is_err()
+        );
+    }
+
+    /// The check trust store takes the keys the package trust store takes
+    /// and refuses the ones it refuses, under its own label.
+    #[test]
+    fn the_check_trust_store_refuses_the_keys_the_package_store_refuses() {
+        let pkcs8 = generated_pkcs8();
+        let good = trusted_key_for_pkcs8("check-key", pkcs8.as_ref()).unwrap();
+        let refused = [
+            TrustedBundleKey {
+                key_id: "bad key id".to_string(),
+                public_key_base64url: good.public_key_base64url.clone(),
+            },
+            TrustedBundleKey {
+                key_id: "check-key".to_string(),
+                public_key_base64url: "!!not base64!!".to_string(),
+            },
+            TrustedBundleKey {
+                key_id: "check-key".to_string(),
+                public_key_base64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode([7u8; 31]),
+            },
+        ];
+        for key in refused {
+            assert_eq!(
+                BundlePackageTrustStore::new([key.clone()]).unwrap_err(),
+                PACKAGE_SIGNER_UNTRUSTED_LABEL
+            );
+            assert_eq!(
+                CheckResultTrustStore::new([key]).unwrap_err(),
+                CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL
+            );
+        }
+        assert_eq!(
+            CheckResultTrustStore::new([good.clone(), good.clone()]).unwrap_err(),
+            CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL
+        );
+        assert!(CheckResultTrustStore::new([good]).is_ok());
+    }
+
+    /// A key of the package trust store is not a check key: an attestation
+    /// signed with a package-signing key does not verify in a check store
+    /// built from other keys, and the two stores are different types, so the
+    /// route holds both and a package key cannot stand in for a check key.
+    #[test]
+    fn a_package_key_is_not_a_check_key() {
+        let package_pkcs8 = generated_pkcs8();
+        let package_trust = BundlePackageTrustStore::new([trusted_key_for_pkcs8(
+            "release-2026-09",
+            package_pkcs8.as_ref(),
+        )
+        .unwrap()])
+        .unwrap();
+        let signed_package = sign_bundle_package(
+            minimal_test_package(),
+            "release-2026-09",
+            package_pkcs8.as_ref(),
+        )
+        .unwrap();
+        package_trust
+            .verify(&signed_package)
+            .expect("the package key signs packages");
+
+        let attestation = sign_check_result(
+            sample_check_result(),
+            3_600,
+            None,
+            None,
+            "release-2026-09",
+            package_pkcs8.as_ref(),
+        )
+        .unwrap();
+        let (_, check_store) = check_signer();
+        assert_eq!(
+            check_store
+                .verify_all(std::slice::from_ref(&attestation))
+                .unwrap_err(),
+            CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL
+        );
+        // Under the package key's own id, with another key behind it.
+        let other_pkcs8 = generated_pkcs8();
+        let lookalike = CheckResultTrustStore::new([trusted_key_for_pkcs8(
+            "release-2026-09",
+            other_pkcs8.as_ref(),
+        )
+        .unwrap()])
+        .unwrap();
+        assert_eq!(
+            lookalike.verify_all(&[attestation]).unwrap_err(),
+            CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL
+        );
+
+        // The reverse: a package signature is not an attestation (the hash
+        // it signs is the package's, not an attestation's).
+        assert_ne!(
+            std::any::TypeId::of::<BundlePackageTrustStore>(),
+            std::any::TypeId::of::<CheckResultTrustStore>()
+        );
+    }
+
+    #[test]
+    fn the_corpus_and_input_digests_cover_every_attestation_that_carries_one() {
+        let (pkcs8, store) = check_signer();
+        let digest = |label: &str| sha256_prefixed(label.as_bytes());
+        let sign = |check_id: &str, corpus: Option<String>, input: Option<String>| {
+            sign_check_result(
+                attested_result(check_id),
+                3_600,
+                corpus,
+                input,
+                CHECK_KEY_ID,
+                pkcs8.as_ref(),
+            )
+            .unwrap()
+        };
+
+        // Two of three carry a corpus digest, under the check ids `x` and
+        // `y`; the third carries none.
+        let attestations = [
+            sign("x", Some(digest("a")), Some(digest("c"))),
+            sign("y", Some(digest("b")), Some(digest("d"))),
+            sign("z", None, None),
+        ];
+        let verified = store.verify_all(&attestations).unwrap();
+        assert_eq!(verified.evidence.len(), 3);
+        assert_eq!(
+            verified.corpus_digest,
+            evidence_hash(&serde_json::json!({"x": digest("a"), "y": digest("b")})).unwrap()
+        );
+        assert_eq!(
+            verified.input_digest,
+            evidence_hash(&serde_json::json!({"x": digest("c"), "y": digest("d")})).unwrap()
+        );
+        let reversed = [
+            attestations[2].clone(),
+            attestations[1].clone(),
+            attestations[0].clone(),
+        ];
+        let reversed = store.verify_all(&reversed).unwrap();
+        assert_eq!(reversed.corpus_digest, verified.corpus_digest);
+        assert_eq!(reversed.input_digest, verified.input_digest);
+
+        // The digest names each check: the same values under other check ids
+        // are another digest, and a changed value is another digest.
+        let renamed = [
+            sign("x", Some(digest("b")), Some(digest("c"))),
+            sign("y", Some(digest("a")), Some(digest("d"))),
+        ];
+        assert_ne!(
+            store.verify_all(&renamed).unwrap().corpus_digest,
+            verified.corpus_digest
+        );
+
+        // Each digest is covered on its own.
+        let corpus_only = store
+            .verify_all(&[sign("x", Some(digest("a")), None)])
+            .unwrap();
+        assert_eq!(
+            corpus_only.corpus_digest,
+            evidence_hash(&serde_json::json!({"x": digest("a")})).unwrap()
+        );
+        assert_eq!(
+            corpus_only.input_digest,
+            evidence_hash(&serde_json::json!({})).unwrap()
+        );
+
+        // None carries one: the empty object's hash.
+        let none = store
+            .verify_all(&[sign("x", None, None), sign("y", None, None)])
+            .unwrap();
+        let empty = evidence_hash(&serde_json::json!({})).unwrap();
+        assert_eq!(none.corpus_digest, empty);
+        assert_eq!(none.input_digest, empty);
+        assert_eq!(store.verify_all(&[]).unwrap().corpus_digest, empty);
+    }
+
+    /// Task 7's review: a mechanics check that carries even one of the three
+    /// package digests (and the four candidate checks correct) blocks
+    /// promotion as `qualification_evidence_package_unexpected:<check_id>`,
+    /// whichever digest it is. The digest it carries is only part of a
+    /// package, so the results also name two packages.
+    #[test]
+    fn a_mechanics_check_with_any_one_package_digest_is_unexpected() {
+        let now = Utc::now();
+        let digests: [(&str, fn(&mut PipelineCheckResult) -> &mut Option<String>); 3] = [
+            ("package_hash", |check| &mut check.package_hash),
+            ("configuration_digest", |check| {
+                &mut check.configuration_digest
+            }),
+            ("dependency_digest", |check| &mut check.dependency_digest),
+        ];
+        for (name, digest) in digests {
+            let mut evidence = passing_evidence(now);
+            *digest(check_mut(&mut evidence, "pipeline_lease_renewal")) =
+                Some(sha256_prefixed(b"candidate-package"));
+            let decision = evaluate_promotion(&evidence, now).unwrap();
+            assert!(!decision.ready, "{name}");
+            assert_eq!(
+                decision.safe_blockers,
+                vec![
+                    QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string(),
+                    format!(
+                        "{QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL}:pipeline_lease_renewal"
+                    ),
+                ],
+                "{name}"
+            );
+            assert_eq!(decision.package, None, "{name}");
         }
     }
 
