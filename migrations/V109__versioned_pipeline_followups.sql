@@ -41,3 +41,14 @@ ALTER TABLE pipeline_export_snapshot_items
     ADD CONSTRAINT pipeline_export_snapshot_items_view_schema_id_shape CHECK (
         authorized_view_schema_id ~ '^[a-z0-9_.-]{1,128}$'
     );
+
+-- poldsam P-9: two foreign keys had no index on the referencing side, so a
+-- submission delete (the invalidation table's key cascades from
+-- `trace_submissions`) and a run delete (the export item's deferred key to
+-- `pipeline_runs`) each found their referencing rows by a scan. Plain
+-- `CREATE INDEX`: a migration runs in one transaction, and both tables are
+-- empty until a tenant is routed.
+CREATE INDEX idx_pipeline_index_invalidations_submission
+    ON pipeline_index_invalidations (tenant_id, submission_id);
+CREATE INDEX idx_pipeline_export_snapshot_items_run
+    ON pipeline_export_snapshot_items (tenant_id, run_id);

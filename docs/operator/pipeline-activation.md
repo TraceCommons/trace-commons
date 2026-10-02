@@ -98,7 +98,9 @@ Credit leg seeded by V94-era code `disabled` (see "NEAR payout"), and adds
 four checks: an export snapshot's requester is `principal_sha256:` or
 `exporter_sha256:` and 64 lowercase hex digits, an export item's outcome and
 view schema ids are labels, and an assessment's resolved quarantine reasons
-are a JSON array. The code already writes only such values.
+are a JSON array. The code already writes only such values. It also
+indexes two foreign keys that had no index on the referencing side: the
+index invalidations by submission and the export items by run.
 
 ## Fail-closed dependency qualification
 

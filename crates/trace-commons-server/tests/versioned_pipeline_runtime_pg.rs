@@ -16981,6 +16981,44 @@ async fn the_database_refuses_malformed_export_and_assessment_fields() {
     }
 }
 
+/// poldsam P-9 (V109): the invalidation table's submission foreign key and
+/// the export item's run foreign key each have an index on the referencing
+/// columns.
+#[tokio::test]
+async fn the_invalidation_and_export_item_foreign_keys_are_indexed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let client = backend.trace_pool_for_test().get().await.unwrap();
+    for (table, index, columns) in [
+        (
+            "pipeline_index_invalidations",
+            "idx_pipeline_index_invalidations_submission",
+            "(tenant_id, submission_id)",
+        ),
+        (
+            "pipeline_export_snapshot_items",
+            "idx_pipeline_export_snapshot_items_run",
+            "(tenant_id, run_id)",
+        ),
+    ] {
+        let definition: Option<String> = client
+            .query_opt(
+                "SELECT indexdef FROM pg_indexes
+                  WHERE schemaname = current_schema() AND tablename = $1 AND indexname = $2",
+                &[&table, &index],
+            )
+            .await
+            .unwrap()
+            .map(|row| row.get(0));
+        let definition = definition.unwrap_or_else(|| panic!("{index} exists"));
+        assert!(
+            definition.ends_with(columns),
+            "{index} covers {columns}: {definition}"
+        );
+    }
+}
+
 /// The withdrawal invalidates every pipeline export snapshot and item that
 /// carries the submission, in its own transaction. A delivered (`complete`)
 /// snapshot put copies out, so the withdrawal reports `commons_distributed`,
