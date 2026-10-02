@@ -265,15 +265,115 @@ pub struct DestinationFacts {
     pub watched: BTreeSet<&'static str>,
     pub declarations: Vec<(&'static str, Option<SourceDeclaration>)>,
     pub harness: Vec<(String, HarnessLink)>,
-    /// The ledger rows for the window; empty when no ledger answered.
-    pub rows: Vec<RoutedExchange>,
+    /// The ledger rows for the window, or `None` when no ledger answered --
+    /// which is not evidence of no calls, and is why each call count reads
+    /// `null` rather than `0` then.
+    pub rows: Option<Vec<RoutedExchange>>,
+    /// The sessions seen in the window, from the queue and the history
+    /// cache, or `None` when the history could not be read: a count from
+    /// the queue alone would undercount and look like a fact.
+    pub sessions: Option<Vec<SessionMark>>,
     pub folders: (usize, usize, usize),
+}
+
+/// One session the window saw: the adapter that read it and its hash.
+///
+/// Held only long enough to count; the hash never leaves this module.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SessionMark {
+    pub source: String,
+    pub session_hash: String,
+}
+
+/// The connected tools that speak a protocol family, as `(source, family)`.
+///
+/// The input to [`attribute`]. Built from the harness rows, never from a
+/// tool's name: a tool is a speaker only while its config names this
+/// daemon's port.
+pub type Speakers = Vec<(&'static str, &'static str)>;
+
+/// The speakers among a set of harness links, by [`TOOLS`]' families.
+fn speakers_from_links(harness: &[(String, HarnessLink)]) -> Speakers {
+    harness
+        .iter()
+        .filter(|(_, link)| link.connected)
+        .filter_map(|(id, _)| {
+            let spec = TOOLS
+                .iter()
+                .find(|spec| spec.harness == Some(id.as_str()))?;
+            Some((spec.source, spec.family?))
+        })
+        .collect()
+}
+
+/// The speakers among the harness rows `harness_list` computes.
+fn speakers_from_rows(harness: &[HarnessRow]) -> Speakers {
+    harness
+        .iter()
+        .filter(|row| row.connected)
+        .filter_map(|row| Some((source_for_harness(&row.id)?, row.family?)))
+        .collect()
+}
+
+/// Per tool, the sessions and the listed calls in the window.
+///
+/// `calls` counts exactly the rows `inference_calls` lists -- rows with a
+/// ledger id -- by the tool that list names, so the map and the Inference
+/// tab can never disagree. A call no tool can be named for is counted in the
+/// second value, never folded into a tool. Sessions are counted once per
+/// session hash, so an entry still in the queue and its history record are
+/// one session. Either side is `None` when its source could not answer.
+#[must_use]
+pub fn tool_counts(
+    rows: Option<&[RoutedExchange]>,
+    speakers: &[(&'static str, &'static str)],
+    sessions: Option<&[SessionMark]>,
+) -> (Vec<ToolCount>, Option<usize>) {
+    let mut unattributed = rows.map(|_| 0usize);
+    let mut counts: Vec<ToolCount> = TOOLS
+        .iter()
+        .map(|spec| ToolCount {
+            tool: spec.source,
+            sessions: sessions.map(|_| 0),
+            inference_calls: rows.map(|_| 0),
+        })
+        .collect();
+    for row in rows.unwrap_or(&[]).iter().filter(|row| row.id.is_some()) {
+        let tool = attribute(&row.facade, speakers);
+        match counts.iter_mut().find(|count| count.tool == tool) {
+            Some(count) => *count.inference_calls.get_or_insert(0) += 1,
+            None => *unattributed.get_or_insert(0) += 1,
+        }
+    }
+    if let Some(sessions) = sessions {
+        let unique: BTreeSet<&SessionMark> = sessions.iter().collect();
+        for mark in unique {
+            if let Some(count) = counts.iter_mut().find(|count| count.tool == mark.source) {
+                *count.sessions.get_or_insert(0) += 1;
+            }
+        }
+    }
+    (counts, unattributed)
+}
+
+/// One tool's counts for the window. `None` is "could not be read", never 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolCount {
+    pub tool: &'static str,
+    pub sessions: Option<usize>,
+    pub inference_calls: Option<usize>,
 }
 
 /// The `tool_destinations` result for a set of facts.
 #[must_use]
 pub fn destinations(facts: &DestinationFacts) -> serde_json::Value {
     let parties = session_parties(facts.route);
+    let rows = facts.rows.as_deref().unwrap_or(&[]);
+    let (counts, unattributed) = tool_counts(
+        facts.rows.as_deref(),
+        &speakers_from_links(&facts.harness),
+        facts.sessions.as_deref(),
+    );
     let tools: Vec<serde_json::Value> = TOOLS
         .iter()
         .map(|spec| {
@@ -292,8 +392,17 @@ pub fn destinations(facts: &DestinationFacts) -> serde_json::Value {
             });
             let observed = spec
                 .family
-                .map_or(Observed::default(), |family| observe(&facts.rows, family));
+                .map_or(Observed::default(), |family| observe(rows, family));
             let (to, basis) = model_calls_to(vendor(spec.source), link, facts.private_ai, observed);
+            let count = counts
+                .iter()
+                .find(|count| count.tool == spec.source)
+                .copied()
+                .unwrap_or(ToolCount {
+                    tool: spec.source,
+                    sessions: None,
+                    inference_calls: None,
+                });
             serde_json::json!({
                 "tool": spec.source,
                 "name": spec.name,
@@ -302,12 +411,18 @@ pub fn destinations(facts: &DestinationFacts) -> serde_json::Value {
                     "to": if watched { parties.clone() } else { Vec::new() },
                 },
                 "model_calls": { "to": to, "basis": basis },
+                "counts": {
+                    "sessions": count.sessions,
+                    "inference_calls": count.inference_calls,
+                },
             })
         })
         .collect();
     serde_json::json!({
         "private_ai": facts.private_ai,
         "sessions_route": facts.route,
+        "window_hours": ACTIVITY_WINDOW_HOURS,
+        "unattributed_calls": unattributed,
         "folders": {
             "armed": facts.folders.0,
             "ask_first": facts.folders.1,
@@ -380,10 +495,44 @@ pub fn handle_destinations(shared: &DaemonShared, req: &Request) -> Response {
         watched,
         declarations,
         harness,
-        rows: ledger_rows(shared).unwrap_or_default(),
+        rows: ledger_rows(shared),
+        sessions: window_sessions(shared),
         folders,
     };
     Response::ok(req.id, destinations(&facts))
+}
+
+/// The sessions the window saw, from the queue and the history cache.
+///
+/// A queue entry counts when the daemon last saw its session written inside
+/// the window (or discovered it there, for an entry that predates that
+/// field); a history record counts when it was submitted inside it. Local
+/// reads only. `None` when the history cache cannot be read.
+fn window_sessions(shared: &DaemonShared) -> Option<Vec<SessionMark>> {
+    let since: DateTime<Utc> = Utc::now() - chrono::Duration::hours(ACTIVITY_WINDOW_HOURS);
+    let mut marks: Vec<SessionMark> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue
+            .all()
+            .iter()
+            .filter(|entry| entry.observed_modified_at.unwrap_or(entry.discovered_at) >= since)
+            .map(|entry| SessionMark {
+                source: entry.source.clone(),
+                session_hash: entry.session_hash.clone(),
+            })
+            .collect()
+    };
+    let history = super::history::HistoryCache::load(&shared.store).ok()?;
+    marks.extend(
+        history
+            .into_iter()
+            .filter(|record| record.submitted_at >= since)
+            .map(|record| SessionMark {
+                source: record.source,
+                session_hash: record.session_hash,
+            }),
+    );
+    Some(marks)
 }
 
 /// A recorded model name, or `unknown` when it is not shaped like one.
@@ -467,12 +616,10 @@ fn decode_cursor(cursor: &str) -> Option<(i64, i64)> {
 /// when exactly one tool connected *now* speaks its family -- the rule
 /// `harness_list` applies to `answering`. Approximate by construction: a row
 /// from before a connection changed can carry the wrong name.
-fn attribute(facade: &str, harness: &[HarnessRow]) -> &'static str {
-    let mut speakers = harness
-        .iter()
-        .filter(|row| row.connected && row.family == Some(facade));
-    match (speakers.next(), speakers.next()) {
-        (Some(only), None) => source_for_harness(&only.id).unwrap_or(UNKNOWN),
+fn attribute(facade: &str, speakers: &[(&'static str, &'static str)]) -> &'static str {
+    let mut speaking = speakers.iter().filter(|(_, family)| *family == facade);
+    match (speaking.next(), speaking.next()) {
+        (Some((only, _)), None) => only,
         _ => UNKNOWN,
     }
 }
@@ -487,7 +634,7 @@ fn attribute(facade: &str, harness: &[HarnessRow]) -> &'static str {
 #[must_use]
 pub fn calls_page(
     rows: &[RoutedExchange],
-    harness: &[HarnessRow],
+    speakers: &[(&'static str, &'static str)],
     before: Option<(i64, i64)>,
     limit: usize,
 ) -> (Vec<serde_json::Value>, Option<String>) {
@@ -514,7 +661,7 @@ pub fn calls_page(
             serde_json::json!({
                 "id": row.id,
                 "at": row.started_at.to_rfc3339(),
-                "tool": attribute(&row.facade, harness),
+                "tool": attribute(&row.facade, speakers),
                 "family": family_label(&row.facade),
                 "model": model_label(row.served_model.as_deref().or(row.requested_model.as_deref())),
                 "route": route_label(row),
@@ -567,8 +714,8 @@ pub fn handle_calls(shared: &DaemonShared, req: &Request) -> Response {
             }),
         );
     };
-    let harness = super::harness::rows_now(shared);
-    let (calls, next) = calls_page(&rows, &harness, before, limit);
+    let speakers = speakers_from_rows(&super::harness::rows_now(shared));
+    let (calls, next) = calls_page(&rows, &speakers, before, limit);
     Response::ok(
         req.id,
         serde_json::json!({
@@ -653,7 +800,8 @@ mod tests {
                     },
                 ),
             ],
-            rows,
+            rows: Some(rows),
+            sessions: Some(Vec::new()),
             folders: (1, 2, 0),
         }
     }
@@ -908,13 +1056,90 @@ mod tests {
                 state: crate::harness_state::HarnessState::NotConnected,
             }
         }
-        let codex = [harness("codex", "openai", true)];
+        let codex = speakers_from_rows(&[harness("codex", "openai", true)]);
         assert_eq!(attribute("openai", &codex), "codex");
         assert_eq!(attribute("anthropic", &codex), "unknown");
         assert_eq!(
-            attribute("openai", &[harness("codex", "openai", false)]),
+            attribute(
+                "openai",
+                &speakers_from_rows(&[harness("codex", "openai", false)])
+            ),
             "unknown"
         );
+    }
+
+    fn mark(source: &str, hash: &str) -> SessionMark {
+        SessionMark {
+            source: source.to_string(),
+            session_hash: hash.to_string(),
+        }
+    }
+
+    /// The map's per-tool node counts: sessions once per hash, calls exactly
+    /// the rows `inference_calls` lists, by the tool it names.
+    #[test]
+    fn each_tool_counts_its_sessions_once_and_the_calls_the_list_names() {
+        // Three openai rows (Codex's family) and one anthropic row; Codex is
+        // the only connected speaker, so the anthropic row is nobody's.
+        let mut anthropic = row(4, 3, Some(ProofStatus::Verified));
+        anthropic.facade = "anthropic".to_string();
+        let mut no_id = row(0, 4, Some(ProofStatus::Verified));
+        no_id.id = None;
+        let rows = vec![
+            row(1, 0, Some(ProofStatus::Verified)),
+            row(2, 1, None),
+            row(3, 2, Some(ProofStatus::Outside)),
+            anthropic,
+            no_id,
+        ];
+        let sessions = vec![
+            mark("claude-code", "sha256:a"),
+            // The same session in the queue and in history is one session.
+            mark("claude-code", "sha256:a"),
+            mark("claude-code", "sha256:b"),
+            mark("codex", "sha256:c"),
+            // An adapter the map has no node for counts nowhere.
+            mark("trajectory", "sha256:d"),
+        ];
+        let speakers = vec![(crate::source::SOURCE_CODEX, "openai")];
+        let (counts, unattributed) = tool_counts(Some(&rows), &speakers, Some(&sessions));
+        let get = |id: &str| *counts.iter().find(|c| c.tool == id).unwrap();
+        assert_eq!(get("codex").inference_calls, Some(3));
+        assert_eq!(get("codex").sessions, Some(1));
+        assert_eq!(get("claude-code").inference_calls, Some(0));
+        assert_eq!(get("claude-code").sessions, Some(2));
+        assert_eq!(get("cline").sessions, Some(0));
+        assert_eq!(unattributed, Some(1), "the id-less row is not listed");
+
+        // Unreadable is null, never zero.
+        let (counts, unattributed) = tool_counts(None, &speakers, None);
+        assert!(
+            counts
+                .iter()
+                .all(|c| c.sessions.is_none() && c.inference_calls.is_none())
+        );
+        assert_eq!(unattributed, None);
+
+        // And it reaches the wire on every tool row. Here both tools are
+        // connected, so the anthropic row is Claude Code's.
+        let mut facts = facts(LABEL_RUNNING, true, rows);
+        facts.sessions = Some(sessions);
+        let value = destinations(&facts);
+        assert_eq!(value["window_hours"], ACTIVITY_WINDOW_HOURS);
+        assert_eq!(
+            tool(&value, "codex")["counts"],
+            serde_json::json!({"sessions": 1, "inference_calls": 3})
+        );
+        assert_eq!(tool(&value, "claude-code")["counts"]["inference_calls"], 1);
+        assert_eq!(value["unattributed_calls"], 0);
+        facts.rows = None;
+        facts.sessions = None;
+        let value = destinations(&facts);
+        assert_eq!(
+            tool(&value, "codex")["counts"],
+            serde_json::json!({"sessions": null, "inference_calls": null})
+        );
+        assert_eq!(value["unattributed_calls"], serde_json::Value::Null);
     }
 
     fn shared() -> (tempfile::TempDir, DaemonShared) {
@@ -952,10 +1177,79 @@ mod tests {
         assert_eq!(value["sessions_route"], "not_enrolled");
         for t in value["tools"].as_array().unwrap() {
             assert_eq!(t["sessions"]["to"], serde_json::json!([]));
+            // No ledger answered: calls unknown. An empty queue and history
+            // are a readable zero.
+            assert_eq!(
+                t["counts"],
+                serde_json::json!({"sessions": 0, "inference_calls": null})
+            );
         }
         let r =
             super::super::ipc::handle_request(&s, &call("inference_calls", serde_json::json!({})));
         assert_eq!(r.result.expect("calls")["readable"], false);
+    }
+
+    /// Sessions come from the queue and the history cache, inside the
+    /// window only, once per session.
+    #[test]
+    fn tool_destinations_counts_the_windows_sessions_from_queue_and_history() {
+        let (_dir, s) = shared();
+        let now = Utc::now();
+        let entry = |hash: &str, source: &str, at: DateTime<Utc>| super::super::queue::QueueEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            session_hash: hash.to_string(),
+            source: source.to_string(),
+            discovered_at: at,
+            ..Default::default()
+        };
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(entry("sha256:q1", "claude-code", now), 100)
+                .unwrap();
+            // Written to inside the window though discovered before it.
+            let mut written = entry("sha256:q2", "claude-code", now - chrono::Duration::days(3));
+            written.observed_modified_at = Some(now);
+            queue.upsert(written, 100).unwrap();
+            queue
+                .upsert(
+                    entry("sha256:old", "claude-code", now - chrono::Duration::days(3)),
+                    100,
+                )
+                .unwrap();
+        }
+        let record = |hash: &str, at: DateTime<Utc>| super::super::history::HistoryRecord {
+            submission_id: uuid::Uuid::new_v4(),
+            submitted_at: at,
+            project_id: "p".to_string(),
+            project_label: "p".to_string(),
+            source: "codex".to_string(),
+            session_hash: hash.to_string(),
+            status: "accepted".to_string(),
+            consent_scopes: vec![],
+            credit_points_pending: 0.0,
+            credit_points_final: None,
+            explanations: vec![],
+            last_refreshed_at: None,
+            withdrawn_at: None,
+            approved_unattended: None,
+            approved_verdict: None,
+        };
+        super::super::history::HistoryCache::save(
+            &s.store,
+            &[
+                record("sha256:h1", now),
+                record("sha256:h-old", now - chrono::Duration::days(2)),
+            ],
+        )
+        .unwrap();
+        let r = super::super::ipc::handle_request(
+            &s,
+            &call("tool_destinations", serde_json::json!({})),
+        );
+        let value = r.result.expect("destinations");
+        assert_eq!(tool(&value, "claude-code")["counts"]["sessions"], 2);
+        assert_eq!(tool(&value, "codex")["counts"]["sessions"], 1);
     }
 
     #[test]
