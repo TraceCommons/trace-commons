@@ -5542,6 +5542,53 @@ pub extern "C" fn tc_privacy_scan_copy_json() -> *mut c_char {
     })
 }
 
+/// The "keychain" block of the private-AI credential status
+/// (`DaemonSettings::keychain_status_json`): what the credential store at
+/// `config_dir` currently holds, as labels and booleans only -- never the
+/// inference key, never the session's refresh token. See the module's own
+/// doc for the fields.
+///
+/// MAY PROMPT FOR OS STORAGE, the same as the daemon's own load: call this
+/// off a shell's blocking worker, never its UI thread.
+///
+/// A NULL or non-UTF-8 `config_dir` returns NULL -- a caller error, not a
+/// business state. An unreadable `config_dir`, or a settings document that
+/// cannot be loaded, instead answers
+/// [`trace_commons_contributor::daemon::settings::keychain_status_unavailable_json`]:
+/// the daemon's own `near_ai_credential_status` IPC answer already names a
+/// storage failure it can detect, with the action that goes with it, so
+/// this failure mode is never surfaced as an error a shell cannot show a
+/// button for.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// for a NULL/non-UTF-8 `config_dir`, and on a caught panic.
+///
+/// # Safety
+/// `config_dir`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_private_ai_keychain_status_json(
+    config_dir: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(dir) = (unsafe { borrow_optional_str(config_dir) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let value = match ConfigStore::open(std::path::PathBuf::from(dir)) {
+            Ok(store) => match DaemonSettings::load_with_cloud_credentials(&store) {
+                Ok(settings) => settings.keychain_status_json(),
+                Err(_) => {
+                    trace_commons_contributor::daemon::settings::keychain_status_unavailable_json()
+                }
+            },
+            Err(_) => {
+                trace_commons_contributor::daemon::settings::keychain_status_unavailable_json()
+            }
+        };
+        Ok(to_owned_cstring(&value.to_string()))
+    })
+}
+
 /// Can this process reach the Cloud credential store?
 ///
 /// Exists so a release pipeline can ask a *signed bundle* the question, which

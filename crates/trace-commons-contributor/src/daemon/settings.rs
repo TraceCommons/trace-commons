@@ -1077,6 +1077,46 @@ impl DaemonSettings {
             })
     }
 
+    /// The "keychain" block of the private-AI credential status (the
+    /// contributor-facing answer `near_ai_credential_status` extends with
+    /// what this machine's own credential store holds). Moved here from
+    /// Tauri (K7, #1173) so every shell -- Tauri today, macOS over the C ABI
+    /// -- assembles the identical fields the identical way.
+    ///
+    /// Labels and booleans only, per the repo's hash-only / label-only rule:
+    /// never the inference key, never the session's refresh token, never an
+    /// account id. `key_prefix` is the service's own truncated display
+    /// prefix, not a secret; see [`NearAiInferenceCredential::key_prefix`].
+    ///
+    /// `key_prefix` and `minted_at` are present only alongside an inference
+    /// credential, and `session_expires_at` only alongside a session that
+    /// has reported an expiry -- a key absent from the object, not `null`,
+    /// is how "nothing to show" is spelled here.
+    pub fn keychain_status_json(&self) -> serde_json::Value {
+        let mut keychain = serde_json::json!({
+            "state": if self.cloud_storage_unavailable {
+                "unavailable"
+            } else if self.cloud_credentials.is_some() {
+                "present"
+            } else {
+                "empty"
+            },
+            "inference_present": self.near_ai_inference.is_some(),
+            "session_present": self.near_ai_session.is_some(),
+            "migration": if self.cloud_credentials.is_some() { "native-v1" } else { "none" },
+        });
+        if let Some(inference) = self.near_ai_inference.as_ref() {
+            keychain["key_prefix"] = serde_json::Value::String(inference.key_prefix.clone());
+            keychain["minted_at"] = serde_json::Value::String(inference.minted_at.to_rfc3339());
+        }
+        if let Some(session) = self.near_ai_session.as_ref()
+            && let Some(expires_at) = session.refresh_token_expires_at
+        {
+            keychain["session_expires_at"] = serde_json::Value::String(expires_at.to_rfc3339());
+        }
+        keychain
+    }
+
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
         let locks = crate::daemon::nearai_credential::session::coordination(store.dir())?;
         let _commit = locks.commit.lock()?;
@@ -1106,6 +1146,24 @@ impl DaemonSettings {
         let body = serde_json::to_vec_pretty(&persisted).context("serializing daemon settings")?;
         store.write_daemon_file(DAEMON_SETTINGS_FILE, &body)
     }
+}
+
+/// [`DaemonSettings::keychain_status_json`]'s answer when the settings
+/// document could not even be loaded (an unreadable config directory, or a
+/// document `load_with_cloud_credentials` refused). The daemon's own
+/// `near_ai_credential_status` IPC answer already names a storage failure it
+/// can detect -- `migration_available`, `storage_unentitled`,
+/// `storage_unavailable` -- with the action that goes with it; this is only
+/// the fallback for the one case where this process cannot even open the
+/// document, and it must read as "nothing here", never as an error a
+/// contributor cannot act on.
+pub fn keychain_status_unavailable_json() -> serde_json::Value {
+    serde_json::json!({
+        "state": "unavailable",
+        "inference_present": false,
+        "session_present": false,
+        "migration": "none",
+    })
 }
 
 /// A partial-settings object held nothing this function recognizes.
@@ -1457,6 +1515,122 @@ mod tests {
             workspace_id: "ws-1".into(),
             minted_at: Utc::now(),
         }
+    }
+
+    fn session() -> NearAiSession {
+        NearAiSession {
+            refresh_token: "rt_super_secret_refresh_token".into(),
+            refresh_token_expires_at: Some(Utc::now()),
+            stored_at: Utc::now(),
+            user_agent: "test-agent".into(),
+        }
+    }
+
+    /// Nothing in the store: empty, and nothing is present.
+    #[test]
+    fn keychain_status_reports_empty_with_nothing_stored() {
+        let value = DaemonSettings::default().keychain_status_json();
+        assert_eq!(value["state"], "empty");
+        assert_eq!(value["inference_present"], false);
+        assert_eq!(value["session_present"], false);
+        assert_eq!(value["migration"], "none");
+        assert!(value.get("key_prefix").is_none());
+        assert!(value.get("minted_at").is_none());
+        assert!(value.get("session_expires_at").is_none());
+    }
+
+    /// An inference credential and a session with a known expiry: present,
+    /// with the labels and the one non-secret prefix, but never the key or
+    /// the refresh token itself.
+    #[test]
+    fn keychain_status_reports_present_fields_with_no_secret_material() {
+        let credential = credential();
+        let session = session();
+        let expires_at = session.refresh_token_expires_at.unwrap();
+        let settings = DaemonSettings {
+            near_ai_inference: Some(credential.clone()),
+            near_ai_session: Some(session),
+            ..Default::default()
+        };
+        let value = settings.keychain_status_json();
+        assert_eq!(value["state"], "empty"); // no cloud_credentials metadata yet
+        assert_eq!(value["inference_present"], true);
+        assert_eq!(value["session_present"], true);
+        assert_eq!(value["key_prefix"], "sk-sup");
+        assert_eq!(value["minted_at"], credential.minted_at.to_rfc3339());
+        assert_eq!(value["session_expires_at"], expires_at.to_rfc3339());
+        let rendered = value.to_string();
+        assert!(!rendered.contains("sk-super-secret-key"));
+        assert!(!rendered.contains("rt_super_secret_refresh_token"));
+    }
+
+    /// A session with no known expiry omits the field rather than writing
+    /// `null` -- the convention this surface uses throughout.
+    #[test]
+    fn keychain_status_omits_session_expiry_when_unknown() {
+        let mut session = session();
+        session.refresh_token_expires_at = None;
+        let settings = DaemonSettings {
+            near_ai_session: Some(session),
+            ..Default::default()
+        };
+        let value = settings.keychain_status_json();
+        assert_eq!(value["session_present"], true);
+        assert!(value.get("session_expires_at").is_none());
+    }
+
+    /// Storage the daemon could not reach reports `unavailable`, not
+    /// `empty`, so a contributor sees "can't reach it" rather than "there's
+    /// nothing here".
+    #[test]
+    fn keychain_status_reports_unavailable_when_storage_is_unreachable() {
+        let settings = DaemonSettings {
+            cloud_storage_unavailable: true,
+            near_ai_inference: Some(credential()),
+            ..Default::default()
+        };
+        let value = settings.keychain_status_json();
+        assert_eq!(value["state"], "unavailable");
+        // The state names the storage failure; presence of secrets this
+        // process did load is still reported truthfully.
+        assert_eq!(value["inference_present"], true);
+    }
+
+    /// Migrated metadata (`cloud_credentials`) is what marks `present` and
+    /// `native-v1`, independent of whether this process also holds the
+    /// in-memory secret right now.
+    #[test]
+    fn keychain_status_present_and_migration_follow_cloud_credentials_metadata() {
+        let (metadata, _bundle) =
+            crate::daemon::stored_cloud_credentials::StoredCloudCredentials::from_secrets(
+                crate::daemon::credential_store::CredentialReference::allocate(),
+                Some(&credential()),
+                None,
+            )
+            .unwrap();
+        // `present`/`native-v1` follow the persisted metadata, not whether
+        // this process currently holds the secret in memory -- so leave
+        // `near_ai_inference` unset here on purpose.
+        let settings = DaemonSettings {
+            cloud_credentials: Some(metadata),
+            ..Default::default()
+        };
+        let value = settings.keychain_status_json();
+        assert_eq!(value["state"], "present");
+        assert_eq!(value["migration"], "native-v1");
+        assert_eq!(value["inference_present"], false);
+    }
+
+    /// The fallback for a settings document this process could not even
+    /// load: unavailable, with nothing present, so a contributor is shown
+    /// "can't reach it" instead of an error with no button.
+    #[test]
+    fn keychain_status_unavailable_fallback_has_nothing_present() {
+        let value = keychain_status_unavailable_json();
+        assert_eq!(value["state"], "unavailable");
+        assert_eq!(value["inference_present"], false);
+        assert_eq!(value["session_present"], false);
+        assert_eq!(value["migration"], "none");
     }
 
     /// `DaemonSettings` derives `Debug`, so a derived `Debug` on the

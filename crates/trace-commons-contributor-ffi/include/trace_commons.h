@@ -2380,6 +2380,16 @@ char*       tc_withdrawal_confirmation_prompt_text(void);
  */
 char*       tc_privacy_scan_copy_json(void);
 
+/* The "keychain" block of the private-AI credential status
+ * (DaemonSettings::keychain_status_json): what the credential store at
+ * config_dir holds, as labels and booleans only -- never the inference key,
+ * never the session's refresh token. MAY PROMPT FOR OS STORAGE; call off a
+ * blocking worker. NULL for a NULL or non-UTF-8 config_dir, and on a caught
+ * panic; an unreadable config_dir or an unloadable settings document answers
+ * the unavailable fallback instead of NULL.
+ */
+char*       tc_private_ai_keychain_status_json(const char* config_dir);
+
 /*
  * Can this process reach the Cloud credential store?
  *

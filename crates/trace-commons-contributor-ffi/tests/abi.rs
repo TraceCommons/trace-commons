@@ -5221,6 +5221,41 @@ fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
 }
 
 #[test]
+fn the_keychain_status_crosses_the_abi_with_no_secret_material() {
+    use trace_commons_contributor::daemon::settings::{
+        DaemonSettings, keychain_status_unavailable_json,
+    };
+    use trace_commons_contributor_ffi::tc_private_ai_keychain_status_json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let value =
+        json_owned(unsafe { tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr()) });
+    assert_eq!(
+        value,
+        serde_json::to_value(DaemonSettings::default().keychain_status_json()).unwrap()
+    );
+    assert_eq!(value["state"], "empty");
+    assert_eq!(value["inference_present"], false);
+    assert_eq!(value["session_present"], false);
+
+    // A NULL/non-UTF-8 config_dir is a caller error, not a business state.
+    assert!(unsafe { tc_private_ai_keychain_status_json(std::ptr::null()) }.is_null());
+
+    // A settings document this process cannot parse answers the
+    // "unavailable" fallback rather than NULL: the daemon's own IPC answer
+    // already names the storage failure, so this must read as "nothing
+    // here", not as an error with no button.
+    std::fs::write(dir.path().join("daemon-settings.json"), "not json").unwrap();
+    let unavailable =
+        json_owned(unsafe { tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr()) });
+    assert_eq!(
+        unavailable,
+        serde_json::to_value(keychain_status_unavailable_json()).unwrap()
+    );
+    assert_eq!(unavailable["state"], "unavailable");
+}
+
+#[test]
 fn the_quit_prompt_is_chosen_from_the_handle() {
     use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
     use trace_commons_contributor_ffi::tc_quit_prompt_json;
