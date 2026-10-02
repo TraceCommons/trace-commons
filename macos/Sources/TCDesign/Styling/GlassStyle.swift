@@ -32,14 +32,12 @@ public enum GlassStatus: Sendable, Equatable {
 
 private struct GlassTypeModifier: ViewModifier {
     let style: GlassTypeStyle
-    /// Read so the modifier re-runs when the system text size changes:
-    /// leading and tracking are resolved against the drawn size, which
-    /// AppKit has already scaled, so the value itself is not applied again.
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    // Leading and tracking are resolved against the size AppKit draws the
+    // text style at. SwiftUI's `dynamicTypeSize` does not scale macOS text
+    // styles, so it is not read here.
     func body(content: Content) -> some View {
-        _ = dynamicTypeSize
-        return content
+        content
             .font(style.font)
             .tracking(style.resolvedTracking)
             .lineSpacing(style.lineSpacing)
