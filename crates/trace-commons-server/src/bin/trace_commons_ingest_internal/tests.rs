@@ -10991,8 +10991,9 @@ fn qualified_compatibility_pipeline_service(
 /// compatibility configuration's `is_qualifiable`, so a runtime otherwise
 /// qualified in every dependency is not production-qualified while its
 /// compatibility bundle binds the local reference configuration (all-zero
-/// floors, not qualifiable), and is with a production-compatible one --
-/// including `main`'s pilot shape, a zero tail-fraction floor.
+/// floors, not qualifiable), and is with a production-compatible one: one
+/// with a zero tail-fraction floor (`TEST_MAIN_GATE`: 2000000, 0, 500000),
+/// and one with the pilot template's floors (0, 0, 500000; poldsam P-4).
 #[tokio::test]
 async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_gate() {
     use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
@@ -11015,16 +11016,31 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
     assert!(!pipeline_runtime_is_production_qualified(&local));
 
     let reference = CompatibilityBundleConfig::local_reference();
-    let pilot = CompatibilityBundleConfig::production_compatible(
-        reference.scorer_model_id.clone(),
-        reference.projection_id.clone(),
-        reference.index_id.clone(),
-        &TEST_MAIN_GATE,
-    )
-    .expect("main's pilot floors validate");
-    let production = service(&pilot);
-    assert!(production.dependency_qualification().bundle);
-    assert!(pipeline_runtime_is_production_qualified(&production));
+    // The pilot template's floors: `deploy/pilot-gcp/ingest.env.template`.
+    let pilot_gate = trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        ..TEST_MAIN_GATE
+    };
+    for (gate, floors) in [
+        (&TEST_MAIN_GATE, "a zero tail-fraction floor alone"),
+        (&pilot_gate, "the pilot template's floors"),
+    ] {
+        let config = CompatibilityBundleConfig::production_compatible(
+            reference.scorer_model_id.clone(),
+            reference.projection_id.clone(),
+            reference.index_id.clone(),
+            gate,
+        )
+        .unwrap_or_else(|error| panic!("{floors} validate: {error}"));
+        let production = service(&config);
+        assert!(production.dependency_qualification().bundle, "{floors}");
+        assert!(
+            pipeline_runtime_is_production_qualified(&production),
+            "{floors}"
+        );
+    }
 }
 
 /// Builds a qualified compatibility service through the seam from the

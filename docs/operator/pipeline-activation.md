@@ -592,7 +592,7 @@ below). With payout disabled, nothing is submitted to NEAR.
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`, `..._REQUIRE_NEAR_CONTRACT` | applied at startup | An enabled payout must name `main`'s contract (`pipeline_runtime_near_contract_mismatch`, `payout_near_contract_missing`). |
   | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | applied at every payout | Ingest hands the mode to the runtime and refuses one that holds another (`pipeline_runtime_near_payout_controls_mismatch`). `disabled` (the default): no outbox row is written and nothing is submitted or confirmed; each leg stays `pending`, as `main`'s rows do. `dry_run`: the full outbox state machine runs in process, with synthetic transaction hashes from each call's idempotency key, no network and no funds, and the injected adapter is not called. `http`: the injected adapter pays. A line is confirmed only in the mode that submitted it (recorded in its stored call as `pipeline_submission_mode`): after a switch between `http` and `dry_run`, a line the other mode submitted stays `submitted` until that mode returns, so a synthetic hash never replaces a real one. |
   | `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH` | refuses an enabled payout on an adapter without a credential | As `main` refuses to start its NEAR adapters without their bearer tokens, whatever the mode: `near_payout_adapter_auth_missing`. The runtime must hold the same flag (`pipeline_runtime_near_payout_controls_mismatch`). |
-  | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's settlement-eligible (`accepted`) leg is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; that event never settles or pays. |
+  | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's leg that settles into a batch (the minimal family's `accepted` event) is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. The `accepted` event is not one of `main`'s settlement-eligible event types (benchmark conversion, regression catch, training utility, ranking utility); the pipeline batches that leg itself. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; that event never settles or pays. |
   | Ranking calibration gates (`TRACE_COMMONS_RANKING_*`) | not applicable | They apply only to `RankingUtility` events; a pipeline leg writes an `accepted` event. |
 
 - A contributor is paid as `main` pays them. A principal linked to an
@@ -710,8 +710,10 @@ appends one hash-only `export` audit event; a refused request appends none.
 The compatibility bundle reproduces `main`'s gate-path credit. Its
 configuration is validated as `main` validates its gate at startup: a
 production-compatible configuration with every floor zero is refused
-(`compatibility_zero_floor`), and a zero tail-fraction floor with the other
-floors positive, `main`'s pilot value, is accepted. A runtime that routes or
+(`compatibility_zero_floor`), and a configuration with at least one positive
+floor is accepted. The pilot template
+(`deploy/pilot-gcp/ingest.env.template`) sets a perplexity floor of 0, a
+tail-fraction floor of 0 and a novelty floor of 500000, which is accepted. A runtime that routes or
 drains a tenant must bind a qualifiable configuration: the local reference
 configuration (all floors zero) fails the qualification gate
 (`pipeline_runtime_dependencies_not_production_qualified`) unless
