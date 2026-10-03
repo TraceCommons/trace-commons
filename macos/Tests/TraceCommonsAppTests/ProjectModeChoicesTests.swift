@@ -16,12 +16,19 @@ final class ProjectModeChoicesTests: XCTestCase {
     }
 
     /// The picker offers only the modes the row can take, in the row's
-    /// order, each labelled by the core.
+    /// order, each by the core's one name for it.
     func test_optionsFollowOfferableModes() throws {
-        let copy = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON()))
-        let options = ProjectModeChoices.options(for: [.ask, .ignore], copy: copy)
+        let options = ProjectModeChoices.options(for: [.ask, .ignore], label: ProjectCopy.modeChoiceLabel)
         XCTAssertEqual(options.map(\.value), [.ask, .ignore])
-        XCTAssertEqual(options.map(\.title), [copy.choice(for: "notify_only")?.label, copy.choice(for: "ignore")?.label])
+        XCTAssertEqual(options.map(\.title), ["Ask me", "Never"])
+    }
+
+    /// Owner decision, 2026-10-02: the Settings picker names the three
+    /// modes "Ask me", "Automatic" and "Never", the words every surface uses.
+    func test_thePickerReadsTheCoresNames() throws {
+        let options = ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore], label: ProjectCopy.modeChoiceLabel)
+        XCTAssertEqual(options.map(\.value), [.ask, .autoUpload, .ignore])
+        XCTAssertEqual(options.map(\.title), ["Ask me", "Automatic", "Never"])
     }
 
     /// A mode the core's table does not name is not offered, rather than
@@ -32,7 +39,8 @@ final class ProjectModeChoicesTests: XCTestCase {
              "override_active":"o","clear":"c","auto_partial":"a"}
             """
         let copy = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: json))
-        let options = ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore], copy: copy)
+        let options = ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore]) { copy.label(for: $0) ?? "" }
         XCTAssertEqual(options.map(\.value), [.ignore])
+        XCTAssertEqual(options.map(\.title), ["Never"])
     }
 }

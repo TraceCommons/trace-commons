@@ -4,12 +4,36 @@ import TCDesign
 import TCShellCore
 
 /// The picker's options for one project row. Pure so the rule is testable:
-/// the words are the core's contribution-mode table, by the daemon's own
-/// mode string, and a mode the table does not name is not offered.
+/// the words are the core's one name per mode (`ProjectCopy.modeChoiceLabel`
+/// at the call site), and a mode with no name is not offered.
 enum ProjectModeChoices {
-    static func options(for modes: [ProjectMode], copy: ContributionModeCopy) -> [GlassPickerOption<ProjectMode>] {
+    static func options(for modes: [ProjectMode], label: (ProjectMode) -> String) -> [GlassPickerOption<ProjectMode>] {
         modes.compactMap { mode in
-            copy.choice(for: mode.rawValue).map { GlassPickerOption($0.label, value: mode) }
+            let title = label(mode)
+            return title.isEmpty ? nil : GlassPickerOption(title, value: mode)
+        }
+    }
+}
+
+/// The last failed project-mode call, for Settings and onboarding Projects
+/// alike. Never undismissable: without the core's word the banner's own
+/// word names the dismiss.
+struct ProjectErrorNotice: View {
+    @EnvironmentObject private var model: AppModel
+
+    private static let dismissLabel = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
+
+    var body: some View {
+        if let error = model.lastActionError {
+            GlassNotice(tone: .outside) {
+                HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+                    Text(error)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                }
+            }
         }
     }
 }
@@ -26,26 +50,11 @@ struct ProjectsSection: View {
     @EnvironmentObject private var model: AppModel
     @State private var armingCandidate: ProjectRow?
 
-    private static let modeCopy = ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON())
-    private static let dismissLabel = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
-
     var body: some View {
         // The container is always present, so the dialog is attached
         // whether or not any project is drawn.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let error = model.lastActionError {
-                GlassNotice(tone: .outside) {
-                    HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                        Text(error)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        // An error is never undismissable: without the
-                        // core's word the banner's own word names it.
-                        Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
-                            .buttonStyle(GlassButtonStyle(.glass))
-                    }
-                }
-            }
+            ProjectErrorNotice()
             GlassEyebrowCard(SettingsWords.projects) {
                 VStack(alignment: .leading, spacing: 0) {
                     // The list defaults to empty; before the daemon answers,
@@ -98,7 +107,7 @@ struct ProjectsSection: View {
                 Text(project.displayLabel)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
-                if let copy = Self.modeCopy {
+                if let copy = ProjectModeWords.table {
                     GlassPicker(
                         project.displayLabel,
                         selection: Binding<ProjectMode?>(
@@ -113,7 +122,7 @@ struct ProjectsSection: View {
                                     model.setProjectMode(project, mode: wanted)
                                 }
                             }),
-                        options: ProjectModeChoices.options(for: project.offerableModes, copy: copy),
+                        options: ProjectModeChoices.options(for: project.offerableModes, label: ProjectCopy.modeChoiceLabel),
                         placeholder: copy.title)
                 }
             }

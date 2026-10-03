@@ -66,11 +66,25 @@ final class OnboardingParityTests: XCTestCase {
                            "GlassPickerOption(copy.localOnly,", "GlassPickerOption(copy.withNear,"],
              guards: ["if let copy {", "GlassPicker(copy.title,", ".buttonStyle(GlassButtonStyle(.primary))",
                       ".keyboardShortcut(.defaultAction)", "set: { if let picked = $0 { choice = picked } }"]),
+        Step(file: "Views/OnboardingProjectsView.swift",
+             bindings: ["ForEach(model.projects) { project in", "if !model.status.answered {",
+                        "model.setProjectMode(project, mode: isIgnored ? .ask : .ignore)",
+                        "if project.isUnresolvedBucket {", "ProjectErrorNotice()",
+                        "Button(OnboardingProjectsWords.continueButton)"],
+             copySources: ["Text(ProjectCopy.unresolvedBucketNote)", "Text(OnboardingProjectsWords.heading)",
+                           "Text(model.projects.isEmpty ? OnboardingProjectsWords.everyProjectAsksFirst : OnboardingProjectsWords.everyProjectAsksFirstIgnore)",
+                           "Text(OnboardingProjectsWords.noProjectsYet)",
+                           "GlassEyebrowCard(OnboardingProjectsWords.projects)",
+                           "GlassTag(ProjectCopy.modeChoiceLabel(project.mode), tone: isIgnored ? .neutral : .ask)"],
+             guards: ["if ProjectModeWords.table != nil {",
+                      "Button(ProjectCopy.modeChoiceLabel(isIgnored ? .ask : .ignore))",
+                      ".buttonStyle(GlassButtonStyle(.glass))", ".buttonStyle(GlassButtonStyle(.primary))",
+                      ".keyboardShortcut(.defaultAction)"]),
     ]
 
     /// Rows the table must hold; each task that adds a step raises it, so a
     /// dropped row fails here instead of passing silently.
-    static let minimumSteps = 5
+    static let minimumSteps = 6
 
     func test_theTableKeepsEveryRowAdded() {
         XCTAssertGreaterThanOrEqual(Self.steps.count, Self.minimumSteps)
@@ -107,6 +121,28 @@ final class OnboardingParityTests: XCTestCase {
         let block = try XCTUnwrap(source[start.upperBound...].firstIndex(of: "}")).self
         XCTAssertTrue(source[start.upperBound..<block].contains(call),
                       "the acknowledgement left the .localPlusScan block")
+    }
+
+    /// Projects offers Never and Ask me, never Automatic: arming is asked for
+    /// later, from a preview, through the core's confirmation, so the
+    /// unresolved bucket can never be armed from here either. The one mode
+    /// call is the toggle, and no mode list that could carry Automatic is
+    /// read.
+    func test_projectsNeverOffersAutomatic() throws {
+        let source = try Self.text("Views/OnboardingProjectsView.swift")
+        XCTAssertFalse(source.contains(".autoUpload"), "onboarding Projects names Automatic")
+        XCTAssertFalse(source.contains("offerableModes"), "onboarding Projects reads a list that can hold Automatic")
+        XCTAssertFalse(source.contains("ProjectModeChoices"), "onboarding Projects draws the Settings picker")
+        XCTAssertEqual(source.components(separatedBy: "model.setProjectMode(").count - 1, 1)
+    }
+
+    /// The error notice both Projects surfaces draw is dismissible, by the
+    /// core's word or the banner's own.
+    func test_theProjectErrorIsDismissible() throws {
+        let source = try Self.text("Views/Settings/ProjectsSection.swift")
+        XCTAssertTrue(source.contains("struct ProjectErrorNotice: View {"))
+        XCTAssertTrue(source.contains(
+            "Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"))
     }
 
     /// No rebuilt step reads the legacy palette.

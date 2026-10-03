@@ -31,6 +31,8 @@ final class ProjectArmingRuleTests: XCTestCase {
 
     func test_neverIsNotGated() {
         XCTAssertFalse(Self.source.contains(".ignore"), "Never must go straight through the generic setter")
-        XCTAssertFalse(Self.source.contains("ProjectCopy.modeChoiceLabel"))
+        // The picker's words are the core's one name per mode, through the
+        // accessor every macOS surface uses.
+        XCTAssertTrue(Self.source.contains("label: ProjectCopy.modeChoiceLabel)"))
     }
 }
