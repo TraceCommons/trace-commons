@@ -41,7 +41,7 @@
    §6.6 describes TWO of these, and they are not the same control:
 
      .tc-switcher   the header view switcher -- track padding 3, items
-                    `4px 12px` at 12px, selected icon in green
+                    `4px 12px` at 12px, selected icon in the accent
      .tc-tab-track  the preview sheet's tab bar -- track padding 4, items
                     `5px 12px` at 11px
 
@@ -100,9 +100,9 @@
   font-weight: 700;
 }
 
-/* §6.6: the selected switcher item turns its icon green while its label
-   stays ink. Matched on the node name so the icon needs no class of its
-   own. */
+/* §6.6: the selected switcher item turns its icon the accent colour while
+   its label stays ink. Matched on the node name so the icon needs no class
+   of its own. */
 .tc-switcher .tc-tab:checked image {
   color: @tc_green_text;
 }
@@ -204,7 +204,7 @@
 }
 
 /* --- Colour roles --------------------------------------------------
-   Type only. Fills, glyph strokes and rules keep the site's exact values;
+   Type only. Fills, glyph strokes and rules keep the fill-weight values;
    these are the darkened light-mode twins that clear 4.5:1 as small text.
    See the measured table in style.rs. */
 
