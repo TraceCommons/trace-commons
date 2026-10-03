@@ -17075,6 +17075,81 @@ async fn withdrawal_invalidates_pipeline_exports_and_reports_them_distributed() 
     tx.commit().await.unwrap();
 }
 
+/// poldsam P-13: not only a pipeline withdrawal invalidates a delivered
+/// (`complete`) pipeline export snapshot. `main`'s retention expiring or
+/// purging the submission (`follow_up_retention`) and `main`'s revocation of
+/// it (`follow_up_revocation`) each invalidate every snapshot that holds
+/// it, delivered or still `ready`, and the item, under the matching reason.
+#[tokio::test]
+async fn expiry_purge_and_revocation_invalidate_a_delivered_pipeline_export() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = PgPipelineStore::new(backend.clone());
+    for reason in ["expired", "purged", "revoked"] {
+        let tenant = format!("export-invalidation-{reason}-{}", uuid::Uuid::new_v4());
+        let (run, _) = run_to_settle_ready(&service, &tenant).await;
+        let delivered = insert_export_snapshot(&run, true).await;
+        let ready = insert_export_snapshot(&run, false).await;
+        match reason {
+            "expired" => store
+                .follow_up_retention(&tenant, run.submission_id, PipelineRetentionAction::Expired)
+                .await
+                .map(|_| ()),
+            "purged" => store
+                .follow_up_retention(&tenant, run.submission_id, PipelineRetentionAction::Purged)
+                .await
+                .map(|_| ()),
+            _ => store
+                .follow_up_revocation(&tenant, run.submission_id, RECEIPT_PRINCIPAL)
+                .await
+                .map(|_| ()),
+        }
+        .unwrap_or_else(|error| panic!("{reason}: {error}"));
+
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        for (snapshot_id, kind) in [(delivered, "delivered"), (ready, "ready")] {
+            let row = tx
+                .query_one(
+                    "SELECT s.state, s.invalidated_at IS NOT NULL,
+                            i.invalidated_at IS NOT NULL, i.invalidation_reason
+                       FROM pipeline_export_snapshots s
+                       JOIN pipeline_export_snapshot_items i
+                         ON i.tenant_id = s.tenant_id AND i.snapshot_id = s.snapshot_id
+                      WHERE s.tenant_id = $1 AND s.snapshot_id = $2",
+                    &[&tenant, &snapshot_id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    row.get::<_, String>(0),
+                    row.get::<_, bool>(1),
+                    row.get::<_, bool>(2),
+                    row.get::<_, Option<String>>(3),
+                ),
+                (
+                    "invalidated".to_string(),
+                    true,
+                    true,
+                    Some(reason.to_string())
+                ),
+                "{reason}: the {kind} snapshot"
+            );
+        }
+        tx.commit().await.unwrap();
+    }
+}
+
 /// Adds an account to `tenant_id` and links the receipt principal to it, so
 /// the submissions that principal owns belong to the account
 /// (`source_submission_owned_by_account`).

@@ -717,9 +717,14 @@ the reserved `pipeline_export:` family with `400` (`export_purpose_reserved`).
 
 A snapshot that can no longer be delivered is refused with `409` and a label
 that tells the caller to create a new snapshot:
-`export_snapshot_invalidated_create_new_snapshot` after a withdrawal, and
-`export_snapshot_stale_create_new_snapshot` when one of its submissions
-expired or was revoked outside the pipeline. Each create and each delivery
+`export_snapshot_invalidated_create_new_snapshot` once the snapshot is
+invalidated, and `export_snapshot_stale_create_new_snapshot` when one of its
+submissions passed its expiry date or was revoked and no follow-up has
+invalidated the snapshot yet. Every snapshot that holds a submission is
+invalidated, a delivered (`complete`) one included, by a withdrawal, by a
+revocation through `main`'s routes, and by `main`'s retention when it
+expires or purges the submission; the item records which (`withdrawn`,
+`revoked`, `expired`, `purged`). Each create and each delivery
 appends one hash-only `export` audit event; a refused request appends none.
 
 ## Compatibility credit
