@@ -18,7 +18,9 @@ struct SkillLearningView: View {
     @State private var configuredDraft: SkillDraft?
     @State private var draftValidation: SkillDraftValidation?
     @State private var showsEvidence = false
-    /// The failure the person dismissed; a new attempt clears it.
+    /// The failure the person dismissed. A failure that arrives clears it,
+    /// and so does a new attempt, whose failure is shown even when it reads
+    /// the same as the one dismissed.
     @State private var dismissedFailure: String?
 
     private var id: String { record.submissionID }
@@ -55,7 +57,7 @@ struct SkillLearningView: View {
         }
         .onChange(of: state.phase.candidate?.candidateID) { _, _ in configureDraft() }
         .onChange(of: state.phase.candidate?.draft) { _, _ in configureDraft() }
-        // A new attempt's failure is shown even when it reads the same.
+        .onChange(of: state.failure) { _, _ in dismissedFailure = nil }
         .onChange(of: state.isWorking) { _, working in if working { dismissedFailure = nil } }
     }
 
