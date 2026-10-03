@@ -34,9 +34,15 @@ public struct HarnessRow: Decodable, Equatable, Sendable, Identifiable {
     /// table, so the two cannot drift in silence.
     public let canConnect: Bool
     public let canDisconnect: Bool
+    /// The vendor this tool answers at by default (`Anthropic`,
+    /// `OpenAI`), from the same table `tc_discover_sources` reads. `nil` for
+    /// a catalog-described tool, or a daemon predating the field. A `var`
+    /// with a default so the memberwise initializer keeps its shape.
+    public var answersAt: String? = nil
 
     public enum CodingKeys: String, CodingKey, CaseIterable {
         case id, name, installed, connected, family, state
+        case answersAt = "answers_at"
         case configPath = "config_path"
         case connectCommand = "connect_command"
         case lastCallAt = "last_call_at"
