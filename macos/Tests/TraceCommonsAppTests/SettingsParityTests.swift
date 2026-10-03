@@ -1,3 +1,5 @@
+import TCDesign
+import TCShellCore
 import XCTest
 
 @testable import TraceCommonsApp
@@ -123,7 +125,10 @@ final class SettingsParityTests: XCTestCase {
                 copySources: ["copy.settingsTitle", "copy.settingsMoved", "copy.destination",
                               "copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
                               "witness.measurementsLabel", "witness.check", "witness.classifier", "witness.origin",
-                              "copy.attestedBodies", "copy.receipts", "facts.url", "facts.signingAddress", "facts.pinnedMeasurements"],
+                              "copy.attestedBodies", "copy.receipts", "facts.url", "facts.signingAddress", "facts.pinnedMeasurements",
+                              "disclosure.copy.title", "model.routeDisclosureUnreadableCopy?.title",
+                              "model.routeDisclosureUnreadableCopy?.panel", "MonitorScreensCopy.decode(",
+                              "monitorScreensCopyJSON()"],
                 confirmations: [],
                 accessibility: [".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/WitnessSection.swift",
@@ -246,11 +251,43 @@ final class SettingsParityTests: XCTestCase {
         }
         XCTAssertTrue(source.contains("Button(copy.destination)"))
         XCTAssertTrue(source.contains(".buttonStyle(GlassButtonStyle(.link))"))
-        XCTAssertTrue(source.contains("GlassStatusLabel(line ?? fallback ?? \"\", status: .ask)"),
+        for arm in ["case .shown(let disclosure):", "case .loading:", "case .unreadable:"] {
+            XCTAssertEqual(source.components(separatedBy: arm).count - 1, 1, "\(arm) is not drawn exactly once")
+        }
+        XCTAssertTrue(source.contains("GlassStatusLabel(words, status: .ask)"),
                       "unreadable is not drawn with a glyph and words")
         XCTAssertTrue(source.contains("ProgressView().controlSize(.small)"))
         XCTAssertFalse(source.lowercased().contains("private inference"))
         XCTAssertFalse(source.contains("MonitorWords"))
+    }
+
+    /// The unreadable state is never a bare dot: with neither of the core's
+    /// sentences it reads the core's "unknown" word, and only then a dash.
+    func test_unreadableLineNeverDrawsEmpty() {
+        typealias Line = RouteDisclosureUnreadableGlassLine
+        XCTAssertEqual(Line.text(line: "panel", fallback: "title", unknown: "unk"), "panel")
+        XCTAssertEqual(Line.text(line: nil, fallback: "title", unknown: "unk"), "title")
+        XCTAssertEqual(Line.text(line: nil, fallback: nil, unknown: "unk"), "unk")
+        XCTAssertFalse(Line.text(line: nil, fallback: nil, unknown: nil).isEmpty)
+        let source = try? Self.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertTrue(source?.contains("Image(systemName: \"exclamationmark.triangle.fill\")") ?? false)
+        XCTAssertTrue(source?.contains(".accessibilityLabel(words)") ?? false)
+    }
+
+    func test_measurementsRowIsOmittedWhenNothingIsPinned() throws {
+        func items(_ pins: [String]) throws -> [GlassKeyValueList.Item] {
+            let pinsJSON = pins.map { "\"\($0)\"" }.joined(separator: ",")
+            let facts = try JSONDecoder().decode(RouteDisclosure.WitnessFacts.self, from: Data("""
+                {"state":"on","url":"u","signing_address":"s","pinned_measurements":[\(pinsJSON)],"origin":"o"}
+                """.utf8))
+            let witness = try JSONDecoder().decode(RouteDisclosure.WitnessCopy.self, from: Data("""
+                {"heading":"h","address_label":"A","signing_label":"S","measurements_label":"M","check":"c","origin":"o"}
+                """.utf8))
+            return RouteDisclosureGlassBody.witnessItems(witness: witness, facts: facts)
+        }
+        XCTAssertEqual(try items([]).map(\.label), ["A", "S"])
+        XCTAssertEqual(try items(["p1", "p2"]).map(\.label), ["A", "S", "M"])
+        XCTAssertEqual(try items(["p1", "p2"]).last?.value, "p1\np2")
     }
 
     func test_theGlassContentDrawsEverySection() throws {
