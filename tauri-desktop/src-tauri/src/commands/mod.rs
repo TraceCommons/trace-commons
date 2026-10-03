@@ -50,6 +50,7 @@ pub(crate) fn handler<R: tauri::Runtime>()
         settings::set_digest_hours,
         settings::set_max_uploads_per_day,
         settings::set_max_bytes_per_day_mb,
+        settings::settings_ranges,
         witness::witness_status,
         witness::configure_witness,
         witness::clear_witness,

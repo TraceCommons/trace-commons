@@ -89,39 +89,7 @@ struct MainWindowView: View {
         // one of them would be missing wherever the contributor actually
         // hit the limit.
         VStack(spacing: 0) {
-            if model.isAttachedDaemon { AttachedDaemonNotice() }
-            // Above the shell for the same reason: a void changes what the
-            // contributor agreed to, and they are told wherever they are.
-            GrantVoidNotices(
-                voids: model.status.grantVoids,
-                refused: model.grantVoidRearmRefused,
-                onAcknowledge: { id in model.acknowledgeGrantVoid(id: id) },
-                onRearm: { id, projectID in model.rearmGrantVoid(id: id, projectID: projectID) }
-            )
-            // The switch-on notices, above the shell for the same reason: a
-            // folder's arming was reworded, or armed folders are on hold.
-            ArmingRewordingNotices(
-                rewordings: model.status.armingRewordings,
-                refused: model.askFirstRefused,
-                onAcknowledge: { id in model.acknowledgeArmingRewording(id: id) },
-                onAskFirst: { projectID in model.askFirst(projectID: projectID) }
-            )
-            if let held = model.gateHeldNotice {
-                GateHeldNoticeCard(
-                    notice: held,
-                    refused: model.askFirstRefused,
-                    onAskFirst: { projectID in model.askFirst(projectID: projectID) }
-                )
-                .padding(.horizontal, TC.Space.md)
-                .padding(.top, TC.Space.s)
-            }
-            // Above the shell too: the contributor is told, wherever they
-            // are, that their contributions now go under their NEAR AI
-            // account (the consent spec requires it in every shell).
-            LegacyMigrationNoticeCard(
-                notice: model.legacyMigrationNotice,
-                onAcknowledge: { model.acknowledgeLegacyInviteMigration() }
-            )
+            ShellNotices()
             shell
         }
     }
@@ -364,8 +332,8 @@ struct MainWindowView: View {
     private static func navGlyphColor(shield: QueueShieldState, selected: Bool) -> Color {
         switch shield {
         case .attention: return TC.goldText
-        case .waiting: return TC.greenText
-        case .clear: return selected ? TC.greenText : TC.inkSecondary
+        case .waiting: return TC.accentText
+        case .clear: return selected ? TC.accentText : TC.inkSecondary
         }
     }
 
@@ -767,6 +735,52 @@ enum MacGlyphs: Equatable {
 /// cannot be opened -- the socket carries the summary only, so showing one
 /// where a body was asked for would be a content promise the attached path
 /// cannot keep.
+/// The notices every window that shows the contributor's traces puts above
+/// everything else: the attached-daemon limits, grant voids, arming
+/// rewordings, a gate hold and the legacy-invite migration. One view, so the
+/// main window and the monitor cannot drift apart on what they tell.
+struct ShellNotices: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if model.isAttachedDaemon { AttachedDaemonNotice() }
+            // Above the shell for the same reason: a void changes what the
+            // contributor agreed to, and they are told wherever they are.
+            GrantVoidNotices(
+                voids: model.status.grantVoids,
+                refused: model.grantVoidRearmRefused,
+                onAcknowledge: { id in model.acknowledgeGrantVoid(id: id) },
+                onRearm: { id, projectID in model.rearmGrantVoid(id: id, projectID: projectID) }
+            )
+            // The switch-on notices, above the shell for the same reason: a
+            // folder's arming was reworded, or armed folders are on hold.
+            ArmingRewordingNotices(
+                rewordings: model.status.armingRewordings,
+                refused: model.askFirstRefused,
+                onAcknowledge: { id in model.acknowledgeArmingRewording(id: id) },
+                onAskFirst: { projectID in model.askFirst(projectID: projectID) }
+            )
+            if let held = model.gateHeldNotice {
+                GateHeldNoticeCard(
+                    notice: held,
+                    refused: model.askFirstRefused,
+                    onAskFirst: { projectID in model.askFirst(projectID: projectID) }
+                )
+                .padding(.horizontal, TC.Space.md)
+                .padding(.top, TC.Space.s)
+            }
+            // Above the shell too: the contributor is told, wherever they
+            // are, that their contributions now go under their NEAR AI
+            // account (the consent spec requires it in every shell).
+            LegacyMigrationNoticeCard(
+                notice: model.legacyMigrationNotice,
+                onAcknowledge: { model.acknowledgeLegacyInviteMigration() }
+            )
+        }
+    }
+}
+
 struct AttachedDaemonNotice: View {
     var body: some View {
         // Both sentences come from `attach_copy` across the ABI. Drawing

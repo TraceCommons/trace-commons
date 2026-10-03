@@ -400,6 +400,30 @@ fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
     }
 }
 
+/// The serialized size, in bytes, of what an upload actually sends (K10).
+///
+/// A witnessed submission sends `witnessed.envelope_bytes` verbatim over
+/// `call_bytes` -- see `upload_with_retry` -- so that length IS the wire
+/// size; re-serializing the parsed envelope would not be measuring the same
+/// bytes. An ordinary submission has no such fixed byte string: `call_json`
+/// serializes `envelope` itself, after scope-stamping, so
+/// `envelope::envelope_size` on that same value is the number `call_json`
+/// is about to produce.
+///
+/// `None` only when the local measurement fails, which is the same
+/// serializer `envelope_size_ok` already required to succeed earlier in
+/// this function -- so in practice this is `None` only for a witnessed
+/// response whose certified bytes this device never parses back out.
+fn sent_envelope_bytes(
+    envelope: &TraceContributionEnvelope,
+    witnessed: Option<&WitnessedEnvelope>,
+) -> Option<u64> {
+    match witnessed {
+        Some(w) => Some(w.envelope_bytes.len() as u64),
+        None => envelope_size(envelope).ok().map(|n| n as u64),
+    }
+}
+
 /// Whether a submit result must make the command exit non-zero. Only an
 /// expected size finding is non-fatal during dry-run. Every known privacy or
 /// pipeline refusal, and every future refusal label, fails closed.
@@ -1786,6 +1810,7 @@ impl<'a> SubmitContext<'a> {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("bundle-review-stale"))?;
             journal.validate_review(&bundle, &response.envelope_bytes)?;
+            let uploaded_bytes = sent_envelope_bytes(&envelope, Some(response));
             let client = build_ingest_client(self.cfg, &token)?;
             match journal.upload_approved(bundle.journal_id, &client).await {
                 Ok(_) => {
@@ -1797,6 +1822,7 @@ impl<'a> SubmitContext<'a> {
                         status: "submitted".into(),
                         approved_unattended: provenance_unattended,
                         approved_verdict: provenance_verdict.clone(),
+                        uploaded_bytes,
                     };
                     self.store.append_receipt(&receipt)?;
                     self.receipts.push(receipt);
@@ -1836,6 +1862,7 @@ impl<'a> SubmitContext<'a> {
                     status: receipt.status.clone(),
                     approved_unattended: provenance_unattended,
                     approved_verdict: provenance_verdict.clone(),
+                    uploaded_bytes: sent_envelope_bytes(&envelope, witnessed.as_ref()),
                 };
                 match self.store.append_receipt(&r) {
                     Ok(()) => {
@@ -3251,6 +3278,25 @@ mod tests {
 
     /// The hosted admission gate's refusal shape: a status, an
     /// `{"error": ...}` label, and no receipt.
+    /// An ingest that records the exact byte length of each request body it
+    /// receives, before any parsing.
+    fn stub_ingest_body_lengths(lengths: Arc<Mutex<Vec<usize>>>) -> Router {
+        Router::new().route(
+            "/v1/traces",
+            post(move |body: axum::body::Bytes| {
+                let lengths = lengths.clone();
+                async move {
+                    lengths.lock().unwrap().push(body.len());
+                    Json(serde_json::json!({
+                        "status": "accepted",
+                        "credit_points_pending": 0.0,
+                        "explanation": []
+                    }))
+                }
+            }),
+        )
+    }
+
     fn stub_ingest_refuses(status: u16, label: &'static str) -> Router {
         Router::new().route(
             "/v1/traces",
@@ -4022,6 +4068,44 @@ mod tests {
             "provenance must not leak onto a later submission; unset is unrecorded"
         );
         assert_eq!(receipts[1].approved_verdict, None);
+    }
+
+    /// K10: the receipt's `uploaded_bytes` describes the exact bytes the
+    /// server received, not an estimate made some other way. The stub
+    /// measures the raw request body before parsing it, so the comparison
+    /// does not depend on how a re-serialization would escape the JSON.
+    #[tokio::test]
+    async fn uploaded_bytes_lands_on_the_written_receipt_and_matches_what_was_sent() {
+        let issuer = spawn(stub_issuer()).await;
+        let lengths = Arc::new(Mutex::new(Vec::new()));
+        let ingest = spawn(stub_ingest_body_lengths(lengths.clone())).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let (source, session_ref) = fixture_selection().remove(0);
+
+        let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        let uploaded_bytes = receipts[0].uploaded_bytes.expect("a size must be recorded");
+
+        let lengths = lengths.lock().unwrap();
+        assert_eq!(lengths.len(), 1);
+        let sent_bytes = lengths[0] as u64;
+        assert_eq!(
+            uploaded_bytes, sent_bytes,
+            "the recorded size must match the bytes the server actually received"
+        );
     }
 
     /// K7 review: the CLI's `submit --verdict` is a person approving, and
@@ -4929,6 +5013,7 @@ mod tests {
                 status: "submitted".to_string(),
                 approved_unattended: None,
                 approved_verdict: None,
+                uploaded_bytes: None,
             })
             .unwrap();
 
@@ -6241,6 +6326,7 @@ mod tests {
             reason_label,
             reasons,
             pin,
+            ..
         } = &decision
         else {
             panic!("expected a hold, got {decision:?}");
@@ -6310,6 +6396,7 @@ mod tests {
             reason_label,
             pin,
             attested_inference,
+            ..
         } = decision
         else {
             panic!("expected a hold, got {decision:?}");
@@ -6323,7 +6410,13 @@ mod tests {
         // What `drain_approved` does with that decision, then a person.
         let mut q = crate::daemon::queue::Queue::default();
         q.upsert(entry.clone(), 10).unwrap();
-        assert!(q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference));
+        assert!(q.hold_with_witness_pin(
+            entry.entry_id,
+            &reason_label,
+            &pin,
+            attested_inference,
+            None
+        ));
         assert!(q.get(entry.entry_id).unwrap().held_for_review());
         assert!(q.approve(
             entry.entry_id,

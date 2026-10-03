@@ -421,7 +421,7 @@ mod tests {
             s,
             &req(
                 "grant_automatic",
-                json!({ "witness_signing_address": witness }),
+                json!({ "witness_signing_address": witness, "confirmed": true }),
             ),
         )
     }
@@ -549,12 +549,80 @@ mod tests {
             "automatic-grant-witness-changed"
         );
         // Not stated at all.
-        let r = crate::daemon::ipc::handle_request(&s, &req("grant_automatic", json!({})));
+        let r = crate::daemon::ipc::handle_request(
+            &s,
+            &req("grant_automatic", json!({ "confirmed": true })),
+        );
         assert_eq!(error_message(&r), "automatic-grant-witness-required");
         assert!(s.policy.lock().unwrap().automatic_grant.is_none());
         // The one configured.
         let given = grant(&s, json!("0xconfigured"));
         assert!(given.error.is_none(), "{:?}", given.error);
+    }
+
+    /// The grant screen's confirmation is the daemon's to hold, not only a
+    /// shell's: any IPC caller that does not state `confirmed: true` is
+    /// refused, and so is a grant over an empty saved scope list even when
+    /// a choice is recorded. `flow1::grant_precondition` refuses the same
+    /// two in the shell; this is the check no shell can skip.
+    #[tokio::test]
+    async fn the_grant_is_refused_without_confirmation_or_with_no_scope() {
+        let base = spawn_onboard_mock().await;
+        let s = shared();
+        let invite = json!({ "invite": format!("{base}/onboard#SOME-CODE") });
+        assert!(
+            handle_enroll(&s, &req("enroll", invite))
+                .await
+                .error
+                .is_none()
+        );
+        let r = handle_set_consent_scopes(
+            &s,
+            &req(
+                "set_consent_scopes",
+                json!({"scopes": ["debugging_evaluation"]}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let ask = |params: serde_json::Value| {
+            crate::daemon::ipc::handle_request(&s, &req("grant_automatic", params))
+        };
+
+        // No `confirmed`, `confirmed: false`, and a non-bool are refused.
+        for params in [
+            json!({ "witness_signing_address": null }),
+            json!({ "witness_signing_address": null, "confirmed": false }),
+            json!({ "witness_signing_address": null, "confirmed": "true" }),
+            json!({ "witness_signing_address": null, "confirmed": 1 }),
+        ] {
+            assert_eq!(
+                error_message(&ask(params.clone())),
+                "automatic-grant-confirmation-required",
+                "{params}"
+            );
+        }
+        assert!(s.policy.lock().unwrap().automatic_grant.is_none());
+
+        // A recorded choice over an empty list is no scope.
+        let mut cfg = s.store.load_config().unwrap().unwrap();
+        let chosen = cfg.consent_scopes.clone();
+        cfg.consent_scopes = Vec::new();
+        assert!(cfg.consent_scopes_chosen);
+        s.store.save_config(&cfg).unwrap();
+        assert_eq!(
+            error_message(&ask(
+                json!({ "witness_signing_address": null, "confirmed": true })
+            )),
+            "automatic-grant-scopes-not-chosen"
+        );
+        assert!(s.policy.lock().unwrap().automatic_grant.is_none());
+
+        // Confirmed, with the scopes chosen: given.
+        cfg.consent_scopes = chosen;
+        s.store.save_config(&cfg).unwrap();
+        let given = ask(json!({ "witness_signing_address": null, "confirmed": true }));
+        assert!(given.error.is_none(), "{:?}", given.error);
+        assert_eq!(given.result.unwrap()["granted"], true);
     }
 
     #[test]

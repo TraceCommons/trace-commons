@@ -1,0 +1,97 @@
+{
+  "private_ai": "off",
+  "sessions_route": "local",
+  "window_hours": 24,
+  "unattributed_calls": null,
+  "folders": {
+    "armed": 0,
+    "ask_first": 0,
+    "ignored": 0
+  },
+  "tools": [
+    {
+      "tool": "claude-code",
+      "name": "Claude Code",
+      "sessions": {
+        "watch": "watched",
+        "to": [
+          "commons"
+        ]
+      },
+      "model_calls": {
+        "to": "anthropic",
+        "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
+      }
+    },
+    {
+      "tool": "codex",
+      "name": "Codex",
+      "sessions": {
+        "watch": "watched",
+        "to": [
+          "commons"
+        ]
+      },
+      "model_calls": {
+        "to": "openai",
+        "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
+      }
+    },
+    {
+      "tool": "gemini-cli",
+      "name": "Gemini CLI",
+      "sessions": {
+        "watch": "not_watched",
+        "to": []
+      },
+      "model_calls": {
+        "to": "google",
+        "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
+      }
+    },
+    {
+      "tool": "cline",
+      "name": "Cline",
+      "sessions": {
+        "watch": "not_watched",
+        "to": []
+      },
+      "model_calls": {
+        "to": "unknown",
+        "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
+      }
+    },
+    {
+      "tool": "opencode",
+      "name": "OpenCode",
+      "sessions": {
+        "watch": "not_watched",
+        "to": []
+      },
+      "model_calls": {
+        "to": "unknown",
+        "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
+      }
+    }
+  ]
+}
