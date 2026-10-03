@@ -93,12 +93,16 @@ final class TracesParityTests: XCTestCase {
         let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
         let body = tree[treeView.lowerBound..<inspector.lowerBound]
         XCTAssertTrue(body.contains("TracesHealth.banners("))
+        XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries)"),
+                      "the queue-full banner names the configured limit, as the main window does")
         XCTAssertTrue(body.contains("GlassHealthBanner(banner:"))
         XCTAssertFalse(body.contains("ForEach(store.safeguards"), "safeguards are drawn through the fail-closed banners")
         let banner = try Self.text("Views/Monitor/TracesHealth.swift")
+        XCTAssertTrue(banner.contains("GlassNotice(tone: banner.tone, title: banner.title.isEmpty ? nil : banner.title)"),
+                      "an empty title would draw a status dot with no words")
         XCTAssertFalse(banner.contains("Button("), "the Traces tab's banners carry no action")
         XCTAssertTrue(banner.contains("TCCoreCopy.healthCopyJSON(reachable: false"))
-        XCTAssertTrue(body.contains("coreDown: TracesHealth.coreDownLine)"))
+        XCTAssertTrue(body.contains("coreDown: TracesHealth.coreDownLine,"))
         let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
         let spinner = try XCTUnwrap(body.range(of: "ProgressView()"))
         XCTAssertLessThan(banners.lowerBound, spinner.lowerBound, "the banners precede the spinner and the tree")
@@ -167,7 +171,8 @@ final class TracesParityTests: XCTestCase {
         for needle in [
             ".glassTier(.pane)",
             "Divider().overlay(GlassColor.hairline)",
-            "GlassSegmentedTabs(model.publicRunCopy?.sessionDetail ?? \"\", selection: $tab,",
+            "GlassSegmentedTabs(model.publicRunCopy?.sessionDetail ?? Self.reviewWord ?? tab.title, selection: $tab,",
+            "private static let reviewWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.review",
             "GlassStatusLabel(line, status: PrivateInferenceIndicator.status(",
             ".accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)",
             "GlassTag(\"nothing sent yet\", tone: .neutral)",
@@ -375,6 +380,10 @@ final class TracesParityTests: XCTestCase {
         // No control without words: an absent core word falls back to an
         // existing one, never to an empty title.
         XCTAssertFalse(offers.contains("?? \"\""), "a control would be wordless without the core")
+        // One dismiss accessor everywhere a glass notice is put away.
+        XCTAssertTrue(offers.contains(
+            "private var dismissWord: String { ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord }"))
+        XCTAssertFalse(offers.contains("words?.dismiss"))
         // An unread list is not an empty one: the certificate list and the
         // first-contribution note wait for the daemon's answer, and draw
         // nothing before it (standing rule: fail closed).

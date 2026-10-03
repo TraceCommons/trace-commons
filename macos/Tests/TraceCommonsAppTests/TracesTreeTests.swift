@@ -514,6 +514,15 @@ final class TracesQueueStateTests: XCTestCase {
         XCTAssertEqual(TracesStore.safeguards(capped).map(\.title), [DailyBudgetCopy.title])
     }
 
+    /// A full queue names the configured limit when the settings were read,
+    /// in the core's words, as the main window's banner does.
+    func test_aFullQueueNamesItsLimit() async throws {
+        let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
+        let named = TracesStore.safeguards(full, maxQueueEntries: 500).first?.body
+        XCTAssertEqual(named, HealthCopy.core(label: "queue-full", maxQueueEntries: 500).detail)
+        XCTAssertNotEqual(named, TracesStore.safeguards(full, maxQueueEntries: nil).first?.body)
+    }
+
     /// The badge pairs with the queue shield: something waiting that is
     /// worth a second look adds the core's words to its text equivalent.
     func test_theBadgeSaysWhenSomethingIsWorthASecondLook() throws {

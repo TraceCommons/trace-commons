@@ -269,7 +269,7 @@ enum MenuPanelData {
     /// outside model with their proof label.
     static func recent(
         pending: [DaemonData.QueueEntry], history: [DaemonData.HistoryRow], calls: [DaemonData.InferenceCall],
-        statusLabel: (String) -> String?, limit: Int = 3
+        statusLabel: (String?) -> String?, limit: Int = 3
     ) -> [Recent] {
         var rows: [Recent] = []
         for entry in pending {
@@ -279,10 +279,12 @@ enum MenuPanelData {
                 text: "\(entry.projectLabel) · \(MonitorWords.waiting)", trailing: nil))
         }
         for row in history {
-            guard let at = row.submittedAt, let status = row.status else { continue }
+            // A row with no status is still activity: the shared table
+            // reads it as unavailable, as the History list does.
+            guard let at = row.submittedAt else { continue }
             rows.append(Recent(
                 id: "history:\(row.submissionId)", kind: .contributed, at: at, tool: row.source.flatMap(tool),
-                text: [row.projectLabel ?? "—", statusLabel(status)].compactMap { $0 }.joined(separator: " · "),
+                text: [row.projectLabel ?? "—", statusLabel(row.status)].compactMap { $0 }.joined(separator: " · "),
                 trailing: nil))
         }
         for call in calls where call.route == "outside" {

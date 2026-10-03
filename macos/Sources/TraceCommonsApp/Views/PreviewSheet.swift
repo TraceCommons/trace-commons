@@ -413,10 +413,15 @@ struct PreviewSheet: View {
         }
     }
 
+    /// The core's word for the review this sheet is: the tab group's name
+    /// when the public-run copy does not decode, so the group is never
+    /// nameless.
+    private static let reviewWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.review
+
     /// The four tabs, in the spec's order. The one that has something to
     /// report says so on its face; the segment carries the selected trait.
     private func tabBar(_ summary: PreviewSummary) -> some View {
-        GlassSegmentedTabs(model.publicRunCopy?.sessionDetail ?? "", selection: $tab,
+        GlassSegmentedTabs(model.publicRunCopy?.sessionDetail ?? Self.reviewWord ?? tab.title, selection: $tab,
                            segments: Tab.allCases.map { item in
                                GlassSegment(item.title, value: item,
                                             badge: badge(for: item, summary: summary).flatMap { Int($0) })
