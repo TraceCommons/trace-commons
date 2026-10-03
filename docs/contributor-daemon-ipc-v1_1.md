@@ -1848,7 +1848,11 @@ handle with `preview-requires-embedded`.
       "session_count": 22,
       "last_session_at": "2026-09-12T11:18:00Z",
       "pending_count": 7,
-      "contributable_count": 3
+      "contributable_count": 3,
+      "tools": [
+        { "source": "antigravity", "session_count": 2, "answers_at": "Google" },
+        { "source": "claude-code", "session_count": 20, "answers_at": "Anthropic" }
+      ]
     }
   ]
 }
@@ -1863,6 +1867,51 @@ written, not when it started -- or `null` when none has been observed. Both
 come from the daemon's per-session record of each session's project, recorded
 when the watcher resolves it, so answering reads and canonicalizes nothing. A tool's own totals are in `tc_discover_sources` (`session_count`,
 `most_recent`).
+
+#### `tools` (K11)
+
+Which tool (or tools) this project's sessions came from, each with its own
+`session_count` within this project -- the design's first-run screen says
+"Repos found in Claude Code sessions"; this is what lets a later screen say
+the same thing about any project, for any tool, once more than one has
+contributed to it.
+
+Each row names a `source`: an adapter name (`claude-code`, `codex`,
+`gemini-cli`, `cline`, `opencode`) for a session the daemon watched directly,
+or the declared source a trajectory file names for one that was staged
+(`trajectory`'s own imports carry their vendor's name, e.g. `antigravity` for
+an imported Antigravity conversation -- see "Antigravity" under `harness_list`
+below). This is the same preference a queue entry's own display already
+applies: what a session declares about itself over the adapter that happens
+to store it, so an imported conversation is never attributed to `trajectory`.
+
+For a staged import the `source` is **self-declared**: it is the
+`meta.source` field of a file anyone can drop into the staging directory,
+checked for shape (`validate_source_name`) but not verified. A staged
+trajectory that claims `claude-code` is counted here as Claude Code and
+reads `answers_at: "Anthropic"`. The effect is local display only; nothing
+decides routing, consent or upload on this field.
+
+`answers_at` is the same fixed vendor word `tc_discover_sources` and
+`harness_list` read `answers_at` from, so a project's tool breakdown cannot
+name a vendor differently than either surface does for the same tool.
+`null` for a tool this build has no fixed default for (Cline, OpenCode) or
+does not recognise.
+
+Always an array, empty rather than absent when nothing is known yet -- a
+client tests its length rather than testing for the key, the way `tools`
+being empty and `session_count` being `0` already agree with each other.
+Rows are ordered by `source`, alphabetically, not by count.
+
+**This can undercount `session_count`.** The per-tool breakdown is read from
+the same per-session record `session_count` already comes from, but the tool
+a session came from was not recorded before this field existed, and a cache
+entry whose file has not changed since is never rewritten just to backfill
+it. A project can therefore show `"session_count": 22` with its `tools[]`
+entries summing to fewer than 22 on a daemon upgraded from an older state
+file, until those sessions' files change again. Never read `tools[]` as a
+second, more detailed `session_count` -- read `session_count` for the total
+and `tools[]` for what it can say about the sessions it has re-seen since.
 
 `pending_count` is how many `Pending` entries this project holds.
 `contributable_count` is how many of those a group-level `approve` would act
@@ -2742,6 +2791,51 @@ for a catalog-described tool, which has no `family` and therefore no claimed
 default either. Like `family`, this is a fixed fact about the tool's own
 released default, never something this daemon checked against the copy
 actually installed.
+
+#### Gemini CLI and Antigravity are not rows here (K13)
+
+`harness_list` is deliberately narrower than "every coding tool this daemon
+knows about". `found` above is `ironwire_agents::tools::all(catalog)`, and
+with no catalog loaded (`catalog_present: false`, the only state this build
+ships in today) that is **exactly** `claude` and `codex` -- the two tools
+IronWire's embedded proxy can redirect, because `Facade::url` only speaks
+the Anthropic and OpenAI wire shapes. Gemini CLI speaks neither, so it has
+never had a row here, and Antigravity -- which is not even a watched
+source; see below -- cannot either. Adding either would mean writing our
+loopback URL into a config key that does not actually redirect that tool's
+calls, which is the exact hazard `owned_agents`'s doc comment refuses to
+guess at. Nothing in K13 changes this list; "Gemini CLI keeps its row"
+refers to its row in `tc_discover_sources` (a watched session store, not a
+redirectable harness), not to this one.
+
+Antigravity's own `answers_at` is `"Google"`, from the same
+`source::source_default_family` table as `gemini-cli`'s -- see `tools` under
+`list_projects` above, and "Antigravity" under `tc_discover_sources`-shaped
+discovery, below.
+
+#### Antigravity has no `tc_discover_sources` row either, and that is also deliberate
+
+Antigravity is not a `TraceSource`: there is no conventional, watchable
+per-user store for it to probe blind, the way `claude-code`, `codex`,
+`gemini-cli` and `cline` are probed. It ships as a one-shot
+`import-antigravity` command that reads the running IDE's local API and
+stages what it finds as `trajectory` files -- see
+`crates/trace-commons-contributor/src/antigravity/mod.rs`'s own doc comment.
+Nothing it stages shares a folder with Gemini CLI's `~/.gemini/tmp` adapter,
+and the two were never actually merged in the shipped code: an earlier,
+abandoned design (`docs/superpowers/specs/2026-08-29-antigravity-source-design.md`)
+would have read Antigravity's own SQLite files from under `~/.gemini/`, but
+it was superseded before it shipped by the API-import design actually in
+place (`docs/superpowers/specs/2026-08-31-antigravity-import-command-design.md`).
+
+What an imported conversation DOES carry, and has carried since that design
+landed, is its own declared source: `meta.source: "antigravity"` on the
+staged file, read back as `SessionRef::declared_source` and shown as
+`"Antigravity"` by every shell's agent label -- never as `"trajectory"`,
+and never merged with a real Gemini CLI session. K11's `tools` field and
+K13's `source_default_family` entry read that same string, so a project
+mixing an Antigravity import with a real Gemini CLI session reports two
+distinct tool rows, not one.
 
 `spend` is what the calls answered **on this computer** have cost since the
 most recent local midnight, in millionths of a dollar. It comes from the

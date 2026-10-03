@@ -87,6 +87,11 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// On an armed row only: `true` when armed from now, so the backlog
     /// waits. Absent (nil) on rows that are not armed.
     public let fromNow: Bool?
+    /// Which tools this project's sessions came from, one row per tool,
+    /// ordered by `source` (K11). Empty when nothing is known yet, and from
+    /// a daemon predating the field. Can undercount `sessionCount`: never
+    /// assert the two sum.
+    public let tools: [ProjectTool]
 
     public var id: String { projectId }
 
@@ -102,7 +107,8 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         contributableCount: Int? = nil,
         sessionCount: Int? = nil,
         lastSessionAt: Date? = nil,
-        fromNow: Bool? = nil
+        fromNow: Bool? = nil,
+        tools: [ProjectTool] = []
     ) {
         self.projectId = projectId
         self.projectLabel = projectLabel
@@ -116,6 +122,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.sessionCount = sessionCount
         self.lastSessionAt = lastSessionAt
         self.fromNow = fromNow
+        self.tools = tools
     }
 
     public enum CodingKeys: String, CodingKey {
@@ -131,6 +138,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case sessionCount = "session_count"
         case lastSessionAt = "last_session_at"
         case fromNow = "from_now"
+        case tools
     }
 
     public init(from decoder: any Decoder) throws {
@@ -158,6 +166,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         sessionCount = try c.decodeIfPresent(Int.self, forKey: .sessionCount)
         lastSessionAt = try c.decodeIfPresent(Date.self, forKey: .lastSessionAt)
         fromNow = try c.decodeIfPresent(Bool.self, forKey: .fromNow)
+        tools = try c.decodeIfPresent([ProjectTool].self, forKey: .tools) ?? []
     }
 
     /// Whether this project could ever be armed to contribute without asking.
@@ -205,6 +214,31 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// replacement, because it is one fact stated on several surfaces.
     public var displayLabel: String {
         isUnresolvedBucket ? ProjectCopy.unresolvedBucketLabel : projectLabel
+    }
+}
+
+/// One `list_projects` `tools[]` row (K11): a tool this project's sessions
+/// came from and how many.
+public struct ProjectTool: Decodable, Equatable, Sendable {
+    /// The tool the sessions read as: the declared source when a staged
+    /// import named one (e.g. `antigravity`), else the adapter. For a staged
+    /// import this is self-declared and unverified.
+    public let source: String
+    public let sessionCount: Int
+    /// The fixed vendor word, e.g. `Anthropic`, or `nil` for a tool with no
+    /// fixed default.
+    public let answersAt: String?
+
+    public init(source: String, sessionCount: Int, answersAt: String? = nil) {
+        self.source = source
+        self.sessionCount = sessionCount
+        self.answersAt = answersAt
+    }
+
+    public enum CodingKeys: String, CodingKey {
+        case source
+        case sessionCount = "session_count"
+        case answersAt = "answers_at"
     }
 }
 
